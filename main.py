@@ -16,9 +16,20 @@ from dm_control.mujoco.wrapper import mjbindings
 def load_model(name):
     path = os.path.join(os.getcwd(), "models", name, "model.xml")
     model = mujoco.MjModel.from_xml_path(path)
+    data = mujoco.MjData(model)
     lower = []
     upper = []
+    joint_positions = []
+    joint_orientations = []
+    joint_axes = []
+    previous_offset = [0, 0, 0]
     for i in range(model.njnt):
+        body = model.jnt_bodyid[i]
+        offset = model.jnt_pos[i]
+        joint_positions.append(model.body_pos[body] - previous_offset + offset)
+        previous_offset = offset
+        joint_orientations.append(model.body_quat[body])
+        joint_axes.append(model.jnt_axis[i])
         if model.jnt_limited[i]:
             lower.append(model.jnt_range[i][0])
             upper.append(model.jnt_range[i][1])
@@ -37,17 +48,21 @@ def load_model(name):
         spec.loader.exec_module(module)
         method = getattr(module, "inverse_kinematics")
         solvers.append({"Name": module_name, "Method": method})
-    data = mujoco.MjData(model)
-    joint_positions = []
-    joint_orientations = []
-    joint_axes = []
+    #joints_data = {}
     for i in range(model.njnt):
-        body = model.jnt_bodyid[i]
-        joint_positions.append(model.body_pos[body])
-        joint_orientations.append(model.body_quat[body])
-        joint_axes.append(model.jnt_axis[i])
-    for i in range(model.njnt):
-        print(f"Joint {i + 1} = {{Position: {list(joint_positions[i])}, Orientation: {list(joint_orientations[i])}, Axes: {list(joint_axes[i])}}}")
+        pos = list(joint_positions[i])
+        quat = list(joint_orientations[i])
+        axis = list(joint_axes[i])
+        #joint_data = {"Position": pos, "Orientation": quat, "Axis": axis}
+        #if model.jnt_limited[i]:
+        #    joint_data["Lower"] = lower[i]
+        #    joint_data["Upper"] = upper[i]
+        s = f"Joint {i + 1} = Position: {pos}, Orientation: {quat}, Axis: {axis}"
+        if model.jnt_limited[i]:
+            s += f", Lower: {lower[i]}, Upper: {upper[i]}"
+        print(s)
+        #joints_data[i + 1] = joint_data
+    #print(joints_data)
     return model, data, lower, upper, mujoco.mj_id2name(model, mujoco.mjtObj.mjOBJ_SITE, model.nsite - 1), path, solvers
 
 

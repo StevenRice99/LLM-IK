@@ -7,6 +7,7 @@ import numpy as np
 import dm_control.utils.inverse_kinematics
 import os
 from dm_control import mujoco as mujoco_dm
+from dm_control.mujoco.wrapper import mjbindings
 
 
 def load_model(path):
@@ -47,17 +48,14 @@ def set_joints(model, data, values):
 
 
 def get_pose(model, data):
-    pos_ref = data.site_xpos[model.nsite - 1]
-    quat_ref = quaternion_difference(data.xquat[model.nbody - 1], model.site_quat[model.nsite - 1])
-    pos = [pos_ref[0], pos_ref[1], pos_ref[2]]
-    quat = [quat_ref[0], quat_ref[1], quat_ref[2], quat_ref[3]]
-    return pos, quat
-
-
-def get_pose_relative(model, data):
-    pos = data.site_xpos[model.nsite - 1] - data.xpos[0]
-    quat = quaternion_difference(data.xquat[0], data.site_quat[model.nsite - 1])
-    return pos, quat
+    pos = data.site_xpos[model.nsite - 1]
+    raw = data.site_xmat[model.nsite - 1]
+    quat = np.empty_like(data.xquat[model.nbody - 1])
+    mjbindings.mjlib.mju_mat2Quat(quat, raw)
+    quat /= quat.ptp()
+    pos = [pos[0], pos[1], pos[2]]
+    quat = [quat[0], quat[1], quat[2], quat[3]]
+    return [pos[0] - data.xpos[0][0], pos[1] - data.xpos[0][1], pos[2] - data.xpos[0][2]], quaternion_difference(data.xquat[0], quat)
 
 
 def quaternion_inverse(q):
@@ -123,6 +121,14 @@ def view(model, data):
         viewer.sync()
 
 
+def mujoco_ik(model, data, path, site, pos, quat):
+    physics = mujoco_dm.Physics.from_xml_path(path)
+    copy_pos = pos.copy()
+    copy_quat = quat.copy()
+    values = dm_control.utils.inverse_kinematics.qpos_from_site_pose(physics, site, copy_pos, copy_quat)
+    set_joints(model, data, values.qpos)
+
+
 def main():
     path = os.path.join(os.getcwd(), "models", "universal_robots_ur5e", "ur5e.xml")
 
@@ -131,28 +137,13 @@ def main():
     #pos, angles = mid_positions(model, data, lower, upper)
     random_positions(model, data, lower, upper)
     goal_pos, goal_quat = get_pose(model, data)
-    print(f"Goal = {goal_pos} | {quaternion_to_euler(goal_quat)}")
-    view(model, data)
+    print(f"Goal   = {goal_pos} | {goal_quat}")
 
     random_positions(model, data, lower, upper)
-    temp_pos, temp_quat = get_pose(model, data)
-    #print(f"Random = {temp_pos} | {quaternion_to_euler(temp_quat)}")
 
-    physics = mujoco_dm.Physics.from_xml_path(path)
-    copy_pos = goal_pos.copy()
-    copy_quat = goal_quat.copy()
-    values = dm_control.utils.inverse_kinematics.qpos_from_site_pose(physics, site, copy_pos, copy_quat)
-    values = values.qpos
-    set_joints(model, data, values)
+    mujoco_ik(model, data, path, site, goal_pos, goal_quat)
     result_pos, result_quat = get_pose(model, data)
-    print(f"Result = {result_pos} | {quaternion_to_euler(result_quat)}")
-
-    euler_goal = quaternion_to_euler(goal_quat)
-    euler_result = quaternion_to_euler(result_quat)
-    diff_pos = np.setdiff1d(np.array(goal_pos), np.array(result_pos))
-    diff_euler = np.setdiff1d(np.array(euler_goal), np.array(euler_result))
-    print(f"Difference = {diff_pos} | {diff_euler}")
-    view(model, data)
+    print(f"Result = {result_pos} | {result_quat}")
 
 
 if __name__ == "__main__":

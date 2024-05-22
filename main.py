@@ -1,6 +1,9 @@
 import math
 import random
 
+import importlib
+import importlib.util
+
 import mujoco
 import mujoco.viewer
 import numpy as np
@@ -10,7 +13,8 @@ from dm_control import mujoco as mujoco_dm
 from dm_control.mujoco.wrapper import mjbindings
 
 
-def load_model(path):
+def load_model(name):
+    path = os.path.join(os.getcwd(), "models", name, "model.xml")
     model = mujoco.MjModel.from_xml_path(path)
     lower = []
     upper = []
@@ -21,7 +25,30 @@ def load_model(path):
         else:
             lower.append(float('-inf'))
             upper.append(float('inf'))
-    return model, mujoco.MjData(model), lower, upper, mujoco.mj_id2name(model, mujoco.mjtObj.mjOBJ_SITE, model.nsite - 1)
+    solvers = []
+    solvers_directory = os.path.join(os.getcwd(), "solvers", name)
+    for file in os.listdir(solvers_directory):
+        if not file.endswith(".py"):
+            continue
+        module_name = file[:-3]
+        module_path = os.path.join(solvers_directory, file)
+        spec = importlib.util.spec_from_file_location(module_name, module_path)
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        method = getattr(module, "inverse_kinematics")
+        solvers.append({"Name": module_name, "Method": method})
+    data = mujoco.MjData(model)
+    joint_positions = []
+    joint_orientations = []
+    joint_axes = []
+    for i in range(model.njnt):
+        body = model.jnt_bodyid[i]
+        joint_positions.append(model.body_pos[body])
+        joint_orientations.append(model.body_quat[body])
+        joint_axes.append(model.jnt_axis[i])
+    for i in range(model.njnt):
+        print(f"Joint {i + 1} = {{Position: {list(joint_positions[i])}, Orientation: {list(joint_orientations[i])}, Axes: {list(joint_axes[i])}}}")
+    return model, data, lower, upper, mujoco.mj_id2name(model, mujoco.mjtObj.mjOBJ_SITE, model.nsite - 1), path, solvers
 
 
 def mid_positions(model, data, lower, upper):
@@ -36,6 +63,13 @@ def random_positions(model, data, lower, upper):
     for i in range(model.njnt):
         values[i] = random.uniform(lower[i], upper[i])
     return set_joints(model, data, values)
+
+
+def get_joints(model, data):
+    values = []
+    for i in range(model.njnt):
+        values.append(data.qpos[i])
+    return values
 
 
 def set_joints(model, data, values):
@@ -53,8 +87,10 @@ def get_pose(model, data):
     quat = np.empty_like(data.xquat[model.nbody - 1])
     mjbindings.mjlib.mju_mat2Quat(quat, raw)
     quat /= quat.ptp()
-    pos = [pos[0], pos[1], pos[2]]
-    quat = [quat[0], quat[1], quat[2], quat[3]]
+    return [pos[0], pos[1], pos[2]], [quat[0], quat[1], quat[2], quat[3]]
+
+
+def get_local_pose(pos, quat, data):
     return [pos[0] - data.xpos[0][0], pos[1] - data.xpos[0][1], pos[2] - data.xpos[0][2]], quaternion_difference(data.xquat[0], quat)
 
 
@@ -129,21 +165,34 @@ def mujoco_ik(model, data, path, site, pos, quat):
     set_joints(model, data, values.qpos)
 
 
-def main():
-    path = os.path.join(os.getcwd(), "models", "universal_robots_ur5e", "ur5e.xml")
-
-    model, data, lower, upper, site = load_model(path)
-
-    #pos, angles = mid_positions(model, data, lower, upper)
-    random_positions(model, data, lower, upper)
-    goal_pos, goal_quat = get_pose(model, data)
-    print(f"Goal   = {goal_pos} | {goal_quat}")
-
-    random_positions(model, data, lower, upper)
-
-    mujoco_ik(model, data, path, site, goal_pos, goal_quat)
+def test_ik(model, data, lower, upper, path, site, solvers, pos=None, quat=None, starting=None):
+    if starting is None:
+        random_positions(model, data, lower, upper)
+        starting = get_joints(model, data)
+    if pos is None or quat is None:
+        random_positions(model, data, lower, upper)
+        pos, quat = get_pose(model, data)
+    print(f"Expected = {pos} | {quat}")
+    view(model, data)
+    pos_rel, quat_rel = get_local_pose(pos, quat, data)
+    set_joints(model, data, starting)
+    mujoco_ik(model, data, path, site, pos, quat)
     result_pos, result_quat = get_pose(model, data)
-    print(f"Result = {result_pos} | {result_quat}")
+    print(f"Deepmind IK = {result_pos} | {result_quat}")
+    #view(model, data)
+    for solver in solvers:
+        set_joints(model, data, starting)
+        joints = solvers[0]["Method"](pos_rel[0], pos_rel[1], pos_rel[2], quat_rel[0], quat_rel[1], quat_rel[2], quat_rel[3])
+        set_joints(model, data, joints)
+        result_pos, result_quat = get_pose(model, data)
+        print(f"{solver['Name']} = {result_pos} | {result_quat}")
+        view(model, data)
+
+
+def main():
+    name = "universal_robots_ur5e"
+    model, data, lower, upper, site, path, solvers = load_model(name)
+    #test_ik(model, data, lower, upper, path, site, solvers)
 
 
 if __name__ == "__main__":

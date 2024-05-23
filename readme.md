@@ -17,6 +17,10 @@ There are multiple ways to solve inverse kinematics.
 - The overall goal would be to get analytical solutions being produced.
 - We could compare the effectiveness of the solutions both in terms of their accuracy and execution time.
 
+## Significance
+
+- Inverse kinematics are hard to solve and require a great deal of understanding of the subject. An LLM being able to comprehend the structure of a kinematic chain and further solve the inverse kinematics would show a very high degree of understanding and complex problem-solving.
+
 ## Progress
 
 - Robots can be parsed and tested with a standard numerical solver.

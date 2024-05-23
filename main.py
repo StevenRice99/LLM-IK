@@ -1,9 +1,9 @@
 import math
 import random
-
 import importlib
 import importlib.util
-
+import time
+import traceback
 import mujoco
 import mujoco.viewer
 import numpy as np
@@ -13,34 +13,119 @@ from dm_control import mujoco as mujoco_dm
 from dm_control.mujoco.wrapper import mjbindings
 
 
-def load_model(name):
+def import_model(name: str) -> [mujoco.MjModel, str]:
+    """
+    Import a file into Mujoco.
+    :param name: The name of the robot to load.
+    :return: The Mujoco model and the path to the model.
+    """
     path = os.path.join(os.getcwd(), "models", name, "model.xml")
-    model = mujoco.MjModel.from_xml_path(path)
+    # The method is meant to be used like this, but the Mujoco API itself is defined wrong.
+    # This is to hide that warning which we are otherwise handling properly.
+    # noinspection PyArgumentList
+    model = mujoco.MjModel.from_xml_path(filename=path, assets=None)
+    return model, path
+
+
+def get_data(model: mujoco.MjModel) -> [mujoco.MjData, list, list, list, list, list, str]:
+    """
+    Get the data for the Mujoco model.
+    :param model: The Mujoco model.
+    :return: The data of the Mujoco model, joint positions, joint orientations, joint axes, joint lower bounds, joint
+    upper bounds, and the name of the site for the end effector.
+    """
     data = mujoco.MjData(model)
+    mujoco.mj_forward(model, data)
+    positions = []
+    orientations = []
+    axes = []
     lower = []
     upper = []
-    joint_positions = []
-    joint_orientations = []
-    joint_axes = []
+    # No previous offset for the first joint.
     previous_offset = [0, 0, 0]
+    # Loop every joint.
     for i in range(model.njnt):
         body = model.jnt_bodyid[i]
+        # Some joints may be offset from their body, so we need to account for that.
         offset = model.jnt_pos[i]
-        joint_positions.append(model.body_pos[body] - previous_offset + offset)
+        # Get this position taking into account how much the previous joint was offset.
+        positions.append(model.body_pos[body] - previous_offset + offset)
+        # Set the offset for the next iteration.
         previous_offset = offset
-        joint_orientations.append(model.body_quat[body])
-        joint_axes.append(model.jnt_axis[i])
+        orientations.append(model.body_quat[body])
+        axes.append(model.jnt_axis[i])
+        # Get limits.
         if model.jnt_limited[i]:
             lower.append(model.jnt_range[i][0])
             upper.append(model.jnt_range[i][1])
         else:
             lower.append(float('-inf'))
             upper.append(float('inf'))
+    return (data, positions, orientations, axes, lower, upper,
+            mujoco.mj_id2name(model, mujoco.mjtObj.mjOBJ_SITE, model.nsite - 1))
+
+
+def generate_prompt(name: str) -> str:
+    """
+    Generate the prompt to give to LLMs.
+    :param name: The name of the robot to generate the prompt for.
+    :return: The prompt for the LLM.
+    """
+    model, path = import_model(name)
+    data, positions, orientations, axes, lower, upper, site = get_data(model)
+    # Get the start of the prompt.
+    with open(os.path.join(os.getcwd(), "start.txt"), 'r') as file:
+        details = file.read()
+    # Write the base nicely.
+    pos = data.xpos[1]
+    pos = f"[{pos[0]:g}, {pos[1]:g}, {pos[2]:g}]"
+    quat = data.xquat[1]
+    quat = f"[{quat[0]:g}, {quat[1]:g}, {quat[2]:g}, {quat[3]:g}]"
+    details += f"\n\nBase = Position: {pos}, Orientation: {quat}"
+    # Write all joints nicely.
+    for i in range(model.njnt):
+        pos = positions[i]
+        pos = f"[{pos[0]:g}, {pos[1]:g}, {pos[2]:g}]"
+        quat = orientations[i]
+        quat = f"[{quat[0]:g}, {quat[1]:g}, {quat[2]:g}, {quat[3]:g}]"
+        axis = axes[i]
+        axis = f"[{axis[0]:g}, {axis[1]:g}, {axis[2]:g}]"
+        details += f"\nJoint {i + 1} = Position: {pos}, Orientation: {quat}, Axis: {axis}"
+        if model.jnt_limited[i]:
+            details += f", Lower: {lower[i]:g}, Upper: {upper[i]:g}"
+    # Write the end effector nicely.
+    site_id = model.nsite - 1
+    body = model.site_bodyid[site_id]
+    pos = model.body_pos[body]
+    pos = pos + model.site_pos[site_id]
+    pos = f"[{pos[0]:g}, {pos[1]:g}, {pos[2]:g}]"
+    quat = model.site_quat[site_id]
+    quat = f"[{quat[0]:g}, {quat[1]:g}, {quat[2]:g}, {quat[3]:g}]"
+    details += f"\nEnd Effector = Position: {pos}, Orientation: {quat}\n\n"
+    # Write the remainder of the prompt.
+    with open(os.path.join(os.getcwd(), "end.txt"), 'r') as file:
+        details += file.read()
+    return details
+
+
+def load_model(name: str) -> [mujoco.MjModel, mujoco.MjData, list, list, str, str, dict]:
+    """
+    Load a model into Mujoco.
+    :param name: The name of the file to load.
+    :return: The Mujoco model, the data of the Mujoco model, joint lower bounds, joint upper bounds, the name of the
+    site for the end effector, the path to the model, and all LLM solvers.
+    """
+    # Do regular Mujoco set up and get joints and other data we need.
+    model, path = import_model(name)
+    data, positions, orientations, axes, lower, upper, site = get_data(model)
+    # Load in solvers which exist for this robot.
     solvers = []
     solvers_directory = os.path.join(os.getcwd(), "solvers", name)
     for file in os.listdir(solvers_directory):
+        # Ensure we are only checking Python files.
         if not file.endswith(".py"):
             continue
+        # Keep the name of the file and bind the inverse kinematics method.
         module_name = file[:-3]
         module_path = os.path.join(solvers_directory, file)
         spec = importlib.util.spec_from_file_location(module_name, module_path)
@@ -48,47 +133,19 @@ def load_model(name):
         spec.loader.exec_module(module)
         method = getattr(module, "inverse_kinematics")
         solvers.append({"Name": module_name, "Method": method})
-    #joints_data = {}
-    for i in range(model.njnt):
-        pos = list(joint_positions[i])
-        quat = list(joint_orientations[i])
-        axis = list(joint_axes[i])
-        #joint_data = {"Position": pos, "Orientation": quat, "Axis": axis}
-        #if model.jnt_limited[i]:
-        #    joint_data["Lower"] = lower[i]
-        #    joint_data["Upper"] = upper[i]
-        s = f"Joint {i + 1} = Position: {pos}, Orientation: {quat}, Axis: {axis}"
-        if model.jnt_limited[i]:
-            s += f", Lower: {lower[i]}, Upper: {upper[i]}"
-        print(s)
-        #joints_data[i + 1] = joint_data
-    #print(joints_data)
-    return model, data, lower, upper, mujoco.mj_id2name(model, mujoco.mjtObj.mjOBJ_SITE, model.nsite - 1), path, solvers
+    return model, data, lower, upper, site, path, solvers
 
 
-def mid_positions(model, data, lower, upper):
-    values = np.zeros(model.njnt)
-    for i in range(model.njnt):
-        values[i] = values[i] = (lower[i] + upper[i]) / 2
-    return set_joints(model, data, values)
-
-
-def random_positions(model, data, lower, upper):
-    values = np.zeros(model.njnt)
-    for i in range(model.njnt):
-        values[i] = random.uniform(lower[i], upper[i])
-    return set_joints(model, data, values)
-
-
-def get_joints(model, data):
-    values = []
-    for i in range(model.njnt):
-        values.append(data.qpos[i])
-    return values
-
-
-def set_joints(model, data, values):
-    for i in range(model.njnt):
+def set_joints(model: mujoco.MjModel, data: mujoco.MjData, values: list) -> None:
+    """
+    Set the Mujoco model to the specified joint values.
+    :param model: The Mujoco model.
+    :param data: The data for the Mujoco model.
+    :param values: The joint values to set.
+    :return: Nothing.
+    """
+    number = min(model.njnt, len(values))
+    for i in range(number):
         data.ctrl[i] = values[i]
         data.qpos[i] = values[i]
         data.qvel[i] = 0
@@ -96,7 +153,41 @@ def set_joints(model, data, values):
     mujoco.mj_step(model, data)
 
 
-def get_pose(model, data):
+def random_positions(model: mujoco.MjModel, data: mujoco.MjData, lower: list, upper: list) -> None:
+    """
+    Set the Mujoco model to random joint values.
+    :param model: The Mujoco model.
+    :param data: The data for the Mujoco model.
+    :param lower: The joint lower bounds.
+    :param upper: The joint upper bounds.
+    :return: Nothing.
+    """
+    values = []
+    for i in range(model.njnt):
+        values.append(random.uniform(lower[i], upper[i]))
+    set_joints(model, data, values)
+
+
+def get_joints(model: mujoco.MjModel, data: mujoco.MjData) -> list:
+    """
+    Get the joint values of the Mujoco model.
+    :param model: The Mujoco model.
+    :param data: The data for the Mujoco model.
+    :return: The joint values of the Mujoco model.
+    """
+    values = []
+    for i in range(model.njnt):
+        values.append(data.qpos[i])
+    return values
+
+
+def get_pose(model: mujoco.MjModel, data: mujoco.MjData) -> [list, list]:
+    """
+    Get the current pose of the position and orientation of the end effector of the Mujoco model.
+    :param model: The Mujoco model.
+    :param data: The data for the Mujoco model.
+    :return: The position [X, Y, Z] and the orientation [W, X, Y, Z].
+    """
     pos = data.site_xpos[model.nsite - 1]
     raw = data.site_xmat[model.nsite - 1]
     quat = np.empty_like(data.xquat[model.nbody - 1])
@@ -105,110 +196,142 @@ def get_pose(model, data):
     return [pos[0], pos[1], pos[2]], [quat[0], quat[1], quat[2], quat[3]]
 
 
-def get_local_pose(pos, quat, data):
-    return [pos[0] - data.xpos[0][0], pos[1] - data.xpos[0][1], pos[2] - data.xpos[0][2]], quaternion_difference(data.xquat[0], quat)
-
-
-def quaternion_inverse(q):
-    """
-    Calculate the inverse of a quaternion.
-    """
-    w, x, y, z = q
-    norm_sq = w**2 + x**2 + y**2 + z**2
-    return [w / norm_sq, -x / norm_sq, -y / norm_sq, -z / norm_sq]
-
-
-def quaternion_multiply(q1, q2):
-    """
-    Multiply two quaternions.
-    """
-    w1, x1, y1, z1 = q1
-    w2, x2, y2, z2 = q2
-    w = w1 * w2 - x1 * x2 - y1 * y2 - z1 * z2
-    x = w1 * x2 + x1 * w2 + y1 * z2 - z1 * y2
-    y = w1 * y2 - x1 * z2 + y1 * w2 + z1 * x2
-    z = w1 * z2 + x1 * y2 - y1 * x2 + z1 * w2
-    return [w, x, y, z]
-
-
-def quaternion_difference(q1, q2):
-    """
-    Calculate the difference between two quaternions.
-    """
-    q1_inv = quaternion_inverse(q1)
-    relative_rotation = quaternion_multiply(q1_inv, q2)
-    return relative_rotation
-
-
-def quaternion_to_euler(quaternion):
+def quaternion_to_euler(quat: list) -> [float, float, float]:
     """
     Convert a quaternion to Euler angles (ZYX convention).
+    :param quat: The quaternion to convert.
+    :return: The euler angles [X, Y, Z].
     """
-    w, x, y, z = quaternion
-
-    # ZYX convention
-    # Roll (x-axis rotation)
+    w, x, y, z = quat
+    # Roll (x-axis rotation).
     sin_roll_cos_pitch = 2.0 * (w * x + y * z)
     cos_roll_cos_pitch = 1.0 - 2.0 * (x * x + y * y)
     roll = math.atan2(sin_roll_cos_pitch, cos_roll_cos_pitch)
-
     sin_pitch = 2.0 * (w * y - z * x)
-
-    # Pitch (y-axis rotation)
-    # Use 90 degrees if out of range
+    # Pitch (y-axis rotation).
+    # Use 90 degrees if out of range.
     pitch = math.copysign(math.pi / 2, sin_pitch) if abs(sin_pitch) >= 1 else math.asin(sin_pitch)
-
-    # Yaw (z-axis rotation)
+    # Yaw (z-axis rotation).
     sin_yaw_cos_pitch = 2.0 * (w * z + x * y)
     cos_yaw_cos_pitch = 1.0 - 2.0 * (y * y + z * z)
     yaw = math.atan2(sin_yaw_cos_pitch, cos_yaw_cos_pitch)
-
     return roll, pitch, yaw
 
 
-def view(model, data):
+def deepmind_ik(model: mujoco.MjModel, data: mujoco.MjData, path: str, site: str, pos: list, quat: list) -> float:
+    """
+    Run the inverse kinematics from Deepmind Controls.
+    :param model: The Mujoco model.
+    :param data: The data for the Mujoco model.
+    :param path: The path for the Mujoco model to reload the model in the Deepmind Controls instance.
+    :param site: The name of the site or end effector.
+    :param pos: The position for the end effector to reach.
+    :param quat: The orientation for the end effector to reach.
+    :return: The time to took to complete the inverse kinematics.
+    """
+    physics = mujoco_dm.Physics.from_xml_path(path)
+    # Copy positions as it seems they might get modified during use.
+    pos_copy = pos.copy()
+    quat_copy = quat.copy()
+    start_time = time.time()
+    values = dm_control.utils.inverse_kinematics.qpos_from_site_pose(physics, site, pos_copy, quat_copy)
+    end_time = time.time()
+    set_joints(model, data, values.qpos)
+    return end_time - start_time
+
+
+def eval_ik(title: str, pos: list, quat: list, goal_pos: list, goal_quat: list, duration: float, error: float) -> None:
+    """
+    Evaluate an inverse kinematics result.
+    :param title: The inverse kinematics method which was used.
+    :param pos: The position of the end effector.
+    :param quat:The orientation of the end effector.
+    :param goal_pos: The position the end effector was trying to reach.
+    :param goal_quat: The orientation the end effector was trying to reach.
+    :param duration: How long it took to compute the inverse kinematics.
+    :param error: The acceptable error tolerance in meters and degrees of which to consider a solution successful.
+    :return: Nothing.
+    """
+    # Get Euler angles so final difference is in a form easily understandable by a human.
+    euler = quaternion_to_euler(quat)
+    goal_euler = quaternion_to_euler(goal_quat)
+    # Calculate differences.
+    diff_pos = [abs(pos[0] - goal_pos[0]), abs(pos[1] - goal_pos[1]), abs(pos[2] - goal_pos[2])]
+    diff_euler = [abs(euler[0] - goal_euler[0]), abs(euler[1] - goal_euler[1]), abs(euler[2] - goal_euler[2])]
+    # Check if the position reaching was a success.
+    success = np.linalg.norm(np.array(pos) - np.array(goal_pos)) <= error
+    # If the position reached, also check the orientation.
+    if success:
+        success = np.linalg.norm(np.array(euler) - np.array(goal_euler)) <= error
+    s = f"{title} | {f'Success' if success else f'Failure'} | {duration} s"
+    s += (f"\nExpected = Position: [{goal_pos[0]:g}, {goal_pos[1]:g}, {goal_pos[2]:g}],"
+          f"Orientation: [{goal_quat[0]:g}, {goal_quat[1]:g}, {goal_quat[2]:g}, {goal_quat[3]:g}]")
+    s += (f"\nResults  = Position: [{pos[0]:g}, {pos[1]:g}, {pos[2]:g}],"
+          f"Orientation: [{quat[0]:g}, {quat[1]:g}, {quat[2]:g}, {quat[3]:g}]")
+    s += (f"\nError    = Position: [{diff_pos[0]:g}, {diff_pos[1]:g}, {diff_pos[2]:g}],"
+          f"Euler: [{diff_euler[0]:g}, {diff_euler[1]:g}, {diff_euler[2]:g}]")
+    # For now, just log the information. In the future if results are promising we would return and tabulate data.
+    print(s)
+
+
+def test_ik(name: str, error: float) -> None:
+    """
+    Test all inverse kinematics solvers for a model.
+    :param name: The name of the robot to test.
+    :param error: The acceptable error tolerance in meters and degrees of which to consider a solution successful.
+    :return: Nothing.
+    """
+    # Load the robot.
+    model, data, lower, upper, site, path, solvers = load_model(name)
+    # Define the starting pose.
+    random_positions(model, data, lower, upper)
+    starting = get_joints(model, data)
+    # Determine where to move to.
+    random_positions(model, data, lower, upper)
+    pos, quat = get_pose(model, data)
+    # Uncomment to view where the robot should try to reach.
+    # view(model, data)
+    # Move back to the starting pose.
+    set_joints(model, data, starting)
+    # Test the Deepmind inverse kinematics.
+    duration = deepmind_ik(model, data, path, site, pos, quat)
+    result_pos, result_quat = get_pose(model, data)
+    eval_ik("Deepmind IK", result_pos, result_quat, pos, quat, duration, error)
+    # Uncomment to view where the robot ended from the Deepmind inverse kinematics.
+    # view(model, data)
+    # Use all solvers which were loaded.
+    for solver in solvers:
+        print()
+        # Move back to the starting pose for every attempt.
+        set_joints(model, data, starting)
+        joints = []
+        start_time = time.time()
+        # Continue in case there are errors which still outputting the stacktrace for debugging.
+        # noinspection PyBroadException
+        try:
+            joints = solvers[0]["Method"]([pos[0], pos[1], pos[2]], [quat[0], quat[1], quat[2], quat[3]])
+        except Exception:
+            traceback.print_exc()
+        end_time = time.time()
+        set_joints(model, data, joints)
+        result_pos, result_quat = get_pose(model, data)
+        eval_ik(solver['Name'], result_pos, result_quat, pos, quat, end_time - start_time, error)
+        # Uncomment to view where the robot ended from the current solver.
+        # view(model, data)
+
+
+def view(model: mujoco.MjModel, data: mujoco.MjData) -> None:
+    """
+    View the current Mujoco model.
+    :param model: The Mujoco model.
+    :param data: The data for the Mujoco model.
+    :return: Nothing.
+    """
     viewer = mujoco.viewer.launch_passive(model, data)
     while viewer.is_running():
         viewer.sync()
 
 
-def mujoco_ik(model, data, path, site, pos, quat):
-    physics = mujoco_dm.Physics.from_xml_path(path)
-    copy_pos = pos.copy()
-    copy_quat = quat.copy()
-    values = dm_control.utils.inverse_kinematics.qpos_from_site_pose(physics, site, copy_pos, copy_quat)
-    set_joints(model, data, values.qpos)
-
-
-def test_ik(model, data, lower, upper, path, site, solvers, pos=None, quat=None, starting=None):
-    if starting is None:
-        random_positions(model, data, lower, upper)
-        starting = get_joints(model, data)
-    if pos is None or quat is None:
-        random_positions(model, data, lower, upper)
-        pos, quat = get_pose(model, data)
-    print(f"Expected = {pos} | {quat}")
-    view(model, data)
-    pos_rel, quat_rel = get_local_pose(pos, quat, data)
-    set_joints(model, data, starting)
-    mujoco_ik(model, data, path, site, pos, quat)
-    result_pos, result_quat = get_pose(model, data)
-    print(f"Deepmind IK = {result_pos} | {result_quat}")
-    #view(model, data)
-    for solver in solvers:
-        set_joints(model, data, starting)
-        joints = solvers[0]["Method"](pos_rel[0], pos_rel[1], pos_rel[2], quat_rel[0], quat_rel[1], quat_rel[2], quat_rel[3])
-        set_joints(model, data, joints)
-        result_pos, result_quat = get_pose(model, data)
-        print(f"{solver['Name']} = {result_pos} | {result_quat}")
-        view(model, data)
-
-
-def main():
-    name = "universal_robots_ur5e"
-    model, data, lower, upper, site, path, solvers = load_model(name)
-    #test_ik(model, data, lower, upper, path, site, solvers)
-
-
 if __name__ == "__main__":
-    main()
+    # Test inverse kinematics on the Universal Robot's UR5E.
+    test_ik("universal_robots_ur5e", 0.001)

@@ -30,7 +30,7 @@ There are multiple ways to solve inverse kinematics.
 
 ## Ideas
 
-- While not as interesting as they do not have as much use, we could potentially try on kinematic chains smaller than a standard serial manipulator.
+- While not as interesting as they do not have as much use, we could potentially try on kinematic chains smaller than a standard serial manipulator. However, those inherently have problems reaching all poses in their workspace anyway, so this may not lead anywhere. At least in terms of solving for position and orientation, as three joints/axis can reach all points for position alone, so we could try that.
 - Trying to solve the inverse kinematics on kinematic chains of two or three joints may be more feasible by current LLMs.
 - If this is the case, we will need to construct them which can be done as seen in the XML files under the "Models" folder, where each subfolder is for a robot which has a "Model.xml". These models were taken from the [Mujoco Model Gallery](https://mujoco.readthedocs.io/en/stable/models.html "Mujoco Model Gallery").
 

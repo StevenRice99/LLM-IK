@@ -19,7 +19,7 @@ def import_model(name: str) -> [mujoco.MjModel, str]:
     :param name: The name of the robot to load.
     :return: The Mujoco model and the path to the model.
     """
-    path = os.path.join(os.getcwd(), "models", name, "model.xml")
+    path = os.path.join(os.getcwd(), "Models", name, "Model.xml")
     # The method is meant to be used like this, but the Mujoco API itself is defined wrong.
     # This is to hide that warning which we are otherwise handling properly.
     # noinspection PyArgumentList
@@ -120,7 +120,7 @@ def load_model(name: str) -> [mujoco.MjModel, mujoco.MjData, list, list, str, st
     data, positions, orientations, axes, lower, upper, site = get_data(model)
     # Load in solvers which exist for this robot.
     solvers = []
-    solvers_directory = os.path.join(os.getcwd(), "solvers", name)
+    solvers_directory = os.path.join(os.getcwd(), "Solvers", name)
     for file in os.listdir(solvers_directory):
         # Ensure we are only checking Python files.
         if not file.endswith(".py"):
@@ -333,5 +333,5 @@ def view(model: mujoco.MjModel, data: mujoco.MjData) -> None:
 
 
 if __name__ == "__main__":
-    # Test inverse kinematics on the Universal Robot's UR5E.
+    # Test inverse kinematics on the Universal Robot's UR5e.
     test_ik("universal_robots_ur5e", 0.001)

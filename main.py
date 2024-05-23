@@ -74,7 +74,7 @@ def generate_prompt(name: str) -> str:
     model, path = import_model(name)
     data, positions, orientations, axes, lower, upper, site = get_data(model)
     # Get the start of the prompt.
-    with open(os.path.join(os.getcwd(), "start.txt"), 'r') as file:
+    with open(os.path.join(os.getcwd(), "prompt_start.txt"), 'r') as file:
         details = file.read()
     # Write the base nicely.
     pos = data.xpos[1]
@@ -103,7 +103,7 @@ def generate_prompt(name: str) -> str:
     quat = f"[{quat[0]:g}, {quat[1]:g}, {quat[2]:g}, {quat[3]:g}]"
     details += f"\nEnd Effector = Position: {pos}, Orientation: {quat}\n\n"
     # Write the remainder of the prompt.
-    with open(os.path.join(os.getcwd(), "end.txt"), 'r') as file:
+    with open(os.path.join(os.getcwd(), "prompt_end.txt"), 'r') as file:
         details += file.read()
     return details
 
@@ -333,5 +333,5 @@ def view(model: mujoco.MjModel, data: mujoco.MjData) -> None:
 
 
 if __name__ == "__main__":
-    # Test inverse kinematics on the Universal Robot's UR5e.
-    test_ik("universal_robots_ur5e", 0.001)
+    # Pass the name of the folder under "Models" for the robot you want.
+    test_ik("Universal Robots UR5e", 0.001)

@@ -33,4 +33,4 @@ There are multiple ways to solve inverse kinematics.
 ## Usage
 
 - "main.py" has all methods. Running this script will test all IK solutions for a given robot, currently set to the [Universal Robots UR5e](https://www.universal-robots.com/products/ur5-robot, "Universal Robots UR5e").
-- "prompt.py" will output a prompt to the console for you to give to LLMs. The contents of the prompt are composed of a static start and end found in "start.txt" and "end.txt" respectively, and between them a dynamic portion of the prompt is input consisting of information about the robot.
+- "prompt.py" will output a prompt to the console for you to give to LLMs. The contents of the prompt are composed of a static start and end found in "prompt_start.txt" and "prompt_end.txt" respectively, and between them a dynamic portion of the prompt is input consisting of information about the robot.

@@ -20,6 +20,9 @@ def import_model(name: str) -> [mujoco.MjModel, str]:
     :return: The Mujoco model and the path to the model.
     """
     path = os.path.join(os.getcwd(), "Models", name, "Model.xml")
+    if not os.path.exists(path):
+        print(f"Model {name} not found at {path}.")
+        return None, path
     # The method is meant to be used like this, but the Mujoco API itself is defined wrong.
     # This is to hide that warning which we are otherwise handling properly.
     # noinspection PyArgumentList
@@ -72,6 +75,8 @@ def generate_prompt(name: str) -> str:
     :return: The prompt for the LLM.
     """
     model, path = import_model(name)
+    if path is None:
+        return ""
     data, positions, orientations, axes, lower, upper, site = get_data(model)
     # Get the start of the prompt.
     with open(os.path.join(os.getcwd(), "prompt_start.txt"), 'r') as file:
@@ -117,22 +122,25 @@ def load_model(name: str) -> [mujoco.MjModel, mujoco.MjData, list, list, str, st
     """
     # Do regular Mujoco set up and get joints and other data we need.
     model, path = import_model(name)
+    if model is None:
+        return [None, None, None, None, None, None, path, None]
     data, positions, orientations, axes, lower, upper, site = get_data(model)
     # Load in solvers which exist for this robot.
     solvers = []
     solvers_directory = os.path.join(os.getcwd(), "Solvers", name)
-    for file in os.listdir(solvers_directory):
-        # Ensure we are only checking Python files.
-        if not file.endswith(".py"):
-            continue
-        # Keep the name of the file and bind the inverse kinematics method.
-        module_name = file[:-3]
-        module_path = os.path.join(solvers_directory, file)
-        spec = importlib.util.spec_from_file_location(module_name, module_path)
-        module = importlib.util.module_from_spec(spec)
-        spec.loader.exec_module(module)
-        method = getattr(module, "inverse_kinematics")
-        solvers.append({"Name": module_name, "Method": method})
+    if os.path.exists(solvers_directory):
+        for file in os.listdir(solvers_directory):
+            # Ensure we are only checking Python files.
+            if not file.endswith(".py"):
+                continue
+            # Keep the name of the file and bind the inverse kinematics method.
+            module_name = file[:-3]
+            module_path = os.path.join(solvers_directory, file)
+            spec = importlib.util.spec_from_file_location(module_name, module_path)
+            module = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(module)
+            method = getattr(module, "inverse_kinematics")
+            solvers.append({"Name": module_name, "Method": method})
     return model, data, lower, upper, site, path, solvers
 
 
@@ -218,7 +226,8 @@ def quaternion_to_euler(quat: list) -> [float, float, float]:
     return roll, pitch, yaw
 
 
-def deepmind_ik(model: mujoco.MjModel, data: mujoco.MjData, path: str, site: str, pos: list, quat: list) -> float:
+def deepmind_ik(model: mujoco.MjModel, data: mujoco.MjData, path: str, site: str, pos: list,
+                quat: list or None = None) -> float:
     """
     Run the inverse kinematics from Deepmind Controls.
     :param model: The Mujoco model.
@@ -232,7 +241,7 @@ def deepmind_ik(model: mujoco.MjModel, data: mujoco.MjData, path: str, site: str
     physics = mujoco_dm.Physics.from_xml_path(path)
     # Copy positions as it seems they might get modified during use.
     pos_copy = pos.copy()
-    quat_copy = quat.copy()
+    quat_copy = None if quat is None else quat.copy()
     start_time = time.time()
     values = dm_control.utils.inverse_kinematics.qpos_from_site_pose(physics, site, pos_copy, quat_copy)
     end_time = time.time()
@@ -240,7 +249,8 @@ def deepmind_ik(model: mujoco.MjModel, data: mujoco.MjData, path: str, site: str
     return end_time - start_time
 
 
-def eval_ik(title: str, pos: list, quat: list, goal_pos: list, goal_quat: list, duration: float, error: float) -> None:
+def eval_ik(title: str, pos: list, quat: list or None, goal_pos: list, goal_quat: list, duration: float,
+            error: float) -> None:
     """
     Evaluate an inverse kinematics result.
     :param title: The inverse kinematics method which was used.
@@ -252,72 +262,80 @@ def eval_ik(title: str, pos: list, quat: list, goal_pos: list, goal_quat: list, 
     :param error: The acceptable error tolerance in meters and degrees of which to consider a solution successful.
     :return: Nothing.
     """
-    # Get Euler angles so final difference is in a form easily understandable by a human.
-    euler = quaternion_to_euler(quat)
-    goal_euler = quaternion_to_euler(goal_quat)
-    # Calculate differences.
+    # Calculate position differences.
     diff_pos = [abs(pos[0] - goal_pos[0]), abs(pos[1] - goal_pos[1]), abs(pos[2] - goal_pos[2])]
-    diff_euler = [abs(euler[0] - goal_euler[0]), abs(euler[1] - goal_euler[1]), abs(euler[2] - goal_euler[2])]
+    # Get Euler angles so final difference is in a form easily understandable by a human.
+    if quat is not None and goal_quat is not None:
+        euler = quaternion_to_euler(quat)
+        goal_euler = quaternion_to_euler(goal_quat)
+        diff_euler = [abs(euler[0] - goal_euler[0]), abs(euler[1] - goal_euler[1]), abs(euler[2] - goal_euler[2])]
+    else:
+        euler = [0, 0, 0]
+        goal_euler = [0, 0, 0]
+        diff_euler = [0, 0, 0]
     # Check if the position reaching was a success.
     success = np.linalg.norm(np.array(pos) - np.array(goal_pos)) <= error
-    # If the position reached, also check the orientation.
-    if success:
+    # If the position reached, also check the orientation if it was passed as well.
+    if success and quat is not None and goal_quat is not None:
         success = np.linalg.norm(np.array(euler) - np.array(goal_euler)) <= error
     s = f"{title} | {f'Success' if success else f'Failure'} | {duration} s"
-    s += (f"\nExpected = Position: [{goal_pos[0]:g}, {goal_pos[1]:g}, {goal_pos[2]:g}],"
-          f"Orientation: [{goal_quat[0]:g}, {goal_quat[1]:g}, {goal_quat[2]:g}, {goal_quat[3]:g}]")
-    s += (f"\nResults  = Position: [{pos[0]:g}, {pos[1]:g}, {pos[2]:g}],"
-          f"Orientation: [{quat[0]:g}, {quat[1]:g}, {quat[2]:g}, {quat[3]:g}]")
-    s += (f"\nError    = Position: [{diff_pos[0]:g}, {diff_pos[1]:g}, {diff_pos[2]:g}],"
-          f"Euler: [{diff_euler[0]:g}, {diff_euler[1]:g}, {diff_euler[2]:g}]")
+    s += f"\nExpected = Position: [{goal_pos[0]:g}, {goal_pos[1]:g}, {goal_pos[2]:g}]"
+    if quat is not None and goal_quat is not None:
+        s += f", Orientation: [{goal_quat[0]:g}, {goal_quat[1]:g}, {goal_quat[2]:g}, {goal_quat[3]:g}]"
+    s += f"\nResults  = Position: [{pos[0]:g}, {pos[1]:g}, {pos[2]:g}])"
+    if quat is not None and goal_quat is not None:
+        s += f", Orientation: [{quat[0]:g}, {quat[1]:g}, {quat[2]:g}, {quat[3]:g}]"
+    s += f"\nError    = Position: [{diff_pos[0]:g}, {diff_pos[1]:g}, {diff_pos[2]:g}]"
+    if quat is not None and goal_quat is not None:
+        s += f", Euler: [{diff_euler[0]:g}, {diff_euler[1]:g}, {diff_euler[2]:g}]"
     # For now, just log the information. In the future if results are promising we would return and tabulate data.
     print(s)
 
 
-def test_ik(name: str, error: float) -> None:
+def test_ik(name: str, error: float, orientation: bool = True) -> None:
     """
     Test all inverse kinematics solvers for a model.
     :param name: The name of the robot to test.
     :param error: The acceptable error tolerance in meters and degrees of which to consider a solution successful.
+    :param orientation: If orientation should be solved for.
     :return: Nothing.
     """
     # Load the robot.
     model, data, lower, upper, site, path, solvers = load_model(name)
+    if model is None:
+        return
     # Define the starting pose.
     random_positions(model, data, lower, upper)
     starting = get_joints(model, data)
     # Determine where to move to.
     random_positions(model, data, lower, upper)
     pos, quat = get_pose(model, data)
-    # Uncomment to view where the robot should try to reach.
-    # view(model, data)
+    if not orientation:
+        quat = None
     # Move back to the starting pose.
     set_joints(model, data, starting)
     # Test the Deepmind inverse kinematics.
     duration = deepmind_ik(model, data, path, site, pos, quat)
     result_pos, result_quat = get_pose(model, data)
     eval_ik("Deepmind IK", result_pos, result_quat, pos, quat, duration, error)
-    # Uncomment to view where the robot ended from the Deepmind inverse kinematics.
-    # view(model, data)
     # Use all solvers which were loaded.
     for solver in solvers:
         print()
         # Move back to the starting pose for every attempt.
         set_joints(model, data, starting)
         joints = []
+        passed_quat = None if quat is None else [quat[0], quat[1], quat[2], quat[3]]
         start_time = time.time()
         # Continue in case there are errors which still outputting the stacktrace for debugging.
         # noinspection PyBroadException
         try:
-            joints = solvers[0]["Method"]([pos[0], pos[1], pos[2]], [quat[0], quat[1], quat[2], quat[3]])
+            joints = solvers[0]["Method"]([pos[0], pos[1], pos[2]], passed_quat)
         except Exception:
             traceback.print_exc()
         end_time = time.time()
         set_joints(model, data, joints)
         result_pos, result_quat = get_pose(model, data)
         eval_ik(solver['Name'], result_pos, result_quat, pos, quat, end_time - start_time, error)
-        # Uncomment to view where the robot ended from the current solver.
-        # view(model, data)
 
 
 def view(model: mujoco.MjModel, data: mujoco.MjData) -> None:
@@ -329,9 +347,10 @@ def view(model: mujoco.MjModel, data: mujoco.MjData) -> None:
     """
     viewer = mujoco.viewer.launch_passive(model, data)
     while viewer.is_running():
+        mujoco.mj_step(model, data)
         viewer.sync()
 
 
 if __name__ == "__main__":
     # Pass the name of the folder under "Models" for the robot you want.
-    test_ik("Universal Robots UR5e", 0.001)
+    test_ik("Simple", 0.001, False)

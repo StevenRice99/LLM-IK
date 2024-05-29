@@ -1,5 +1,3 @@
-2. Fully implement the closed-form analytical inverse kinematics solution you produced in the following Python method. You may not leave any parts incomplete or with placeholder values as the inverse kinematics must be fully implemented.
-
 def inverse_kinematics(p: list, q: list or None = None) -> list:
     """
     Solve the inverse kinematics to reach position and orientation, both in the reference frame of the chain's origin.
@@ -8,4 +6,4 @@ def inverse_kinematics(p: list, q: list or None = None) -> list:
     If "None" is passed for the orientation, then only solve for inverse kinematics for the position.
     :return: A list of the joint values in radians needed for the end effector to reach the position and orientation.
     """
-	# You must complete this method fully without any placeholder parts.
+    return []

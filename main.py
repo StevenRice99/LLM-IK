@@ -303,7 +303,7 @@ def eval_ik(title: str, pos: list, quat: list or None, goal_pos: list, goal_quat
     s += f"\nExpected = Position: [{goal_pos[0]:g}, {goal_pos[1]:g}, {goal_pos[2]:g}]"
     if quat is not None and goal_quat is not None:
         s += f", Orientation: [{goal_quat[0]:g}, {goal_quat[1]:g}, {goal_quat[2]:g}, {goal_quat[3]:g}]"
-    s += f"\nResults  = Position: [{pos[0]:g}, {pos[1]:g}, {pos[2]:g}])"
+    s += f"\nResults  = Position: [{pos[0]:g}, {pos[1]:g}, {pos[2]:g}]"
     if quat is not None and goal_quat is not None:
         s += f", Orientation: [{quat[0]:g}, {quat[1]:g}, {quat[2]:g}, {quat[3]:g}]"
     s += f"\nError    = Position: [{diff_pos[0]:g}, {diff_pos[1]:g}, {diff_pos[2]:g}]"
@@ -377,4 +377,4 @@ def view(model: mujoco.MjModel, data: mujoco.MjData) -> None:
 
 if __name__ == "__main__":
     # Pass the name of the folder under "Models" for the robot you want.
-    test_ik("Simple", 0.001, False)
+    test_ik("2DOF", 0.001, False)

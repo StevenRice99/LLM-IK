@@ -21,21 +21,28 @@ There are multiple ways to solve inverse kinematics.
 
 - Inverse kinematics are hard to solve and require a great deal of understanding of the subject. An LLM being able to comprehend the structure of a kinematic chain and further solve the inverse kinematics would show a very high degree of understanding and complex problem-solving.
 
-## Progress
+## Features
 
 - Robots can be parsed and tested with a standard numerical solver.
-- **However, GPT-3.5, GPT-4o, and GPT-4 have all failed with multiple prompt attempts so far.** I have ChatGPT Plus which is where I tested these three models. There is no direct API calls to any LLMs thus far, and all communication has been via copying and pasting to and from ChatGPT.
-- These prompts have tried giving minimal information about the robot via parsing of joint data before adding it to the prompt, as well as attempting to send entire [URDF](https://en.wikipedia.org/wiki/URDF "URDF Wikipedia") files in the prompts as well. All attempts so far have failed. The reality is that no LLMs may be capable of solving inverse kinematics of serial manipulators yet.
-- **All of my tests have been done on a [Universal Robots UR5e](https://www.universal-robots.com/products/ur5-robot, "Universal Robots UR5e").**
+- You can choose to solve for the entire transform (position and orientation), or just position.
+- You can choose to use joint limits or ignore them.
+- You can generate initial prompts for LLMs that give the kinematic structure of the robot.
+- You can generate feedback prompts based off the results for feeding back to the LLM to try and get it to improve its solution.
+
+## Progress
+
+- GPT-4 has succeeded in solving a 1-DOF arm.
+- GPT-3.5, GPT-4o, and GPT-4 have all failed with anything beyond 1-DOF.
 
 ## Ideas
 
-- While not as interesting as they do not have as much use, we could potentially try on kinematic chains smaller than a standard serial manipulator. However, those inherently have problems reaching all poses in their workspace anyway, so this may not lead anywhere. At least in terms of solving for position and orientation, as three joints/axis can reach all points for position alone, so we could try that.
-- Trying to solve the inverse kinematics on kinematic chains of two or three joints may be more feasible by current LLMs.
-- If this is the case, we will need to construct them which can be done as seen in the XML files under the "Models" folder, where each subfolder is for a robot which has a "Model.xml". These models were taken from the [Mujoco Model Gallery](https://mujoco.readthedocs.io/en/stable/models.html "Mujoco Model Gallery").
+- Using the [OpenAI API](http://platform.openai.com, "OpenAI API") instead of [ChatGPT](http://chatgpt.com, "ChatGPT") may produce better results via tuning before prompting the model.
 
 ## Usage
 
-- "main.py" has all methods. Running this script will test all IK solutions for a given robot in reaching a random position and orientation. It is currently set to the [Universal Robots UR5e](https://www.universal-robots.com/products/ur5-robot, "Universal Robots UR5e"). Change the name to the folder of the robot under "Models" you wish to use.
-- "prompt.py" will output a prompt to the console for you to give to LLMs. The contents of the prompt are composed of a static start and end found in "prompt_start.txt" and "prompt_end.txt" respectively, and between them a dynamic portion of the prompt is input consisting of information about the robot.
-- Once you have a solution from an LLM, under "Solvers", create folders matching the names of the robot under "Models" you are using. Then, create a Python file named after the LLM implementing the function "inverse_kinematics" which takes in a position and orientation to reach and returns the joint values.
+- "main.py" has all methods.
+- "configuration.py" controls what robot and with what settings other methods will use.
+- "visualize.py" lets you see and manually control a robot.
+- "prompt.py" will output a prompt to the console for you to give to LLMs. The contents of the prompt are composed of a static start and end found in "Prompts/prompt_start.txt" and "Prompts/prompt_end_position.txt" or "Prompts/prompt_end_transform.txt" depending on what is being solved for, and between them a dynamic portion of the prompt is input consisting of information about the robot.
+- Once you have a solution from an LLM, under "Solvers", create folders matching the names of the robot under "Models" you are using. Then, create a subfolder for either "Position" or "Transform" depending on what you are solving. Then, create a Python file named after the LLM implementing the function "inverse_kinematics" which takes in a position (or position and orientation if solving for the entire transform) to reach and returns the joint values.
+- "test.py" lets you run trails to test the inverse kinematics and generate feedback prompts for the LLM.

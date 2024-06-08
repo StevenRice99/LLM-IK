@@ -1,0 +1,6 @@
+ROBOT = "1DOF"
+ORIENTATION = False
+LIMITS = False
+ERROR = 0.001
+TESTS = 10
+VERBOSE = True

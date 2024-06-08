@@ -197,6 +197,21 @@ def random_positions(model: mujoco.MjModel, data: mujoco.MjData, lower: list, up
     set_joints(model, data, values)
 
 
+def mid_positions(model: mujoco.MjModel, data: mujoco.MjData, lower: list, upper: list) -> None:
+    """
+    Set the Mujoco model to middle joint values.
+    :param model: The Mujoco model.
+    :param data: The data for the Mujoco model.
+    :param lower: The joint lower bounds.
+    :param upper: The joint upper bounds.
+    :return: Nothing.
+    """
+    values = []
+    for i in range(model.njnt):
+        values.append((lower[i] + upper[i]) / 2)
+    set_joints(model, data, values)
+
+
 def get_joints(model: mujoco.MjModel, data: mujoco.MjData) -> list:
     """
     Get the joint values of the Mujoco model.
@@ -270,18 +285,22 @@ def deepmind_ik(model: mujoco.MjModel, data: mujoco.MjData, path: str, site: str
     return end_time - start_time
 
 
-def eval_ik(title: str, pos: list, quat: list or None, goal_pos: list, goal_quat: list, duration: float,
-            error: float) -> None:
+def eval_ik(title: str, pos: list, goal_pos: list, quat: list or None = None, goal_quat: list or None = None,
+            duration: float = 0, error: float = 0.001, joints: list or None = None, solution: list or None = None,
+            verbose: bool = False) -> [bool, str or None]:
     """
     Evaluate an inverse kinematics result.
     :param title: The inverse kinematics method which was used.
     :param pos: The position of the end effector.
-    :param quat:The orientation of the end effector.
     :param goal_pos: The position the end effector was trying to reach.
+    :param quat:The orientation of the end effector.
     :param goal_quat: The orientation the end effector was trying to reach.
     :param duration: How long it took to compute the inverse kinematics.
     :param error: The acceptable error tolerance in meters and degrees of which to consider a solution successful.
-    :return: Nothing.
+    :param joints: The joints the model proposed.
+    :param solution: A solution for joints to reach the target.
+    :param verbose: If output messages should be logged or not.
+    :return: If the move was successful or not and a potential error message.
     """
     # Calculate position differences.
     diff_pos = [abs(pos[0] - goal_pos[0]), abs(pos[1] - goal_pos[1]), abs(pos[2] - goal_pos[2])]
@@ -299,67 +318,178 @@ def eval_ik(title: str, pos: list, quat: list or None, goal_pos: list, goal_quat
     # If the position reached, also check the orientation if it was passed as well.
     if success and quat is not None and goal_quat is not None:
         success = np.linalg.norm(np.array(euler) - np.array(goal_euler)) <= error
-    s = f"{title} | {f'Success' if success else f'Failure'} | {duration} s"
-    s += f"\nExpected = Position: [{goal_pos[0]:g}, {goal_pos[1]:g}, {goal_pos[2]:g}]"
-    if quat is not None and goal_quat is not None:
-        s += f", Orientation: [{goal_quat[0]:g}, {goal_quat[1]:g}, {goal_quat[2]:g}, {goal_quat[3]:g}]"
-    s += f"\nResults  = Position: [{pos[0]:g}, {pos[1]:g}, {pos[2]:g}]"
-    if quat is not None and goal_quat is not None:
-        s += f", Orientation: [{quat[0]:g}, {quat[1]:g}, {quat[2]:g}, {quat[3]:g}]"
-    s += f"\nError    = Position: [{diff_pos[0]:g}, {diff_pos[1]:g}, {diff_pos[2]:g}]"
-    if quat is not None and goal_quat is not None:
-        s += f", Euler: [{diff_euler[0]:g}, {diff_euler[1]:g}, {diff_euler[2]:g}]"
-    # For now, just log the information. In the future if results are promising we would return and tabulate data.
-    print(s)
+    orientation = quat is not None and goal_quat is not None
+    # Create a message for the console if verbose.
+    if verbose:
+        s = f"{title} | {f'Success' if success else f'Failure'} | {duration} seconds"
+        s += f"\nExpected = Position: [{goal_pos[0]:g}, {goal_pos[1]:g}, {goal_pos[2]:g}]"
+        if orientation:
+            s += f", Orientation: [{goal_quat[0]:g}, {goal_quat[1]:g}, {goal_quat[2]:g}, {goal_quat[3]:g}]"
+        s += f"\nResults  = Position: [{pos[0]:g}, {pos[1]:g}, {pos[2]:g}]"
+        if orientation:
+            s += f", Orientation: [{quat[0]:g}, {quat[1]:g}, {quat[2]:g}, {quat[3]:g}]"
+        s += f"\nError    = Position: [{diff_pos[0]:g}, {diff_pos[1]:g}, {diff_pos[2]:g}]"
+        if orientation:
+            s += f", Euler: [{diff_euler[0]:g}, {diff_euler[1]:g}, {diff_euler[2]:g}]"
+        # For now, just log the information. In the future if results are promising we would return and tabulate data.
+        print(s)
+    # Create a success message to help improve results.
+    if success:
+        s = f"Successfully reached position [{goal_pos[0]:g}, {goal_pos[1]:g}, {goal_pos[2]:g}]"
+        if orientation:
+            s += f" and orientation [{goal_quat[0]:g}, {goal_quat[1]:g}, {goal_quat[2]:g}, {goal_quat[3]:g}]"
+        s += "."
+        if joints is not None:
+            s += f" The joints the method produced were ["
+            if len(joints) > 0:
+                s += f"{joints[0]:g}"
+            for i in range(1, len(joints)):
+                s += f", {joints[i]}"
+            s += f"]."
+            return True, s
+    # Create a failure message to help improve results.
+    s = f"Failed to reach position [{goal_pos[0]:g}, {goal_pos[1]:g}, {goal_pos[2]:g}]"
+    if orientation:
+        s += f" and orientation [{goal_quat[0]:g}, {goal_quat[1]:g}, {goal_quat[2]:g}, {goal_quat[3]:g}]"
+    s += f". Instead reached position [{pos[0]:g}, {pos[1]:g}, {pos[2]:g}]"
+    if orientation:
+        s += f" and orientation [{quat[0]:g}, {quat[1]:g}, {quat[2]:g}, {quat[3]:g}]"
+    s += f"."
+    if joints is not None and solution is not None:
+        s += f" The joints produced were ["
+        if len(joints) > 0:
+            s += f"{joints[0]:g}"
+        for i in range(1, len(joints)):
+            s += f", {joints[i]}"
+        s += f"]. The solution for the joints were ["
+        if len(solution) > 0:
+            s += f"{solution[0]:g}"
+        for i in range(1, len(solution)):
+            s += f", {solution[i]}"
+        s += "]."
+    return False, s
 
 
-def test_ik(name: str, error: float, orientation: bool = False, limits: bool = False) -> None:
+def test_ik(name: str, error: float = 0.001, orientation: bool = False, limits: bool = False,
+            verbose: bool = False, tests: int = 1, methods: list or None = None) -> dict:
     """
     Test all inverse kinematics solvers for a model.
     :param name: The name of the robot to test.
     :param error: The acceptable error tolerance in meters and degrees of which to consider a solution successful.
     :param orientation: If orientation should be solved for.
     :param limits: If limits should be enforced or not.
-    :return: Nothing.
+    :param verbose: If output messages should be logged or not.
+    :param tests: The number of tests to run.
+    :param methods: Which methods to run.
+    :return: The results in a dictionary.
     """
+    results = []
     # Load the robot.
     model, data, lower, upper, site, path, solvers = load_model(name, orientation, limits)
     if model is None:
-        return
-    # Define the starting pose.
-    random_positions(model, data, lower, upper)
-    starting = get_joints(model, data)
-    # Determine where to move to.
-    random_positions(model, data, lower, upper)
-    pos, quat = get_pose(model, data)
-    if not orientation:
-        quat = None
-    # Move back to the starting pose.
-    set_joints(model, data, starting)
-    # Test the Deepmind inverse kinematics.
-    duration = deepmind_ik(model, data, path, site, pos, quat)
-    result_pos, result_quat = get_pose(model, data)
-    eval_ik("Deepmind IK", result_pos, result_quat, pos, quat, duration, error)
-    # Use all solvers which were loaded.
-    for solver in solvers:
-        print()
-        # Move back to the starting pose for every attempt.
-        set_joints(model, data, starting)
-        joints = []
-        start_time = time.time()
-        # Continue in case there are errors which still outputting the stacktrace for debugging.
-        # noinspection PyBroadException
-        try:
-            if orientation:
-                joints = solvers[0]["Method"]([pos[0], pos[1], pos[2]], [quat[0], quat[1], quat[2], quat[3]])
+        return {}
+    for i in range(tests):
+        if tests > 0:
+            if verbose:
+                print()
+            print(f"{i+1} / {tests}")
+            if verbose:
+                print()
+        result = {}
+        # Determine where to move to.
+        random_positions(model, data, lower, upper)
+        solution = get_joints(model, data)
+        pos, quat = get_pose(model, data)
+        if not orientation:
+            quat = None
+        # Define the starting pose at the middle.
+        mid_positions(model, data, lower, upper)
+        starting = get_joints(model, data)
+        # Test the Deepmind inverse kinematics.
+        if methods is None or "Deepmind IK" in methods:
+            duration = deepmind_ik(model, data, path, site, pos, quat)
+            result_pos, result_quat = get_pose(model, data)
+            joints = get_joints(model, data)
+            success, message = eval_ik("Deepmind IK", result_pos, pos, result_quat, quat, duration, error, joints,
+                                       solution, verbose)
+            if success:
+                solution = joints
+            result["Deepmind IK"] = {"Success": success, "Message": message, "Duration": duration}
+        # Use all solvers which were loaded.
+        for solver in solvers:
+            if methods is not None and solver["Name"] not in methods:
+                continue
+            if verbose:
+                print()
+            # Move back to the starting pose for every attempt.
+            set_joints(model, data, starting)
+            joints = []
+            start_time = time.time()
+            exception_message = None
+            # Continue in case there are errors which still outputting the stacktrace for debugging.
+            # noinspection PyBroadException
+            try:
+                if orientation:
+                    joints = solvers[0]["Method"]([pos[0], pos[1], pos[2]], [quat[0], quat[1], quat[2], quat[3]])
+                else:
+                    joints = solvers[0]["Method"]([pos[0], pos[1], pos[2]])
+            except Exception:
+                if verbose:
+                    traceback.print_exc()
+                exception_message = traceback.format_exc()
+            end_time = time.time()
+            set_joints(model, data, joints)
+            result_pos, result_quat = get_pose(model, data)
+            duration = end_time - start_time
+            success, message = eval_ik(solver["Name"], result_pos, pos, result_quat, quat, end_time - start_time, error,
+                                       joints, solution, verbose)
+            if exception_message is not None:
+                message += f" This is likely due to the exception which happened: {exception_message}"
+            result[solver["Name"]] = {"Success": success, "Message": message, "Duration": duration}
+        results.append(result)
+    # If there is no results, there is nothing else to do.
+    if len(results) < 1:
+        return {}
+    successes = {}
+    durations = {}
+    feedbacks = {}
+    # Loop all results to get average scores.
+    for result in results:
+        result: dict
+        for key in result.keys():
+            success = result[key]["Success"]
+            if key in successes:
+                durations[key] += result[key]["Duration"]
+                feedbacks[key] += f"\n{result[key]['Message']}"
+                if success:
+                    successes[key] += 1
             else:
-                joints = solvers[0]["Method"]([pos[0], pos[1], pos[2]])
-        except Exception:
-            traceback.print_exc()
-        end_time = time.time()
-        set_joints(model, data, joints)
-        result_pos, result_quat = get_pose(model, data)
-        eval_ik(solver['Name'], result_pos, result_quat, pos, quat, end_time - start_time, error)
+                successes[key] = 1 if success else 0
+                durations[key] = result[key]["Duration"]
+                feedbacks[key] = result[key]["Message"]
+    results = {}
+    # Get messages in readable format.
+    for key in successes:
+        results[key] = {"Success": (successes[key] / tests * 100), "Duration": (durations[key] / tests),
+                        "Message": feedbacks[key]}
+    # Append to messages to potentially help with improving results.
+    for key in successes:
+        trimmed = f"{results[key]['Success']:.2f}".rstrip('0').rstrip('.')
+        results[key]["Message"] = (f"The method had a success rate of {trimmed}% solving inverse kinematics. "
+                                   f"Below are feedback messages of the test trails to analyze to improve the method:\n"
+                                   f"{results[key]['Message']}")
+    # Display the results.
+    print("\nResults:")
+    for key in results.keys():
+        trimmed = f"{results[key]['Success']:.2f}".rstrip('0').rstrip('.')
+        print(f"{key} | Success Rate = {trimmed}% | "
+              f"Average Time = {results[key]['Duration']:f} seconds")
+    # Optionally display the training methods.
+    if verbose:
+        print("\nFeedback:")
+        for key in results.keys():
+            print(f"\n{key}\n{results[key]['Message']}")
+    return results
 
 
 def view(model: mujoco.MjModel, data: mujoco.MjData) -> None:
@@ -373,8 +503,3 @@ def view(model: mujoco.MjModel, data: mujoco.MjData) -> None:
     while viewer.is_running():
         mujoco.mj_step(model, data)
         viewer.sync()
-
-
-if __name__ == "__main__":
-    # Pass the name of the folder under "Models" for the robot you want.
-    test_ik("2DOF", 0.001, False)

@@ -1,5 +1,5 @@
 from main import generate_prompt
-from configuration import ROBOT, ORIENTATION, LIMITS
+from configuration import ROBOTS, ORIENTATION, LIMITS
 
 if __name__ == "__main__":
-    print(generate_prompt(ROBOT, ORIENTATION, LIMITS))
+    print(generate_prompt(ROBOTS, ORIENTATION, LIMITS))

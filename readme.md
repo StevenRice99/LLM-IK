@@ -45,4 +45,5 @@ There are multiple ways to solve inverse kinematics.
 - "visualize.py" lets you see and manually control a robot.
 - "prompt.py" will output a prompt to the console for you to give to LLMs. The contents of the prompt are composed of a static start and end found in "Prompts/prompt_start.txt" and "Prompts/prompt_end_position.txt" or "Prompts/prompt_end_transform.txt" depending on what is being solved for, and between them a dynamic portion of the prompt is input consisting of information about the robot.
 - Once you have a solution from an LLM, under "Solvers", create folders matching the names of the robot under "Models" you are using. Then, create a subfolder for either "Position" or "Transform" depending on what you are solving. Then, create a Python file named after the LLM implementing the function "inverse_kinematics" which takes in a position (or position and orientation if solving for the entire transform) to reach and returns the joint values.
-- "test.py" lets you run trails to test the inverse kinematics and generate feedback prompts for the LLM.
+- "test.py" lets you run trails to test the inverse kinematics and generate feedback prompts for the LLM to then use to try and improve the solution.
+- "evaluate.py" runs trials across all models and writes them to CSV files.

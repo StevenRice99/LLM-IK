@@ -30,11 +30,13 @@ def import_model(name: str) -> [mujoco.MjModel, str]:
     return model, path
 
 
-def get_data(model: mujoco.MjModel, limits: bool = False) -> [mujoco.MjData, list, list, list, list, list, str]:
+def get_data(model: mujoco.MjModel, limits: bool = False,
+             collisions: bool = False) -> [mujoco.MjData, list, list, list, list, list, str]:
     """
     Get the data for the Mujoco model.
     :param model: The Mujoco model.
     :param limits: If limits should be enforced or not.
+    :param collisions: If collisions should be enforced or not.
     :return: The data of the Mujoco model, joint positions, joint orientations, joint axes, joint lower bounds, joint
     upper bounds, and the name of the site for the end effector.
     """
@@ -63,13 +65,19 @@ def get_data(model: mujoco.MjModel, limits: bool = False) -> [mujoco.MjData, lis
             # If we are not looking to enforce limits, remove them.
             if not limits:
                 model.jnt_limited[i] = 0
-                model.jnt_range[i][0] = -6.28319
-                model.jnt_range[i][1] = 6.28319
+                model.jnt_range[i][0] = -3.14159
+                model.jnt_range[i][1] = 3.14159
             lower.append(model.jnt_range[i][0])
             upper.append(model.jnt_range[i][1])
         else:
-            lower.append(-6.28319)
-            upper.append(6.28319)
+            lower.append(-3.14159)
+            upper.append(3.14159)
+    # Turn off collisions if needed.
+    if not collisions:
+        for i in range(model.ngeom):
+            model.geom_contype[i] = 0
+            model.geom_conaffinity[i] = 0
+            model.geom_condim[i] = 1
     return (data, positions, orientations, axes, lower, upper,
             mujoco.mj_id2name(model, mujoco.mjtObj.mjOBJ_SITE, model.nsite - 1))
 
@@ -85,7 +93,7 @@ def generate_prompt(name: str, orientation: bool = False, limits: bool = False) 
     model, path = import_model(name)
     if path is None:
         return ""
-    data, positions, orientations, axes, lower, upper, site = get_data(model, limits)
+    data, positions, orientations, axes, lower, upper, site = get_data(model, limits, False)
     # Get the start of the prompt.
     with open(os.path.join(os.getcwd(), "Prompts", "prompt_start.txt"), 'r') as file:
         details = file.read()
@@ -127,13 +135,14 @@ def generate_prompt(name: str, orientation: bool = False, limits: bool = False) 
     return details
 
 
-def load_model(name: str, orientation: bool = False,
-               limits: bool = False) -> [mujoco.MjModel, mujoco.MjData, list, list, str, str, dict]:
+def load_model(name: str, orientation: bool = False, limits: bool = False,
+               collisions: bool = False) -> [mujoco.MjModel, mujoco.MjData, list, list, str, str, dict]:
     """
     Load a model into Mujoco.
     :param name: The name of the file to load.
     :param orientation: If orientation should be solved for.
     :param limits: If limits should be enforced or not.
+    :param collisions: If collisions should be enforced or not.
     :return: The Mujoco model, the data of the Mujoco model, joint lower bounds, joint upper bounds, the name of the
     site for the end effector, the path to the model, and all LLM solvers.
     """
@@ -141,7 +150,7 @@ def load_model(name: str, orientation: bool = False,
     model, path = import_model(name)
     if model is None:
         return [None, None, None, None, None, None, path, None]
-    data, positions, orientations, axes, lower, upper, site = get_data(model, limits)
+    data, positions, orientations, axes, lower, upper, site = get_data(model, limits, collisions)
     # Load in solvers which exist for this robot.
     solvers = []
     folder = "Transform" if orientation else "Position"
@@ -321,7 +330,7 @@ def eval_ik(title: str, pos: list, goal_pos: list, quat: list or None = None, go
     orientation = quat is not None and goal_quat is not None
     # Create a message for the console if verbose.
     if verbose:
-        s = f"{title} | {f'Success' if success else f'Failure'} | {duration} seconds"
+        s = f"{title} | {f'Success' if success else f'Failure'} | {duration:g} seconds"
         s += f"\nExpected = Position: [{goal_pos[0]:g}, {goal_pos[1]:g}, {goal_pos[2]:g}]"
         if orientation:
             s += f", Orientation: [{goal_quat[0]:g}, {goal_quat[1]:g}, {goal_quat[2]:g}, {goal_quat[3]:g}]"
@@ -370,126 +379,233 @@ def eval_ik(title: str, pos: list, goal_pos: list, quat: list or None = None, go
     return False, s
 
 
-def test_ik(name: str, error: float = 0.001, orientation: bool = False, limits: bool = False,
-            verbose: bool = False, tests: int = 1, methods: list or None = None) -> dict:
+def test_ik(names: str or list or None = None, error: float = 0.001, orientation: bool = False, limits: bool = False,
+            collisions: bool = False, verbose: bool = False, tests: int = 1, methods: list or None = None) -> dict:
     """
     Test all inverse kinematics solvers for a model.
-    :param name: The name of the robot to test.
+    :param names: The names of the robots to test.
     :param error: The acceptable error tolerance in meters and degrees of which to consider a solution successful.
     :param orientation: If orientation should be solved for.
     :param limits: If limits should be enforced or not.
+    :param collisions: If collisions should be enforced or not.
     :param verbose: If output messages should be logged or not.
     :param tests: The number of tests to run.
     :param methods: Which methods to run.
     :return: The results in a dictionary.
     """
-    results = []
-    # Load the robot.
-    model, data, lower, upper, site, path, solvers = load_model(name, orientation, limits)
-    if model is None:
-        return {}
-    for i in range(tests):
-        if tests > 0:
-            if verbose:
-                print()
-            print(f"{i+1} / {tests}")
-            if verbose:
-                print()
-        result = {}
-        # Determine where to move to.
-        random_positions(model, data, lower, upper)
-        solution = get_joints(model, data)
-        pos, quat = get_pose(model, data)
-        if not orientation:
-            quat = None
-        # Define the starting pose at the middle.
-        mid_positions(model, data, lower, upper)
-        starting = get_joints(model, data)
-        # Test the Deepmind inverse kinematics.
-        if methods is None or "Deepmind IK" in methods:
+    # Need to check for methods which have solvers.
+    solver_folder = os.path.join(os.getcwd(), "Solvers")
+    # If no names were passed, try with all options.
+    if names is None:
+        names = []
+        if os.path.exists(solver_folder):
+            for name in os.listdir(solver_folder):
+                names.append(name)
+    # If one name was passed, convert it to a list.
+    elif isinstance(names, str):
+        names = [names]
+    # Need to ensure there are solvers that exist
+    filtered = []
+    for name in names:
+        # Check depending on if we are solving for the entire transform or just the position.
+        current_solver = os.path.join(solver_folder, name, "Transform" if orientation else "Position")
+        # Check for solvers.
+        if os.path.exists(current_solver):
+            for file in os.listdir(current_solver):
+                # Ensure we are only checking Python files.
+                if not file.endswith(".py"):
+                    continue
+                # Get the name from the file.
+                module_name = file[:-3]
+                # If it is not a method we are interested in, ignore it.
+                if methods is not None and module_name not in methods:
+                    continue
+                # Load the code.
+                spec = importlib.util.spec_from_file_location(module_name, os.path.join(current_solver, file))
+                module = importlib.util.module_from_spec(spec)
+                spec.loader.exec_module(module)
+                # If it has a proper module, we can test this robot.
+                if hasattr(module, "inverse_kinematics"):
+                    filtered.append(name)
+                    break
+    # Use the filtered results.
+    names = filtered
+    all_results = {}
+    post = ""
+    if orientation:
+        post += " Orientation"
+    if limits:
+        post += " Limits"
+    if collisions:
+        post += " Collisions"
+    # Loop for all robot options.
+    index = 1
+    for name in names:
+        # Load the robot.
+        model, data, lower, upper, site, path, solvers = load_model(name, orientation, limits, collisions)
+        if model is None or len(solvers) == 0:
+            continue
+        pre = "" if len(names) <= 1 else f"Model {index} / {len(names)} | "
+        index += 1
+        results = []
+        for i in range(tests):
+            if tests > 0:
+                if verbose:
+                    print()
+                print(f"{pre}{name}{post} | Test {i+1} / {tests}")
+                if verbose:
+                    print()
+            result = {}
+            # Determine where to move to.
+            random_positions(model, data, lower, upper)
+            solution = get_joints(model, data)
+            pos, quat = get_pose(model, data)
+            if not orientation:
+                quat = None
+            # Define the starting pose at the middle.
+            mid_positions(model, data, lower, upper)
+            starting = get_joints(model, data)
+            # Test the Deepmind inverse kinematics.
             duration = deepmind_ik(model, data, path, site, pos, quat)
             result_pos, result_quat = get_pose(model, data)
             joints = get_joints(model, data)
             success, message = eval_ik("Deepmind IK", result_pos, pos, result_quat, quat, duration, error, joints,
                                        solution, verbose)
+            # If Deepmind inverse kinematics was successful, check to see if it should be used as the solution.
             if success:
-                solution = joints
+                # Check to see what joint configuration is the closest to the midpoints.
+                existing_diff = 0
+                new_diff = 0
+                for j in range(len(starting)):
+                    existing_diff += abs(starting[j] - solution[j])
+                    new_diff += abs(starting[j] - joints[j])
+                # If the Deepmind solution is closer to the midpoints, use it.
+                if new_diff < existing_diff:
+                    solution = joints
             result["Deepmind IK"] = {"Success": success, "Message": message, "Duration": duration}
-        # Use all solvers which were loaded.
-        for solver in solvers:
-            if methods is not None and solver["Name"] not in methods:
-                continue
-            if verbose:
-                print()
-            # Move back to the starting pose for every attempt.
-            set_joints(model, data, starting)
-            joints = []
-            start_time = time.time()
-            exception_message = None
-            # Continue in case there are errors which still outputting the stacktrace for debugging.
-            # noinspection PyBroadException
-            try:
-                if orientation:
-                    joints = solvers[0]["Method"]([pos[0], pos[1], pos[2]], [quat[0], quat[1], quat[2], quat[3]])
-                else:
-                    joints = solvers[0]["Method"]([pos[0], pos[1], pos[2]])
-            except Exception:
+            # Use all solvers which were loaded.
+            for solver in solvers:
+                if methods is not None and solver["Name"] not in methods:
+                    continue
                 if verbose:
-                    traceback.print_exc()
-                exception_message = traceback.format_exc()
-            end_time = time.time()
-            set_joints(model, data, joints)
-            result_pos, result_quat = get_pose(model, data)
-            duration = end_time - start_time
-            success, message = eval_ik(solver["Name"], result_pos, pos, result_quat, quat, end_time - start_time, error,
-                                       joints, solution, verbose)
-            if exception_message is not None:
-                message += f" This is likely due to the exception which happened: {exception_message}"
-            result[solver["Name"]] = {"Success": success, "Message": message, "Duration": duration}
-        results.append(result)
-    # If there is no results, there is nothing else to do.
-    if len(results) < 1:
-        return {}
-    successes = {}
-    durations = {}
-    feedbacks = {}
-    # Loop all results to get average scores.
-    for result in results:
-        result: dict
-        for key in result.keys():
-            success = result[key]["Success"]
-            if key in successes:
-                durations[key] += result[key]["Duration"]
-                feedbacks[key] += f"\n{result[key]['Message']}"
-                if success:
-                    successes[key] += 1
-            else:
-                successes[key] = 1 if success else 0
-                durations[key] = result[key]["Duration"]
-                feedbacks[key] = result[key]["Message"]
-    results = {}
-    # Get messages in readable format.
-    for key in successes:
-        results[key] = {"Success": (successes[key] / tests * 100), "Duration": (durations[key] / tests),
-                        "Message": feedbacks[key]}
-    # Append to messages to potentially help with improving results.
-    for key in successes:
-        trimmed = f"{results[key]['Success']:.2f}".rstrip('0').rstrip('.')
-        results[key]["Message"] = (f"The method had a success rate of {trimmed}% solving inverse kinematics. "
-                                   f"Below are feedback messages of the test trails to analyze to improve the method:\n"
-                                   f"{results[key]['Message']}")
-    # Display the results.
-    print("\nResults:")
-    for key in results.keys():
-        trimmed = f"{results[key]['Success']:.2f}".rstrip('0').rstrip('.')
-        print(f"{key} | Success Rate = {trimmed}% | "
-              f"Average Time = {results[key]['Duration']:f} seconds")
-    # Optionally display the training methods.
-    if verbose:
-        print("\nFeedback:")
+                    print()
+                # Move back to the starting pose for every attempt.
+                set_joints(model, data, starting)
+                joints = []
+                start_time = time.time()
+                exception_message = None
+                # Continue in case there are errors which still outputting the stacktrace for debugging.
+                # noinspection PyBroadException
+                try:
+                    if orientation:
+                        joints = solver["Method"]([pos[0], pos[1], pos[2]], [quat[0], quat[1], quat[2], quat[3]])
+                    else:
+                        joints = solver["Method"]([pos[0], pos[1], pos[2]])
+                except Exception:
+                    if verbose:
+                        traceback.print_exc()
+                    exception_message = traceback.format_exc()
+                end_time = time.time()
+                set_joints(model, data, joints)
+                result_pos, result_quat = get_pose(model, data)
+                duration = end_time - start_time
+                success, message = eval_ik(solver["Name"], result_pos, pos, result_quat, quat, end_time - start_time,
+                                           error, joints, solution, verbose)
+                if exception_message is not None:
+                    message += f" This is likely due to the exception which happened: {exception_message}"
+                result[solver["Name"]] = {"Success": success, "Message": message, "Duration": duration}
+            results.append(result)
+        # If there is no results, there is nothing else to do.
+        if len(results) < 1:
+            return {}
+        successes = {}
+        durations = {}
+        feedbacks = {}
+        # Loop all results to get average scores.
+        for result in results:
+            result: dict
+            for key in result.keys():
+                success = result[key]["Success"]
+                if key in successes:
+                    durations[key] += result[key]["Duration"]
+                    feedbacks[key] += f"\n{result[key]['Message']}"
+                    if success:
+                        successes[key] += 1
+                else:
+                    successes[key] = 1 if success else 0
+                    durations[key] = result[key]["Duration"]
+                    feedbacks[key] = result[key]["Message"]
+        results = {}
+        # Get messages in readable format.
+        for key in successes:
+            results[key] = {"Success": (successes[key] / tests * 100), "Duration": (durations[key] / tests),
+                            "Message": feedbacks[key]}
+        # Append to messages to potentially help with improving results.
+        for key in successes:
+            trimmed = f"{results[key]['Success']:.2f}".rstrip('0').rstrip('.')
+            results[key]["Message"] = (f"The method had a success rate of {trimmed}% solving inverse kinematics. Below "
+                                       f"are feedback messages of the test trails to analyze to improve the method:\n"
+                                       f"{results[key]['Message']}")
+        # Display the results.
+        print(f"\n{pre}{name}{post} | Results")
         for key in results.keys():
-            print(f"\n{key}\n{results[key]['Message']}")
-    return results
+            trimmed = f"{results[key]['Success']:.2f}".rstrip('0').rstrip('.')
+            print(f"{key} | Success Rate = {trimmed}% | Average Time = {results[key]['Duration']:g} seconds")
+        # Optionally display the training methods.
+        if verbose:
+            print(f"\n{pre}{name}{post} | Feedback")
+            for key in results.keys():
+                print(f"\n{key}\n{results[key]['Message']}")
+        all_results[name] = results
+    return all_results
+
+
+def evaluate(error: float = 0.001, limits: bool = False, collisions: bool = False, tests: int = 1) -> None:
+    """
+    Evaluate robots for many trials.
+    :param error: The acceptable error tolerance in meters and degrees of which to consider a solution successful.
+    :param limits: If tests with limits should be done as well.
+    :param collisions: If tests with collisions should be done as well.
+    :param tests: The number of tests to run.
+    :return: Nothing.
+    """
+    # Ensure the folder for results exists.
+    root = os.path.join(os.getcwd(), "Results")
+    if not os.path.exists(root):
+        os.mkdir(root)
+    # Test all variations if requested.
+    limits = [False, True] if limits else [False]
+    collisions = [False, True] if collisions else [False]
+    # Test all permutations of options.
+    for orientation in [False, True]:
+        for limit in limits:
+            for collision in collisions:
+                # Test the current permutation.
+                results = test_ik(None, error, orientation, limit, collision, False, tests, None)
+                # Write the results of each robot in CSV format.
+                for robot in results.keys():
+                    # Write the Deepmind inverse kinematics first as it was the baseline.
+                    success = f"{results[robot]['Deepmind IK']['Success']}".rstrip('0').rstrip('.')
+                    duration = f"{results[robot]['Deepmind IK']['Duration']}".rstrip('0').rstrip('.')
+                    s = f"Method,Success Rate(%),Average Time (s)\nDeepmind IK,{success}%,{duration}"
+                    # Write all LLM methods.
+                    for mode in sorted(results[robot].keys()):
+                        if mode == "Deepmind IK":
+                            continue
+                        success = f"{results[robot][mode]['Success']}".rstrip('0').rstrip('.')
+                        duration = f"{results[robot][mode]['Duration']}".rstrip('0').rstrip('.')
+                        s += f"\n{mode},{success}%,{duration}"
+                    # Add the configuration details so they are saved to the proper file..
+                    if orientation:
+                        robot += " Orientations"
+                    if limit:
+                        robot += " Limits"
+                    if collision:
+                        robot += " Collisions"
+                    # Write to the file.
+                    f = open(os.path.join(root, f"{robot}.csv"), "w")
+                    f.write(s)
+                    f.close()
 
 
 def view(model: mujoco.MjModel, data: mujoco.MjData) -> None:

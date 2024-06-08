@@ -30,10 +30,11 @@ def import_model(name: str) -> [mujoco.MjModel, str]:
     return model, path
 
 
-def get_data(model: mujoco.MjModel) -> [mujoco.MjData, list, list, list, list, list, str]:
+def get_data(model: mujoco.MjModel, limits: bool = False) -> [mujoco.MjData, list, list, list, list, list, str]:
     """
     Get the data for the Mujoco model.
     :param model: The Mujoco model.
+    :param limits: If limits should be enforced or not.
     :return: The data of the Mujoco model, joint positions, joint orientations, joint axes, joint lower bounds, joint
     upper bounds, and the name of the site for the end effector.
     """
@@ -59,44 +60,56 @@ def get_data(model: mujoco.MjModel) -> [mujoco.MjData, list, list, list, list, l
         axes.append(model.jnt_axis[i])
         # Get limits.
         if model.jnt_limited[i]:
+            # If we are not looking to enforce limits, remove them.
+            if not limits:
+                model.jnt_limited[i] = 0
+                model.jnt_range[i][0] = -6.28319
+                model.jnt_range[i][1] = 6.28319
             lower.append(model.jnt_range[i][0])
             upper.append(model.jnt_range[i][1])
         else:
-            lower.append(float('-inf'))
-            upper.append(float('inf'))
+            lower.append(-6.28319)
+            upper.append(6.28319)
     return (data, positions, orientations, axes, lower, upper,
             mujoco.mj_id2name(model, mujoco.mjtObj.mjOBJ_SITE, model.nsite - 1))
 
 
-def generate_prompt(name: str) -> str:
+def generate_prompt(name: str, orientation: bool = False, limits: bool = False) -> str:
     """
     Generate the prompt to give to LLMs.
     :param name: The name of the robot to generate the prompt for.
+    :param orientation: If orientation should be solved for.
+    :param limits: If limits should be enforced or not.
     :return: The prompt for the LLM.
     """
     model, path = import_model(name)
     if path is None:
         return ""
-    data, positions, orientations, axes, lower, upper, site = get_data(model)
+    data, positions, orientations, axes, lower, upper, site = get_data(model, limits)
     # Get the start of the prompt.
-    with open(os.path.join(os.getcwd(), "prompt_start.txt"), 'r') as file:
+    with open(os.path.join(os.getcwd(), "Prompts", "prompt_start.txt"), 'r') as file:
         details = file.read()
+    if limits:
+        details += "Limits are in radians."
     # Write the base nicely.
     pos = data.xpos[1]
     pos = f"[{pos[0]:g}, {pos[1]:g}, {pos[2]:g}]"
+    details += f"\n\nBase = Position: {pos}"
     quat = data.xquat[1]
     quat = f"[{quat[0]:g}, {quat[1]:g}, {quat[2]:g}, {quat[3]:g}]"
-    details += f"\n\nBase = Position: {pos}, Orientation: {quat}"
+    details += f", Orientation: {quat}"
     # Write all joints nicely.
     for i in range(model.njnt):
         pos = positions[i]
         pos = f"[{pos[0]:g}, {pos[1]:g}, {pos[2]:g}]"
+        details += f"\nJoint {i + 1} = Position: {pos}"
         quat = orientations[i]
         quat = f"[{quat[0]:g}, {quat[1]:g}, {quat[2]:g}, {quat[3]:g}]"
+        details += f", Orientation: {quat}"
         axis = axes[i]
         axis = f"[{axis[0]:g}, {axis[1]:g}, {axis[2]:g}]"
-        details += f"\nJoint {i + 1} = Position: {pos}, Orientation: {quat}, Axis: {axis}"
-        if model.jnt_limited[i]:
+        details += f", Axes: {axis}"
+        if limits and model.jnt_limited[i]:
             details += f", Lower: {lower[i]:g}, Upper: {upper[i]:g}"
     # Write the end effector nicely.
     site_id = model.nsite - 1
@@ -108,15 +121,19 @@ def generate_prompt(name: str) -> str:
     quat = f"[{quat[0]:g}, {quat[1]:g}, {quat[2]:g}, {quat[3]:g}]"
     details += f"\nEnd Effector = Position: {pos}, Orientation: {quat}\n\n"
     # Write the remainder of the prompt.
-    with open(os.path.join(os.getcwd(), "prompt_end.txt"), 'r') as file:
+    file = "prompt_end_transform.txt" if orientation else "prompt_end_position.txt"
+    with open(os.path.join(os.getcwd(), "Prompts", file), 'r') as file:
         details += file.read()
     return details
 
 
-def load_model(name: str) -> [mujoco.MjModel, mujoco.MjData, list, list, str, str, dict]:
+def load_model(name: str, orientation: bool = False,
+               limits: bool = False) -> [mujoco.MjModel, mujoco.MjData, list, list, str, str, dict]:
     """
     Load a model into Mujoco.
     :param name: The name of the file to load.
+    :param orientation: If orientation should be solved for.
+    :param limits: If limits should be enforced or not.
     :return: The Mujoco model, the data of the Mujoco model, joint lower bounds, joint upper bounds, the name of the
     site for the end effector, the path to the model, and all LLM solvers.
     """
@@ -124,10 +141,11 @@ def load_model(name: str) -> [mujoco.MjModel, mujoco.MjData, list, list, str, st
     model, path = import_model(name)
     if model is None:
         return [None, None, None, None, None, None, path, None]
-    data, positions, orientations, axes, lower, upper, site = get_data(model)
+    data, positions, orientations, axes, lower, upper, site = get_data(model, limits)
     # Load in solvers which exist for this robot.
     solvers = []
-    solvers_directory = os.path.join(os.getcwd(), "Solvers", name)
+    folder = "Transform" if orientation else "Position"
+    solvers_directory = os.path.join(os.getcwd(), "Solvers", name, folder)
     if os.path.exists(solvers_directory):
         for file in os.listdir(solvers_directory):
             # Ensure we are only checking Python files.
@@ -139,6 +157,9 @@ def load_model(name: str) -> [mujoco.MjModel, mujoco.MjData, list, list, str, st
             spec = importlib.util.spec_from_file_location(module_name, module_path)
             module = importlib.util.module_from_spec(spec)
             spec.loader.exec_module(module)
+            # Ensure it has the proper module.
+            if not hasattr(module, "inverse_kinematics"):
+                continue
             method = getattr(module, "inverse_kinematics")
             solvers.append({"Name": module_name, "Method": method})
     return model, data, lower, upper, site, path, solvers
@@ -292,16 +313,17 @@ def eval_ik(title: str, pos: list, quat: list or None, goal_pos: list, goal_quat
     print(s)
 
 
-def test_ik(name: str, error: float, orientation: bool = True) -> None:
+def test_ik(name: str, error: float, orientation: bool = False, limits: bool = False) -> None:
     """
     Test all inverse kinematics solvers for a model.
     :param name: The name of the robot to test.
     :param error: The acceptable error tolerance in meters and degrees of which to consider a solution successful.
     :param orientation: If orientation should be solved for.
+    :param limits: If limits should be enforced or not.
     :return: Nothing.
     """
     # Load the robot.
-    model, data, lower, upper, site, path, solvers = load_model(name)
+    model, data, lower, upper, site, path, solvers = load_model(name, orientation, limits)
     if model is None:
         return
     # Define the starting pose.
@@ -324,12 +346,14 @@ def test_ik(name: str, error: float, orientation: bool = True) -> None:
         # Move back to the starting pose for every attempt.
         set_joints(model, data, starting)
         joints = []
-        passed_quat = None if quat is None else [quat[0], quat[1], quat[2], quat[3]]
         start_time = time.time()
         # Continue in case there are errors which still outputting the stacktrace for debugging.
         # noinspection PyBroadException
         try:
-            joints = solvers[0]["Method"]([pos[0], pos[1], pos[2]], passed_quat)
+            if orientation:
+                joints = solvers[0]["Method"]([pos[0], pos[1], pos[2]], [quat[0], quat[1], quat[2], quat[3]])
+            else:
+                joints = solvers[0]["Method"]([pos[0], pos[1], pos[2]])
         except Exception:
             traceback.print_exc()
         end_time = time.time()

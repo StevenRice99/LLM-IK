@@ -10,7 +10,9 @@ This repository is the base for generating prompts and executing code for testin
 
 ## Background
 
-There are multiple ways to solve inverse kinematics.
+- Inverse is the process of taking a chain such as a serial manipulator robot and giving it the target you wish for it to reach (whether it be the position, or the entire transform of position and orientation), and the inverse kinematics algorithm thus determines what joint values it needs so it can reach said target.
+- There are multiple ways to solve inverse kinematics.
+
 1. Numerical/iterative solvers which try to converge to a solution. These are very popular but have the problem of failing to converge by getting stuck in a local minima. Popular libraries such as [IKPy](https://github.com/Phylliade/ikpy "IKPy") use these methods. Even the Robot [Operating System (ROS)](https://www.ros.org "ROS - Robot Operating System") uses the [KDL solver](https://wiki.ros.org/kdl "KDL Solver") which is of this type of solver by default.
    - Pros:
      1. Implementations available in most languages.

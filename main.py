@@ -9,6 +9,7 @@ import mujoco.viewer
 import numpy as np
 import dm_control.utils.inverse_kinematics
 import os
+from collections.abc import Iterable
 from dm_control import mujoco as mujoco_dm
 from dm_control.mujoco.wrapper import mjbindings
 
@@ -161,16 +162,20 @@ def load_model(name: str, orientation: bool = False, limits: bool = False,
             if not file.endswith(".py"):
                 continue
             # Keep the name of the file and bind the inverse kinematics method.
-            module_name = file[:-3]
-            module_path = os.path.join(solvers_directory, file)
-            spec = importlib.util.spec_from_file_location(module_name, module_path)
-            module = importlib.util.module_from_spec(spec)
-            spec.loader.exec_module(module)
-            # Ensure it has the proper module.
-            if not hasattr(module, "inverse_kinematics"):
+            # noinspection PyBroadException
+            try:
+                module_name = file[:-3]
+                module_path = os.path.join(solvers_directory, file)
+                spec = importlib.util.spec_from_file_location(module_name, module_path)
+                module = importlib.util.module_from_spec(spec)
+                spec.loader.exec_module(module)
+                # Ensure it has the proper module.
+                if not hasattr(module, "inverse_kinematics"):
+                    continue
+                method = getattr(module, "inverse_kinematics")
+                solvers.append({"Name": module_name, "Method": method})
+            except Exception:
                 continue
-            method = getattr(module, "inverse_kinematics")
-            solvers.append({"Name": module_name, "Method": method})
     return model, data, lower, upper, site, path, solvers
 
 
@@ -182,13 +187,24 @@ def set_joints(model: mujoco.MjModel, data: mujoco.MjData, values: list) -> None
     :param values: The joint values to set.
     :return: Nothing.
     """
-    number = min(model.njnt, len(values))
-    for i in range(number):
-        data.ctrl[i] = values[i]
-        data.qpos[i] = values[i]
-        data.qvel[i] = 0
-    mujoco.mj_forward(model, data)
-    mujoco.mj_step(model, data)
+    if isinstance(values, Iterable):
+        number = min(model.njnt, len(values))
+        for i in range(number):
+            current = data.qpos[i]
+            # noinspection PyBroadException
+            try:
+                data.ctrl[i] = values[i]
+                data.qpos[i] = values[i]
+            except Exception:
+                data.ctrl[i] = current
+                data.qpos[i] = current
+            data.qvel[i] = 0
+    # noinspection PyBroadException
+    try:
+        mujoco.mj_forward(model, data)
+        mujoco.mj_step(model, data)
+    except Exception:
+        return
 
 
 def random_positions(model: mujoco.MjModel, data: mujoco.MjData, lower: list, upper: list) -> None:
@@ -348,14 +364,22 @@ def eval_ik(title: str, pos: list, goal_pos: list, quat: list or None = None, go
         if orientation:
             s += f" and orientation [{goal_quat[0]:g}, {goal_quat[1]:g}, {goal_quat[2]:g}, {goal_quat[3]:g}]"
         s += "."
-        if joints is not None:
+        if joints is not None and len(joints) > 0:
             s += f" The joints the method produced were ["
             if len(joints) > 0:
-                s += f"{joints[0]:g}"
+                if isinstance(joints[0], float):
+                    s += f"{joints[0]:g}"
+                else:
+                    s += f"{joints[0]}"
             for i in range(1, len(joints)):
-                s += f", {joints[i]}"
+                if isinstance(joints[0], float):
+                    s += f", {joints[i]}"
+                else:
+                    s += f", {joints[i]}"
             s += f"]."
-            return True, s
+        else:
+            s += " Did not produce any joints."
+        return True, s
     # Create a failure message to help improve results.
     s = f"Failed to reach position [{goal_pos[0]:g}, {goal_pos[1]:g}, {goal_pos[2]:g}]"
     if orientation:
@@ -364,18 +388,29 @@ def eval_ik(title: str, pos: list, goal_pos: list, quat: list or None = None, go
     if orientation:
         s += f" and orientation [{quat[0]:g}, {quat[1]:g}, {quat[2]:g}, {quat[3]:g}]"
     s += f"."
-    if joints is not None and solution is not None:
+    if joints is not None and len(joints) > 0:
         s += f" The joints produced were ["
         if len(joints) > 0:
-            s += f"{joints[0]:g}"
+            if isinstance(joints[0], float):
+                s += f"{joints[0]:g}"
+            else:
+                s += f"{joints[0]}"
         for i in range(1, len(joints)):
-            s += f", {joints[i]}"
-        s += f"]. The solution for the joints were ["
-        if len(solution) > 0:
-            s += f"{solution[0]:g}"
-        for i in range(1, len(solution)):
-            s += f", {solution[i]}"
-        s += "]."
+            if isinstance(joints[0], float):
+                s += f", {joints[i]}"
+            else:
+                s += f", {joints[i]}"
+        if solution is not None and len(solution) > 0:
+            s += f"]. The solution for the joints were ["
+            if len(solution) > 0:
+                s += f"{solution[0]:g}"
+            for i in range(1, len(solution)):
+                s += f", {solution[i]}"
+            s += "]."
+        else:
+            s += "]."
+    else:
+        s += " Failed to produce any joints."
     return False, s
 
 
@@ -421,13 +456,17 @@ def test_ik(names: str or list or None = None, error: float = 0.001, orientation
                 if methods is not None and module_name not in methods:
                     continue
                 # Load the code.
-                spec = importlib.util.spec_from_file_location(module_name, os.path.join(current_solver, file))
-                module = importlib.util.module_from_spec(spec)
-                spec.loader.exec_module(module)
-                # If it has a proper module, we can test this robot.
-                if hasattr(module, "inverse_kinematics"):
-                    filtered.append(name)
-                    break
+                # noinspection PyBroadException
+                try:
+                    spec = importlib.util.spec_from_file_location(module_name, os.path.join(current_solver, file))
+                    module = importlib.util.module_from_spec(spec)
+                    spec.loader.exec_module(module)
+                    # If it has a proper module, we can test this robot.
+                    if hasattr(module, "inverse_kinematics"):
+                        filtered.append(name)
+                        break
+                except Exception:
+                    continue
     # Use the filtered results.
     names = filtered
     all_results = {}
@@ -452,7 +491,7 @@ def test_ik(names: str or list or None = None, error: float = 0.001, orientation
             if tests > 0:
                 if verbose:
                     print()
-                print(f"{pre}{name}{post} | Test {i+1} / {tests}")
+                print(f"{pre}{name}{post} | Test {i + 1} / {tests}")
                 if verbose:
                     print()
             result = {}

@@ -31,8 +31,8 @@ There are multiple ways to solve inverse kinematics.
 
 ## Progress
 
-- GPT-4 has succeeded in solving a 1-DOF arm.
-- GPT-3.5, GPT-4o, and GPT-4 have all failed with anything beyond 1-DOF.
+- GPT-4 has succeeded in solving a 1-DOF arm, but has failed on a 2-DOF arm.
+- All other models have failed on everything.
 
 ## Ideas
 

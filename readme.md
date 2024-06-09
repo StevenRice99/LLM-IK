@@ -12,8 +12,29 @@ This repository is the base for generating prompts and executing code for testin
 
 There are multiple ways to solve inverse kinematics.
 1. Numerical/iterative solvers which try to converge to a solution. These are very popular but have the problem of failing to converge by getting stuck in a local minima. Popular libraries such as [IKPy](https://github.com/Phylliade/ikpy "IKPy") use these methods. Even the Robot [Operating System (ROS)](https://www.ros.org "ROS - Robot Operating System") uses the [KDL solver](https://wiki.ros.org/kdl "KDL Solver") which is of this type of solver by default.
+   - Pros:
+     1. Implementations available in most languages.
+     2. Can typically handle a variety of degrees-of-freedom.
+   - Cons:
+     1. Slow execution time compared to other methods.
+     2. Can fail due to getting stuck in a local minima.
+     3. Some versions can only solve for position, not the entire transform of position and orientation.
 2. Machine learning techniques taken approaches at solving this. [Bio IK](https://d-nb.info/1221720910/34 "Bio IK") is one of the best, and I built [Fusion IK](https://stevenrice.ca/fusion-ik "Fusion IK Demo") on top of it which improves its effectiveness on extended kinematic chains. However, most of these lack repeatability given their evolutionary nature, and repeatability is something we want for robotics.
+   - Pros:
+     1. Can scale very well across a range of degrees-of-freedom.
+     2. The joint move times produced can be optimized to be efficient.
+     3. Neural networks and evolutionary solvers are available in most languages.
+   - Cons:
+     1. Variable and inconsistent results.
+     2. Long training times for deep learning methods.
+     3. Although neural networks and evolutionary solvers are available in most languages, robot-specific implementations are not.
 3. Analytical solvers solve generate closed-form solutions by solving complex equations to complete the inverse kinematics. This is most often done by hand by experts. The only program which can do this is [IKFast](https://moveit.picknik.ai/main/doc/examples/ikfast/ikfast_tutorial.html "MoveIt IKFast") can generate C++ code for six or seven degrees-of-freedom robots in a few minutes but fails beyond that.
+   - Pros:
+     1. Very fast execution time.
+     2. Perfect repeatability.
+   - Cons:
+     1. [IKFast](https://moveit.picknik.ai/main/doc/examples/ikfast/ikfast_tutorial.html "MoveIt IKFast") is essentially the only option for this, and it is very much tied to specific Linux and ROS versions making it quite hard to use outside of that.
+     2. Fails beyond six or seven degrees-of-freedom.
 
 ## Goal
 

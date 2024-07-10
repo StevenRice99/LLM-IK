@@ -415,7 +415,7 @@ def eval_ik(title: str, pos: list, goal_pos: list, quat: list or None = None, go
 
 
 def test_ik(names: str or list or None = None, error: float = 0.001, orientation: bool = False, limits: bool = False,
-            collisions: bool = False, verbose: bool = False, tests: int = 1, methods: list or None = None) -> dict:
+            collisions: bool = False, verbose: bool = False, tests: int = 1, methods: str or list or None = None) -> dict:
     """
     Test all inverse kinematics solvers for a model.
     :param names: The names of the robots to test.
@@ -439,6 +439,9 @@ def test_ik(names: str or list or None = None, error: float = 0.001, orientation
     # If one name was passed, convert it to a list.
     elif isinstance(names, str):
         names = [names]
+    # If the methods to run was a string, make it into a list.
+    if isinstance(methods, str):
+        methods = [methods]
     # Need to ensure there are solvers that exist
     filtered = []
     for name in names:

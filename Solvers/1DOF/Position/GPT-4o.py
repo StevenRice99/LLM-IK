@@ -7,20 +7,28 @@ def inverse_kinematics(p: list) -> list:
     :param p: The position for the end effector to reach in a Cartesian [x, y, z].
     :return: A list of the joint values in radians needed for the end effector to reach the position.
     """
-    # Desired position for the end effector
     x, y, z = p
 
-    # The length of the arm (distance from Joint 1 to End Effector)
-    l = 0.4
+    # The end effector position in the local frame
+    z_offset = 0.4
 
-    # Calculate the distance in the yz-plane from the origin to the desired position
-    d = np.sqrt(y ** 2 + z ** 2)
+    if abs(z_offset) < 1e-6:
+        raise ValueError("The z offset cannot be zero.")
 
-    # Ensure the position is reachable
-    if d > l:
-        raise ValueError("The target position is out of reach.")
+    # Calculate the potential angles
+    theta_1 = np.arctan2(y, z)
+    theta_2 = np.arctan2(-y, z)
 
-    # Calculate the rotation angle around the x-axis (Joint 1)
-    theta1 = np.arctan2(z, y)
+    # Verify which angle satisfies the desired position
+    possible_solutions = [
+        theta_1 if np.isclose(np.sin(theta_1) * z_offset, y) and np.isclose(np.cos(theta_1) * z_offset, z) else None,
+        theta_2 if np.isclose(np.sin(theta_2) * z_offset, y) and np.isclose(np.cos(theta_2) * z_offset, z) else None,
+    ]
 
-    return [theta1]
+    # Filter out invalid solutions
+    valid_solutions = [theta for theta in possible_solutions if theta is not None]
+
+    if not valid_solutions:
+        raise ValueError("No valid solution found.")
+
+    return valid_solutions

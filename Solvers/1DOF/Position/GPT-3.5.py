@@ -1,20 +1,31 @@
 import numpy as np
+from scipy.spatial.transform import Rotation
 
-def inverse_kinematics(p):
-    # Desired position in local coordinates of Joint 1
-    p_local = [p[0], p[1], p[2] - 0.4]  # Adjust for the offset of the end effector
+def inverse_kinematics(p: list) -> list:
+    # Given parameters
+    base_pos = np.array([0, 0, 0])
+    base_ori = np.array([1, 0, 0, 0])  # Quaternion [w, x, y, z]
 
-    # Calculate the joint angle
-    theta = np.arctan2(p_local[1], p_local[2])
+    joint1_pos = np.array([0, 0, 0])
+    joint1_ori = np.array([1, 0, 0, 0])  # Quaternion [w, x, y, z]
+    joint1_axis = np.array([1, 0, 0])   # Rotation axis for joint 1
 
-    # Check if the calculated angle puts the end effector in the correct position
-    # If not, adjust the angle by pi
-    if not np.allclose(forward_kinematics(theta), p):
-        theta += np.pi
+    ee_pos = np.array([0, 0, 0.4])
+    ee_ori = np.array([1, 0, 0, 0])     # Quaternion [w, x, y, z]
 
-    # Return joint values
-    return [theta]
+    # Target position in global coordinates
+    target_pos = np.array(p)
 
-def forward_kinematics(theta):
-    # Calculate the position of the end effector given the joint angle
-    return [0, np.sin(theta), 0.4 + np.cos(theta)]
+    # Calculate r_0_e (vector from base to end effector in global coordinates)
+    r_0_e = target_pos - base_pos
+
+    # Calculate theta1 (angle for joint 1)
+    theta1 = np.arctan2(r_0_e[1], r_0_e[0])
+
+    # Transform r_0_e to joint 1's local coordinates
+    r_1_e_local = Rotation.from_quat(joint1_ori).inv().apply(r_0_e)
+
+    # Calculate theta2 (angle for joint 2)
+    theta2 = np.arctan2(r_1_e_local[2], r_1_e_local[0])
+
+    return [theta1, theta2]

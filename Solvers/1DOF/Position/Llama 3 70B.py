@@ -1,29 +1,23 @@
 import math
 
+
 def inverse_kinematics(p: list) -> list:
     """
     Solve the inverse kinematics to reach the position in the reference frame of the chain's origin.
     :param p: The position for the end effector to reach in a Cartesian [x, y, z].
     :return: A list of the joint values in radians needed for the end effector to reach the position.
     """
-    l = 0.4  # length of the arm
+    # Calculate the distance from the base to the end effector
+    distance = math.sqrt(p[0] ** 2 + p[1] ** 2 + (p[2] - 0.4) ** 2)
 
-    # Check if the position is within the reachable workspace
-    if p[2] < 0 or p[2] > l:
-        return []  # or return an error value
-
-    # Calculate the joint angle (theta) using the atan2 function
-    r = math.sqrt(p[0]**2 + p[1]**2)
-    theta = math.atan2(r, p[2] - l)
-
-    # Handle edge cases
-    if r == 0:
+    # Handle the case where the end effector is at the maximum extension of the joint
+    if distance == 0.4:
         theta = 0
-    elif p[2] == l:
-        theta = math.pi / 2
+    else:
+        # Calculate the joint angle (theta) using the DH parameters
+        theta = math.atan2(p[1], p[0]) + math.acos((0.4 ** 2 + distance ** 2 - p[2] ** 2) / (2 * 0.4 * distance))
 
-    # Add some sanity checks to ensure the joint angle is valid
-    if theta < 0 or theta > math.pi:
-        return []  # or return an error value
+    # Calculate the joint value in radians
+    joint_value = theta
 
-    return [theta]
+    return [joint_value]

@@ -639,9 +639,11 @@ def test_ik(names: str or list or None = None, error: float = 0.001, orientation
     return all_results
 
 
-def evaluate(error: float = 0.001, limits: bool = False, collisions: bool = False, tests: int = 1) -> None:
+def evaluate(names: str or list or None = None, error: float = 0.001, limits: bool = False, collisions: bool = False,
+             tests: int = 1) -> None:
     """
     Evaluate robots for many trials.
+    :param names: The names of the robots to test.
     :param error: The acceptable error tolerance in meters and degrees of which to consider a solution successful.
     :param limits: If tests with limits should be done as well.
     :param collisions: If tests with collisions should be done as well.
@@ -660,7 +662,7 @@ def evaluate(error: float = 0.001, limits: bool = False, collisions: bool = Fals
         for limit in limits:
             for collision in collisions:
                 # Test the current permutation.
-                results = test_ik(None, error, orientation, limit, collision, False, tests, None)
+                results = test_ik(names, error, orientation, limit, collision, False, tests, None)
                 # Write the results of each robot in CSV format.
                 for robot in results.keys():
                     # Write the header.

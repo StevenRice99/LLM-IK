@@ -89,7 +89,7 @@ def neat(value: float) -> str:
     :param value: The float value.
     :return: The value as a formatted string.
     """
-    return f"{value:f}".rstrip('0').rstrip('.')
+    return f"{value:.8f}".rstrip('0').rstrip('.')
 
 
 def generate_prompt(name: str, orientation: bool = False, limits: bool = False) -> str:

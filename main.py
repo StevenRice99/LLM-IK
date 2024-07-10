@@ -83,6 +83,15 @@ def get_data(model: mujoco.MjModel, limits: bool = False,
             mujoco.mj_id2name(model, mujoco.mjtObj.mjOBJ_SITE, model.nsite - 1))
 
 
+def neat(value: float) -> str:
+    """
+    Format a float value with no trailing zeros.
+    :param value: The float value.
+    :return: The value as a formatted string.
+    """
+    return f"{value:f}".rstrip('0').rstrip('.')
+
+
 def generate_prompt(name: str, orientation: bool = False, limits: bool = False) -> str:
     """
     Generate the prompt to give to LLMs.
@@ -102,32 +111,32 @@ def generate_prompt(name: str, orientation: bool = False, limits: bool = False) 
         details += "Limits are in radians."
     # Write the base nicely.
     pos = data.xpos[1]
-    pos = f"[{pos[0]:g}, {pos[1]:g}, {pos[2]:g}]"
+    pos = f"[{neat(pos[0])}, {neat(pos[1])}, {neat(pos[2])}]"
     details += f"\n\nBase = Position: {pos}"
     quat = data.xquat[1]
-    quat = f"[{quat[0]:g}, {quat[1]:g}, {quat[2]:g}, {quat[3]:g}]"
+    quat = f"[{neat(quat[0])}, {neat(quat[1])}, {neat(quat[2])}, {neat(quat[3])}]"
     details += f", Orientation: {quat}"
     # Write all joints nicely.
     for i in range(model.njnt):
         pos = positions[i]
-        pos = f"[{pos[0]:g}, {pos[1]:g}, {pos[2]:g}]"
+        pos = f"[{neat(pos[0])}, {neat(pos[1])}, {neat(pos[2])}]"
         details += f"\nJoint {i + 1} = Position: {pos}"
         quat = orientations[i]
-        quat = f"[{quat[0]:g}, {quat[1]:g}, {quat[2]:g}, {quat[3]:g}]"
+        quat = f"[{neat(quat[0])}, {neat(quat[1])}, {neat(quat[2])}, {neat(quat[3])}]"
         details += f", Orientation: {quat}"
         axis = axes[i]
-        axis = f"[{axis[0]:g}, {axis[1]:g}, {axis[2]:g}]"
+        axis = f"[{neat(axis[0])}, {neat(axis[1])}, {neat(axis[2])}]"
         details += f", Axes: {axis}"
         if limits and model.jnt_limited[i]:
-            details += f", Lower: {lower[i]:g}, Upper: {upper[i]:g}"
+            details += f", Lower: {neat(lower[i])}, Upper: {neat(upper[i])}"
     # Write the end effector nicely.
     site_id = model.nsite - 1
     body = model.site_bodyid[site_id]
     pos = model.body_pos[body]
     pos = pos + model.site_pos[site_id]
-    pos = f"[{pos[0]:g}, {pos[1]:g}, {pos[2]:g}]"
+    pos = f"[{neat(pos[0])}, {neat(pos[1])}, {neat(pos[2])}]"
     quat = model.site_quat[site_id]
-    quat = f"[{quat[0]:g}, {quat[1]:g}, {quat[2]:g}, {quat[3]:g}]"
+    quat = f"[{neat(quat[0])}, {neat(quat[1])}, {neat(quat[2])}, {neat(quat[3])}]"
     details += f"\nEnd Effector = Position: {pos}, Orientation: {quat}\n\n"
     # Write the remainder of the prompt.
     file = "prompt_end_transform.txt" if orientation else "prompt_end_position.txt"
@@ -350,34 +359,35 @@ def eval_ik(title: str, pos: list, goal_pos: list, quat: list or None = None, go
             success = False
     # Create a message for the console if verbose.
     if verbose:
-        s = f"{title} | {f'Success' if success else f'Failure'} | {duration:g} seconds"
-        s += f"\nExpected = Position: [{goal_pos[0]:g}, {goal_pos[1]:g}, {goal_pos[2]:g}]"
+        s = f"{title} | {f'Success' if success else f'Failure'} | {neat(duration)} seconds"
+        s += f"\nExpected = Position: [{neat(goal_pos[0])}, {neat(goal_pos[1])}, {neat(goal_pos[2])}]"
         if orientation:
-            s += f", Orientation: [{goal_quat[0]:g}, {goal_quat[1]:g}, {goal_quat[2]:g}, {goal_quat[3]:g}]"
-        s += f"\nResults  = Position: [{pos[0]:g}, {pos[1]:g}, {pos[2]:g}]"
+            s += (f", Orientation: [{neat(goal_quat[0])}, {neat(goal_quat[1])}, {neat(goal_quat[2])}, "
+                  f"{neat(goal_quat[3])}]")
+        s += f"\nResults  = Position: [{neat(pos[0])}, {neat(pos[1])}, {neat(pos[2])}]"
         if orientation:
-            s += f", Orientation: [{quat[0]:g}, {quat[1]:g}, {quat[2]:g}, {quat[3]:g}]"
-        s += f"\nError    = Position: {diff_pos:g}"
+            s += f", Orientation: [{neat(quat[0])}, {neat(quat[1])}, {neat(quat[2])}, {neat(quat[3])}]"
+        s += f"\nError    = Position: {neat(diff_pos)}"
         if orientation:
-            s += f", Euler: {diff_euler:g}"
-        # For now, just log the information. In the future if results are promising we would return and tabulate data.
+            s += f", Euler: {neat(diff_euler)}"
         print(s)
     # Create a success message to help improve results.
     if success:
-        s = f"Successfully reached position [{goal_pos[0]:g}, {goal_pos[1]:g}, {goal_pos[2]:g}]"
+        s = f"Successfully reached position [{neat(goal_pos[0])}, {neat(goal_pos[1])}, {neat(goal_pos[2])}]"
         if orientation:
-            s += f" and orientation [{goal_quat[0]:g}, {goal_quat[1]:g}, {goal_quat[2]:g}, {goal_quat[3]:g}]"
+            s += (f" and orientation [{neat(goal_quat[0])}, {neat(goal_quat[1])}, {neat(goal_quat[2])}, "
+                  f"{neat(goal_quat[3])}]")
         s += "."
         if joints is not None and len(joints) > 0:
             s += f" The joints the method produced were ["
             if len(joints) > 0:
                 if isinstance(joints[0], float):
-                    s += f"{joints[0]:g}"
+                    s += f"{neat(joints[0])}"
                 else:
                     s += f"{joints[0]}"
             for i in range(1, len(joints)):
                 if isinstance(joints[0], float):
-                    s += f", {joints[i]}"
+                    s += f", {neat(joints[i])}"
                 else:
                     s += f", {joints[i]}"
             s += f"]."
@@ -385,31 +395,32 @@ def eval_ik(title: str, pos: list, goal_pos: list, quat: list or None = None, go
             s += " Did not produce any joints."
         return True, diff_pos, diff_euler, s
     # Create a failure message to help improve results.
-    s = f"Failed to reach position [{goal_pos[0]:g}, {goal_pos[1]:g}, {goal_pos[2]:g}]"
+    s = f"Failed to reach position [{neat(goal_pos[0])}, {neat(goal_pos[1])}, {neat(goal_pos[2])}]"
     if orientation:
-        s += f" and orientation [{goal_quat[0]:g}, {goal_quat[1]:g}, {goal_quat[2]:g}, {goal_quat[3]:g}]"
-    s += f". Instead reached position [{pos[0]:g}, {pos[1]:g}, {pos[2]:g}]"
+        s += (f" and orientation [{neat(goal_quat[0])}, {neat(goal_quat[1])}, {neat(goal_quat[2])}, "
+              f"{neat(goal_quat[3])}]")
+    s += f". Instead reached position [{neat(pos[0])}, {neat(pos[1])}, {neat(pos[2])}]"
     if orientation:
-        s += f" and orientation [{quat[0]:g}, {quat[1]:g}, {quat[2]:g}, {quat[3]:g}]"
+        s += f" and orientation [{neat(quat[0])}, {neat(quat[1])}, {neat(quat[2])}, {neat(quat[3])}]"
     s += f"."
     if joints is not None and len(joints) > 0:
         s += f" The joints produced were ["
         if len(joints) > 0:
             if isinstance(joints[0], float):
-                s += f"{joints[0]:g}"
+                s += f"{neat(joints[0])}"
             else:
                 s += f"{joints[0]}"
         for i in range(1, len(joints)):
             if isinstance(joints[0], float):
-                s += f", {joints[i]}"
+                s += f", {neat(joints[i])}"
             else:
                 s += f", {joints[i]}"
         if solution is not None and len(solution) > 0:
             s += f"]. The solution for the joints were ["
             if len(solution) > 0:
-                s += f"{solution[0]:g}"
+                s += f"{neat(solution[0])}"
             for i in range(1, len(solution)):
-                s += f", {solution[i]}"
+                s += f", {neat(solution[i])}"
             s += "]."
         else:
             s += "]."
@@ -530,7 +541,7 @@ def test_ik(names: str or list or None = None, error: float = 0.001, orientation
                 if new_diff < existing_diff:
                     solution = joints
             result["Deepmind IK"] = {"Success": success, "Position": error_pos, "Orientation": orientation,
-                                     "Message": message, "Duration": duration}
+                                     "Duration": duration, "Message": message}
             # Use all solvers which were loaded.
             for solver in solvers:
                 if methods is not None and solver["Name"] not in methods:
@@ -563,7 +574,7 @@ def test_ik(names: str or list or None = None, error: float = 0.001, orientation
                 if exception_message is not None:
                     message += f" This is likely due to the exception which happened: {exception_message}"
                 result[solver["Name"]] = {"Success": success, "Position": error_pos, "Orientation": orientation,
-                                          "Message": message, "Duration": duration}
+                                          "Duration": duration, "Message": message}
             results.append(result)
         # If there is no results, there is nothing else to do.
         if len(results) < 1:
@@ -594,9 +605,17 @@ def test_ik(names: str or list or None = None, error: float = 0.001, orientation
         results = {}
         # Get messages in readable format.
         for key in successes:
-            results[key] = {"Success": (successes[key] / tests * 100), "Duration": (durations[key] / tests),
-                            "Position": (error_pos[key] / tests), "Orientation": (error_quat[key] / tests),
+            results[key] = {"Success": (successes[key] / tests * 100), "Position": (error_pos[key] / tests),
+                            "Orientation": (error_quat[key] / tests), "Duration": (durations[key] / tests),
                             "Message": feedbacks[key]}
+        # Sort the results by best to worst.
+        results = dict(sorted(results.items(), key=lambda val: (
+            -val[1]["Success"],
+            val[1]["Position"],
+            val[1]["Orientation"],
+            val[1]["Duration"],
+            val[0]
+        )))
         # Append to messages to potentially help with improving results.
         for key in successes:
             trimmed = f"{results[key]['Success']:.2f}".rstrip('0').rstrip('.')
@@ -606,12 +625,11 @@ def test_ik(names: str or list or None = None, error: float = 0.001, orientation
         # Display the results.
         print(f"\n{pre}{name}{post} | Results")
         for key in results.keys():
-            trimmed = f"{results[key]['Success']:.2f}".rstrip('0').rstrip('.')
-            s = (f"{key} | Success Rate = {trimmed}% | Average Time = {results[key]['Duration']:g} seconds | "
-                 f"Position Error = {results[key]['Position']:g}")
+            s = (f"{key} | Success Rate = {neat(results[key]['Success'])}% | "
+                 f"Position Error = {neat(results[key]['Position'])}")
             if orientation:
-                s += " | Orientation Error = {results[key]['Orientation']:g}"
-            print(s)
+                s += f" | Orientation Error = {neat(results[key]['Orientation'])}"
+            print(s + f" | Average Time = {neat(results[key]['Duration'])} seconds")
         # Optionally display the training methods.
         if verbose:
             print(f"\n{pre}{name}{post} | Feedback")
@@ -645,28 +663,18 @@ def evaluate(error: float = 0.001, limits: bool = False, collisions: bool = Fals
                 results = test_ik(None, error, orientation, limit, collision, False, tests, None)
                 # Write the results of each robot in CSV format.
                 for robot in results.keys():
-                    # Write the Deepmind inverse kinematics first as it was the baseline.
-                    success = f"{results[robot]['Deepmind IK']['Success']}".rstrip('0').rstrip('.')
-                    duration = f"{results[robot]['Deepmind IK']['Duration']}".rstrip('0').rstrip('.')
-                    position = f"{results[robot]['Deepmind IK']['Position']}".rstrip('0').rstrip('.')
-                    s = f"Method,Success Rate(%),Average Time (s),Position Error (m)"
+                    # Write the header.
+                    s = f"Method,Success Rate(%),Position Error (m)"
                     if orientation:
                         s += ",Orientation (rad)"
-                    s += f"\nDeepmind IK,{success}%,{duration},{position}"
-                    if orientation:
-                        orientation = f"{results[robot]['Deepmind IK']['Orientation']}".rstrip('0').rstrip('.')
-                        s += f",{orientation}"
-                    # Write all LLM methods.
-                    for mode in sorted(results[robot].keys()):
-                        if mode == "Deepmind IK":
-                            continue
-                        success = f"{results[robot][mode]['Success']}".rstrip('0').rstrip('.')
-                        duration = f"{results[robot][mode]['Duration']}".rstrip('0').rstrip('.')
-                        position = f"{results[robot][mode]['Position']}".rstrip('0').rstrip('.')
-                        s += f"\n{mode},{success}%,{duration},{position}"
+                    s += f",Average Time (s)"
+                    # Write all results.
+                    for mode in results[robot].keys():
+                        s += (f"\n{mode},{neat(results[robot][mode]['Success'])}%,"
+                              f"{neat(results[robot][mode]['Position'])}")
                         if orientation:
-                            orientation = f"{results[robot][mode]['Orientation']}".rstrip('0').rstrip('.')
-                            s += f",{orientation}"
+                            s += f",{neat(results[robot][mode]['Orientation'])}"
+                        s += f",{neat(results[robot][mode]['Duration'])}"
                     # Add the configuration details, so they are saved to the proper file.
                     if orientation:
                         robot += " Orientations"

@@ -312,7 +312,7 @@ def deepmind_ik(model: mujoco.MjModel, data: mujoco.MjData, path: str, site: str
 
 def eval_ik(title: str, pos: list, goal_pos: list, quat: list or None = None, goal_quat: list or None = None,
             duration: float = 0, error: float = 0.001, joints: list or None = None, solution: list or None = None,
-            verbose: bool = False) -> [bool, str or None]:
+            verbose: bool = False) -> [bool, float, float, str or None]:
     """
     Evaluate an inverse kinematics result.
     :param title: The inverse kinematics method which was used.
@@ -325,25 +325,29 @@ def eval_ik(title: str, pos: list, goal_pos: list, quat: list or None = None, go
     :param joints: The joints the model proposed.
     :param solution: A solution for joints to reach the target.
     :param verbose: If output messages should be logged or not.
-    :return: If the move was successful or not and a potential error message.
+    :return: If the move was successful or not, the position error, orientation error, and a potential error message.
     """
-    # Calculate position differences.
-    diff_pos = [abs(pos[0] - goal_pos[0]), abs(pos[1] - goal_pos[1]), abs(pos[2] - goal_pos[2])]
+    orientation = quat is not None and goal_quat is not None
     # Get Euler angles so final difference is in a form easily understandable by a human.
-    if quat is not None and goal_quat is not None:
+    if orientation:
         euler = quaternion_to_euler(quat)
         goal_euler = quaternion_to_euler(goal_quat)
-        diff_euler = [abs(euler[0] - goal_euler[0]), abs(euler[1] - goal_euler[1]), abs(euler[2] - goal_euler[2])]
+        diff_euler = np.linalg.norm(np.array(euler) - np.array(goal_euler))
     else:
-        euler = [0, 0, 0]
-        goal_euler = [0, 0, 0]
-        diff_euler = [0, 0, 0]
+        diff_euler = 0
     # Check if the position reaching was a success.
-    success = np.linalg.norm(np.array(pos) - np.array(goal_pos)) <= error
+    diff_pos = np.linalg.norm(np.array(pos) - np.array(goal_pos))
+    if diff_pos <= error:
+        success = True
+        diff_pos = 0
+    else:
+        success = False
     # If the position reached, also check the orientation if it was passed as well.
-    if success and quat is not None and goal_quat is not None:
-        success = np.linalg.norm(np.array(euler) - np.array(goal_euler)) <= error
-    orientation = quat is not None and goal_quat is not None
+    if success and orientation:
+        if diff_euler <= error:
+            diff_euler = 0
+        else:
+            success = False
     # Create a message for the console if verbose.
     if verbose:
         s = f"{title} | {f'Success' if success else f'Failure'} | {duration:g} seconds"
@@ -353,9 +357,9 @@ def eval_ik(title: str, pos: list, goal_pos: list, quat: list or None = None, go
         s += f"\nResults  = Position: [{pos[0]:g}, {pos[1]:g}, {pos[2]:g}]"
         if orientation:
             s += f", Orientation: [{quat[0]:g}, {quat[1]:g}, {quat[2]:g}, {quat[3]:g}]"
-        s += f"\nError    = Position: [{diff_pos[0]:g}, {diff_pos[1]:g}, {diff_pos[2]:g}]"
+        s += f"\nError    = Position: {diff_pos:g}"
         if orientation:
-            s += f", Euler: [{diff_euler[0]:g}, {diff_euler[1]:g}, {diff_euler[2]:g}]"
+            s += f", Euler: {diff_euler:g}"
         # For now, just log the information. In the future if results are promising we would return and tabulate data.
         print(s)
     # Create a success message to help improve results.
@@ -379,7 +383,7 @@ def eval_ik(title: str, pos: list, goal_pos: list, quat: list or None = None, go
             s += f"]."
         else:
             s += " Did not produce any joints."
-        return True, s
+        return True, diff_pos, diff_euler, s
     # Create a failure message to help improve results.
     s = f"Failed to reach position [{goal_pos[0]:g}, {goal_pos[1]:g}, {goal_pos[2]:g}]"
     if orientation:
@@ -411,11 +415,12 @@ def eval_ik(title: str, pos: list, goal_pos: list, quat: list or None = None, go
             s += "]."
     else:
         s += " Failed to produce any joints."
-    return False, s
+    return False, diff_pos, diff_euler, s
 
 
 def test_ik(names: str or list or None = None, error: float = 0.001, orientation: bool = False, limits: bool = False,
-            collisions: bool = False, verbose: bool = False, tests: int = 1, methods: str or list or None = None) -> dict:
+            collisions: bool = False, verbose: bool = False, tests: int = 1,
+            methods: str or list or None = None) -> dict:
     """
     Test all inverse kinematics solvers for a model.
     :param names: The names of the robots to test.
@@ -511,8 +516,8 @@ def test_ik(names: str or list or None = None, error: float = 0.001, orientation
             duration = deepmind_ik(model, data, path, site, pos, quat)
             result_pos, result_quat = get_pose(model, data)
             joints = get_joints(model, data)
-            success, message = eval_ik("Deepmind IK", result_pos, pos, result_quat, quat, duration, error, joints,
-                                       solution, verbose)
+            success, error_pos, error_quat, message = eval_ik("Deepmind IK", result_pos, pos, result_quat, quat,
+                                                              duration, error, joints, solution, verbose)
             # If Deepmind inverse kinematics was successful, check to see if it should be used as the solution.
             if success:
                 # Check to see what joint configuration is the closest to the midpoints.
@@ -524,7 +529,8 @@ def test_ik(names: str or list or None = None, error: float = 0.001, orientation
                 # If the Deepmind solution is closer to the midpoints, use it.
                 if new_diff < existing_diff:
                     solution = joints
-            result["Deepmind IK"] = {"Success": success, "Message": message, "Duration": duration}
+            result["Deepmind IK"] = {"Success": success, "Position": error_pos, "Orientation": orientation,
+                                     "Message": message, "Duration": duration}
             # Use all solvers which were loaded.
             for solver in solvers:
                 if methods is not None and solver["Name"] not in methods:
@@ -551,11 +557,13 @@ def test_ik(names: str or list or None = None, error: float = 0.001, orientation
                 set_joints(model, data, joints)
                 result_pos, result_quat = get_pose(model, data)
                 duration = end_time - start_time
-                success, message = eval_ik(solver["Name"], result_pos, pos, result_quat, quat, end_time - start_time,
-                                           error, joints, solution, verbose)
+                success, error_pos, error_quat, message = eval_ik(solver["Name"], result_pos, pos, result_quat, quat,
+                                                                  end_time - start_time, error, joints, solution,
+                                                                  verbose)
                 if exception_message is not None:
                     message += f" This is likely due to the exception which happened: {exception_message}"
-                result[solver["Name"]] = {"Success": success, "Message": message, "Duration": duration}
+                result[solver["Name"]] = {"Success": success, "Position": error_pos, "Orientation": orientation,
+                                          "Message": message, "Duration": duration}
             results.append(result)
         # If there is no results, there is nothing else to do.
         if len(results) < 1:
@@ -563,6 +571,8 @@ def test_ik(names: str or list or None = None, error: float = 0.001, orientation
         successes = {}
         durations = {}
         feedbacks = {}
+        error_pos = {}
+        error_quat = {}
         # Loop all results to get average scores.
         for result in results:
             result: dict
@@ -573,14 +583,19 @@ def test_ik(names: str or list or None = None, error: float = 0.001, orientation
                     feedbacks[key] += f"\n{result[key]['Message']}"
                     if success:
                         successes[key] += 1
+                    error_pos[key] += result[key]["Position"]
+                    error_quat[key] += result[key]["Orientation"]
                 else:
                     successes[key] = 1 if success else 0
                     durations[key] = result[key]["Duration"]
                     feedbacks[key] = result[key]["Message"]
+                    error_pos[key] = result[key]["Position"]
+                    error_quat[key] = result[key]["Orientation"]
         results = {}
         # Get messages in readable format.
         for key in successes:
             results[key] = {"Success": (successes[key] / tests * 100), "Duration": (durations[key] / tests),
+                            "Position": (error_pos[key] / tests), "Orientation": (error_quat[key] / tests),
                             "Message": feedbacks[key]}
         # Append to messages to potentially help with improving results.
         for key in successes:
@@ -592,7 +607,11 @@ def test_ik(names: str or list or None = None, error: float = 0.001, orientation
         print(f"\n{pre}{name}{post} | Results")
         for key in results.keys():
             trimmed = f"{results[key]['Success']:.2f}".rstrip('0').rstrip('.')
-            print(f"{key} | Success Rate = {trimmed}% | Average Time = {results[key]['Duration']:g} seconds")
+            s = (f"{key} | Success Rate = {trimmed}% | Average Time = {results[key]['Duration']:g} seconds | "
+                 f"Position Error = {results[key]['Position']:g}")
+            if orientation:
+                s += " | Orientation Error = {results[key]['Orientation']:g}"
+            print(s)
         # Optionally display the training methods.
         if verbose:
             print(f"\n{pre}{name}{post} | Feedback")
@@ -629,15 +648,26 @@ def evaluate(error: float = 0.001, limits: bool = False, collisions: bool = Fals
                     # Write the Deepmind inverse kinematics first as it was the baseline.
                     success = f"{results[robot]['Deepmind IK']['Success']}".rstrip('0').rstrip('.')
                     duration = f"{results[robot]['Deepmind IK']['Duration']}".rstrip('0').rstrip('.')
-                    s = f"Method,Success Rate(%),Average Time (s)\nDeepmind IK,{success}%,{duration}"
+                    position = f"{results[robot]['Deepmind IK']['Position']}".rstrip('0').rstrip('.')
+                    s = f"Method,Success Rate(%),Average Time (s),Position Error (m)"
+                    if orientation:
+                        s += ",Orientation (rad)"
+                    s += f"\nDeepmind IK,{success}%,{duration},{position}"
+                    if orientation:
+                        orientation = f"{results[robot]['Deepmind IK']['Orientation']}".rstrip('0').rstrip('.')
+                        s += f",{orientation}"
                     # Write all LLM methods.
                     for mode in sorted(results[robot].keys()):
                         if mode == "Deepmind IK":
                             continue
                         success = f"{results[robot][mode]['Success']}".rstrip('0').rstrip('.')
                         duration = f"{results[robot][mode]['Duration']}".rstrip('0').rstrip('.')
-                        s += f"\n{mode},{success}%,{duration}"
-                    # Add the configuration details so they are saved to the proper file..
+                        position = f"{results[robot][mode]['Position']}".rstrip('0').rstrip('.')
+                        s += f"\n{mode},{success}%,{duration},{position}"
+                        if orientation:
+                            orientation = f"{results[robot][mode]['Orientation']}".rstrip('0').rstrip('.')
+                            s += f",{orientation}"
+                    # Add the configuration details, so they are saved to the proper file.
                     if orientation:
                         robot += " Orientations"
                     if limit:

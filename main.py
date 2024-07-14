@@ -299,10 +299,10 @@ def quaternion_to_euler(quat: list) -> [float, float, float]:
 def deepmind_ik(model: mujoco.MjModel, data: mujoco.MjData, path: str, site: str, pos: list,
                 quat: list or None = None) -> float:
     """
-    Run the inverse kinematics from Deepmind Controls.
+    Run the inverse kinematics from DeepMind Controls.
     :param model: The Mujoco model.
     :param data: The data for the Mujoco model.
-    :param path: The path for the Mujoco model to reload the model in the Deepmind Controls instance.
+    :param path: The path for the Mujoco model to reload the model in the DeepMind Controls instance.
     :param site: The name of the site or end effector.
     :param pos: The position for the end effector to reach.
     :param quat: The orientation for the end effector to reach.
@@ -523,13 +523,13 @@ def test_ik(names: str or list or None = None, error: float = 0.001, orientation
             # Define the starting pose at the middle.
             mid_positions(model, data, lower, upper)
             starting = get_joints(model, data)
-            # Test the Deepmind inverse kinematics.
+            # Test the DeepMind inverse kinematics.
             duration = deepmind_ik(model, data, path, site, pos, quat)
             result_pos, result_quat = get_pose(model, data)
             joints = get_joints(model, data)
-            success, error_pos, error_quat, message = eval_ik("Deepmind IK", result_pos, pos, result_quat, quat,
+            success, error_pos, error_quat, message = eval_ik("DeepMind IK", result_pos, pos, result_quat, quat,
                                                               duration, error, joints, solution, verbose)
-            # If Deepmind inverse kinematics was successful, check to see if it should be used as the solution.
+            # If DeepMind inverse kinematics was successful, check to see if it should be used as the solution.
             if success:
                 # Check to see what joint configuration is the closest to the midpoints.
                 existing_diff = 0
@@ -537,10 +537,10 @@ def test_ik(names: str or list or None = None, error: float = 0.001, orientation
                 for j in range(len(starting)):
                     existing_diff += abs(starting[j] - solution[j])
                     new_diff += abs(starting[j] - joints[j])
-                # If the Deepmind solution is closer to the midpoints, use it.
+                # If the DeepMind solution is closer to the midpoints, use it.
                 if new_diff < existing_diff:
                     solution = joints
-            result["Deepmind IK"] = {"Success": success, "Position": error_pos, "Orientation": orientation,
+            result["DeepMind IK"] = {"Success": success, "Position": error_pos, "Orientation": orientation,
                                      "Duration": duration, "Message": message}
             # Use all solvers which were loaded.
             for solver in solvers:

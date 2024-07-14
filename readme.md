@@ -16,3 +16,4 @@ This repository is for generating and testing the [inverse kinematics](https://e
 
 - As of now, all prompting and then executing of the code in manual via outputting prompts and results to the console, inputting them to a chat interface for a large language model such as [ChatGPT](http://chatgpt.com, "ChatGPT"), [Gemini](https://gemini.google.com, "Gemini"), or [HuggingChat](https://huggingface.co/chat, "HuggingChat").
 - In the future, implementing methods to automatically do this via APIs such as the [OpenAI API](http://platform.openai.com, "OpenAI API") could help more quickly iterate the process of creating and debugging inverse kinematics solutions.
+- Robot arms from the [Mujoco Menagerie](https://github.com/google-deepmind/mujoco_menagerie "Mujoco Menagerie") library have been added to this repository. They have been set up for use, but no existing large language model has been able to solve them. They have been kept here for easy future experiments.

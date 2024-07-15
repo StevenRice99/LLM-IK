@@ -620,7 +620,7 @@ def test_ik(names: str or list or None = None, error: float = 0.001, orientation
         for key in successes:
             trimmed = f"{results[key]['Success']:.2f}".rstrip('0').rstrip('.')
             results[key]["Message"] = (f"The method had a success rate of {trimmed}% solving inverse kinematics. Below "
-                                       f"are feedback messages of the test trails to analyze to improve the method:\n"
+                                       f"are feedback messages of the test trials to analyze to improve the method:\n"
                                        f"{results[key]['Message']}")
         # Display the results.
         print(f"\n{pre}{name}{post} | Results")

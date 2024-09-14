@@ -514,15 +514,18 @@ def test_ik(names: str or list or None = None, error: float = 0.001, orientation
                 if verbose:
                     print()
             result = {}
-            # Determine where to move to.
-            random_positions(model, data, lower, upper)
-            solution = get_joints(model, data)
-            pos, quat = get_pose(model, data)
-            if not orientation:
-                quat = None
             # Define the starting pose at the middle.
             mid_positions(model, data, lower, upper)
             starting = get_joints(model, data)
+            # Determine where to move to.
+            solution = starting
+            # Ensure the starting position is not the same as the ending position.
+            while solution == starting:
+                random_positions(model, data, lower, upper)
+                solution = get_joints(model, data)
+            pos, quat = get_pose(model, data)
+            if not orientation:
+                quat = None
             # Test the DeepMind inverse kinematics.
             duration = deepmind_ik(model, data, path, site, pos, quat)
             result_pos, result_quat = get_pose(model, data)

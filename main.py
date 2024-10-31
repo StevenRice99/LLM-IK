@@ -4,6 +4,8 @@ import importlib
 import importlib.util
 import time
 import traceback
+from typing import Any
+
 import mujoco
 import mujoco.viewer
 import numpy as np
@@ -12,6 +14,7 @@ import os
 from collections.abc import Iterable
 from dm_control import mujoco as mujoco_dm
 from dm_control.mujoco.wrapper import mjbindings
+from tabulate import tabulate
 
 
 def import_model(name: str) -> [mujoco.MjModel, str]:
@@ -31,15 +34,52 @@ def import_model(name: str) -> [mujoco.MjModel, str]:
     return model, path
 
 
+def quaternion_to_rotation_matrix(quat) -> np.ndarray[Any, np.dtype[np.floating | np.float_]]:
+    """
+    Convert a quaternion into a rotation matrix.
+    :param quat: The quaternion as [x, y, z, w].
+    :return: The rotation matrix.
+    """
+    x, y, z, w = quat
+    # Compute the rotation matrix elements.
+    r = np.zeros((3, 3))
+    r[0, 0] = 1 - 2 * (y ** 2 + z ** 2)
+    r[0, 1] = 2 * (x * y - z * w)
+    r[0, 2] = 2 * (x * z + y * w)
+    r[1, 0] = 2 * (x * y + z * w)
+    r[1, 1] = 1 - 2 * (x ** 2 + z ** 2)
+    r[1, 2] = 2 * (y * z - x * w)
+    r[2, 0] = 2 * (x * z - y * w)
+    r[2, 1] = 2 * (y * z + x * w)
+    r[2, 2] = 1 - 2 * (x ** 2 + y ** 2)
+    return r
+
+
+def dh_table(dh_parameters: list) -> str:
+    """
+    Prints the DH parameters in a human-readable table.
+    :param dh_parameters: A list of DH parameters for each joint.
+    :return: The table as a string.
+    """
+    headers = ["Joint", "Theta (rad)", "d (m)", "a (m)", "Alpha (rad)"]
+    table = []
+    for i, params in enumerate(dh_parameters):
+        theta_i, d_i, a_i, alpha_i = params
+        table.append([i + 1, neat(theta_i), neat(d_i), neat(a_i), neat(alpha_i)])
+    return tabulate(table, headers=headers, tablefmt="github")
+
+
 def get_data(model: mujoco.MjModel, limits: bool = False,
-             collisions: bool = False) -> [mujoco.MjData, list, list, list, list, list, str]:
+             collisions: bool = False, tcp: int = 0) -> [mujoco.MjData, list, list, list, list, list, list, str, list,
+                                                         int]:
     """
     Get the data for the Mujoco model.
     :param model: The Mujoco model.
     :param limits: If limits should be enforced or not.
     :param collisions: If collisions should be enforced or not.
+    :param tcp: The index of the TCP we want.
     :return: The data of the Mujoco model, joint positions, joint orientations, joint axes, joint lower bounds, joint
-    upper bounds, and the name of the site for the end effector.
+    upper bounds, the types of joints, the name of the site for the end effector, the names of the joints, and the TCP index.
     """
     data = mujoco.MjData(model)
     mujoco.mj_forward(model, data)
@@ -48,15 +88,42 @@ def get_data(model: mujoco.MjModel, limits: bool = False,
     axes = []
     lower = []
     upper = []
+    types = []
+    joints = []
     # No previous offset for the first joint.
-    previous_offset = [0, 0, 0]
+    previous_offset = np.array([0, 0, 0])
+    # How many
+    if tcp < 1 or tcp > model.nsite:
+        tcp = model.nsite
+    tcp_name = mujoco.mj_id2name(model, mujoco.mjtObj.mjOBJ_SITE, tcp - 1)
+    tcp_id = model.site_bodyid[tcp - 1]
+    keep = []
+    tcp_id = model.body_parentid[tcp_id]
+    while tcp_id != 0:
+        keep.append(tcp_id)
+        tcp_id = model.body_parentid[tcp_id]
     # Loop every joint.
     for i in range(model.njnt):
+        joints.append(mujoco.mj_id2name(model, mujoco.mjtObj.mjOBJ_JOINT, i))
+        # Get the type of joint.
+        joint_type = model.jnt_type[i]
+        if joint_type == 3:
+            joint_type = "Revolute"
+        elif joint_type == 2:
+            joint_type = "Linear"
+        elif joint_type == 1:
+            joint_type = "Spherical"
+        else:
+            joint_type = "Free"
+        types.append(joint_type)
         body = model.jnt_bodyid[i]
+        # Not interested in later joints
+        if body not in keep:
+            continue
         # Some joints may be offset from their body, so we need to account for that.
         offset = model.jnt_pos[i]
         # Get this position taking into account how much the previous joint was offset.
-        positions.append(model.body_pos[body] - previous_offset + offset)
+        positions.append( model.body_pos[body] + offset - previous_offset)
         # Set the offset for the next iteration.
         previous_offset = offset
         orientations.append(model.body_quat[body])
@@ -79,8 +146,16 @@ def get_data(model: mujoco.MjModel, limits: bool = False,
             model.geom_contype[i] = 0
             model.geom_conaffinity[i] = 0
             model.geom_condim[i] = 1
-    return (data, positions, orientations, axes, lower, upper,
-            mujoco.mj_id2name(model, mujoco.mjtObj.mjOBJ_SITE, model.nsite - 1))
+    # If there are collisions, turn them off for joints we do not care about.
+    else:
+        for i in range(model.ngeom):
+            body = model.geom_bodyid[i]
+            if body in keep:
+                continue
+            model.geom_contype[i] = 0
+            model.geom_conaffinity[i] = 0
+            model.geom_condim[i] = 1
+    return data, positions, orientations, axes, lower, upper, types, tcp_name, joints, tcp,
 
 
 def neat(value: float) -> str:
@@ -92,35 +167,60 @@ def neat(value: float) -> str:
     return f"{value:.8f}".rstrip('0').rstrip('.')
 
 
-def generate_prompt(name: str, orientation: bool = False, limits: bool = False) -> str:
+def generate_prompt(name: str, orientation: bool = False, limits: bool = False, tcp: int = 0,
+                    iterative: str or None = None) -> str:
     """
     Generate the prompt to give to LLMs.
     :param name: The name of the robot to generate the prompt for.
     :param orientation: If orientation should be solved for.
     :param limits: If limits should be enforced or not.
+    :param tcp: The index of the TCP we want.
+    :param iterative: The solver so that this can look at a lower-joints solver to try and help it.
     :return: The prompt for the LLM.
     """
     model, path = import_model(name)
     if path is None:
         return ""
-    data, positions, orientations, axes, lower, upper, site = get_data(model, limits, False)
+    data, positions, orientations, axes, lower, upper, types, site, joints, tcp = get_data(model, limits, False, tcp)
+    # Load an example from a lower-level joint to help the solver.
+    example = None
+    if iterative is not None:
+        path = os.path.join(os.getcwd(), "Solvers", name, "Orientation" if orientation else "Position", str(tcp - 1),
+                            f"{iterative}.py")
+        if os.path.exists(path):
+            with open(path, "r") as file:
+                example = file.read().strip()
     # Get the start of the prompt.
-    with open(os.path.join(os.getcwd(), "Prompts", "prompt_start.txt"), 'r') as file:
-        details = file.read()
+    details = ('<SUMMARY>\n'
+               f'Produce a closed-form analytical solution for the inverse kinematics of the {len(positions)} '
+               'degree-of-freedom serial manipulator detailed in the "DETAILS" section by completing the Python '
+               'function provided in the "CODE" section. Positions and orientations are local coordinates relative to '
+               'their parent link.')
     if limits:
-        details += "Limits are in radians."
+        details += " Limits are in radians."
+    details += (" A right-handed coordinate system is used. The X-axis is forwards, Y-axis is left, and Z-axis is up. "
+                "You may assume all requested targets to solve the inverse kinematics for will be valid.")
+    if example is not None:
+        details += (f" A solution to solving the sub-chain of the first {len(positions) - 1} joints is provided in the "
+                    '"EXISTING" section. This solution was obtained with the same serial manipulator, except "Joint '
+                    f'{len(positions)}" was the "End Effector" instead of a joint. This means it had the same position'
+                    f' and orientation as "Joint {len(positions)}" does now, but was the "End Effector" for that '
+                    "sub-chain.")
     # Write the base nicely.
     pos = data.xpos[1]
     pos = f"[{neat(pos[0])}, {neat(pos[1])}, {neat(pos[2])}]"
-    details += f"\n\nBase = Position: {pos}"
+    details += f"\n</SUMMARY>\n<DETAILS>\nBase = Position: {pos}"
     quat = data.xquat[1]
     quat = f"[{neat(quat[0])}, {neat(quat[1])}, {neat(quat[2])}, {neat(quat[3])}]"
     details += f", Orientation: {quat}"
     # Write all joints nicely.
-    for i in range(model.njnt):
+    n_joints = len(positions)
+    for i in range(n_joints):
+        details += (f"\nJoint {i + 1}" if n_joints > 1 else "\nJoint")
+        details += f" = Type: {types[i]}"
         pos = positions[i]
         pos = f"[{neat(pos[0])}, {neat(pos[1])}, {neat(pos[2])}]"
-        details += f"\nJoint {i + 1} = Position: {pos}"
+        details += f", Position: {pos}"
         quat = orientations[i]
         quat = f"[{neat(quat[0])}, {neat(quat[1])}, {neat(quat[2])}, {neat(quat[3])}]"
         details += f", Orientation: {quat}"
@@ -137,34 +237,55 @@ def generate_prompt(name: str, orientation: bool = False, limits: bool = False) 
     pos = f"[{neat(pos[0])}, {neat(pos[1])}, {neat(pos[2])}]"
     quat = model.site_quat[site_id]
     quat = f"[{neat(quat[0])}, {neat(quat[1])}, {neat(quat[2])}, {neat(quat[3])}]"
-    details += f"\nEnd Effector = Position: {pos}, Orientation: {quat}\n\n"
     # Write the remainder of the prompt.
-    file = "prompt_end_transform.txt" if orientation else "prompt_end_position.txt"
-    with open(os.path.join(os.getcwd(), "Prompts", file), 'r') as file:
-        details += file.read()
+    details += (f"\nEnd Effector = Position: {pos}, Orientation: {quat}\n"
+                "</DETAILS>\n"
+                "<CODE>\n"
+                "def inverse_kinematics(p: list")
+    if orientation:
+        details += ", q: list"
+    details += (") -> list[float]:\n"
+                '    """\n'
+                "    Solve the inverse kinematics to reach the position"
+                f"{' and orientation, both' if orientation else ''} in the reference frame of the chain's origin.\n"
+                "    :param p: The position for the end effector to reach in a Cartesian [x, y, z].\n")
+    if orientation:
+        details += ("    :param q: The orientation for the end effector to reach in radians in a quaternion [w, x, y, z"
+                    "].\n")
+    details += "    :return: A list of the joint values in radians needed for the end effector to reach the position"
+    if orientation:
+        details += " and orientation"
+    details += (".\n"
+                '    """\n'
+                "</CODE>")
+    if example is not None:
+        details += f"\n<EXISTING>\n{example}\n</EXISTING>"
     return details
 
 
-def load_model(name: str, orientation: bool = False, limits: bool = False,
-               collisions: bool = False) -> [mujoco.MjModel, mujoco.MjData, list, list, str, str, dict]:
+def load_model(name: str, orientation: bool = False, limits: bool = False, collisions: bool = False,
+               tcp: int = 0) -> [mujoco.MjModel, mujoco.MjData, list, list, str, str, dict, list, int]:
     """
     Load a model into Mujoco.
     :param name: The name of the file to load.
     :param orientation: If orientation should be solved for.
     :param limits: If limits should be enforced or not.
     :param collisions: If collisions should be enforced or not.
+    :param tcp: The index of the TCP we want.
     :return: The Mujoco model, the data of the Mujoco model, joint lower bounds, joint upper bounds, the name of the
-    site for the end effector, the path to the model, and all LLM solvers.
+    site for the end effector, the path to the model, all LLM solvers, the names of the joints, and the index of the
+    TCP.
     """
     # Do regular Mujoco set up and get joints and other data we need.
     model, path = import_model(name)
     if model is None:
         return [None, None, None, None, None, None, path, None]
-    data, positions, orientations, axes, lower, upper, site = get_data(model, limits, collisions)
+    data, positions, orientations, axes, lower, upper, types, site, joints, tcp = get_data(model, limits, collisions,
+                                                                                           tcp)
     # Load in solvers which exist for this robot.
     solvers = []
     folder = "Transform" if orientation else "Position"
-    solvers_directory = os.path.join(os.getcwd(), "Solvers", name, folder)
+    solvers_directory = os.path.join(os.getcwd(), "Solvers", name, folder, str(tcp))
     if os.path.exists(solvers_directory):
         for file in os.listdir(solvers_directory):
             # Ensure we are only checking Python files.
@@ -185,7 +306,7 @@ def load_model(name: str, orientation: bool = False, limits: bool = False,
                 solvers.append({"Name": module_name, "Method": method})
             except Exception:
                 continue
-    return model, data, lower, upper, site, path, solvers
+    return model, data, lower, upper, site, path, solvers, joints, tcp
 
 
 def set_joints(model: mujoco.MjModel, data: mujoco.MjData, values: list) -> None:
@@ -246,29 +367,35 @@ def mid_positions(model: mujoco.MjModel, data: mujoco.MjData, lower: list, upper
     set_joints(model, data, values)
 
 
-def get_joints(model: mujoco.MjModel, data: mujoco.MjData) -> list:
+def get_joints(model: mujoco.MjModel, data: mujoco.MjData, joints: int = 0) -> list:
     """
     Get the joint values of the Mujoco model.
     :param model: The Mujoco model.
     :param data: The data for the Mujoco model.
+    :param joints: The number of joints we care about the values for.
     :return: The joint values of the Mujoco model.
     """
+    if joints < 1 or joints > model.njnt:
+        joints = model.njnt
     values = []
-    for i in range(model.njnt):
+    for i in range(joints):
         values.append(data.qpos[i])
     return values
 
 
-def get_pose(model: mujoco.MjModel, data: mujoco.MjData) -> [list, list]:
+def get_pose(model: mujoco.MjModel, data: mujoco.MjData, tcp: int = 0) -> [list, list]:
     """
     Get the current pose of the position and orientation of the end effector of the Mujoco model.
     :param model: The Mujoco model.
     :param data: The data for the Mujoco model.
+    :param tcp: The index of the TCP we want.
     :return: The position [X, Y, Z] and the orientation [W, X, Y, Z].
     """
-    pos = data.site_xpos[model.nsite - 1]
-    raw = data.site_xmat[model.nsite - 1]
-    quat = np.empty_like(data.xquat[model.nbody - 1])
+    if tcp < 1 or tcp > model.nsite:
+        tcp = model.nsite
+    pos = data.site_xpos[tcp - 1]
+    raw = data.site_xmat[tcp - 1]
+    quat = np.empty_like(data.xquat[model.site_bodyid[tcp - 1]])
     mjbindings.mjlib.mju_mat2Quat(quat, raw)
     quat /= quat.ptp()
     return [pos[0], pos[1], pos[2]], [quat[0], quat[1], quat[2], quat[3]]
@@ -297,7 +424,7 @@ def quaternion_to_euler(quat: list) -> [float, float, float]:
 
 
 def deepmind_ik(model: mujoco.MjModel, data: mujoco.MjData, path: str, site: str, pos: list,
-                quat: list or None = None) -> float:
+                quat: list or None = None, joints: None or list = None, max_steps: int = 1000) -> float:
     """
     Run the inverse kinematics from DeepMind Controls.
     :param model: The Mujoco model.
@@ -306,6 +433,8 @@ def deepmind_ik(model: mujoco.MjModel, data: mujoco.MjData, path: str, site: str
     :param site: The name of the site or end effector.
     :param pos: The position for the end effector to reach.
     :param quat: The orientation for the end effector to reach.
+    :param joints: The joints that can be used to solve.
+    :param max_steps: How many iterations the DeepMind IK can run for.
     :return: The time to took to complete the inverse kinematics.
     """
     physics = mujoco_dm.Physics.from_xml_path(path)
@@ -313,7 +442,8 @@ def deepmind_ik(model: mujoco.MjModel, data: mujoco.MjData, path: str, site: str
     pos_copy = pos.copy()
     quat_copy = None if quat is None else quat.copy()
     start_time = time.time()
-    values = dm_control.utils.inverse_kinematics.qpos_from_site_pose(physics, site, pos_copy, quat_copy)
+    values = dm_control.utils.inverse_kinematics.qpos_from_site_pose(physics, site, pos_copy, quat_copy, joints,
+                                                                     max_steps=max_steps)
     end_time = time.time()
     set_joints(model, data, values.qpos)
     return end_time - start_time
@@ -379,7 +509,8 @@ def eval_ik(title: str, pos: list, goal_pos: list, quat: list or None = None, go
                   f"{neat(goal_quat[3])}]")
         s += "."
         if joints is not None and len(joints) > 0:
-            s += f" The joints the method produced were ["
+            multiple = len(joints) > 1
+            s += f" The joint{'s' if multiple else ''} the method produced {'were' if multiple else 'was'} ["
             if len(joints) > 0:
                 if isinstance(joints[0], float):
                     s += f"{neat(joints[0])}"
@@ -423,15 +554,15 @@ def eval_ik(title: str, pos: list, goal_pos: list, quat: list or None = None, go
                 s += f", {neat(solution[i])}"
             s += "]."
         else:
-            s += "]."
+            s += "]. There is no known solution to this, it may be unreachable."
     else:
         s += " Failed to produce any joints."
     return False, diff_pos, diff_euler, s
 
 
 def test_ik(names: str or list or None = None, error: float = 0.001, orientation: bool = False, limits: bool = False,
-            collisions: bool = False, verbose: bool = False, tests: int = 1,
-            methods: str or list or None = None) -> dict:
+            collisions: bool = False, verbose: bool = False, tests: int = 1, methods: str or list or None = None,
+            targets: list or None = None, max_steps: int = 1000, tcp: int = 0) -> dict:
     """
     Test all inverse kinematics solvers for a model.
     :param names: The names of the robots to test.
@@ -442,8 +573,20 @@ def test_ik(names: str or list or None = None, error: float = 0.001, orientation
     :param verbose: If output messages should be logged or not.
     :param tests: The number of tests to run.
     :param methods: Which methods to run.
+    :param targets: Manually define targets.
+    :param max_steps: How many iterations the DeepMind IK can run for.
+    :param tcp: The index of the TCP we want.
     :return: The results in a dictionary.
     """
+    # See if targets were manually defined.
+    manual = targets is not None and len(targets) > 0
+    if manual:
+        tests = len(targets)
+        orientation = True
+        for target in targets:
+            if len(target) < 2:
+                orientation = False
+                break
     # Need to check for methods which have solvers.
     solver_folder = os.path.join(os.getcwd(), "Solvers")
     # If no names were passed, try with all options.
@@ -461,8 +604,10 @@ def test_ik(names: str or list or None = None, error: float = 0.001, orientation
     # Need to ensure there are solvers that exist
     filtered = []
     for name in names:
+        _, _, _, _, _, _, _, _, instance_tcp = load_model(name, orientation, limits, collisions, tcp)
         # Check depending on if we are solving for the entire transform or just the position.
-        current_solver = os.path.join(solver_folder, name, "Transform" if orientation else "Position")
+        current_solver = os.path.join(solver_folder, name, "Transform" if orientation else "Position",
+                                      str(instance_tcp))
         # Check for solvers.
         if os.path.exists(current_solver):
             for file in os.listdir(current_solver):
@@ -500,12 +645,14 @@ def test_ik(names: str or list or None = None, error: float = 0.001, orientation
     index = 1
     for name in names:
         # Load the robot.
-        model, data, lower, upper, site, path, solvers = load_model(name, orientation, limits, collisions)
+        model, data, lower, upper, site, path, solvers, joint_names, instance_tcp = load_model(name, orientation,
+                                                                                               limits, collisions, tcp)
         if model is None or len(solvers) == 0:
             continue
         pre = "" if len(names) <= 1 else f"Model {index} / {len(names)} | "
         index += 1
         results = []
+        n_joints = len(joint_names)
         for i in range(tests):
             if tests > 0:
                 if verbose:
@@ -516,20 +663,27 @@ def test_ik(names: str or list or None = None, error: float = 0.001, orientation
             result = {}
             # Define the starting pose at the middle.
             mid_positions(model, data, lower, upper)
-            starting = get_joints(model, data)
-            # Determine where to move to.
-            solution = starting
-            # Ensure the starting position is not the same as the ending position.
-            while solution == starting:
-                random_positions(model, data, lower, upper)
-                solution = get_joints(model, data)
-            pos, quat = get_pose(model, data)
-            if not orientation:
-                quat = None
+            starting = get_joints(model, data, n_joints)
+            quat = None
+            if targets is None:
+                # Determine where to move to.
+                solution = starting
+                # Ensure the starting position is not the same as the ending position.
+                while solution == starting:
+                    random_positions(model, data, lower, upper)
+                    solution = get_joints(model, data, n_joints)
+                pos, quat = get_pose(model, data, instance_tcp)
+                if not orientation:
+                    quat = None
+            else:
+                solution = None
+                pos = targets[i][0]
+                if orientation:
+                    quat = targets[i][1]
             # Test the DeepMind inverse kinematics.
-            duration = deepmind_ik(model, data, path, site, pos, quat)
-            result_pos, result_quat = get_pose(model, data)
-            joints = get_joints(model, data)
+            duration = deepmind_ik(model, data, path, site, pos, quat, joint_names, max_steps)
+            result_pos, result_quat = get_pose(model, data, instance_tcp)
+            joints = get_joints(model, data, n_joints)
             success, error_pos, error_quat, message = eval_ik("DeepMind IK", result_pos, pos, result_quat, quat,
                                                               duration, error, joints, solution, verbose)
             # If DeepMind inverse kinematics was successful, check to see if it should be used as the solution.
@@ -569,7 +723,7 @@ def test_ik(names: str or list or None = None, error: float = 0.001, orientation
                     exception_message = traceback.format_exc()
                 end_time = time.time()
                 set_joints(model, data, joints)
-                result_pos, result_quat = get_pose(model, data)
+                result_pos, result_quat = get_pose(model, data, instance_tcp)
                 duration = end_time - start_time
                 success, error_pos, error_quat, message = eval_ik(solver["Name"], result_pos, pos, result_quat, quat,
                                                                   end_time - start_time, error, joints, solution,
@@ -620,13 +774,17 @@ def test_ik(names: str or list or None = None, error: float = 0.001, orientation
             val[0]
         )))
         # Append to messages to potentially help with improving results.
+        core = "% success rate solving inverse kinematics"
+        if not manual:
+            core += (". All targets were reachable, and solutions to failures have been solved by another inverse "
+                     "kinematics solver which have been provided")
+        core += ":\n"
         for key in successes:
             trimmed = f"{results[key]['Success']:.2f}".rstrip('0').rstrip('.')
-            results[key]["Message"] = (f"The method had a success rate of {trimmed}% solving inverse kinematics. Below "
-                                       f"are feedback messages of the test trials to analyze to improve the method:\n"
-                                       f"{results[key]['Message']}")
+            if tests > 1:
+                results[key]["Message"] = f"{trimmed}{core}{results[key]['Message']}"
         # Display the results.
-        print(f"\n{pre}{name}{post} | Results")
+        print(f"\n{pre}{name} TCP {instance_tcp}{post} | Results")
         for key in results.keys():
             s = (f"{key} | Success Rate = {neat(results[key]['Success'])}% | "
                  f"Position Error = {neat(results[key]['Position'])}")
@@ -635,7 +793,7 @@ def test_ik(names: str or list or None = None, error: float = 0.001, orientation
             print(s + f" | Average Time = {neat(results[key]['Duration'])} seconds")
         # Optionally display the training methods.
         if verbose:
-            print(f"\n{pre}{name}{post} | Feedback")
+            print(f"\n{pre}{name} TCP {instance_tcp}{post} | Feedback")
             for key in results.keys():
                 print(f"\n{key}\n{results[key]['Message']}")
         all_results[name] = results

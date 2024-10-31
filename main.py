@@ -827,17 +827,17 @@ def evaluate(names: str or list or None = None, error: float = 0.001, limits: bo
                 # Write the results of each robot in CSV format.
                 for robot in results.keys():
                     # Write the header.
-                    s = f"Method,Success Rate(%),Position Error (m)"
+                    s = f"Method,Success Rate (%),Position Error (m)"
                     if orientation:
                         s += ",Orientation (rad)"
-                    s += f",Average Time (s)"
+                    s += f",Average Time (ms)"
                     # Write all results.
                     for mode in results[robot].keys():
-                        s += (f"\n{mode},{neat(results[robot][mode]['Success'])}%,"
-                              f"{neat(results[robot][mode]['Position'])}")
+                        s += (f"\n{mode},{results[robot][mode]['Success']:.3f}%,"
+                              f"{results[robot][mode]['Position']:.3f} m")
                         if orientation:
-                            s += f",{neat(results[robot][mode]['Orientation'])}"
-                        s += f",{neat(results[robot][mode]['Duration'])}"
+                            s += f",{results[robot][mode]['Orientation']:.3f} rad"
+                        s += f",{results[robot][mode]['Duration'] * 1000:.3f} ms"
                     # Add the configuration details, so they are saved to the proper file.
                     if orientation:
                         robot += " Orientations"

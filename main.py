@@ -1,20 +1,18 @@
-import math
-import random
 import importlib
 import importlib.util
+import math
+import os
+import random
 import time
 import traceback
-from typing import Any
+from collections.abc import Iterable
 
+import dm_control.utils.inverse_kinematics
 import mujoco
 import mujoco.viewer
 import numpy as np
-import dm_control.utils.inverse_kinematics
-import os
-from collections.abc import Iterable
 from dm_control import mujoco as mujoco_dm
 from dm_control.mujoco.wrapper import mjbindings
-from tabulate import tabulate
 
 
 def import_model(name: str) -> [mujoco.MjModel, str]:
@@ -32,41 +30,6 @@ def import_model(name: str) -> [mujoco.MjModel, str]:
     # noinspection PyArgumentList
     model = mujoco.MjModel.from_xml_path(filename=path, assets=None)
     return model, path
-
-
-def quaternion_to_rotation_matrix(quat) -> np.ndarray[Any, np.dtype[np.floating | np.float_]]:
-    """
-    Convert a quaternion into a rotation matrix.
-    :param quat: The quaternion as [x, y, z, w].
-    :return: The rotation matrix.
-    """
-    x, y, z, w = quat
-    # Compute the rotation matrix elements.
-    r = np.zeros((3, 3))
-    r[0, 0] = 1 - 2 * (y ** 2 + z ** 2)
-    r[0, 1] = 2 * (x * y - z * w)
-    r[0, 2] = 2 * (x * z + y * w)
-    r[1, 0] = 2 * (x * y + z * w)
-    r[1, 1] = 1 - 2 * (x ** 2 + z ** 2)
-    r[1, 2] = 2 * (y * z - x * w)
-    r[2, 0] = 2 * (x * z - y * w)
-    r[2, 1] = 2 * (y * z + x * w)
-    r[2, 2] = 1 - 2 * (x ** 2 + y ** 2)
-    return r
-
-
-def dh_table(dh_parameters: list) -> str:
-    """
-    Prints the DH parameters in a human-readable table.
-    :param dh_parameters: A list of DH parameters for each joint.
-    :return: The table as a string.
-    """
-    headers = ["Joint", "Theta (rad)", "d (m)", "a (m)", "Alpha (rad)"]
-    table = []
-    for i, params in enumerate(dh_parameters):
-        theta_i, d_i, a_i, alpha_i = params
-        table.append([i + 1, neat(theta_i), neat(d_i), neat(a_i), neat(alpha_i)])
-    return tabulate(table, headers=headers, tablefmt="github")
 
 
 def get_data(model: mujoco.MjModel, limits: bool = False,

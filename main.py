@@ -1,6 +1,7 @@
 import copy
 import logging
 import os.path
+import random
 import time
 import warnings
 
@@ -12,6 +13,26 @@ from matplotlib import pyplot as plt
 from scipy.spatial.transform import Rotation
 from tabulate import tabulate
 
+MODELS = "Models"
+INFO = "Info"
+INTERACTIONS = "Interactions"
+SOLUTIONS = "Solutions"
+RESULTS = "Results"
+
+NORMAL = "Normal"
+EXTEND = "Extend"
+DYNAMIC = "Dynamic"
+
+MESSAGE = "Message"
+RESPONSE = "Response"
+
+POSITION = "Position"
+TRANSFORM = "Transform"
+
+TRAINING = 2
+EVALUATING = 2
+SEED = 42
+
 # Set up logging.
 logging.basicConfig(level=logging.INFO, format="%(asctime)s | %(levelname)s | %(message)s")
 
@@ -21,15 +42,26 @@ class Robot:
     Handle all aspects of serial robots.
     """
 
-    def __init__(self, path: str):
+    def __init__(self, name: str, models: str = MODELS, info: str = INFO, training: int = TRAINING,
+                 evaluating: int = EVALUATING, seed: int = SEED):
         """
         Initialize the robot.
-        :param path: The path to the URDF to load.
+        :param name: The name of the URDF to load.
+        :param models: The folder models are stored in.
+        :param info: The folder to save info about chains to.
+        :param training: The number of poses to use for training the LLM.
+        :param evaluating: The number of poses to use for evaluating the LLMs.
+        :param seed: The seed to use for generating poses.
         """
-        self.name = os.path.splitext(os.path.basename(path))[0]
+        self.name = os.path.splitext(name)[0]
+        # Cache the to save info to.
+        self.info = os.path.join(os.getcwd(), info, f"Info-{self.name}")
         self.chains = None
         self.joints = 0
+        self.training = {}
+        self.evaluating = {}
         # Nothing to do if the file does not exist.
+        path = os.path.join(os.getcwd(), models, name)
         if not os.path.exists(path):
             logging.error(f"{self.name} | Path '{path}' does not exist.")
             return
@@ -83,6 +115,7 @@ class Robot:
         # Build all possible sub chains.
         self.chains = {}
         # All possible starting lower joints.
+        os.makedirs(self.info, exist_ok=True)
         for lower in range(self.joints):
             self.chains[lower] = {}
             # All possible upper ending joints.
@@ -131,9 +164,17 @@ class Robot:
                 # Build and cache this sub chain.
                 with warnings.catch_warnings():
                     warnings.simplefilter("ignore", category=UserWarning)
-                    self.chains[lower][upper] = ikpy.chain.Chain(instance_links, instance_active,
-                                                                 f"{self.name} from joints {lower + 1} to {upper + 1}")
-        logging.info(f"{self.name} | Loaded | {self.joints} Joints")
+                    chain = ikpy.chain.Chain(instance_links, instance_active,
+                                             f"{self.name} from joints {lower + 1} to {upper + 1}")
+                    self.chains[lower][upper] = chain
+                    with open(os.path.join(self.info, f"Info-{self.name}-{lower + 1}-{upper + 1}.txt"), "w") as file:
+                        file.write(self.details(lower, upper)[0])
+        # Set the seed for generating training and evaluating instances.
+        random.seed(seed)
+        np.random.seed(seed)
+        self.generate_random(training, True)
+        self.generate_random(evaluating, False)
+        logging.info(f"{self.name} | Loaded | {self.joints} Joints | Info saved to '{self.info}'.")
 
     def __str__(self) -> str:
         """
@@ -141,6 +182,52 @@ class Robot:
         :return: The table of the details of the full robot.
         """
         return self.details()[0]
+
+    def generate_random(self, number: int = 1, training: bool = True) -> None:
+        if number < 1:
+            number = 1
+        title = "Training" if training else "Evaluation"
+        for lower in range(self.joints):
+            if training:
+                self.training[lower] = {}
+            else:
+                self.evaluating[lower] = {}
+            for upper in range(lower, self.joints):
+                bounds = []
+                chain = self.chains[lower][upper]
+                for link in chain.links:
+                    if link.joint_type == "fixed":
+                        continue
+                    if link.bounds is None or link.bounds == (-np.inf, np.inf):
+                        bounds.append(None)
+                    else:
+                        bounds.append(link.bounds)
+                samples = []
+                for i in range(number):
+                    joints = []
+                    for bound in bounds:
+                        if bound is None:
+                            joints.append(np.random.uniform(-2 * np.pi, 2 * np.pi))
+                        else:
+                            joints.append(np.random.uniform(bound[0], bound[1]))
+                    position, orientation = self.forward_kinematics(lower, upper, joints)
+                    sample = {"Joints": joints, "Position": position, "Orientation": orientation}
+                    solution, distance, angle, elapsed = self.inverse_kinematics(lower, upper, position)
+                    sample[f"Solution {POSITION}"] = {"Solution": solution, "Distance": distance, "Angle": angle,
+                                                      "Time": time}
+                    if lower == upper:
+                        sample[f"Solution {TRANSFORM}"] = sample[POSITION]
+                    else:
+                        solution, distance, angle, elapsed = self.inverse_kinematics(lower, upper, position,
+                                                                                     orientation)
+                        sample[f"Solution {TRANSFORM}"] = {"Solution": solution, "Distance": distance, "Angle": angle,
+                                                           "Time": time}
+                    samples.append(sample)
+                if training:
+                    self.training[lower][upper] = samples
+                else:
+                    self.evaluating[lower][upper] = samples
+                logging.info(f"{self.name} | {lower + 1} to {upper + 1} | {title} data generated.")
 
     def details(self, lower: int = 0, upper: int = -1) -> (str, int, int, int, bool, bool):
         """
@@ -219,7 +306,15 @@ class Robot:
         # Return all details.
         return tabulate(data, headers, tablefmt="presto"), revolute, prismatic, fixed, tcp, limits
 
-    def prepare_llm(self, lower: int = 0, upper: int = -1, orientation: bool = False) -> str:
+    def prepare_llm(self, lower: int = 0, upper: int = -1, orientation: bool = False, additional: str = "") -> str:
+        """
+        Prepare information about the chain for a LLM.
+        :param lower: The starting joint.
+        :param upper: The ending joint.
+        :param orientation: If orientation is being solved for.
+        :param additional: Any additional instructions to be inserted.
+        :return: The formatted prompt.
+        """
         # If not valid, there is nothing to prepare for.
         if not self.is_valid():
             logging.error(f"{self.name} | Prepare LLM | Robot not configured.")
@@ -260,8 +355,8 @@ class Robot:
                   f"for these links.")
         s += (" You are to respond with only the code for the completed inverse kinematics method with no additional "
               "text. Do not write any code to run the method for testing. You may use any methods included in Python, "
-              f"numpy, and sympy to write your solution.\n</INSTRUCTIONS>\n<DETAILS>\n{table}\n</DETAILS>\n<CODE>\ndef "
-              "inverse_kinematics(p: tuple[float, float, float]")
+              f"numpy, and sympy to write your solution.{additional}\n</INSTRUCTIONS>\n<DETAILS>\n{table}\n</DETAILS>\n"
+              "<CODE>\ndef inverse_kinematics(p: tuple[float, float, float]")
         if orientation:
             s += ", r: tuple[float, float, float]"
         reach = ' and orientation "r"' if orientation else ""
@@ -279,6 +374,7 @@ class Robot:
         if orientation:
             s += "\n    :param r: The orientation to reach in radians in the form [x, y, z]."
         s += f'\n    :return: {ret_param} to for reaching position "p"{reach}.\n    """\n</CODE>'
+        logging.info(f"{self.name} | {lower + 1} to {upper + 1} | Prompt prepared.")
         return s
 
     def forward_kinematics(self, lower: int = 0, upper: int = -1, joints: list[float] or None = None,
@@ -323,8 +419,8 @@ class Robot:
         # Perform forward kinematics.
         forward = chain.forward_kinematics(values)
         # Get the position and orientation reached.
-        position = forward[:3, 3]
-        orientation = Rotation.from_matrix(forward[:3, :3]).as_euler("xyz")
+        position = list(forward[:3, 3])
+        orientation = list(Rotation.from_matrix(forward[:3, :3]).as_euler("xyz"))
         # Plot if we should.
         if plot:
             fig, ax = plot_utils.init_3d_figure()
@@ -362,6 +458,9 @@ class Robot:
             logging.warning(f"{self.name} | {lower + 1} to {upper + 1} | Inverse Kinematics | No target position was "
                             f"passed, solving for [0, 0, 0].")
             position = [0, 0, 0]
+        # No point in solving for orientation when it is just one joint.
+        if lower == upper:
+            orientation = None
         chain = self.chains[lower][upper]
         total = len(chain.links)
         values = [0] * total
@@ -374,17 +473,18 @@ class Robot:
             target[:3, :3] = Rotation.from_euler("xyz", orientation).as_matrix()
         target[:3, 3] = position
         # Solve the inverse kinematics.
-        start_time = time.time()
+        start_time = time.perf_counter()
         values = chain.inverse_kinematics_frame(target, orientation_mode=None if orientation is None else "all",
                                                 initial_position=values)
-        elapsed = time.time() - start_time
+        end_time = time.perf_counter()
+        elapsed = end_time - start_time
         # Get the actual joint values, ignoring fixed links.
-        parsed = []
+        solution = []
         for i in range(total):
             if chain.links[i].joint_type != "fixed":
-                parsed.append(values[i])
+                solution.append(values[i])
         # Get the reached position and orientations.
-        true_position, true_orientation = self.forward_kinematics(lower, upper, parsed)
+        true_position, true_orientation = self.forward_kinematics(lower, upper, solution)
         # Get the position error.
         distance = np.sqrt(sum([(goal - true) ** 2 for goal, true in zip(position, true_position)]))
         # Get the orientation error if it was being solved for.
@@ -401,16 +501,16 @@ class Robot:
             plt.title(chain.name)
             plt.tight_layout()
             plt.show()
-        if orientation:
+        if orientation is not None:
             logging.debug(f"{self.name} | {lower + 1} to {upper + 1} | Inverse Kinematics | Target Position = "
                           f"{position} | Reached Position = {true_position} | Position Error = {distance} | Target "
                           f"Orientation = {orientation} | Reached Orientation = {true_orientation} | Orientation Error "
-                          f"= {angle} | Solution = {parsed} | Time = {elapsed} seconds")
+                          f"= {angle} | Solution = {solution} | Time = {elapsed} seconds")
         else:
             logging.debug(f"{self.name} | {lower + 1} to {upper + 1} | Inverse Kinematics | Target = {position} | "
-                          f"Reached = {true_position} | Error = {distance} | Solution = {parsed} | Time = {elapsed} "
+                          f"Reached = {true_position} | Error = {distance} | Solution = {solution} | Time = {elapsed} "
                           "seconds")
-        return parsed, distance, angle, elapsed
+        return solution, distance, angle, elapsed
 
     def is_valid(self) -> bool:
         """
@@ -437,6 +537,77 @@ class Robot:
             lower = upper
         # Return the updated lower and upper values.
         return lower, upper
+
+
+class Solver:
+    def __init__(self, model: str, robot: Robot, interactions: str = INTERACTIONS, solutions: str = SOLUTIONS,
+                 results: str = RESULTS):
+        self.model = model
+        self.robot = robot
+        if self.robot is None:
+            logging.error(f"{self.model} | Robot is null.")
+            self.interactions = os.path.join(os.getcwd(), interactions)
+            self.solutions = os.path.join(os.getcwd(), solutions)
+            self.results = os.path.join(os.getcwd(), results)
+            return
+        self.interactions = os.path.join(os.getcwd(), interactions, f"{INTERACTIONS}-{self.robot.name}",
+                                         f"{INTERACTIONS}-{self.robot.name}-{self.model}")
+        self.solutions = os.path.join(os.getcwd(), solutions, f"{SOLUTIONS}-{self.robot.name}",
+                                      f"{SOLUTIONS}-{self.robot.name}-{self.model}")
+        self.results = os.path.join(os.getcwd(), results, f"{RESULTS}-{self.robot.name}",
+                                    f"{RESULTS}-{self.robot.name}-{self.model}")
+        if not robot.is_valid():
+            logging.error(f"{self.model} | {self.robot.name} | Robot is not valid.")
+            return
+        logging.info(f"{self.model} | {self.robot.name} | Solver loaded.")
+
+    def __str__(self) -> str:
+        if not self.is_valid():
+            logging.error(f"{self.model} | Solver is not valid.")
+            return ""
+        return self.robot.__str__()
+
+    def prepare_llm(self, lower: int = 0, upper: int = -1, orientation: bool = False, mode: str = NORMAL) -> str:
+        if not self.is_valid():
+            logging.error(f"{self.model} | Solver is not valid.")
+            return ""
+        lower, upper = self.robot.validate_lower_upper(lower, upper)
+        if mode not in [NORMAL, EXTEND, DYNAMIC]:
+            logging.warning(f"{self.model} | {self.robot.name} | {lower + 1} to {upper + 1} | Mode '{mode}' not valid, "
+                            f"using '{NORMAL}' instead.")
+            mode = NORMAL
+        if lower == upper:
+            orientation = False
+        if mode == NORMAL or lower == upper:
+            prompt = self.robot.prepare_llm(lower, upper, orientation)
+            logging.info(f"{self.model} | {self.robot.name} | {lower + 1} to {upper + 1} | Normal prompt prepared.")
+            return prompt
+        solving_type = TRANSFORM if orientation else POSITION
+        if mode == EXTEND:
+            path = os.path.join(self.solutions,
+                                f"{SOLUTIONS}-{self.model}-{self.robot.name}-{lower}-{upper-1}-{solving_type}.py")
+            if not os.path.exists(path):
+                logging.error(f"{self.model} | {self.robot.name} | {lower + 1} to {upper + 1} | Cannot load an "
+                              f"extending prompt as '{path}' does not exist.")
+                return ""
+            total = upper - lower
+            plural = "s" if total > 1 else ""
+            additional = (f" To help you, a solution for solving the sub-chain of the first {total} link{plural} is "
+                          f'provided in the "EXISTING" section. This code solved the sub-chain assuming link '
+                          f"{total + 1} was the position{' and orientation' if orientation else ''} being solved for. "
+                          f"You can use this solution as a starting point to extend for the entire chain.")
+            prompt = self.robot.prepare_llm(lower, upper, orientation, additional)
+            prompt += "\n<EXISTING>\n"
+            with open(path, "r") as file:
+                prompt += file.read().strip()
+            logging.info(f"{self.model} | {self.robot.name} | {lower + 1} to {upper + 1} | Extended prompt prepared.")
+            return f"{prompt}\n</EXISTING>"
+        logging.error(f"{self.model} | {self.robot.name} | {lower + 1} to {upper + 1} | Dynamic prompts not yet "
+                      f"implemented.")
+        return ""
+
+    def is_valid(self) -> bool:
+        return self.robot is not None and self.robot.is_valid()
 
 
 def get_direction_details(vector) -> str:
@@ -548,14 +719,9 @@ def main() -> None:
     Handle main program operations.
     :return: Nothing.
     """
-    ur5 = Robot("ur5.urdf")
-    # ur5.forward_kinematics(plot=True)
-    # j, d, a = ur5.inverse_kinematics(plot=True)
-    # print(j)
-    # print(d)
-    # print(a)
-    # print(reached(d, a))
-    print(ur5.prepare_llm(0, 0, orientation=True))
+    ur5 = Robot("UR5.urdf")
+    #solver = Solver("gpt-4o", ur5)
+    print(ur5.training)
 
 
 if __name__ == "__main__":

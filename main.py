@@ -1,6 +1,7 @@
 import copy
 import logging
 import os.path
+import time
 import warnings
 
 import ikpy.chain
@@ -66,8 +67,8 @@ class Robot:
                 origin_translation = zeros
                 origin_orientation = zeros
             # Store the link.
-            links.append(URDFLink(f"{len(links) + 1}", origin_translation, origin_orientation, link.rotation,
-                                  link.translation, link.bounds, "rpy", link.use_symbolic_matrix, link.joint_type))
+            links.append(URDFLink(link.name, origin_translation, origin_orientation, link.rotation, link.translation,
+                                  link.bounds, "rpy", link.use_symbolic_matrix, link.joint_type))
         if self.joints < 1:
             logging.error(f"{self.name} | No joints.")
             return
@@ -103,75 +104,182 @@ class Robot:
                     instance_active.append(False)
                 # Ensure the base joint is at the origin.
                 base = instance_links[0]
-                instance_links[0] = URDFLink("1", zeros, zeros, base.rotation, base.translation, base.bounds,
+                instance_links[0] = URDFLink(base.name, zeros, zeros, base.rotation, base.translation, base.bounds,
                                              "rpy", base.use_symbolic_matrix, base.joint_type)
                 # Break references to ensure we can name each link properly.
                 instance_links = copy.deepcopy(instance_links)
-                instance_count = len(instance_links) - 1
-                for i in range(1, instance_count):
-                    instance_links[i].name = f"{i + 1}"
+                # Name every joint based on its type.
+                instance_count = len(instance_links)
+                fixed = 0
+                revolute = 0
+                prismatic = 0
+                for i in range(0, instance_count):
+                    joint_type = instance_links[i].joint_type.capitalize()
+                    if joint_type == "Fixed":
+                        fixed += 1
+                        number = fixed
+                    elif joint_type == "Revolute":
+                        revolute += 1
+                        number = revolute
+                    else:
+                        prismatic += 1
+                        number = prismatic
+                    instance_links[i].name = f"{joint_type} {number}"
+                # Ensure the TCP is named correctly, which only does not happen if it's a full chain loaded without one.
+                if instance_links[-1].joint_type == "fixed":
+                    instance_links[-1].name = "TCP"
+                # Build and cache this sub chain.
                 with warnings.catch_warnings():
                     warnings.simplefilter("ignore", category=UserWarning)
                     self.chains[lower][upper] = ikpy.chain.Chain(instance_links, instance_active,
-                                                                 f"{self.name}-{lower}-{upper}")
+                                                                 f"{self.name} from joints {lower + 1} to {upper + 1}")
         logging.info(f"{self.name} | Loaded | {self.joints} Joints")
 
     def __str__(self) -> str:
-        return self.details()
+        """
+        Get the table of the details of the full robot.
+        :return: The table of the details of the full robot.
+        """
+        return self.details()[0]
 
-    def details(self, lower: int = 0, upper: int = -1, limits: bool = True) -> str:
+    def details(self, lower: int = 0, upper: int = -1) -> (str, int, int, int, bool, bool):
+        """
+        Get the details of a kinematic chain.
+        :param lower: The starting joint.
+        :param upper: The ending joint.
+        :return: A formatted table of the chain, the number of revolute joints, the number of prismatic joints, the
+        number of fixed links, if the chain has a dedicated TCP, and if there are limits.
+        """
+        # If not valid, there is nothing to display.
         if not self.is_valid():
             logging.error(f"{self.name} | Details | Robot not configured.")
-            return ""
+            return "", 0, 0, 0, False, False
         # Get all values to perform.
         lower, upper = self.validate_lower_upper(lower, upper)
         chain = self.chains[lower][upper]
         total = len(chain.links)
-        headers = ["Link", "Type", "Position", "Orientation"]
-        have_orientation = False
-        have_translation = False
-        have_limits = False
+        # Define the headers which we will for sure have.
+        headers = ["Link", "Position", "Orientation"]
+        # Count the numbers of each type of link.
+        revolute = 0
+        prismatic = 0
+        fixed = 0
+        tcp = False
+        limits = False
         for i in range(total):
-            if chain.links[i].rotation is not None:
-                have_orientation = True
-            if chain.links[i].translation is not None:
-                have_translation = True
-            if chain.links[i].bounds is not None:
-                have_limits = True
-            if have_orientation and have_translation and have_limits:
+            link = chain.links[i]
+            # If this is the TCP, we are at the end so stop.
+            if link.name == "TCP":
+                tcp = True
                 break
-        if have_orientation:
-            headers.append("Axes")
-        if have_translation:
+            # Determine the link type.
+            if link.has_rotation:
+                revolute += 1
+            elif link.has_translation:
+                prismatic += 1
+            else:
+                fixed += 1
+            # Determine if this link has bounds.
+            if link.bounds is not None and link.bounds != (-np.inf, np.inf):
+                limits = True
+        # If there are revolute joints, we need to display them.
+        if revolute > 0:
+            headers.append("Axis")
+        # If there are prismatic joints, we need to display them.
+        if prismatic > 0:
             headers.append("Translation")
-        if limits and have_limits:
+        # If there are limits, we need to display them.
+        if limits:
             headers.append("Limits")
+        # Build the table data.
         data = []
         for i in range(total):
             link = chain.links[i]
-            details = [link.name, link.joint_type.capitalize(),
-                       f"[{neat(link.origin_translation[0])}, {neat(link.origin_translation[1])}, "
-                       f"{neat(link.origin_translation[2])}]",
-                       f"[{neat(link.origin_orientation[0])}, {neat(link.origin_orientation[1])}, "
-                       f"{neat(link.origin_orientation[2])}]"]
-            if have_orientation:
+            # We need the name which already has the joint type, position, and orientation.
+            details = [link.name, neat(link.origin_translation), neat(link.origin_orientation)]
+            # Display the rotational axis if this is a revolute joint.
+            if revolute > 0:
                 if link.rotation is None:
-                    details.append("-")
+                    details.append("")
                 else:
-                    details.append(f"[{neat(link.rotation[0])}, {neat(link.rotation[1])}, {neat(link.rotation[2])}]")
-            if have_translation:
+                    details.append(get_direction_details(link.rotation))
+            # Display the translational axis if this is a prismatic joint.
+            if prismatic > 0:
                 if link.translation is None:
-                    details.append("-")
+                    details.append("")
                 else:
-                    details.append(f"[{neat(link.translation[0])}, {neat(link.translation[1])}, "
-                                   f"{neat(link.translation[2])}]")
-            if limits and have_limits:
-                if link.joint_type == "fixed" or link.bounds is None:
-                    details.append("-")
+                    details.append(get_direction_details(link.translation))
+            # Display limits if this has any.
+            if limits:
+                if link.joint_type == "fixed" or link.bounds is None or link.bounds == (-np.inf, np.inf):
+                    details.append("")
                 else:
-                    details.append(f"[{neat(link.bounds[0])}, {neat(link.bounds[1])}]")
+                    details.append(neat(link.bounds))
             data.append(details)
-        return tabulate(data, headers, tablefmt="presto")
+        # Return all details.
+        return tabulate(data, headers, tablefmt="presto"), revolute, prismatic, fixed, tcp, limits
+
+    def prepare_llm(self, lower: int = 0, upper: int = -1, orientation: bool = False) -> str:
+        # If not valid, there is nothing to prepare for.
+        if not self.is_valid():
+            logging.error(f"{self.name} | Prepare LLM | Robot not configured.")
+            return ""
+        # Get all values to perform.
+        lower, upper = self.validate_lower_upper(lower, upper)
+        table, revolute, prismatic, fixed, has_tcp, limits = self.details(lower, upper)
+        dof = revolute + fixed
+        # Nothing to prepare to solve for if there are no degrees-of-freedom.
+        if dof < 1:
+            logging.error(f"{self.name} | {lower + 1} to {upper + 1} | Prepare LLM | No degrees of freedom.")
+            return ""
+        if dof < 2 and not has_tcp:
+            logging.error(f"{self.name} | {lower + 1} to {upper + 1} | Prepare LLM | Only one link and no TCP.")
+            return ""
+        # If there is only a single degree-of-freedom, the position solution is the same as the whole transform.
+        if dof < 2:
+            orientation = False
+        # Build the prompt.
+        s = ("<INSTRUCTIONS>\nYou are tasked with producing a closed-form analytical solution for the inverse "
+             f"kinematics of the {dof} degree{'s' if dof > 1 else ''}-of-freedom serial manipulator solving for the "
+             f"position{' and orientation' if orientation else ''} of the {'TCP' if has_tcp else 'last link'} as "
+             'detailed in the "DETAILS" section by completing the Python function provided in the "CODE" section. The '
+             '"Position" and "Orientation" columns represent link coordinates in local space relative to their parent '
+             'link. The positions are from the "xyx" attribute and the orientations are the "rpy" attribute from each '
+             'link\'s "origin" element parsed from the URDF.')
+        if revolute > 0:
+            s += (' The "Axis" column in the table represents the rotational axis of the revolute '
+                  f"link{'s' if revolute > 1 else ''}; return their values in radians.")
+            if limits:
+                s += f" and {'their' if revolute > 1 else 'the'} limits are in radians"
+            s += "."
+        if prismatic > 0:
+            s += (' The "Translation" column in the table represents the movement axis of the prismatic '
+                  f"link{'s' if prismatic > 1 else ''}.")
+        if fixed > 0:
+            s += (f" The fixed link{'s do' if fixed > 1 else ' does'} not have any movement; do not return anything "
+                  f"for these links.")
+        s += (" You are to respond with only the code for the completed inverse kinematics method with no additional "
+              "text. Do not write any code to run the method for testing. You may use any methods included in Python, "
+              f"numpy, and sympy to write your solution.\n</INSTRUCTIONS>\n<DETAILS>\n{table}\n</DETAILS>\n<CODE>\ndef "
+              "inverse_kinematics(p: tuple[float, float, float]")
+        if orientation:
+            s += ", r: tuple[float, float, float]"
+        reach = ' and orientation "r"' if orientation else ""
+        if dof > 1:
+            ret = "tuple[float"
+            for i in range(1, dof):
+                ret += ", float"
+            ret += "]"
+            ret_param = "A list of the values to set the links"
+        else:
+            ret = "float"
+            ret_param = "The value to set the link"
+        s += (f') -> {ret}:\n    """\n    Gets the joint values needed to reach position "p"{reach}.\n    :param p :The'
+              f" position to reach in the form [x, y, z].")
+        if orientation:
+            s += "\n    :param r: The orientation to reach in radians in the form [x, y, z]."
+        s += f'\n    :return: {ret_param} to for reaching position "p"{reach}.\n    """\n</CODE>'
+        return s
 
     def forward_kinematics(self, lower: int = 0, upper: int = -1, joints: list[float] or None = None,
                            plot: bool = False, width: float = 10, height: float = 10,
@@ -223,7 +331,7 @@ class Robot:
             fig.set_size_inches(abs(width), abs(height))
             # If a target to display was passed, display it, otherwise display the end position.
             chain.plot(values, ax, position if target is None else target)
-            plt.title(f"{self.name} from joints {lower + 1} to {upper + 1}")
+            plt.title(chain.name)
             plt.tight_layout()
             plt.show()
         logging.debug(f"{self.name} | {lower + 1} to {upper + 1} | Forward kinematics | Joints = {controlled} | "
@@ -232,7 +340,7 @@ class Robot:
 
     def inverse_kinematics(self, lower: int = 0, upper: int = -1, position: list[float] or None = None,
                            orientation: list[float] or None = None, plot: bool = False, width: float = 10,
-                           height: float = 10) -> (list[float], float, float):
+                           height: float = 10) -> (list[float], float, float, float):
         """
         Perform inverse kinematics.
         :param lower: The starting joint.
@@ -242,17 +350,18 @@ class Robot:
         :param plot: If the result should be plotted.
         :param width: The width to plot.
         :param height: The height to plot.
-        :return: The solution joints, positional error, and rotational error.
+        :return: The solution joints, positional error, rotational error, and solving time.
         """
         # Ensure we can perform inverse kinematics.
         if not self.is_valid():
             logging.error(f"{self.name} | Inverse Kinematics | Robot not configured.")
-            return [], np.inf, np.inf
-        if position is None:
-            logging.warning(f"{self.name} | Inverse Kinematics | No target position was passed, solving for [0, 0, 0].")
-            position = [0, 0, 0]
+            return [], np.inf, np.inf, np.inf
         # Set the joints to start at the midpoints.
         lower, upper = self.validate_lower_upper(lower, upper)
+        if position is None:
+            logging.warning(f"{self.name} | {lower + 1} to {upper + 1} | Inverse Kinematics | No target position was "
+                            f"passed, solving for [0, 0, 0].")
+            position = [0, 0, 0]
         chain = self.chains[lower][upper]
         total = len(chain.links)
         values = [0] * total
@@ -265,8 +374,10 @@ class Robot:
             target[:3, :3] = Rotation.from_euler("xyz", orientation).as_matrix()
         target[:3, 3] = position
         # Solve the inverse kinematics.
+        start_time = time.time()
         values = chain.inverse_kinematics_frame(target, orientation_mode=None if orientation is None else "all",
                                                 initial_position=values)
+        elapsed = time.time() - start_time
         # Get the actual joint values, ignoring fixed links.
         parsed = []
         for i in range(total):
@@ -287,18 +398,19 @@ class Robot:
             fig.set_size_inches(abs(width), abs(height))
             # Show the goal position that should have been reached.
             chain.plot(values, ax, position)
-            plt.title(f"{self.name} from joints {lower + 1} to {upper + 1}")
+            plt.title(chain.name)
             plt.tight_layout()
             plt.show()
         if orientation:
             logging.debug(f"{self.name} | {lower + 1} to {upper + 1} | Inverse Kinematics | Target Position = "
                           f"{position} | Reached Position = {true_position} | Position Error = {distance} | Target "
                           f"Orientation = {orientation} | Reached Orientation = {true_orientation} | Orientation Error "
-                          f"= {angle} | Solution = {parsed}")
+                          f"= {angle} | Solution = {parsed} | Time = {elapsed} seconds")
         else:
             logging.debug(f"{self.name} | {lower + 1} to {upper + 1} | Inverse Kinematics | Target = {position} | "
-                          f"Reached = {true_position} | Error = {distance} | Solution = {parsed}")
-        return parsed, distance, angle
+                          f"Reached = {true_position} | Error = {distance} | Solution = {parsed} | Time = {elapsed} "
+                          "seconds")
+        return parsed, distance, angle, elapsed
 
     def is_valid(self) -> bool:
         """
@@ -314,8 +426,8 @@ class Robot:
         :param upper:
         :return:
         """
-        # If no upper value was passed, use the last joint.
-        if upper < 0:
+        # If no upper value was passed, or it is more than there are joints, use the last joint.
+        if upper < 0 or upper >= self.joints:
             upper = self.joints - 1
         # If no lower value was passed, use the first joint.
         if lower < 0:
@@ -327,25 +439,108 @@ class Robot:
         return lower, upper
 
 
-def reached(distance: float = 0, angle: float = 0, distance_error: float = 0.001, angle_error: float = 0.001):
+def get_direction_details(vector) -> str:
+    """
+    Get a string containing the direction details for a vector.
+    :param vector:
+    :return: The string containing the direction details for a vector.
+    """
+    # Split the vector into its components.
+    x, y, z = vector
+    # If the vector is not aligned, simply get the cleaned version of the vector.
+    aligned = is_aligned(x) and is_aligned(y) and is_aligned(z)
+    if not aligned:
+        return neat(vector)
+    # Determine the number of axes which are active.
+    active = 0
+    if x != 0:
+        active += 1
+    if y != 0:
+        active += 1
+    if z != 0:
+        active += 1
+    # If none are active, return nothing.
+    if active < 1:
+        return ""
+    # If one is active, return only it.
+    elif active == 1:
+        if x != 0:
+            return get_direction_value(x, "X")
+        if y != 0:
+            return get_direction_value(y, "Y")
+        return get_direction_value(z, "Z")
+    # Otherwise, build and return all active axes.
+    s = "["
+    if x != 0:
+        t = get_direction_value(x, "X")
+        if s == "[":
+            s += t
+        else:
+            s += f", {t}"
+    if y != 0:
+        t = get_direction_value(y, "Y")
+        if s == "[":
+            s += t
+        else:
+            s += f", {t}"
+    if z != 0:
+        t = get_direction_value(z, "Z")
+        if s == "[":
+            s += t
+        else:
+            s += f", {t}"
+    return f"{s}]"
+
+
+def is_aligned(value) -> bool:
+    """
+    Determine if an axis component is perfectly aligned being a zero or one.
+    :param value: The axis component.
+    :return: True if the axis component is perfectly aligned being a zero or one, false otherwise.
+    """
+    return value == 0 or value == 1
+
+
+def get_direction_value(value, representation: str) -> str:
+    """
+    Get a clean direction value.
+    :param value: The axis component value.
+    :param representation: The component this represents.
+    :return: A clean direction value for the axis component.
+    """
+    return representation if value > 0 else f"-{representation}"
+
+
+def reached(distance: float = 0, angle: float = 0, distance_error: float = 0.001, angle_error: float = 0.001) -> bool:
     """
     Check if a robot has reached a target
     :param distance: The distance from the target.
     :param angle: The angle from the target.
     :param distance_error: The maximum acceptable positional error.
     :param angle_error: The maximum acceptable orientation error.
-    :return:
+    :return: True if the target was reached, false otherwise.
     """
     return distance <= distance_error and angle <= angle_error
 
 
-def neat(value: float) -> str:
+def neat(value: float or list or tuple or np.array) -> str:
     """
     Format a float value with no trailing zeros.
     :param value: The float value.
     :return: The value as a formatted string.
     """
-    return f"{value:.8f}".rstrip('0').rstrip('.')
+    # If this contains multiple elements, clean every one.
+    if isinstance(value, (list, tuple, np.ndarray)):
+        count = len(value)
+        s = "["
+        for i in range(count):
+            if i == 0:
+                s += neat(value[i])
+            else:
+                s += f", {neat(value[i])}"
+        return f"{s}]"
+    # Otherwise, clean the value.
+    return f"{value:.12f}".rstrip('0').rstrip('.')
 
 
 def main() -> None:
@@ -360,7 +555,7 @@ def main() -> None:
     # print(d)
     # print(a)
     # print(reached(d, a))
-    print(ur5)
+    print(ur5.prepare_llm(0, 0, orientation=True))
 
 
 if __name__ == "__main__":

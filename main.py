@@ -622,8 +622,7 @@ class Robot:
         start_time = time.perf_counter()
         values = chain.inverse_kinematics_frame(target, orientation_mode=None if orientation is None else "all",
                                                 initial_position=values)
-        end_time = time.perf_counter()
-        elapsed = end_time - start_time
+        elapsed = time.perf_counter() - start_time
         # Get the actual joint values, ignoring fixed links.
         solution = []
         for i in range(total):
@@ -806,6 +805,92 @@ class Solver:
             self.code[lower][upper][solving] = {}
         self.code[lower][upper][solving][mode] = method
 
+    def run_code(self, lower: int = 0, upper: int = -1, mode: str = NORMAL, position: list[float] or None = None,
+                 orientation: list[float] or None = None) -> (list[float] or None, float, str or None):
+        """
+        Run code for a chain
+        :param lower: The starting joint.
+        :param upper: The ending joint.
+        :param mode: The mode by which the code was achieved.
+        :param position: The position to solve for.
+        :param orientation: The orientation to solve for.
+        :return: The joints returned by the method, the time the method took, and an error message if there was one.
+        """
+        # Nothing to do if the solver is not valid.
+        if not self.is_valid():
+            logging.error(f"{self.model} | Run Code | Solver is not valid.")
+            return None, 0, None
+        if self.code is None:
+            logging.error(f"{self.model} | Run Code | No codes loaded.")
+            return None, 0, None
+        # Ensure valid values.
+        lower, upper = self.robot.validate_lower_upper(lower, upper)
+        if lower not in self.code:
+            logging.error(f"{self.model} | {lower + 1} to {upper + 1} | Run Code | No codes loaded for starting at "
+                          f"{lower + 1}.")
+            return None, 0, None
+        if upper not in self.code[lower]:
+            logging.error(f"{self.model} | {lower + 1} to {upper + 1} | Run Code | No codes loaded for starting at "
+                          f"{lower + 1} and ending at {upper + 1}.")
+            return None, 0, None
+        solving = POSITION if orientation is None else TRANSFORM
+        if solving not in self.code[lower][upper]:
+            logging.error(f"{self.model} | {lower + 1} to {upper + 1} | Run Code | No codes loaded for starting at "
+                          f"{lower + 1}, ending at {upper + 1}, and solving for '{solving}'.")
+            return None, 0, None
+        if mode not in [NORMAL, EXTEND, DYNAMIC]:
+            logging.warning(f"{self.model} | {self.robot.name} | {lower + 1} to {upper + 1} | Run Code | Mode "
+                            f"'{mode}' not valid, using '{NORMAL}' instead.")
+            mode = NORMAL
+        if mode not in self.code[lower][upper][solving]:
+            logging.error(f"{self.model} | {lower + 1} to {upper + 1} | Run Code | No codes loaded for starting at "
+                          f"{lower + 1}, ending at {upper + 1}, solving for '{solving}', and generated using '{mode}' "
+                          "mode.")
+            return None, 0, None
+        # Ensure a position.
+        if position is None:
+            logging.warning(f"{self.model} | {lower + 1} to {upper + 1} | Run Code | {solving} | {mode} | No position "
+                            "passed; solving for [0, 0, 0].")
+            position = [0, 0, 0]
+        position = tuple(position)
+        joints = []
+        message = None
+        # Run the code passing the orientation if we should.
+        if orientation is None:
+            start_time = time.perf_counter()
+            try:
+                joints = self.code[lower][upper][solving][mode](position)
+                elapsed = time.perf_counter() - start_time
+            except Exception as e:
+                elapsed = time.perf_counter() - start_time
+                message = e
+                logging.error(f"{self.model} | {lower + 1} to {upper + 1} | Run Code | {solving} | {mode} | Error: {e}")
+        else:
+            orientation = tuple(orientation)
+            start_time = time.perf_counter()
+            try:
+                joints = self.code[lower][upper][solving][mode](position, orientation)
+                elapsed = time.perf_counter() - start_time
+            except Exception as e:
+                elapsed = time.perf_counter() - start_time
+                message = e
+                logging.error(f"{self.model} | {lower + 1} to {upper + 1} | Run Code | {solving} | {mode} | Error: {e}")
+        # Parse the joints.
+        if joints is not None:
+            try:
+                temp = []
+                for joint in joints:
+                    temp.append(joint)
+                joints = temp
+            except Exception as e:
+                logging.error(f"{self.model} | {lower + 1} to {upper + 1} | Run Code | {solving} | {mode} | Joints "
+                              f"could not be cast to a list: {e}")
+                joints = None
+        else:
+            logging.error(f"{self.model} | {lower + 1} to {upper + 1} | Run Code | {solving} | {mode} | No joints "
+                          f"returned.")
+        return joints, elapsed, message
+
     def prepare_llm(self, lower: int = 0, upper: int = -1, orientation: bool = False, mode: str = NORMAL) -> str:
         """
         Prepare an initial prompt for the LLM.
@@ -984,8 +1069,7 @@ def main() -> None:
     :return: Nothing.
     """
     ur5 = Robot("UR5.urdf")
-    #solver = Solver("gpt-4o", ur5)
-    ur5.get_data(training=True)
+    solver = Solver("gpt-4o", ur5)
 
 
 if __name__ == "__main__":

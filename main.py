@@ -1,4 +1,6 @@
 import copy
+import importlib
+import importlib.util
 import logging
 import os.path
 import random
@@ -489,8 +491,9 @@ class Robot:
                   f"for these links.")
         s += (" You are to respond with only the code for the completed inverse kinematics method with no additional "
               "text. Do not write any code to run the method for testing. You may use any methods included in Python, "
-              f"numpy, and sympy to write your solution.{additional}\n</INSTRUCTIONS>\n<DETAILS>\n{table}\n</DETAILS>\n"
-              "<CODE>\ndef inverse_kinematics(p: tuple[float, float, float]")
+              "NumPy, SymPy, and SciPy to write your solution except for any interative optimization methods."
+              f"{additional}\n</INSTRUCTIONS>\n<DETAILS>\n{table}\n</DETAILS>\n<CODE>\ndef inverse_kinematics(p: "
+              "tuple[float, float, float]")
         if orientation:
             s += ", r: tuple[float, float, float]"
         reach = ' and orientation "r"' if orientation else ""
@@ -685,52 +688,165 @@ class Robot:
 
 
 class Solver:
+    """
+    Handle a solver attached to a robot.
+    """
+
     def __init__(self, model: str, robot: Robot, interactions: str = INTERACTIONS, solutions: str = SOLUTIONS,
                  results: str = RESULTS):
+        """
+        Load a solver.
+        :param model: The name of the model.
+        :param robot: The robot for the solver.
+        :param interactions: The folder to save and load interactions to and from.
+        :param solutions: The folder to save and load solutions to and from.
+        :param results: The folder to save results to.
+        """
         self.model = model
         self.robot = robot
+        self.code = None
+        # If the robot is invalid, there is nothing to do.
         if self.robot is None:
             logging.error(f"{self.model} | Robot is null.")
             self.interactions = os.path.join(os.getcwd(), interactions, "_Invalid", self.model)
             self.solutions = os.path.join(os.getcwd(), solutions, "_Invalid", self.model)
             self.results = os.path.join(os.getcwd(), results, "_Invalid", self.model)
             return
+        # Cache folders.
         self.interactions = os.path.join(os.getcwd(), interactions, self.robot.name, self.model)
         self.solutions = os.path.join(os.getcwd(), solutions, self.robot.name, self.model)
         self.results = os.path.join(os.getcwd(), results, self.robot.name, self.model)
+        # Ensure the robot is valid.
         if not robot.is_valid():
             logging.error(f"{self.model} | {self.robot.name} | Robot is not valid.")
             return
+        # Load the code of all existing solvers.
+        self.load_codes()
         logging.info(f"{self.model} | {self.robot.name} | Solver loaded.")
 
     def __str__(self) -> str:
-        if not self.is_valid():
-            logging.error(f"{self.model} | Solver is not valid.")
-            return ""
-        return self.robot.__str__()
+        """
+        Print as a string.
+        :return: The name of this solver.
+        """
+        return self.model
 
-    def prepare_llm(self, lower: int = 0, upper: int = -1, orientation: bool = False, mode: str = NORMAL) -> str:
+    def load_codes(self) -> None:
+        """
+        Load all existing codes for the solver.
+        :return: Nothing.
+        """
+        # Nothing to load if the solver is not valid.
         if not self.is_valid():
-            logging.error(f"{self.model} | Solver is not valid.")
-            return ""
+            logging.error(f"{self.model} | Load Codes | Solver is not valid.")
+            return
+        # Load every possible solver.
+        end = self.robot.joints
+        for lower in range(end):
+            for upper in range(lower, end):
+                for orientation in [False, True]:
+                    for mode in [NORMAL, EXTEND, DYNAMIC]:
+                        # Suppress the error messages for solvers that do not exist.
+                        self.load_code(lower, upper, orientation, mode, True)
+
+    def load_code(self, lower: int = 0, upper: int = -1, orientation: bool = False, mode: str = NORMAL,
+                  suppress: bool = False) -> None:
+        """
+        Load the code for a solver.
+        :param lower: The starting joint.
+        :param upper: The ending joint.
+        :param orientation: If this data cares about the orientation or not.
+        :param mode: The mode by which the code was achieved.
+        :param suppress: If the error for the code not existing should be suppressed.
+        :return: Nothing.
+        """
+        # Nothing to do if the solver is not valid.
+        if not self.is_valid():
+            logging.error(f"{self.model} | Load Code | Solver is not valid.")
+            return
+        # Ensure valid values.
         lower, upper = self.robot.validate_lower_upper(lower, upper)
         if mode not in [NORMAL, EXTEND, DYNAMIC]:
-            logging.warning(f"{self.model} | {self.robot.name} | {lower + 1} to {upper + 1} | Mode '{mode}' not valid, "
-                            f"using '{NORMAL}' instead.")
+            logging.warning(f"{self.model} | {self.robot.name} | {lower + 1} to {upper + 1} | Load Code | Mode "
+                            f"'{mode}' not valid, using '{NORMAL}' instead.")
             mode = NORMAL
+        # Get the name and path of what to load.
+        solving = TRANSFORM if orientation else POSITION
+        name = f"{lower}-{upper}-{solving}-{mode}"
+        path = os.path.join(self.solutions, f"{name}.py")
+        # Nothing to do if the file does not exist.
+        if not os.path.exists(path):
+            if not suppress:
+                logging.error(f"{self.model} | {lower + 1} to {upper + 1} | Load Code | {solving} | {mode} | Solver "
+                              f"'{path}' does not exist.")
+            return
+        # Try to load the inverse kinematics method from the Python file.
+        try:
+            spec = importlib.util.spec_from_file_location(name, path)
+            module = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(module)
+            # If the method is not in the file, return.
+            if not hasattr(module, "inverse_kinematics"):
+                logging.error(f"{self.model} | {lower + 1} to {upper + 1} | Load Code | {solving} | {mode} | Solver "
+                              f"'{path}' does not have the method 'inverse_kinematics'.")
+                return
+            method = getattr(module, "inverse_kinematics")
+        except Exception as e:
+            logging.error(f"{self.model} | {lower + 1} to {upper + 1} | Load Code | {solving} | {mode} | Failed to load"
+                          f" '{path}': {e}")
+            return
+        # Cache the method.
+        if self.code is None:
+            self.code = {}
+        if lower not in self.code:
+            self.code[lower] = {}
+        if upper not in self.code[lower]:
+            self.code[lower][upper] = {}
+        if solving not in self.code[lower][upper]:
+            self.code[lower][upper][solving] = {}
+        self.code[lower][upper][solving][mode] = method
+
+    def prepare_llm(self, lower: int = 0, upper: int = -1, orientation: bool = False, mode: str = NORMAL) -> str:
+        """
+        Prepare an initial prompt for the LLM.
+        :param lower: The starting joint.
+        :param upper: The ending joint.
+        :param orientation: If we want to solve for orientation.
+        :param mode: The solving mode to use.
+        :return:
+        """
+        # Nothing to do if the solver is not valid.
+        if not self.is_valid():
+            logging.error(f"{self.model} | Prepare LLM | Solver is not valid.")
+            return ""
+        # Ensure valid values.
+        lower, upper = self.robot.validate_lower_upper(lower, upper)
+        if mode not in [NORMAL, EXTEND, DYNAMIC]:
+            logging.warning(f"{self.model} | {self.robot.name} | {lower + 1} to {upper + 1} | Prepare LLM  | Mode "
+                            f"'{mode}' not valid, using '{NORMAL}' instead.")
+            mode = NORMAL
+        # Cannot do orientation if just a single joint.
         if lower == upper:
             orientation = False
+        # Can only do normal mode for single joint chains.
         if mode == NORMAL or lower == upper:
             prompt = self.robot.prepare_llm(lower, upper, orientation)
-            logging.info(f"{self.model} | {self.robot.name} | {lower + 1} to {upper + 1} | Normal prompt prepared.")
+            logging.info(f"{self.model} | {self.robot.name} | {lower + 1} to {upper + 1} | Prepare LLM | Normal prompt "
+                         f"prepared.")
             return prompt
-        solving_type = TRANSFORM if orientation else POSITION
+        # Cache what is being solved for file outputs.
+        solving = TRANSFORM if orientation else POSITION
+        # Extending prompting mode.
         if mode == EXTEND:
+            # We need to load the results of the lower portion, which when just one joint is the normal mode.
+            previous = upper - 1
+            previous_mode = NORMAL if lower == previous else EXTEND
             path = os.path.join(self.solutions,
-                                f"{SOLUTIONS}-{self.model}-{self.robot.name}-{lower}-{upper-1}-{solving_type}.py")
+                                f"{lower}-{previous}-{previous_mode}-{solving}.py")
+            # Cannot prepare a prompt in this mode if the chain to extend does not exist.
             if not os.path.exists(path):
-                logging.error(f"{self.model} | {self.robot.name} | {lower + 1} to {upper + 1} | Cannot load an "
-                              f"extending prompt as '{path}' does not exist.")
+                logging.error(f"{self.model} | {self.robot.name} | {lower + 1} to {upper + 1} | Prepare LLM | Cannot "
+                              f"load an extending prompt as '{path}' does not exist.")
                 return ""
             total = upper - lower
             plural = "s" if total > 1 else ""
@@ -744,11 +860,16 @@ class Solver:
                 prompt += file.read().strip()
             logging.info(f"{self.model} | {self.robot.name} | {lower + 1} to {upper + 1} | Extended prompt prepared.")
             return f"{prompt}\n</EXISTING>"
-        logging.error(f"{self.model} | {self.robot.name} | {lower + 1} to {upper + 1} | Dynamic prompts not yet "
-                      f"implemented.")
+        # TODO - Implement dynamic mode prompt building.
+        logging.error(f"{self.model} | {self.robot.name} | {lower + 1} to {upper + 1} | Prepare LLM | Dynamic prompts "
+                      f"not yet implemented.")
         return ""
 
     def is_valid(self) -> bool:
+        """
+        Ensure the solver is valid.
+        :return: True if the sovler's robot is valid, false otherwise.
+        """
         return self.robot is not None and self.robot.is_valid()
 
 

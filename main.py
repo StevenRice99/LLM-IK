@@ -8,6 +8,7 @@ import time
 import ikpy.chain
 import ikpy.utils.plot as plot_utils
 import numpy as np
+import pandas as pd
 from ikpy.link import URDFLink
 from matplotlib import pyplot as plt
 from scipy.spatial.transform import Rotation
@@ -28,10 +29,14 @@ RESPONSE = "Response"
 
 POSITION = "Position"
 TRANSFORM = "Transform"
+TRAINING_TITLE = "Training"
+EVALUATING_TITLE = "Evaluating"
 
 TRAINING = 1
 EVALUATING = 1
 SEED = 42
+
+BOUND = 2 * np.pi
 
 # Set up logging.
 logging.basicConfig(level=logging.INFO, format="%(asctime)s | %(levelname)s | %(message)s")
@@ -58,8 +63,7 @@ class Robot:
         self.info = os.path.join(os.getcwd(), info, self.name)
         self.chains = None
         self.joints = 0
-        self.training = {}
-        self.evaluating = {}
+        self.data = {}
         # Nothing to do if the file does not exist.
         path = os.path.join(os.getcwd(), models, name)
         if not os.path.exists(path):
@@ -172,10 +176,7 @@ class Robot:
                     with open(os.path.join(self.info, f"{lower + 1}-{upper + 1}.txt"), "w") as file:
                         file.write(self.details(lower, upper)[0])
         # Set the seed for generating training and evaluating instances.
-        random.seed(seed)
-        np.random.seed(seed)
-        self.generate_training(training)
-        self.generate_evaluation(evaluating)
+        self.load_data(training, evaluating, seed)
         logging.info(f"{self.name} | Loaded | {self.joints} Joints | Info saved to '{self.info}'.")
 
     def __str__(self) -> str:
@@ -185,14 +186,32 @@ class Robot:
         """
         return self.details()[0]
 
-    def generate_training(self, number: int = 1) -> None:
-        if number < 1:
-            number = 1
+    def load_data(self, training: int = TRAINING, evaluating: int = EVALUATING, seed: int = SEED) -> None:
+        # Clear any previous data.
+        self.data = {}
+        # Set the random seed.
+        random.seed(seed)
+        np.random.seed(seed)
+        # Ensure valid data amounts.
+        if training < 1:
+            training = 1
+        if evaluating < 1:
+            evaluating = 1
+        # If there is already data for this configuration, load it.
+        path = os.path.join(self.info, f"{seed}-{training}-{evaluating}.json")
+        if os.path.exists(path):
+            df = pd.read_json(path, orient="records", lines=True)
+            self.data = df.to_dict(orient="dict")
+            logging.info(f"{self.name}| Seed = {seed} | Training = {training} | Evaluating = {evaluating} | Generated "
+                         f"data loaded from '{path}'.")
+            return
+        # Run all possible joint configurations.
         for lower in range(self.joints):
-            self.training[lower] = {}
+            self.data[lower] = {}
             for upper in range(lower, self.joints):
                 bounds = []
                 chain = self.chains[lower][upper]
+                # Define the bounds for randomly generating poses.
                 for link in chain.links:
                     if link.joint_type == "fixed":
                         continue
@@ -200,73 +219,74 @@ class Robot:
                         bounds.append(None)
                     else:
                         bounds.append(link.bounds)
-                samples_position = {"Joints": [], "Position": []}
-                samples_transform = None if lower == upper else {"Joints": [], "Position": [], "Orientation": []}
-                for i in range(number):
-                    joints = []
-                    for bound in bounds:
-                        if bound is None:
-                            joints.append(np.random.uniform(-2 * np.pi, 2 * np.pi))
-                        else:
-                            joints.append(np.random.uniform(bound[0], bound[1]))
-                    positions, orientations = self.forward_kinematics(lower, upper, joints)
-                    target_position = positions[-1]
-                    target_orientation = orientations[-1]
-                    joints, distance, angle, elapsed = self.inverse_kinematics(lower, upper, target_position)
-                    positions, orientations = self.forward_kinematics(lower, upper, joints)
-                    samples_position["Joints"].append(joints)
-                    samples_position["Position"].append(positions[-1])
-                    if samples_transform is not None:
-                        joints, distance, angle, elapsed = self.inverse_kinematics(lower, upper, target_position, target_orientation)
+                # Create the data structures to hold the data.
+                training_position = {"Joints": [], "Position": []}
+                training_transform = None if lower == upper else {"Joints": [], "Position": [], "Orientation": []}
+                evaluating_position = {"Position": [], "Distance": [], "Angle": [], "Time": []}
+                evaluating_transform = None if lower == upper else {"Position": [], "Orientation": [], "Distance": [],
+                                                                    "Angle": [], "Time": []}
+                # Create the training and evaluation data.
+                for part in [TRAINING_TITLE, EVALUATING_TITLE]:
+                    # Run for the number of instances.
+                    instances = training if part == TRAINING_TITLE else evaluating
+                    for i in range(instances):
+                        # Define random joint values.
+                        joints = []
+                        for bound in bounds:
+                            if bound is None:
+                                joints.append(np.random.uniform(-BOUND, BOUND))
+                            else:
+                                joints.append(np.random.uniform(bound[0], bound[1]))
+                        # Perform a common forwards and inverse kinematics that both sets of data use.
                         positions, orientations = self.forward_kinematics(lower, upper, joints)
-                        samples_transform["Joints"].append(joints)
-                        samples_transform["Position"].append(positions[-1])
-                        samples_transform["Orientation"].append(orientations[-1])
-                self.training[lower][upper] = {POSITION: samples_position, TRANSFORM: samples_transform}
-                logging.info(f"{self.name} | {lower + 1} to {upper + 1} | Training data generated.")
-
-    def generate_evaluation(self, number: int = 1) -> None:
-        if number < 1:
-            number = 1
-        for lower in range(self.joints):
-            self.evaluating[lower] = {}
-            for upper in range(lower, self.joints):
-                bounds = []
-                chain = self.chains[lower][upper]
-                for link in chain.links:
-                    if link.joint_type == "fixed":
-                        continue
-                    if link.bounds is None or link.bounds == (-np.inf, np.inf):
-                        bounds.append(None)
-                    else:
-                        bounds.append(link.bounds)
-                samples_position = {"Position": [], "Distance": [], "Angle": [], "Time": []}
-                samples_transform = None if lower == upper else {"Position": [], "Orientation": [], "Distance": [],
-                                                                 "Angle": [], "Time": []}
-                for i in range(number):
-                    joints = []
-                    for bound in bounds:
-                        if bound is None:
-                            joints.append(np.random.uniform(-2 * np.pi, 2 * np.pi))
-                        else:
-                            joints.append(np.random.uniform(bound[0], bound[1]))
-                    positions, orientations = self.forward_kinematics(lower, upper, joints)
-                    position = positions[-1]
-                    orientation = orientations[-1]
-                    joints, distance, angle, elapsed = self.inverse_kinematics(lower, upper, position)
-                    samples_position["Position"].append(position)
-                    samples_position["Distance"].append(distance)
-                    samples_position["Angle"].append(angle)
-                    samples_position["Time"].append(elapsed)
-                    if samples_transform is not None:
-                        joints, distance, angle, elapsed = self.inverse_kinematics(lower, upper, position, orientation)
-                        samples_transform["Position"].append(position)
-                        samples_transform["Orientation"].append(orientation)
-                        samples_transform["Distance"].append(distance)
-                        samples_transform["Angle"].append(angle)
-                        samples_transform["Time"].append(elapsed)
-                self.evaluating[lower][upper] = {POSITION: samples_position, TRANSFORM: samples_transform}
-                logging.info(f"{self.name} | {lower + 1} to {upper + 1} | Evaluation data generated.")
+                        position = positions[-1]
+                        orientation = orientations[-1]
+                        joints, distance, angle, elapsed = self.inverse_kinematics(lower, upper, position)
+                        # Build training data.
+                        if part == TRAINING_TITLE:
+                            # Get the position only inverse kinematics pose.
+                            positions, orientations = self.forward_kinematics(lower, upper, joints)
+                            training_position["Joints"].append(joints)
+                            training_position["Position"].append(positions[-1])
+                            # Get the transform inverse kinematics pose.
+                            if training_transform is not None:
+                                joints, distance, angle, elapsed = self.inverse_kinematics(lower, upper, position,
+                                                                                           orientation)
+                                positions, orientations = self.forward_kinematics(lower, upper, joints)
+                                training_transform["Joints"].append(joints)
+                                training_transform["Position"].append(positions[-1])
+                                training_transform["Orientation"].append(orientations[-1])
+                            continue
+                        # Build the evaluating data, starting with the performance of the position only results.
+                        evaluating_position["Position"].append(position)
+                        evaluating_position["Distance"].append(distance)
+                        evaluating_position["Angle"].append(angle)
+                        evaluating_position["Time"].append(elapsed)
+                        # Save the transform results as well.
+                        if evaluating_transform is not None:
+                            joints, distance, angle, elapsed = self.inverse_kinematics(lower, upper, position,
+                                                                                       orientation)
+                            evaluating_transform["Position"].append(position)
+                            evaluating_transform["Orientation"].append(orientation)
+                            evaluating_transform["Distance"].append(distance)
+                            evaluating_transform["Angle"].append(angle)
+                            evaluating_transform["Time"].append(elapsed)
+                # Cache the data.
+                self.data[lower][upper] = {
+                    TRAINING_TITLE: {POSITION: training_position, TRANSFORM: training_transform},
+                    EVALUATING_TITLE: {POSITION: evaluating_position, TRANSFORM: evaluating_transform}
+                }
+                logging.info(f"{self.name} | {lower + 1} to {upper + 1} | Seed = {seed} | Training = {training} | "
+                             f"Evaluating = {evaluating} | Data generated.")
+        # Save the newly generated data.
+        os.makedirs(self.info, exist_ok=True)
+        df = pd.DataFrame(self.data)
+        df.to_json(path, orient="records", lines=True, double_precision=15)
+        # Reload the data to ensure consistent values.
+        df = pd.read_json(path, orient="records", lines=True)
+        self.data = df.to_dict(orient="dict")
+        logging.info(f"{self.name}| Seed = {seed} | Training = {training} | Evaluating = {evaluating} | Generated "
+                     f"data saved to '{path}'.")
 
     def details(self, lower: int = 0, upper: int = -1) -> (str, int, int, int, bool, bool):
         """
@@ -763,7 +783,7 @@ def main() -> None:
     """
     ur5 = Robot("UR5.urdf")
     #solver = Solver("gpt-4o", ur5)
-    print(ur5.training[0][0])
+    print(ur5.data)
 
 
 if __name__ == "__main__":

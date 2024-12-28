@@ -2,8 +2,8 @@ import copy
 import logging
 import os.path
 import random
-import warnings
 import time
+import warnings
 
 import ikpy.chain
 import ikpy.utils.plot as plot_utils
@@ -63,6 +63,8 @@ class Robot:
         self.info = os.path.join(os.getcwd(), info, self.name)
         self.chains = None
         self.joints = 0
+        self.training = 0
+        self.evaluating = 0
         self.data = {}
         # Nothing to do if the file does not exist.
         path = os.path.join(os.getcwd(), models, name)
@@ -164,7 +166,9 @@ class Robot:
                     instance_links[i].name = f"{joint_type} {number}"
                 # If the last joint is not fixed, this chain cannot be used.
                 if instance_links[-1].joint_type != "fixed":
+                    self.chains[lower][upper] = None
                     logging.warning(f"{self.name} | {lower + 1} to {upper + 1} | Last joint is not fixed; skipping.")
+                    continue
                 # Ensure the TCP is named correctly.
                 instance_links[-1].name = "TCP"
                 # Build and cache this sub chain.
@@ -187,6 +191,13 @@ class Robot:
         return self.details()[0]
 
     def load_data(self, training: int = TRAINING, evaluating: int = EVALUATING, seed: int = SEED) -> None:
+        """
+        Load data for the robot to use.
+        :param training: The number of training data instances.
+        :param evaluating: The number of evaluation data instances.
+        :param seed: The seed to generate the data with.
+        :return: Nothing.
+        """
         # Clear any previous data.
         self.data = {}
         # Set the random seed.
@@ -197,6 +208,8 @@ class Robot:
             training = 1
         if evaluating < 1:
             evaluating = 1
+        self.training = training
+        self.evaluating = evaluating
         # If there is already data for this configuration, load it.
         path = os.path.join(self.info, f"{seed}-{training}-{evaluating}.json")
         if os.path.exists(path):
@@ -210,7 +223,10 @@ class Robot:
             self.data[lower] = {}
             for upper in range(lower, self.joints):
                 bounds = []
+                # Only run for valid chains.
                 chain = self.chains[lower][upper]
+                if chain is None:
+                    continue
                 # Define the bounds for randomly generating poses.
                 for link in chain.links:
                     if link.joint_type == "fixed":
@@ -288,6 +304,62 @@ class Robot:
         logging.info(f"{self.name}| Seed = {seed} | Training = {training} | Evaluating = {evaluating} | Generated "
                      f"data saved to '{path}'.")
 
+    def get_data(self, lower: int = 0, upper: int = -1, training: bool = True, orientation: bool = False,
+                 start: int = 0, count: int = 1) -> list:
+        """
+        Get data to use for training or evaluation.
+        :param lower: The starting joint.
+        :param upper: The ending joint.
+        :param training: If this is training data or evaluating data.
+        :param orientation: If this data cares about the orientation or not.
+        :param start: The starting index of data to request.
+        :param count: The number of data entries to request.
+        :return: The training or evaluation data as a list of dicts.
+        """
+        # Nothing to do if the robot is not valid.
+        if not self.is_valid():
+            logging.error(f"{self.name} | Get Data | Robot not configured.")
+            return []
+        # Nothing to do if this chain is not valid.
+        lower, upper = self.validate_lower_upper(lower, upper)
+        if self.chains[lower][upper] is None:
+            logging.error(f"{self.name} | {lower + 1} to {upper + 1} | Get Data | Chain not valid.")
+            return []
+        # Get the portion of data requested.
+        category = TRAINING_TITLE if training else EVALUATING_TITLE
+        pose = TRANSFORM if orientation else POSITION
+        data = self.data[lower][upper][category][pose]
+        # If there is no data loaded for this, there is nothing to get.
+        if data is None:
+            logging.error(f"{self.name} | {lower + 1} to {upper + 1} | Get Data | No data.")
+            return []
+        # Ensure valid values.
+        if start < 0:
+            start = 0
+        if count < 1:
+            count = 1
+        end = start + count
+        # If there are fewer data points than the range requested, clamp it.
+        for title in data:
+            instances = len(data[title])
+            if instances < end:
+                end = instances
+                logging.warning(f"{self.name} | {lower + 1} to {upper + 1} | Get Data | Cannot get {count} instances "
+                                f"from index {start} as there are {end} instances total; clamping.")
+                break
+        if start >= end:
+            start = end - 1
+            logging.warning(f"{self.name} | {lower + 1} to {upper + 1} | Get Data | Start was more than {end}; clamped "
+                            f"to {start}.")
+        # Get all instances in a list.
+        values = []
+        for i in range(start, end):
+            value = {}
+            for title in data:
+                value[title] = data[title][i]
+            values.append(value)
+        return values
+
     def details(self, lower: int = 0, upper: int = -1) -> (str, int, int, int, bool, bool):
         """
         Get the details of a kinematic chain.
@@ -303,6 +375,9 @@ class Robot:
         # Get all values to perform.
         lower, upper = self.validate_lower_upper(lower, upper)
         chain = self.chains[lower][upper]
+        if chain is None:
+            logging.error(f"{self.name} | {lower + 1} to {upper + 1} | Details | Chain not valid.")
+            return "", 0, 0, 0, False, False
         total = len(chain.links)
         # Define the headers which we will for sure have.
         headers = ["Link", "Position", "Orientation"]
@@ -457,6 +532,9 @@ class Robot:
         # Get all values to perform.
         lower, upper = self.validate_lower_upper(lower, upper)
         chain = self.chains[lower][upper]
+        if chain is None:
+            logging.error(f"{self.name} | {lower + 1} to {upper + 1} | Forward Kinematics | Chain not valid.")
+            return [0, 0, 0], [0, 0, 0]
         total = len(chain.links)
         # Set the joints.
         values = [0] * total
@@ -524,6 +602,9 @@ class Robot:
         if lower == upper:
             orientation = None
         chain = self.chains[lower][upper]
+        if chain is None:
+            logging.error(f"{self.name} | {lower + 1} to {upper + 1} | Inverse Kinematics | Chain not valid.")
+            return [], np.inf, np.inf, np.inf
         total = len(chain.links)
         values = [0] * total
         for i in range(total):
@@ -783,7 +864,7 @@ def main() -> None:
     """
     ur5 = Robot("UR5.urdf")
     #solver = Solver("gpt-4o", ur5)
-    print(ur5.data)
+    ur5.get_data(training=True)
 
 
 if __name__ == "__main__":

@@ -5,6 +5,7 @@ import logging
 import os.path
 import random
 import time
+import traceback
 import warnings
 
 import ikpy.chain
@@ -38,6 +39,9 @@ TRAINING = 1
 EVALUATING = 1
 SEED = 42
 
+DISTANCE_ERROR = 0.001
+ANGLE_ERROR = 0.001
+
 BOUND = 2 * np.pi
 
 # Set up logging.
@@ -50,7 +54,8 @@ class Robot:
     """
 
     def __init__(self, name: str, models: str = MODELS, info: str = INFO, training: int = TRAINING,
-                 evaluating: int = EVALUATING, seed: int = SEED):
+                 evaluating: int = EVALUATING, seed: int = SEED, distance_error: float = DISTANCE_ERROR,
+                 angle_error: float = ANGLE_ERROR):
         """
         Initialize the robot.
         :param name: The name of the URDF to load.
@@ -58,6 +63,8 @@ class Robot:
         :param info: The folder to save info about chains to.
         :param training: The number of poses to use for training the LLM.
         :param evaluating: The number of poses to use for evaluating the LLMs.
+        :param distance_error: The acceptable positional error.
+        :param angle_error: The acceptable orientational error.
         :param seed: The seed to use for generating poses.
         """
         self.name = os.path.splitext(name)[0]
@@ -67,6 +74,8 @@ class Robot:
         self.joints = 0
         self.training = 0
         self.evaluating = 0
+        self.distance_error = max(0.0, distance_error)
+        self.angle_error = max(0.0, angle_error)
         self.data = {}
         # Nothing to do if the file does not exist.
         path = os.path.join(os.getcwd(), models, name)
@@ -633,12 +642,9 @@ class Robot:
         true_position = true_positions[-1]
         true_orientation = true_orientations[-1]
         # Get the position error.
-        distance = np.sqrt(sum([(goal - true) ** 2 for goal, true in zip(position, true_position)]))
+        distance = difference_distance(position, true_position)
         # Get the orientation error if it was being solved for.
-        if orientation is None:
-            angle = 0
-        else:
-            angle = sum([abs(goal - true) for goal, true in zip(orientation, true_orientation)])
+        angle = 0 if orientation is None else difference_angle(orientation, true_orientation)
         # Plot if we should.
         if plot:
             fig, ax = plot_utils.init_3d_figure()
@@ -658,6 +664,15 @@ class Robot:
                           f"Reached = {true_position} | Error = {distance} | Solution = {solution} | Time = {elapsed} "
                           "seconds")
         return solution, distance, angle, elapsed
+
+    def reached(self, distance: float = 0, angle: float = 0) -> bool:
+        """
+        Determine if a target has been reached.
+        :param distance: The distance.
+        :param angle: The angle.
+        :return: True if it has been reached, false otherwise.
+        """
+        return distance <= self.distance_error and angle <= self.angle_error
 
     def is_valid(self) -> bool:
         """
@@ -691,12 +706,14 @@ class Solver:
     Handle a solver attached to a robot.
     """
 
-    def __init__(self, model: str, robot: Robot, interactions: str = INTERACTIONS, solutions: str = SOLUTIONS,
-                 results: str = RESULTS):
+    def __init__(self, model: str, robot: Robot, feedbacks: int = 0, examples: int = 1,
+                 interactions: str = INTERACTIONS, solutions: str = SOLUTIONS, results: str = RESULTS):
         """
         Load a solver.
         :param model: The name of the model.
         :param robot: The robot for the solver.
+        :param feedbacks: The amount of times we can give feedback.
+        :param examples: The number of examples to give for each feedback.
         :param interactions: The folder to save and load interactions to and from.
         :param solutions: The folder to save and load solutions to and from.
         :param results: The folder to save results to.
@@ -707,6 +724,8 @@ class Solver:
         # If the robot is invalid, there is nothing to do.
         if self.robot is None:
             logging.error(f"{self.model} | Robot is null.")
+            self.examples = 0
+            self.feedbacks = 0
             self.interactions = os.path.join(os.getcwd(), interactions, "_Invalid", self.model)
             self.solutions = os.path.join(os.getcwd(), solutions, "_Invalid", self.model)
             self.results = os.path.join(os.getcwd(), results, "_Invalid", self.model)
@@ -717,10 +736,15 @@ class Solver:
         self.results = os.path.join(os.getcwd(), results, self.robot.name, self.model)
         # Ensure the robot is valid.
         if not robot.is_valid():
+            self.examples = 0
+            self.feedbacks = 0
             logging.error(f"{self.model} | {self.robot.name} | Robot is not valid.")
             return
         # Load the code of all existing solvers.
         self.load_codes()
+        # Ensure feedback cases are valid.
+        self.examples = max(1, examples)
+        self.feedbacks = max(0, feedbacks)
         logging.info(f"{self.model} | {self.robot.name} | Solver loaded.")
 
     def __str__(self) -> str:
@@ -820,6 +844,7 @@ class Solver:
         if not self.is_valid():
             logging.error(f"{self.model} | Run Code | Solver is not valid.")
             return None, 0, None
+        # Nothing to do if there is no code loaded.
         if self.code is None:
             logging.error(f"{self.model} | Run Code | No codes loaded.")
             return None, 0, None
@@ -863,7 +888,7 @@ class Solver:
                 elapsed = time.perf_counter() - start_time
             except Exception as e:
                 elapsed = time.perf_counter() - start_time
-                message = e
+                message = traceback.format_exc()
                 logging.error(f"{self.model} | {lower + 1} to {upper + 1} | Run Code | {solving} | {mode} | Error: {e}")
         else:
             orientation = tuple(orientation)
@@ -873,7 +898,7 @@ class Solver:
                 elapsed = time.perf_counter() - start_time
             except Exception as e:
                 elapsed = time.perf_counter() - start_time
-                message = e
+                message = traceback.format_exc()
                 logging.error(f"{self.model} | {lower + 1} to {upper + 1} | Run Code | {solving} | {mode} | Error: {e}")
         # Parse the joints.
         if joints is not None:
@@ -890,6 +915,92 @@ class Solver:
             logging.error(f"{self.model} | {lower + 1} to {upper + 1} | Run Code | {solving} | {mode} | No joints "
                           f"returned.")
         return joints, elapsed, message
+
+    def prepare_feedback(self, lower: int = 0, upper: int = -1, orientation: bool = False, mode: str = NORMAL) -> str:
+        """
+        Prepare a feedback prompt for the LLM.
+        :param lower: The starting joint.
+        :param upper: The ending joint.
+        :param orientation: If we want to solve for orientation.
+        :param mode: The solving mode to use.
+        :return: The feedback prompt for the LLM.
+        """
+        # Nothing to do if the solver is not valid.
+        if not self.is_valid():
+            logging.error(f"{self.model} | Prepare Feedback | Solver is not valid.")
+            return ""
+        # Ensure valid values.
+        lower, upper = self.robot.validate_lower_upper(lower, upper)
+        solving = POSITION if orientation is None else TRANSFORM
+        if mode not in [NORMAL, EXTEND, DYNAMIC]:
+            logging.warning(f"{self.model} | {self.robot.name} | {lower + 1} to {upper + 1} | Prepare Feedback | Mode "
+                            f"'{mode}' not valid, using '{NORMAL}' instead.")
+            mode = NORMAL
+        # Get the data to run the code against.
+        data = self.robot.get_data(lower, upper, True, orientation, 0, self.robot.training)
+        # If there is no data, there is nothing to give feedback on.
+        if len(data) < 1:
+            logging.error(f"{self.model} | {lower + 1} to {upper + 1} | {solving} | {mode} | No data.")
+            return ""
+        # Store what to respond with.
+        errors = []
+        failures = []
+        number = upper - lower + 1
+        for point in data:
+            # Determine what to test against.
+            target_position = point["Position"]
+            target_orientation = point["Orientation"] if orientation else None
+            # Run the code.
+            joints, elapsed, error = self.run_code(lower, upper, mode, target_position, target_orientation)
+            # If we got an error, save it.
+            if error is not None:
+                if error not in errors:
+                    errors.append(error)
+                if len(errors) >= self.examples:
+                    break
+                continue
+            # See if we got a valid number of joints back.
+            got = len(joints)
+            if got != number:
+                error = f"Returned the wrong number of joints - expected {number} but got {got}."
+                if error not in errors:
+                    errors.append(error)
+                if len(errors) >= self.examples:
+                    break
+                continue
+            # If there are any errors, that is all we will give feedback about, so don't test anything else.
+            if len(errors) > 0:
+                continue
+            # See if we reached the target.
+            positions, orientations = self.robot.forward_kinematics(lower, upper, joints)
+            distance = difference_distance(target_position, positions[-1])
+            angle = 0 if orientation is None else difference_angle(target_orientation, orientations[-1])
+            # If we did, this was a success so continue.
+            if self.robot.reached(distance, angle):
+                continue
+            # Otherwise, detail what the issue was.
+            a = f" and orientation {neat(target_orientation)}" if orientation else ""
+            b = f" and orientation {neat(orientations[-1])}" if orientation else ""
+            failures.append(f"Failed to reach position {neat(target_position)}{a}. Instead reached position "
+                            f"{neat(positions[-1])}{b}. The correct joint values were {neat(point['Joints'])} and the "
+                            f"joints produced by the code were {neat(joints)}.")
+        total = len(errors)
+        if total > 0:
+            plural = "s" if total > 1 else ""
+            s = (f"<FEEDBACK>\nThe code was tested on multiple trials with valid inputs but encountered the following "
+                 f"error{plural}:")
+            for error in errors:
+                s += f"\n{error}"
+            return f"{s}\n</FEEDBACK>"
+        total = min(self.examples, len(failures))
+        if total < 1:
+            return ""
+        s = (f"<FEEDBACK>\nThe code was tested on multiple trials with valid inputs but failed to reach all targets. "
+             f"The solution for the joints generated from a working inverse kinematics solver have been provided for "
+             f"you to learn from:")
+        for i in range(total):
+            s += f"\n{failures[i]}"
+        return f"{s}\n</FEEDBACK>"
 
     def prepare_llm(self, lower: int = 0, upper: int = -1, orientation: bool = False, mode: str = NORMAL) -> str:
         """
@@ -1030,18 +1141,6 @@ def get_direction_value(value, representation: str) -> str:
     return representation if value > 0 else f"-{representation}"
 
 
-def reached(distance: float = 0, angle: float = 0, distance_error: float = 0.001, angle_error: float = 0.001) -> bool:
-    """
-    Check if a robot has reached a target
-    :param distance: The distance from the target.
-    :param angle: The angle from the target.
-    :param distance_error: The maximum acceptable positional error.
-    :param angle_error: The maximum acceptable orientation error.
-    :return: True if the target was reached, false otherwise.
-    """
-    return distance <= distance_error and angle <= angle_error
-
-
 def neat(value: float or list or tuple or np.array) -> str:
     """
     Format a float value with no trailing zeros.
@@ -1061,6 +1160,26 @@ def neat(value: float or list or tuple or np.array) -> str:
     # Otherwise, clean the value.
     value = str(value).rstrip('0').rstrip('.')
     return "0" if value == "" else value
+
+
+def difference_distance(a, b) -> float:
+    """
+    Get the difference between two positions.
+    :param a: First position.
+    :param b: Second position.
+    :return: The differences between the two positions.
+    """
+    return np.sqrt(sum([(x - y) ** 2 for x, y in zip(a, b)]))
+
+
+def difference_angle(a, b) -> float:
+    """
+    Get the difference between two angles.
+    :param a: First angle.
+    :param b: Second angle.
+    :return: The differences between the two angle.
+    """
+    return sum([abs(x - y) for x, y in zip(a, b)])
 
 
 def main() -> None:

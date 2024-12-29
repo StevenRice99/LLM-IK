@@ -17,7 +17,7 @@ from matplotlib import pyplot as plt
 from scipy.spatial.transform import Rotation
 from tabulate import tabulate
 
-MODELS = "Models"
+ROBOTS = "Robots"
 INFO = "Info"
 INTERACTIONS = "Interactions"
 SOLUTIONS = "Solutions"
@@ -53,14 +53,15 @@ class Robot:
     Handle all aspects of serial robots.
     """
 
-    def __init__(self, name: str, models: str = MODELS, info: str = INFO, training: int = TRAINING,
-                 evaluating: int = EVALUATING, seed: int = SEED, distance_error: float = DISTANCE_ERROR,
-                 angle_error: float = ANGLE_ERROR):
+    def __init__(self, name: str, robots: str = ROBOTS, info: str = INFO, results: str = RESULTS,
+                 training: int = TRAINING, evaluating: int = EVALUATING, seed: int = SEED,
+                 distance_error: float = DISTANCE_ERROR, angle_error: float = ANGLE_ERROR):
         """
         Initialize the robot.
         :param name: The name of the URDF to load.
-        :param models: The folder models are stored in.
+        :param robots: The folder models are stored in.
         :param info: The folder to save info about chains to.
+        :param info: The folder to save results to.
         :param training: The number of poses to use for training the LLM.
         :param evaluating: The number of poses to use for evaluating the LLMs.
         :param distance_error: The acceptable positional error.
@@ -70,6 +71,7 @@ class Robot:
         self.name = os.path.splitext(name)[0]
         # Cache the to save info to.
         self.info = os.path.join(os.getcwd(), info, self.name)
+        self.results = os.path.join(os.getcwd(), results, self.name, "IKPy")
         self.chains = None
         self.joints = 0
         self.training = 0
@@ -78,7 +80,7 @@ class Robot:
         self.angle_error = max(0.0, angle_error)
         self.data = {}
         # Nothing to do if the file does not exist.
-        path = os.path.join(os.getcwd(), models, name)
+        path = os.path.join(os.getcwd(), robots, name)
         if not os.path.exists(path):
             logging.error(f"{self.name} | Path '{path}' does not exist.")
             return
@@ -190,9 +192,9 @@ class Robot:
                     self.chains[lower][upper] = chain
                     with open(os.path.join(self.info, f"{lower + 1}-{upper + 1}.txt"), "w") as file:
                         file.write(self.details(lower, upper)[0])
+        logging.info(f"{self.name} | Info saved to '{self.info}'.")
         # Set the seed for generating training and evaluating instances.
         self.load_data(training, evaluating, seed)
-        logging.info(f"{self.name} | Loaded | {self.joints} Joints | Info saved to '{self.info}'.")
 
     def __str__(self) -> str:
         """
@@ -200,6 +202,62 @@ class Robot:
         :return: The table of the details of the full robot.
         """
         return self.details()[0]
+
+    def save_results(self) -> None:
+        """
+        Save the results for built-in inverse kinematics.
+        :return: Nothing.
+        """
+        # Nothing to do if the robot is not valid.
+        if not self.is_valid():
+            logging.error(f"{self.name} | Save Results | Robot not configured.")
+            return
+        # Loop for every link.
+        for lower in range(self.joints):
+            for upper in range(lower, self.joints):
+                for orientation in [False, True]:
+                    # Single joints only solve for position.
+                    if orientation and lower == upper:
+                        continue
+                    # Get the data for this.
+                    data = self.get_data(lower, upper, False, orientation)
+                    total = len(data)
+                    if total < 1:
+                        continue
+                    # Tabulate results.
+                    successes = 0
+                    total_distance = 0
+                    total_angle = 0
+                    total_time = 0
+                    for point in data:
+                        distance = point["Distance"]
+                        angle = point["Angle"] if orientation else 0
+                        total_time += point["Time"]
+                        reached = self.reached(distance, angle)
+                        if reached:
+                            successes += 1
+                            continue
+                        total_distance += distance
+                        total_angle += angle
+                    # Format results.
+                    failures = total - successes
+                    total_distance = 0 if failures < 1 else neat(total_distance / failures)
+                    total_angle = 0 if failures < 1 else neat(total_angle / failures)
+                    total_time = neat(total_time / total)
+                    successes = neat(successes / total * 100)
+                    s = "Success Rate (%),Average Failure Distance"
+                    if orientation:
+                        s += ",Average Failure Angle (°)"
+                    s += f",Elapsed Time (s)\n{successes}%,{total_distance}"
+                    if orientation:
+                        s += f",{total_angle}°"
+                    s += f",{total_time} s"
+                    # Save results.
+                    os.makedirs(self.results, exist_ok=True)
+                    path = os.path.join(self.results, f"{lower}-{upper}-{TRANSFORM if orientation else POSITION}.csv")
+                    with open(path, "w") as file:
+                        file.write(s)
+        logging.info(f"{self.name} | Save Results | IKPy results saved to '{self.results}'.")
 
     def load_data(self, training: int = TRAINING, evaluating: int = EVALUATING, seed: int = SEED) -> None:
         """
@@ -209,6 +267,10 @@ class Robot:
         :param seed: The seed to generate the data with.
         :return: Nothing.
         """
+        # Nothing to do if the robot is not valid.
+        if not self.is_valid():
+            logging.error(f"{self.name} | Load Data | Robot not configured.")
+            return
         # Clear any previous data.
         self.data = {}
         # Set the random seed.
@@ -228,6 +290,7 @@ class Robot:
             self.data = df.to_dict(orient="dict")
             logging.info(f"{self.name}| Seed = {seed} | Training = {training} | Evaluating = {evaluating} | Generated "
                          f"data loaded from '{path}'.")
+            self.save_results()
             return
         # Run all possible joint configurations.
         for lower in range(self.joints):
@@ -314,17 +377,15 @@ class Robot:
         self.data = df.to_dict(orient="dict")
         logging.info(f"{self.name}| Seed = {seed} | Training = {training} | Evaluating = {evaluating} | Generated "
                      f"data saved to '{path}'.")
+        self.save_results()
 
-    def get_data(self, lower: int = 0, upper: int = -1, training: bool = True, orientation: bool = False,
-                 start: int = 0, count: int = 1) -> list:
+    def get_data(self, lower: int = 0, upper: int = -1, training: bool = True, orientation: bool = False) -> list:
         """
         Get data to use for training or evaluation.
         :param lower: The starting joint.
         :param upper: The ending joint.
         :param training: If this is training data or evaluating data.
         :param orientation: If this data cares about the orientation or not.
-        :param start: The starting index of data to request.
-        :param count: The number of data entries to request.
         :return: The training or evaluation data as a list of dicts.
         """
         # Nothing to do if the robot is not valid.
@@ -344,27 +405,14 @@ class Robot:
         if data is None:
             logging.error(f"{self.name} | {lower + 1} to {upper + 1} | Get Data | No data.")
             return []
-        # Ensure valid values.
-        if start < 0:
-            start = 0
-        if count < 1:
-            count = 1
-        end = start + count
-        # If there are fewer data points than the range requested, clamp it.
-        for title in data:
-            instances = len(data[title])
-            if instances < end:
-                end = instances
-                logging.warning(f"{self.name} | {lower + 1} to {upper + 1} | Get Data | Cannot get {count} instances "
-                                f"from index {start} as there are {end} instances total; clamping.")
-                break
-        if start >= end:
-            start = end - 1
-            logging.warning(f"{self.name} | {lower + 1} to {upper + 1} | Get Data | Start was more than {end}; clamped "
-                            f"to {start}.")
         # Get all instances in a list.
         values = []
-        for i in range(start, end):
+        total = 0
+        for title in data:
+            amount = len(data[title])
+            if amount > total:
+                total = amount
+        for i in range(total):
             value = {}
             for title in data:
                 value[title] = data[title][i]
@@ -937,7 +985,7 @@ class Solver:
                             f"'{mode}' not valid, using '{NORMAL}' instead.")
             mode = NORMAL
         # Get the data to run the code against.
-        data = self.robot.get_data(lower, upper, True, orientation, 0, self.robot.training)
+        data = self.robot.get_data(lower, upper, True, orientation)
         # If there is no data, there is nothing to give feedback on.
         if len(data) < 1:
             logging.error(f"{self.model} | {lower + 1} to {upper + 1} | {solving} | {mode} | No data.")
@@ -1064,7 +1112,7 @@ class Solver:
     def is_valid(self) -> bool:
         """
         Ensure the solver is valid.
-        :return: True if the sovler's robot is valid, false otherwise.
+        :return: True if the robot is valid, false otherwise.
         """
         return self.robot is not None and self.robot.is_valid()
 

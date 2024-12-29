@@ -794,6 +794,7 @@ class Solver:
         self.examples = max(1, examples)
         self.feedbacks = max(0, feedbacks)
         logging.info(f"{self.model} | {self.robot.name} | Solver loaded.")
+        self.save_prompts()
 
     def __str__(self) -> str:
         """
@@ -801,6 +802,40 @@ class Solver:
         :return: The name of this solver.
         """
         return self.model
+
+    def save_prompts(self) -> None:
+        """
+        Save all valid initial prompts to text documents.
+        :return:
+        """
+        # Nothing to load if the solver is not valid.
+        if not self.is_valid():
+            logging.error(f"{self.model} | Save Prompts | Solver is not valid.")
+            return
+        # Loop all possible combinations.
+        for lower in range(self.robot.joints):
+            for upper in range(lower, self.robot.joints):
+                for orientation in [False, True]:
+                    # No solving for orientation with just one link.
+                    if orientation and lower == upper:
+                        break
+                    # Try building the prompts for all modes.
+                    for mode in [NORMAL, EXTEND, DYNAMIC]:
+                        # Can only do the normal mode for single-link chains.
+                        if mode != NORMAL and lower == upper:
+                            break
+                        # Get the prompt.
+                        prompt = self.prepare_llm(lower, upper, orientation, mode, True)
+                        # If no prompt is returned, there is nothing to do.
+                        if prompt == "":
+                            continue
+                        # Save to a text file.
+                        path = os.path.join(self.interactions,
+                                            f"{lower}-{upper}-{TRANSFORM if orientation else POSITION}-{mode}")
+                        os.makedirs(path, exist_ok=True)
+                        with open(os.path.join(path, f"0-{MESSAGE}.txt"), "w") as file:
+                            file.write(prompt)
+        logging.info(f"{self.model} | Save Prompts | Valid initial prompts saved to '{self.interactions}'.")
 
     def load_codes(self) -> None:
         """
@@ -964,7 +999,8 @@ class Solver:
                           f"returned.")
         return joints, elapsed, message
 
-    def prepare_feedback(self, lower: int = 0, upper: int = -1, orientation: bool = False, mode: str = NORMAL) -> str:
+    def prepare_feedback(self, lower: int = 0, upper: int = -1, orientation: bool = False,
+                         mode: str = NORMAL) -> str:
         """
         Prepare a feedback prompt for the LLM.
         :param lower: The starting joint.
@@ -1008,6 +1044,13 @@ class Solver:
                     break
                 continue
             # See if we got a valid number of joints back.
+            if joints is None:
+                error = f"Returned no joints - expected {number}."
+                if error not in errors:
+                    errors.append(error)
+                if len(errors) >= self.examples:
+                    break
+                continue
             got = len(joints)
             if got != number:
                 error = f"Returned the wrong number of joints - expected {number} but got {got}."
@@ -1050,14 +1093,16 @@ class Solver:
             s += f"\n{failures[i]}"
         return f"{s}\n</FEEDBACK>"
 
-    def prepare_llm(self, lower: int = 0, upper: int = -1, orientation: bool = False, mode: str = NORMAL) -> str:
+    def prepare_llm(self, lower: int = 0, upper: int = -1, orientation: bool = False, mode: str = NORMAL,
+                    suppress: bool = False) -> str:
         """
         Prepare an initial prompt for the LLM.
         :param lower: The starting joint.
         :param upper: The ending joint.
         :param orientation: If we want to solve for orientation.
         :param mode: The solving mode to use.
-        :return:
+        :param suppress: If the error for the code not existing should be suppressed.
+        :return: The initial prompt for the LLM.
         """
         # Nothing to do if the solver is not valid.
         if not self.is_valid():
@@ -1086,12 +1131,20 @@ class Solver:
             previous = upper - 1
             previous_mode = NORMAL if lower == previous else EXTEND
             path = os.path.join(self.solutions,
-                                f"{lower}-{previous}-{previous_mode}-{solving}.py")
+                                f"{lower}-{previous}-{solving}-{previous_mode}.py")
             # Cannot prepare a prompt in this mode if the chain to extend does not exist.
             if not os.path.exists(path):
-                logging.error(f"{self.model} | {self.robot.name} | {lower + 1} to {upper + 1} | Prepare LLM | Cannot "
-                              f"load an extending prompt as '{path}' does not exist.")
+                if not suppress:
+                    logging.error(f"{self.model} | {self.robot.name} | {lower + 1} to {upper + 1} | Prepare LLM | "
+                                  f"Cannot load an extending prompt as '{path}' does not exist.")
                 return ""
+            existing_feedback = self.prepare_feedback(lower, previous, orientation, previous_mode)
+            # Only perform an extending prompt if the previous chain was successful.
+            if existing_feedback != "":
+                logging.info(f"{self.model} | {self.robot.name} | {lower + 1} to {upper + 1} | Not performing an "
+                             f"extending prompt as '{path}' is not perfectly successful.")
+                return ""
+            # Add the extending prompt portions.
             total = upper - lower
             plural = "s" if total > 1 else ""
             additional = (f" To help you, a solution for solving the sub-chain of the first {total} link{plural} is "
@@ -1237,6 +1290,7 @@ def main() -> None:
     """
     ur5 = Robot("UR5.urdf")
     solver = Solver("gpt-4o", ur5)
+    print(solver.prepare_llm(mode=EXTEND))
 
 
 if __name__ == "__main__":

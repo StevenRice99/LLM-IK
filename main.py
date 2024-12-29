@@ -18,6 +18,7 @@ from scipy.spatial.transform import Rotation
 from tabulate import tabulate
 
 ROBOTS = "Robots"
+MODELS = "Models"
 INFO = "Info"
 INTERACTIONS = "Interactions"
 SOLUTIONS = "Solutions"
@@ -38,6 +39,8 @@ EVALUATING_TITLE = "Evaluating"
 TRAINING = 1
 EVALUATING = 1
 SEED = 42
+FEEDBACKS = 0
+EXAMPLES = 1
 
 DISTANCE_ERROR = 0.001
 ANGLE_ERROR = 0.001
@@ -53,34 +56,25 @@ class Robot:
     Handle all aspects of serial robots.
     """
 
-    def __init__(self, name: str, robots: str = ROBOTS, info: str = INFO, results: str = RESULTS,
-                 training: int = TRAINING, evaluating: int = EVALUATING, seed: int = SEED,
-                 distance_error: float = DISTANCE_ERROR, angle_error: float = ANGLE_ERROR):
+    def __init__(self, name: str):
         """
         Initialize the robot.
         :param name: The name of the URDF to load.
-        :param robots: The folder models are stored in.
-        :param info: The folder to save info about chains to.
-        :param info: The folder to save results to.
-        :param training: The number of poses to use for training the LLM.
-        :param evaluating: The number of poses to use for evaluating the LLMs.
-        :param distance_error: The acceptable positional error.
-        :param angle_error: The acceptable orientational error.
-        :param seed: The seed to use for generating poses.
         """
+        # Make the name which was passed valid.
+        if not name.endswith(".urdf"):
+            name = name + ".urdf"
         self.name = os.path.splitext(name)[0]
         # Cache the to save info to.
-        self.info = os.path.join(os.getcwd(), info, self.name)
-        self.results = os.path.join(os.getcwd(), results, self.name, "IKPy")
+        self.info = os.path.join(INFO, self.name)
+        self.results = os.path.join(RESULTS, self.name, "IKPy")
         self.chains = None
         self.joints = 0
         self.training = 0
         self.evaluating = 0
-        self.distance_error = max(0.0, distance_error)
-        self.angle_error = max(0.0, angle_error)
         self.data = {}
         # Nothing to do if the file does not exist.
-        path = os.path.join(os.getcwd(), robots, name)
+        path = os.path.join(ROBOTS, name)
         if not os.path.exists(path):
             logging.error(f"{self.name} | Path '{path}' does not exist.")
             return
@@ -194,7 +188,7 @@ class Robot:
                         file.write(self.details(lower, upper)[0])
         logging.info(f"{self.name} | Info saved to '{self.info}'.")
         # Set the seed for generating training and evaluating instances.
-        self.load_data(training, evaluating, seed)
+        self.load_data()
 
     def __str__(self) -> str:
         """
@@ -233,8 +227,8 @@ class Robot:
                         distance = point["Distance"]
                         angle = point["Angle"] if orientation else 0
                         total_time += point["Time"]
-                        reached = self.reached(distance, angle)
-                        if reached:
+                        did_reach = reached(distance, angle)
+                        if did_reach:
                             successes += 1
                             continue
                         total_distance += distance
@@ -259,12 +253,9 @@ class Robot:
                         file.write(s)
         logging.info(f"{self.name} | Save Results | IKPy results saved to '{self.results}'.")
 
-    def load_data(self, training: int = TRAINING, evaluating: int = EVALUATING, seed: int = SEED) -> None:
+    def load_data(self) -> None:
         """
         Load data for the robot to use.
-        :param training: The number of training data instances.
-        :param evaluating: The number of evaluation data instances.
-        :param seed: The seed to generate the data with.
         :return: Nothing.
         """
         # Nothing to do if the robot is not valid.
@@ -274,21 +265,21 @@ class Robot:
         # Clear any previous data.
         self.data = {}
         # Set the random seed.
-        random.seed(seed)
-        np.random.seed(seed)
+        random.seed(SEED)
+        np.random.seed(SEED)
         # Ensure valid data amounts.
-        if training < 1:
-            training = 1
-        if evaluating < 1:
-            evaluating = 1
-        self.training = training
-        self.evaluating = evaluating
+        global TRAINING
+        global EVALUATING
+        if TRAINING < 1:
+            TRAINING = 1
+        if EVALUATING < 1:
+            EVALUATING = 1
         # If there is already data for this configuration, load it.
-        path = os.path.join(self.info, f"{seed}-{training}-{evaluating}.json")
+        path = os.path.join(self.info, f"{SEED}-{TRAINING}-{EVALUATING}.json")
         if os.path.exists(path):
             df = pd.read_json(path, orient="records", lines=True)
             self.data = df.to_dict(orient="dict")
-            logging.info(f"{self.name}| Seed = {seed} | Training = {training} | Evaluating = {evaluating} | Generated "
+            logging.info(f"{self.name}| Seed = {SEED} | Training = {TRAINING} | Evaluating = {EVALUATING} | Generated "
                          f"data loaded from '{path}'.")
             self.save_results()
             return
@@ -318,7 +309,7 @@ class Robot:
                 # Create the training and evaluation data.
                 for part in [TRAINING_TITLE, EVALUATING_TITLE]:
                     # Run for the number of instances.
-                    instances = training if part == TRAINING_TITLE else evaluating
+                    instances = TRAINING if part == TRAINING_TITLE else EVALUATING
                     for i in range(instances):
                         # Define random joint values.
                         joints = []
@@ -366,8 +357,8 @@ class Robot:
                     TRAINING_TITLE: {POSITION: training_position, TRANSFORM: training_transform},
                     EVALUATING_TITLE: {POSITION: evaluating_position, TRANSFORM: evaluating_transform}
                 }
-                logging.info(f"{self.name} | {lower + 1} to {upper + 1} | Seed = {seed} | Training = {training} | "
-                             f"Evaluating = {evaluating} | Data generated.")
+                logging.info(f"{self.name} | {lower + 1} to {upper + 1} | Seed = {SEED} | Training = {TRAINING} | "
+                             f"Evaluating = {EVALUATING} | Data generated.")
         # Save the newly generated data.
         os.makedirs(self.info, exist_ok=True)
         df = pd.DataFrame(self.data)
@@ -375,7 +366,7 @@ class Robot:
         # Reload the data to ensure consistent values.
         df = pd.read_json(path, orient="records", lines=True)
         self.data = df.to_dict(orient="dict")
-        logging.info(f"{self.name}| Seed = {seed} | Training = {training} | Evaluating = {evaluating} | Generated "
+        logging.info(f"{self.name}| Seed = {SEED} | Training = {TRAINING} | Evaluating = {EVALUATING} | Generated "
                      f"data saved to '{path}'.")
         self.save_results()
 
@@ -713,15 +704,6 @@ class Robot:
                           "seconds")
         return solution, distance, angle, elapsed
 
-    def reached(self, distance: float = 0, angle: float = 0) -> bool:
-        """
-        Determine if a target has been reached.
-        :param distance: The distance.
-        :param angle: The angle.
-        :return: True if it has been reached, false otherwise.
-        """
-        return distance <= self.distance_error and angle <= self.angle_error
-
     def is_valid(self) -> bool:
         """
         Ensure the robot is valid.
@@ -754,17 +736,11 @@ class Solver:
     Handle a solver attached to a robot.
     """
 
-    def __init__(self, model: str, robot: Robot, feedbacks: int = 0, examples: int = 1,
-                 interactions: str = INTERACTIONS, solutions: str = SOLUTIONS, results: str = RESULTS):
+    def __init__(self, model: str, robot: Robot):
         """
         Load a solver.
         :param model: The name of the model.
         :param robot: The robot for the solver.
-        :param feedbacks: The amount of times we can give feedback.
-        :param examples: The number of examples to give for each feedback.
-        :param interactions: The folder to save and load interactions to and from.
-        :param solutions: The folder to save and load solutions to and from.
-        :param results: The folder to save results to.
         """
         self.model = model
         self.robot = robot
@@ -772,27 +748,20 @@ class Solver:
         # If the robot is invalid, there is nothing to do.
         if self.robot is None:
             logging.error(f"{self.model} | Robot is null.")
-            self.examples = 0
-            self.feedbacks = 0
-            self.interactions = os.path.join(os.getcwd(), interactions, "_Invalid", self.model)
-            self.solutions = os.path.join(os.getcwd(), solutions, "_Invalid", self.model)
-            self.results = os.path.join(os.getcwd(), results, "_Invalid", self.model)
+            self.interactions = os.path.join(INTERACTIONS, "_Invalid", self.model)
+            self.solutions = os.path.join(SOLUTIONS, "_Invalid", self.model)
+            self.results = os.path.join(RESULTS, "_Invalid", self.model)
             return
         # Cache folders.
-        self.interactions = os.path.join(os.getcwd(), interactions, self.robot.name, self.model)
-        self.solutions = os.path.join(os.getcwd(), solutions, self.robot.name, self.model)
-        self.results = os.path.join(os.getcwd(), results, self.robot.name, self.model)
+        self.interactions = os.path.join(INTERACTIONS, self.robot.name, self.model)
+        self.solutions = os.path.join(SOLUTIONS, self.robot.name, self.model)
+        self.results = os.path.join(RESULTS, self.robot.name, self.model)
         # Ensure the robot is valid.
         if not robot.is_valid():
-            self.examples = 0
-            self.feedbacks = 0
             logging.error(f"{self.model} | {self.robot.name} | Robot is not valid.")
             return
         # Load the code of all existing solvers.
         self.load_codes()
-        # Ensure feedback cases are valid.
-        self.examples = max(1, examples)
-        self.feedbacks = max(0, feedbacks)
         logging.info(f"{self.model} | {self.robot.name} | Solver loaded.")
         self.save_prompts()
 
@@ -1040,7 +1009,7 @@ class Solver:
             if error is not None:
                 if error not in errors:
                     errors.append(error)
-                if len(errors) >= self.examples:
+                if len(errors) >= EXAMPLES:
                     break
                 continue
             # See if we got a valid number of joints back.
@@ -1048,7 +1017,7 @@ class Solver:
                 error = f"Returned no joints - expected {number}."
                 if error not in errors:
                     errors.append(error)
-                if len(errors) >= self.examples:
+                if len(errors) >= EXAMPLES:
                     break
                 continue
             got = len(joints)
@@ -1056,7 +1025,7 @@ class Solver:
                 error = f"Returned the wrong number of joints - expected {number} but got {got}."
                 if error not in errors:
                     errors.append(error)
-                if len(errors) >= self.examples:
+                if len(errors) >= EXAMPLES:
                     break
                 continue
             # If there are any errors, that is all we will give feedback about, so don't test anything else.
@@ -1067,7 +1036,7 @@ class Solver:
             distance = difference_distance(target_position, positions[-1])
             angle = 0 if orientation is None else difference_angle(target_orientation, orientations[-1])
             # If we did, this was a success so continue.
-            if self.robot.reached(distance, angle):
+            if reached(distance, angle):
                 continue
             # Otherwise, detail what the issue was.
             a = f" and orientation {neat(target_orientation)}" if orientation else ""
@@ -1083,7 +1052,7 @@ class Solver:
             for error in errors:
                 s += f"\n{error}"
             return f"{s}\n</FEEDBACK>"
-        total = min(self.examples, len(failures))
+        total = min(EXAMPLES, len(failures))
         if total < 1:
             return ""
         s = (f"<FEEDBACK>\nThe code was tested on multiple trials with valid inputs but failed to reach all targets. "
@@ -1263,6 +1232,16 @@ def neat(value: float or list or tuple or np.array) -> str:
     return "0" if value == "" else value
 
 
+def reached(distance: float = 0, angle: float = 0) -> bool:
+    """
+    Determine if a target has been reached.
+    :param distance: The distance.
+    :param angle: The angle.
+    :return: True if it has been reached, false otherwise.
+    """
+    return distance <= DISTANCE_ERROR and angle <= ANGLE_ERROR
+
+
 def difference_distance(a, b) -> float:
     """
     Get the difference between two positions.
@@ -1273,7 +1252,7 @@ def difference_distance(a, b) -> float:
     return np.sqrt(sum([(x - y) ** 2 for x, y in zip(a, b)]))
 
 
-def difference_angle(a, b) -> float:
+def difference_angle(a: float or int = 0, b: float or int = 0) -> float:
     """
     Get the difference between two angles.
     :param a: First angle.
@@ -1283,15 +1262,137 @@ def difference_angle(a, b) -> float:
     return sum([abs(x - y) for x, y in zip(a, b)])
 
 
-def main() -> None:
+def get_files(directory) -> list[str]:
+    """
+    Get all files in a directory.
+    :param directory: The directory to get the files from.
+    :return: The names of all files in the directory.
+    """
+    return [f for f in os.listdir(directory) if os.path.isfile(os.path.join(directory, f))]
+
+
+def main(cwd: str or None = None, robots: str or list[str] or None = None, models: str or list[str] or None = None,
+         orientation: bool or None = False, feedbacks: int = FEEDBACKS, examples: int = EXAMPLES,
+         training: int = TRAINING, evaluating: int = EVALUATING, seed: int = SEED,
+         distance_error: float = DISTANCE_ERROR, angle_error: float = ANGLE_ERROR) -> None:
     """
     Handle main program operations.
     :return: Nothing.
     """
-    ur5 = Robot("UR5.urdf")
-    solver = Solver("gpt-4o", ur5)
-    print(solver.prepare_llm(mode=EXTEND))
-
+    # If no directory was passed, run in the current working directory.
+    if cwd is None:
+        cwd = os.getcwd()
+        logging.info(f"Using '{cwd}' as the working directory.")
+    # Otherwise, check if the passed directory exists.
+    elif not os.path.exists(cwd):
+        logging.error(f"Working directory of '{cwd}' does not exist.")
+        return
+    logging.info(f"Set '{cwd}' as the working directory.")
+    # Set all paths relative to the working directory and make sure they exist.
+    global ROBOTS
+    ROBOTS = os.path.join(cwd, ROBOTS)
+    os.makedirs(ROBOTS, exist_ok=True)
+    global MODELS
+    MODELS = os.path.join(cwd, MODELS)
+    os.makedirs(MODELS, exist_ok=True)
+    global INFO
+    INFO = os.path.join(cwd, INFO)
+    os.makedirs(INFO, exist_ok=True)
+    global INTERACTIONS
+    INTERACTIONS = os.path.join(cwd, INTERACTIONS)
+    os.makedirs(INTERACTIONS, exist_ok=True)
+    global SOLUTIONS
+    SOLUTIONS = os.path.join(cwd, SOLUTIONS)
+    os.makedirs(SOLUTIONS, exist_ok=True)
+    global RESULTS
+    RESULTS = os.path.join(cwd, RESULTS)
+    os.makedirs(RESULTS, exist_ok=True)
+    # If there are no robots, there is nothing to do.
+    existing = get_files(ROBOTS)
+    if len(existing) < 1:
+        logging.error(f"No robots in '{ROBOTS}'.")
+        return
+    # If no robots were passed, run all of them.
+    if robots is None:
+        robots = existing
+    # Otherwise, if a string was passed, load it if it exists.
+    elif isinstance(robots, str):
+        if robots not in existing and f"{robots}.urdf" not in existing:
+            logging.error(f"Robot '{robots}' does not exist in '{ROBOTS}'.")
+            return
+        robots = [robots]
+    # Otherwise, if a list, ensure all passed robots exist.
+    else:
+        found = []
+        for robot in robots:
+            if robot not in existing and f"{robot}.urdf" not in existing:
+                logging.warning(f"Robot '{robot}' does not exist in '{ROBOTS}'; removing it.")
+                continue
+            found.append(robot)
+        if len(found) < 1:
+            logging.error(f"No valid robots were passed; nothing to perform on.")
+            return
+        robots = found
+    # Load all robots.
+    created = []
+    for name in robots:
+        robot = Robot(name)
+        if robot.is_valid():
+            created.append(robot)
+    if len(created) < 1:
+        logging.error("No robots could be successfully loaded; nothing to perform on.")
+        return
+    robots = created
+    total = len(robots)
+    logging.info(f"{total} robot{'s' if total > 1 else ''} loaded.")
+    # TODO - Load solvers.
+    # Get the orientation types we wish to solve for.
+    if orientation is None:
+        logging.info("Solving for both position and transform.")
+        orientation = [False, True]
+    else:
+        logging.info(f"Solving for only {'transform' if orientation else 'position'}.")
+        orientation = [orientation]
+    # Ensure all other values are valid and assigned.
+    if feedbacks < 0:
+        feedbacks = 0
+    global FEEDBACKS
+    FEEDBACKS = feedbacks
+    logging.info(f"Providing {FEEDBACKS} feedback{'' if FEEDBACKS == 1 else 's'}.")
+    if examples < 1:
+        logging.warning("Examples must be at minimum one.")
+        examples = 1
+    global EXAMPLES
+    EXAMPLES = examples
+    logging.info(f"Giving feedbacks with {EXAMPLES} example{'' if EXAMPLES == 1 else 's'}.")
+    if training < 1:
+        logging.warning("Must have at least one training sample.")
+        training = 1
+    global TRAINING
+    TRAINING = training
+    logging.info(f"Training with {TRAINING} sample{'' if TRAINING == 1 else 's'}.")
+    if evaluating < 1:
+        logging.warning("Must have at least one evaluating sample.")
+        evaluating = 1
+    global EVALUATING
+    EVALUATING = evaluating
+    logging.info(f"Evaluating with {EVALUATING} sample{'' if EVALUATING == 1 else 's'}.")
+    global SEED
+    SEED = seed
+    logging.info(f"Using the seed {SEED}.")
+    if distance_error < 0:
+        logging.warning("Distance error must be at least zero.")
+        distance_error = 0
+    global DISTANCE_ERROR
+    DISTANCE_ERROR = distance_error
+    logging.info(f"Acceptable distance error is {distance_error}.")
+    if angle_error < 0:
+        logging.warning("Angle error must be at least zero.")
+        angle_error = 0
+    global ANGLE_ERROR
+    ANGLE_ERROR = angle_error
+    logging.info(f"Acceptable angle error is {angle_error}°.")
+    # TODO - Actually run stuff.
 
 if __name__ == "__main__":
     main()

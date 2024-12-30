@@ -1345,46 +1345,7 @@ def llm_ik(robots: str or list[str] or None = None, models: str or list[str] or 
     os.makedirs(SOLUTIONS, exist_ok=True)
     RESULTS = os.path.join(cwd, RESULTS)
     os.makedirs(RESULTS, exist_ok=True)
-    # If there are no robots, there is nothing to do.
-    existing = get_files(ROBOTS)
-    if len(existing) < 1:
-        logging.error(f"No robots in '{ROBOTS}'.")
-        return None
-    # If no robots were passed, run all of them.
-    if robots is None:
-        robots = existing
-    # Otherwise, if a string was passed, load it if it exists.
-    elif isinstance(robots, str):
-        if robots not in existing and f"{robots}.urdf" not in existing:
-            logging.error(f"Robot '{robots}' does not exist in '{ROBOTS}'.")
-            return None
-        robots = [robots]
-    # Otherwise, if a list, ensure all passed robots exist.
-    else:
-        found = []
-        for robot in robots:
-            if robot not in existing and f"{robot}.urdf" not in existing:
-                logging.warning(f"Robot '{robot}' does not exist in '{ROBOTS}'; removing it.")
-                continue
-            found.append(robot)
-        if len(found) < 1:
-            logging.error(f"No valid robots were passed; nothing to perform on.")
-            return None
-        robots = found
-    # Load all robots.
-    created = []
-    for name in robots:
-        robot = Robot(name)
-        if robot.is_valid():
-            created.append(robot)
-    if len(created) < 1:
-        logging.error("No robots could be successfully loaded; nothing to perform on.")
-        return None
-    robots = created
-    total = len(robots)
-    logging.info(f"{total} robot{'s' if total > 1 else ''} loaded.")
-    # Load the LLM solvers.
-    # TODO - Load solvers.
+
     # Ensure the passed types are valid.
     acceptable = [NORMAL, EXTEND, DYNAMIC]
     # If noe were passed, use all.
@@ -1468,6 +1429,101 @@ def llm_ik(robots: str or list[str] or None = None, models: str or list[str] or 
     global RUN
     RUN = run
     logging.info("Running LLM API calls." if RUN else "Not running LLM API calls.")
+    # If there are no robots, there is nothing to do.
+    existing = get_files(ROBOTS)
+    if len(existing) < 1:
+        logging.error(f"No robots in '{ROBOTS}'.")
+        return None
+    # If no robots were passed, run all of them.
+    if robots is None:
+        robots = existing
+    # Otherwise, if a string was passed, load it if it exists.
+    elif isinstance(robots, str):
+        if robots not in existing and f"{robots}.urdf" not in existing:
+            logging.error(f"Robot '{robots}' does not exist in '{ROBOTS}'.")
+            return None
+        robots = [robots]
+    # Otherwise, if a list, ensure all passed robots exist.
+    else:
+        found = []
+        for robot in robots:
+            if robot not in existing and f"{robot}.urdf" not in existing:
+                logging.warning(f"Robot '{robot}' does not exist in '{ROBOTS}'; removing it.")
+                continue
+            found.append(robot)
+        if len(found) < 1:
+            logging.error(f"No valid robots were passed; nothing to perform on.")
+            return None
+        robots = found
+    # Load all robots.
+    created = []
+    for name in robots:
+        robot = Robot(name)
+        if robot.is_valid():
+            created.append(robot)
+    if len(created) < 1:
+        logging.error("No robots could be successfully loaded; nothing to perform on.")
+        return None
+    robots = created
+    total = len(robots)
+    logging.info(f"{total} robot{'s' if total > 1 else ''} loaded.")
+    # See which models exist in the core folder.
+    found = get_files(MODELS)
+    # Clean out only to the models we are interested in.
+    total = len(found)
+    # If there are no models in the first place, there is nothing to check.
+    if total < 1:
+        logging.warning("No models; can only perform built-in IKPy inverse kinematics.")
+        models = []
+    # Otherwise, ensure our passed models are valid.
+    else:
+        # Clean the names of models.
+        for i in range(total):
+            found[i] = found[i].replace(".txt", "")
+        # If no models were passed, use all found in the folder.
+        if models is None:
+            logging.info(f"Loading{' all' if total > 1 else ''} {total} model{'s' if total > 1 else ''}.")
+            models = found
+        # If it was a string, make sure it exists.
+        elif isinstance(models, str):
+            if models not in found:
+                logging.error(f"Model '{models}' does not exist in '{MODELS}'; can only perform built-in IKPy inverse "
+                              f"kinematics.")
+                models = []
+                total = 0
+            else:
+                logging.info(f"Loading '{models}'.")
+                models = [models]
+                total = 1
+        # If it was a list, make sure they all are created.
+        else:
+            selected = []
+            for model in models:
+                if model not in found:
+                    logging.error(f"Model '{model}' does not exist in '{MODELS}'; removing it.")
+                else:
+                    selected.append(model)
+            models = selected
+            total = len(models)
+            if total < 1:
+                logging.error("No models being loaded; can only perform built-in IKPy inverse kinematics.")
+            else:
+                logging.info(f"Loading {total} model{'s' if total > 1 else ''}.")
+    # If there is at least one model we should load, let us try to fully load it.
+    if total > 0:
+        created = []
+        # Try for every LLM paired with every robot.
+        for name in models:
+            for robot in robots:
+                model = Solver(name, robot)
+                if model.is_valid():
+                    created.append(model)
+        models = created
+        total = len(models)
+        if total < 1:
+            logging.warning("No models loaded; can only perform built-in IKPy inverse kinematics.")
+        else:
+            logging.info(f"Loaded {total} model{'s' if total > 1 else ''}.")
     # TODO - Actually run stuff.
 
 

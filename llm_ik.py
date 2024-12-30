@@ -1,3 +1,4 @@
+import argparse
 import copy
 import importlib
 import importlib.util
@@ -17,38 +18,45 @@ from matplotlib import pyplot as plt
 from scipy.spatial.transform import Rotation
 from tabulate import tabulate
 
+# Folders.
 ROBOTS = "Robots"
 MODELS = "Models"
+PROVIDERS = "Providers"
+KEYS = "Keys"
 INFO = "Info"
 INTERACTIONS = "Interactions"
 SOLUTIONS = "Solutions"
 RESULTS = "Results"
 
+# If we should run the actual API calls or not.
+RUN = False
+
+# Execution modes.
 NORMAL = "Normal"
 EXTEND = "Extend"
 DYNAMIC = "Dynamic"
 
+# API interaction file naming.
 MESSAGE = "Message"
 RESPONSE = "Response"
 
+# Data naming.
 POSITION = "Position"
 TRANSFORM = "Transform"
 TRAINING_TITLE = "Training"
 EVALUATING_TITLE = "Evaluating"
 
+# Parameters.
 TRAINING = 1
 EVALUATING = 1
 SEED = 42
 FEEDBACKS = 0
 EXAMPLES = 1
-
 DISTANCE_ERROR = 0.001
 ANGLE_ERROR = 0.001
 
+# Default bounding value.
 BOUND = 2 * np.pi
-
-# Set up logging.
-logging.basicConfig(level=logging.INFO, format="%(asctime)s | %(levelname)s | %(message)s")
 
 
 class Robot:
@@ -205,7 +213,7 @@ class Robot:
         # Nothing to do if the robot is not valid.
         if not self.is_valid():
             logging.error(f"{self.name} | Save Results | Robot not configured.")
-            return
+            return None
         # Loop for every link.
         for lower in range(self.joints):
             for upper in range(lower, self.joints):
@@ -261,19 +269,12 @@ class Robot:
         # Nothing to do if the robot is not valid.
         if not self.is_valid():
             logging.error(f"{self.name} | Load Data | Robot not configured.")
-            return
+            return None
         # Clear any previous data.
         self.data = {}
         # Set the random seed.
         random.seed(SEED)
         np.random.seed(SEED)
-        # Ensure valid data amounts.
-        global TRAINING
-        global EVALUATING
-        if TRAINING < 1:
-            TRAINING = 1
-        if EVALUATING < 1:
-            EVALUATING = 1
         # If there is already data for this configuration, load it.
         path = os.path.join(self.info, f"{SEED}-{TRAINING}-{EVALUATING}.json")
         if os.path.exists(path):
@@ -282,7 +283,7 @@ class Robot:
             logging.info(f"{self.name}| Seed = {SEED} | Training = {TRAINING} | Evaluating = {EVALUATING} | Generated "
                          f"data loaded from '{path}'.")
             self.save_results()
-            return
+            return None
         # Run all possible joint configurations.
         for lower in range(self.joints):
             self.data[lower] = {}
@@ -780,7 +781,7 @@ class Solver:
         # Nothing to load if the solver is not valid.
         if not self.is_valid():
             logging.error(f"{self.model} | Save Prompts | Solver is not valid.")
-            return
+            return None
         # Loop all possible combinations.
         for lower in range(self.robot.joints):
             for upper in range(lower, self.robot.joints):
@@ -814,7 +815,7 @@ class Solver:
         # Nothing to load if the solver is not valid.
         if not self.is_valid():
             logging.error(f"{self.model} | Load Codes | Solver is not valid.")
-            return
+            return None
         # Load every possible solver.
         end = self.robot.joints
         for lower in range(end):
@@ -838,7 +839,7 @@ class Solver:
         # Nothing to do if the solver is not valid.
         if not self.is_valid():
             logging.error(f"{self.model} | Load Code | Solver is not valid.")
-            return
+            return None
         # Ensure valid values.
         lower, upper = self.robot.validate_lower_upper(lower, upper)
         if mode not in [NORMAL, EXTEND, DYNAMIC]:
@@ -854,7 +855,7 @@ class Solver:
             if not suppress:
                 logging.error(f"{self.model} | {lower + 1} to {upper + 1} | Load Code | {solving} | {mode} | Solver "
                               f"'{path}' does not exist.")
-            return
+            return None
         # Try to load the inverse kinematics method from the Python file.
         try:
             spec = importlib.util.spec_from_file_location(name, path)
@@ -864,12 +865,12 @@ class Solver:
             if not hasattr(module, "inverse_kinematics"):
                 logging.error(f"{self.model} | {lower + 1} to {upper + 1} | Load Code | {solving} | {mode} | Solver "
                               f"'{path}' does not have the method 'inverse_kinematics'.")
-                return
+                return None
             method = getattr(module, "inverse_kinematics")
         except Exception as e:
             logging.error(f"{self.model} | {lower + 1} to {upper + 1} | Load Code | {solving} | {mode} | Failed to load"
                           f" '{path}': {e}")
-            return
+            return None
         # Cache the method.
         if self.code is None:
             self.code = {}
@@ -1271,14 +1272,45 @@ def get_files(directory) -> list[str]:
     return [f for f in os.listdir(directory) if os.path.isfile(os.path.join(directory, f))]
 
 
-def main(cwd: str or None = None, robots: str or list[str] or None = None, models: str or list[str] or None = None,
-         orientation: bool or None = False, feedbacks: int = FEEDBACKS, examples: int = EXAMPLES,
-         training: int = TRAINING, evaluating: int = EVALUATING, seed: int = SEED,
-         distance_error: float = DISTANCE_ERROR, angle_error: float = ANGLE_ERROR) -> None:
+def llm_ik(robots: str or list[str] or None = None, models: str or list[str] or None = None,
+           orientation: bool or None = False, types: str or list[str] or None = None, feedbacks: int = FEEDBACKS,
+           examples: int = EXAMPLES, training: int = TRAINING, evaluating: int = EVALUATING, seed: int = SEED,
+           distance_error: float = DISTANCE_ERROR, angle_error: float = ANGLE_ERROR, length: int or None = None,
+           run: bool = False, cwd: str or None = None, level: str = "INFO") -> None:
     """
-    Handle main program operations.
+    Run LLM inverse kinematics.
+    :param robots: The names of the robots.
+    :param models: The names of the LLMs.
+    :param orientation: If we want to solve for position, transform, or both being none.
+    :param types: The solving types.
+    :param feedbacks: The max number of times to give feedback.
+    :param examples: The number of examples to give with feedbacks.
+    :param training: The number of training samples.
+    :param evaluating: The number of evaluating samples.
+    :param seed: The samples generation seed.
+    :param distance_error: The acceptable distance error.
+    :param angle_error: The acceptable angle error.
+    :param length: The maximum chain length to solve.
+    :param run: Enable API running.
+    :param cwd: The working directory.
+    :param level: The logging level.
     :return: Nothing.
     """
+    # Set the logging level.
+    level = level.upper()
+    if level == "CRITICAL" or level == "FATAL":
+        level = logging.CRITICAL
+    elif level == "ERROR":
+        level = logging.ERROR
+    elif level == "WARNING" or level == "WARN":
+        level = logging.WARNING
+    elif level == "INFO":
+        level = logging.INFO
+    elif level == "DEBUG":
+        level = logging.DEBUG
+    else:
+        level = logging.NOTSET
+    logging.basicConfig(level=level, format="%(asctime)s | %(levelname)s | %(message)s")
     # If no directory was passed, run in the current working directory.
     if cwd is None:
         cwd = os.getcwd()
@@ -1286,32 +1318,38 @@ def main(cwd: str or None = None, robots: str or list[str] or None = None, model
     # Otherwise, check if the passed directory exists.
     elif not os.path.exists(cwd):
         logging.error(f"Working directory of '{cwd}' does not exist.")
-        return
+        return None
     logging.info(f"Set '{cwd}' as the working directory.")
     # Set all paths relative to the working directory and make sure they exist.
     global ROBOTS
+    global MODELS
+    global PROVIDERS
+    global KEYS
+    global INFO
+    global INTERACTIONS
+    global SOLUTIONS
+    global RESULTS
     ROBOTS = os.path.join(cwd, ROBOTS)
     os.makedirs(ROBOTS, exist_ok=True)
-    global MODELS
     MODELS = os.path.join(cwd, MODELS)
     os.makedirs(MODELS, exist_ok=True)
-    global INFO
+    PROVIDERS = os.path.join(cwd, PROVIDERS)
+    os.makedirs(PROVIDERS, exist_ok=True)
+    KEYS = os.path.join(cwd, KEYS)
+    os.makedirs(KEYS, exist_ok=True)
     INFO = os.path.join(cwd, INFO)
     os.makedirs(INFO, exist_ok=True)
-    global INTERACTIONS
     INTERACTIONS = os.path.join(cwd, INTERACTIONS)
     os.makedirs(INTERACTIONS, exist_ok=True)
-    global SOLUTIONS
     SOLUTIONS = os.path.join(cwd, SOLUTIONS)
     os.makedirs(SOLUTIONS, exist_ok=True)
-    global RESULTS
     RESULTS = os.path.join(cwd, RESULTS)
     os.makedirs(RESULTS, exist_ok=True)
     # If there are no robots, there is nothing to do.
     existing = get_files(ROBOTS)
     if len(existing) < 1:
         logging.error(f"No robots in '{ROBOTS}'.")
-        return
+        return None
     # If no robots were passed, run all of them.
     if robots is None:
         robots = existing
@@ -1319,7 +1357,7 @@ def main(cwd: str or None = None, robots: str or list[str] or None = None, model
     elif isinstance(robots, str):
         if robots not in existing and f"{robots}.urdf" not in existing:
             logging.error(f"Robot '{robots}' does not exist in '{ROBOTS}'.")
-            return
+            return None
         robots = [robots]
     # Otherwise, if a list, ensure all passed robots exist.
     else:
@@ -1331,7 +1369,7 @@ def main(cwd: str or None = None, robots: str or list[str] or None = None, model
             found.append(robot)
         if len(found) < 1:
             logging.error(f"No valid robots were passed; nothing to perform on.")
-            return
+            return None
         robots = found
     # Load all robots.
     created = []
@@ -1341,11 +1379,36 @@ def main(cwd: str or None = None, robots: str or list[str] or None = None, model
             created.append(robot)
     if len(created) < 1:
         logging.error("No robots could be successfully loaded; nothing to perform on.")
-        return
+        return None
     robots = created
     total = len(robots)
     logging.info(f"{total} robot{'s' if total > 1 else ''} loaded.")
+    # Load the LLM solvers.
     # TODO - Load solvers.
+    # Ensure the passed types are valid.
+    acceptable = [NORMAL, EXTEND, DYNAMIC]
+    # If noe were passed, use all.
+    if types is None:
+        types = acceptable
+    # If one was passed, but it is not a valid option, there is nothing to do.
+    elif isinstance(types, str):
+        if types not in acceptable:
+            logging.error(f"Solving type of '{types}' is not an option; nothing to perform.")
+            return None
+        types = [types]
+    # Ensure all list options are valid.
+    else:
+        found = []
+        for t in types:
+            if t not in acceptable:
+                logging.warning(f"Solving type of '{t}' is not an option; removing it.")
+            found.append(t)
+        if len(found) < 1:
+            logging.error("No valid solving types; nothing to perform.")
+            return None
+        # Ensure they are in the order of normal, extend, and then dynamic.
+        types = sorted(found, reverse=True)
+    logging.info(f"Solving in the following modes: {types}.")
     # Get the orientation types we wish to solve for.
     if orientation is None:
         logging.info("Solving for both position and transform.")
@@ -1356,15 +1419,6 @@ def main(cwd: str or None = None, robots: str or list[str] or None = None, model
     # Ensure all other values are valid and assigned.
     if feedbacks < 0:
         feedbacks = 0
-    global FEEDBACKS
-    FEEDBACKS = feedbacks
-    logging.info(f"Providing {FEEDBACKS} feedback{'' if FEEDBACKS == 1 else 's'}.")
-    if examples < 1:
-        logging.warning("Examples must be at minimum one.")
-        examples = 1
-    global EXAMPLES
-    EXAMPLES = examples
-    logging.info(f"Giving feedbacks with {EXAMPLES} example{'' if EXAMPLES == 1 else 's'}.")
     if training < 1:
         logging.warning("Must have at least one training sample.")
         training = 1
@@ -1377,6 +1431,18 @@ def main(cwd: str or None = None, robots: str or list[str] or None = None, model
     global EVALUATING
     EVALUATING = evaluating
     logging.info(f"Evaluating with {EVALUATING} sample{'' if EVALUATING == 1 else 's'}.")
+    global FEEDBACKS
+    FEEDBACKS = feedbacks
+    logging.info(f"Providing {FEEDBACKS} feedback{'' if FEEDBACKS == 1 else 's'}.")
+    if examples < 1:
+        logging.warning("Examples must be at minimum one.")
+        examples = 1
+    elif examples > TRAINING:
+        logging.warning(f"Examples must be at most the training size of {TRAINING}.")
+        examples = TRAINING
+    global EXAMPLES
+    EXAMPLES = examples
+    logging.info(f"Giving feedbacks with {EXAMPLES} example{'' if EXAMPLES == 1 else 's'}.")
     global SEED
     SEED = seed
     logging.info(f"Using the seed {SEED}.")
@@ -1392,7 +1458,42 @@ def main(cwd: str or None = None, robots: str or list[str] or None = None, model
     global ANGLE_ERROR
     ANGLE_ERROR = angle_error
     logging.info(f"Acceptable angle error is {angle_error}°.")
+    if length is None:
+        logging.info(f"Solving chains of all lengths.")
+    else:
+        if length < 1:
+            logging.info("Solving chain lengths must be at least one.")
+            length = 1
+        logging.info(f"Solving chains up to a length of {length}.")
+    global RUN
+    RUN = run
+    logging.info("Running LLM API calls." if RUN else "Not running LLM API calls.")
     # TODO - Actually run stuff.
 
+
 if __name__ == "__main__":
-    main()
+    # Configure the argument parser.
+    parser = argparse.ArgumentParser(description="LLM Inverse Kinematics")
+    parser.add_argument("-r", "--robots", type=str or list[str] or None, default=None, help="The names of the robots.")
+    parser.add_argument("-m", "--models", type=str or list[str] or None, default=None, help="The names of the LLMs.")
+    parser.add_argument("-o", "--orientation", type=bool or None, default=False, help="If we want to solve for "
+                                                                                      "position, transform, or both "
+                                                                                      "being none.")
+    parser.add_argument("-t", "--types", type=str or list[str] or None, default=None, help="The solving types.")
+    parser.add_argument("-f", "--feedbacks", type=int, default=FEEDBACKS, help="The max number of times to give "
+                                                                               "feedback.")
+    parser.add_argument("-e", "--examples", type=int, default=EXAMPLES, help="The number of examples to give with "
+                                                                             "feedbacks.")
+    parser.add_argument("-a", "--training", type=int, default=TRAINING, help="The number of training samples.")
+    parser.add_argument("-v", "--evaluating", type=int, default=EVALUATING, help="The number of evaluating samples.")
+    parser.add_argument("-s", "--seed", type=int, default=SEED, help="The samples generation seed.")
+    parser.add_argument("-d", "--distance", type=float, default=DISTANCE_ERROR, help="The acceptable distance error.")
+    parser.add_argument("-n", "--angle", type=float, default=ANGLE_ERROR, help="The acceptable angle error.")
+    parser.add_argument("-l", "--length", type=int or None, default=None, help="The maximum chain length to solve.")
+    parser.add_argument("-c", "--cwd", type=str or None, default=None, help="The working directory.")
+    parser.add_argument("-u", "--run", action="store_true", help="Enable API running.")
+    parser.add_argument("-g", "--logging", type=str, default="INFO", help="The logging level.")
+    args = parser.parse_args()
+    # Run the program.
+    llm_ik(args.robots, args.models, args.orientation, args.types, args.feedbacks, args.examples, args.training,
+           args.evaluating, args.seed, args.distance, args.angle, args.length, args.run, args.cwd, args.logging)

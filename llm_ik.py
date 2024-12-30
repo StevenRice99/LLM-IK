@@ -743,9 +743,19 @@ class Solver:
         :param model: The name of the model.
         :param robot: The robot for the solver.
         """
+        self.code = None
+        self.url = None
+        self.methods = False
+        self.key = ""
+        # Ensure the file exists.
+        path = os.path.join(MODELS, f"{model}.txt")
+        if not os.path.exists(path):
+            logging.error(f"Model '{path}' does not exist.")
+            self.model = ""
+            self.robot = None
+            return
         self.model = model
         self.robot = robot
-        self.code = None
         # If the robot is invalid, there is nothing to do.
         if self.robot is None:
             logging.error(f"{self.model} | Robot is null.")
@@ -761,6 +771,53 @@ class Solver:
         if not robot.is_valid():
             logging.error(f"{self.model} | {self.robot.name} | Robot is not valid.")
             return
+        # Read the models' file.
+        with open(path, "r") as file:
+            provider = file.read()
+        provider = provider.strip()
+        # If there are details, this indicates the provider of the model.
+        if provider != "":
+            # If the provider does not exist, indicate this.
+            path = os.path.join(PROVIDERS, f"{provider}.txt")
+            if not os.path.exists(path):
+                logging.warning(f"{self.model} | {self.robot.name} | Provider '{path}' does not exist; setting this to "
+                                "a manual chat interface without methods instead.")
+            # Otherwise, load the provider.
+            else:
+                with open(path, "r") as file:
+                    s = file.read()
+                s = s.strip()
+                # If there was no URL for the provider, indicate this.
+                if s == "":
+                    logging.warning(f"{self.model} | {self.robot.name} | Provider '{path}' does not have a URL; setting"
+                                    f" this to a manual chat interface without methods instead.")
+                # Otherwise, set the URL.
+                else:
+                    lines = s.split()
+                    self.url = lines[0].strip()
+                    logging.info(f"{self.model} | {self.robot.name} | Provider '{provider}' URL is '{self.url}'.")
+                    # See if this endpoint supports methods.
+                    if len(lines) > 1:
+                        methods = lines[1].upper()
+                        if methods == "TRUE" or methods == "1":
+                            self.methods = True
+                    logging.info(f"{self.model} | {self.robot.name} | Provider '{provider}' "
+                                 f"{'supports' if self.methods else 'does not support'} methods.")
+        else:
+            logging.info(f"{self.model} | {self.robot.name} | No provider; this means this is manually for a chat "
+                         "interface without methods.")
+        if self.url is not None:
+            path = os.path.join(KEYS, f"{provider}.txt")
+            if not os.path.exists(path):
+                logging.info(f"{self.model} | {self.robot.name} | No key at '{path}' for provider '{provider}'.")
+            else:
+                with open(path, "r") as file:
+                    s = file.read()
+                self.key = s.strip()
+                if self.key == "":
+                    logging.warning(f"{self.model} | {self.robot.name} | No key specified in '{path}'.")
+                else:
+                    logging.info(f"{self.model} | {self.robot.name} | Loaded key from '{path}'.")
         # Load the code of all existing solvers.
         self.load_codes()
         logging.info(f"{self.model} | {self.robot.name} | Solver loaded.")

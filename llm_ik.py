@@ -5,6 +5,7 @@ import importlib.util
 import logging
 import os.path
 import random
+import re
 import time
 import traceback
 import warnings
@@ -27,9 +28,6 @@ INFO = "Info"
 INTERACTIONS = "Interactions"
 SOLUTIONS = "Solutions"
 RESULTS = "Results"
-
-# If we should run the actual API calls or not.
-RUN = False
 
 # Execution modes.
 NORMAL = "Normal"
@@ -195,8 +193,6 @@ class Robot:
                     with open(os.path.join(self.info, f"{lower + 1}-{upper + 1}.txt"), "w") as file:
                         file.write(self.details(lower, upper)[0])
         logging.info(f"{self.name} | Info saved to '{self.info}'.")
-        # Set the seed for generating training and evaluating instances.
-        self.load_data()
 
     def __str__(self) -> str:
         """
@@ -819,9 +815,149 @@ class Solver:
                 else:
                     logging.info(f"{self.model} | {self.robot.name} | Loaded key from '{path}'.")
         # Load the code of all existing solvers.
-        self.load_codes()
         logging.info(f"{self.model} | {self.robot.name} | Solver loaded.")
-        self.save_prompts()
+
+    def perform(self, orientation: list[bool] or None = None, mode: list[str] or None = None,
+                length: int or None = None, run: bool = False) -> None:
+        """
+        Perform solver logic.
+        :param orientation: The end effector goals to run API calls with.
+        :param mode: The modes to run API calls with.
+        :param length: The maximum chain length to run API calls with.
+        :param run: If API calls should be run.
+        :return: Nothing.
+        """
+        # Nothing to load if the solver is not valid.
+        if not self.is_valid():
+            logging.error(f"{self.model} | Perform | Solver is not valid.")
+            return None
+        # Set default values if none are passed.
+        if orientation is None:
+            orientation = [False, True]
+        if mode is None:
+            mode = [NORMAL, EXTEND, DYNAMIC]
+        # Loop all possible combinations.
+        for lower in range(self.robot.joints):
+            for upper in range(lower, self.robot.joints):
+                for current_orientation in [False, True]:
+                    # No solving for orientation with just one link.
+                    if current_orientation and lower == upper:
+                        break
+                    # Try building the prompts for all modes.
+                    for current_mode in [NORMAL, EXTEND, DYNAMIC]:
+                        # Can only do the normal mode for single-link chains.
+                        if current_mode != NORMAL and lower == upper:
+                            break
+                        # Handle the interaction as much as possible.
+                        while True:
+                            # Get the latest message to send to the LLM.
+                            message = self.handle_interactions(lower, upper, current_orientation, current_mode)
+                            if message == "":
+                                break
+                            # Check if we should try continuing this with the API.
+                            if (run and current_orientation in orientation and current_mode in mode and
+                                    (length is None or upper - lower + 1 <= length)):
+                                solving = TRANSFORM if current_orientation else POSITION
+                                logging.error(f"{self.model} | {self.robot.name} | {lower + 1} to {upper + 1} | "
+                                              f"{solving} | {current_mode} | Perform | LLM interactions not yet "
+                                              "implemented.")
+                                # TODO - Run API calls.
+
+    def handle_interactions(self, lower: int = 0, upper: int = -1, orientation: bool = False,
+                            mode: str = NORMAL) -> (str, int):
+        """
+        Handle determining what the next messages should be.
+        :param lower: The starting joint.
+        :param upper: The ending joint.
+        :param orientation: If this data cares about the orientation or not.
+        :param mode: The mode by which the code was achieved.
+        :return: The next message to send to the LLM.
+        """
+        # Nothing to do if the solver is not valid.
+        if not self.is_valid():
+            logging.error(f"{self.model} | Handle Interactions | Solver is not valid.")
+            return ""
+        # Ensure valid values.
+        lower, upper = self.robot.validate_lower_upper(lower, upper)
+        # If only one joint, can only solve in normal mode and for the position only.
+        if lower == upper:
+            mode = NORMAL
+            orientation = False
+        # Ensure the mode is valid.
+        if mode not in [NORMAL, EXTEND, DYNAMIC]:
+            logging.warning(f"{self.model} | {self.robot.name} | {lower + 1} to {upper + 1} | Handle Interactions | "
+                            f"Mode '{mode}' not valid, using '{NORMAL}' instead.")
+            mode = NORMAL
+        # Get all interactions.
+        solving = TRANSFORM if orientation else POSITION
+        root = os.path.join(self.interactions, f"{lower}-{upper}-{solving}-{mode}")
+        interactions = sorted(get_files(root)) if os.path.exists(root) else []
+        total = len(interactions)
+        # Create the initial prompt if needed.
+        initial = f"0-{MESSAGE}.txt"
+        if total < 1 or initial not in interactions:
+            s = self.prepare_llm(lower, upper, orientation, mode, True)
+            if s != "":
+                os.makedirs(root, exist_ok=True)
+                path = os.path.join(root, initial)
+                with open(path, "w") as file:
+                    file.write(s)
+                logging.info(f"{self.model} | {self.robot.name} | {lower + 1} to {upper + 1} | {solving} | {mode} | "
+                             f"Handle Interactions | Initial prompt generated to '{path}'.")
+                return s
+            return s
+        # If there have already been the maximum number of feedbacks given, we are done.
+        count = sum(RESPONSE in s for s in interactions)
+        if count >= FEEDBACKS:
+            logging.info(f"{self.model} | {self.robot.name} | {lower + 1} to {upper + 1} | {solving} | {mode} | {count}"
+                         " Handle Interactions | feedbacks; done.")
+            return ""
+        # Read the last interaction.
+        path = os.path.join(root, interactions[-1])
+        with open(path, "r") as file:
+            s = file.read()
+        # If the last interaction was a message for the LLM, load it.
+        if MESSAGE in interactions[-1]:
+            logging.info(f"{self.model} | {self.robot.name} | {lower + 1} to {upper + 1} | {solving} | {mode} | Handle "
+                         f"Interactions | Last message loaded from '{path}'.")
+            return s.strip()
+        # Otherwise, it was a response from the LLM, so prepare the next message by parsing it.
+        codes = re.findall(r"```python\s*([\s\S]*?)```", s, re.IGNORECASE)
+        # If not codes were returned, indicate this.
+        if len(codes) < 1:
+            logging.info(f"{self.model} | {self.robot.name} | {lower + 1} to {upper + 1} | {solving} | {mode} | Handle "
+                         f"Interactions | No Python code found in '{path}'; creating message indicating this.")
+            path = os.path.join(root, f"{total}-{MESSAGE}.txt")
+            s = "You did not respond with valid code to solve the inverse kinematics."
+            os.makedirs(root, exist_ok=True)
+            with open(path, "w") as file:
+                file.write(s)
+            return s
+        # Otherwise, parse the code assuming the last code would be the complete code snippet.
+        code = codes[-1].strip()
+        logging.info(f"{self.model} | {self.robot.name} | {lower + 1} to {upper + 1} | {solving} | {mode} | Handle "
+                     f"Interactions | Extracted code found in '{path}'.")
+        path = os.path.join(self.interactions, f"{lower}-{upper}-{solving}-{mode}.py")
+        # Save the code so it can be loaded by the program.
+        os.makedirs(self.interactions, exist_ok=True)
+        with open(path, "w") as file:
+            file.write(code)
+        # Evaluate the code.
+        self.load_code(lower, upper, orientation, mode)
+        s = self.prepare_feedback(lower, upper, orientation, mode)
+        # If the code performed perfectly, we are done.
+        if s == "":
+            logging.info(f"{self.model} | {self.robot.name} | {lower + 1} to {upper + 1} | {solving} | {mode} | Handle "
+                         "Interactions | Performed perfectly on the training set; done.")
+            return ""
+        # Otherwise, prepare feedback to provide to the LLM.
+        path = os.path.join(root, f"{total}-{MESSAGE}.txt")
+        os.makedirs(root, exist_ok=True)
+        with open(path, "w") as file:
+            file.write(s)
+        logging.info(f"{self.model} | {self.robot.name} | {lower + 1} to {upper + 1} | {solving} | {mode} | Handle "
+                     f"Interactions | New feedback saved to '{path}'.")
+        return s
 
     def __str__(self) -> str:
         """
@@ -829,58 +965,6 @@ class Solver:
         :return: The name of this solver.
         """
         return self.model
-
-    def save_prompts(self) -> None:
-        """
-        Save all valid initial prompts to text documents.
-        :return:
-        """
-        # Nothing to load if the solver is not valid.
-        if not self.is_valid():
-            logging.error(f"{self.model} | Save Prompts | Solver is not valid.")
-            return None
-        # Loop all possible combinations.
-        for lower in range(self.robot.joints):
-            for upper in range(lower, self.robot.joints):
-                for orientation in [False, True]:
-                    # No solving for orientation with just one link.
-                    if orientation and lower == upper:
-                        break
-                    # Try building the prompts for all modes.
-                    for mode in [NORMAL, EXTEND, DYNAMIC]:
-                        # Can only do the normal mode for single-link chains.
-                        if mode != NORMAL and lower == upper:
-                            break
-                        # Get the prompt.
-                        prompt = self.prepare_llm(lower, upper, orientation, mode, True)
-                        # If no prompt is returned, there is nothing to do.
-                        if prompt == "":
-                            continue
-                        # Save to a text file.
-                        path = os.path.join(self.interactions,
-                                            f"{lower}-{upper}-{TRANSFORM if orientation else POSITION}-{mode}")
-                        os.makedirs(path, exist_ok=True)
-                        with open(os.path.join(path, f"0-{MESSAGE}.txt"), "w") as file:
-                            file.write(prompt)
-        logging.info(f"{self.model} | Save Prompts | Valid initial prompts saved to '{self.interactions}'.")
-
-    def load_codes(self) -> None:
-        """
-        Load all existing codes for the solver.
-        :return: Nothing.
-        """
-        # Nothing to load if the solver is not valid.
-        if not self.is_valid():
-            logging.error(f"{self.model} | Load Codes | Solver is not valid.")
-            return None
-        # Load every possible solver.
-        end = self.robot.joints
-        for lower in range(end):
-            for upper in range(lower, end):
-                for orientation in [False, True]:
-                    for mode in [NORMAL, EXTEND, DYNAMIC]:
-                        # Suppress the error messages for solvers that do not exist.
-                        self.load_code(lower, upper, orientation, mode, True)
 
     def load_code(self, lower: int = 0, upper: int = -1, orientation: bool = False, mode: str = NORMAL,
                   suppress: bool = False) -> None:
@@ -1377,7 +1461,7 @@ def llm_ik(robots: str or list[str] or None = None, models: str or list[str] or 
         logging.error(f"Working directory of '{cwd}' does not exist.")
         return None
     logging.info(f"Set '{cwd}' as the working directory.")
-    # Set all paths relative to the working directory and make sure they exist.
+    # Set all paths relative to the working directory and make sure the "required" folders for a human to use exist.
     global ROBOTS
     global MODELS
     global PROVIDERS
@@ -1387,22 +1471,17 @@ def llm_ik(robots: str or list[str] or None = None, models: str or list[str] or 
     global SOLUTIONS
     global RESULTS
     ROBOTS = os.path.join(cwd, ROBOTS)
-    os.makedirs(ROBOTS, exist_ok=True)
     MODELS = os.path.join(cwd, MODELS)
-    os.makedirs(MODELS, exist_ok=True)
     PROVIDERS = os.path.join(cwd, PROVIDERS)
-    os.makedirs(PROVIDERS, exist_ok=True)
-    KEYS = os.path.join(cwd, KEYS)
-    os.makedirs(KEYS, exist_ok=True)
-    INFO = os.path.join(cwd, INFO)
-    os.makedirs(INFO, exist_ok=True)
     INTERACTIONS = os.path.join(cwd, INTERACTIONS)
-    os.makedirs(INTERACTIONS, exist_ok=True)
     SOLUTIONS = os.path.join(cwd, SOLUTIONS)
-    os.makedirs(SOLUTIONS, exist_ok=True)
     RESULTS = os.path.join(cwd, RESULTS)
-    os.makedirs(RESULTS, exist_ok=True)
-
+    INFO = os.path.join(cwd, INFO)
+    KEYS = os.path.join(cwd, KEYS)
+    os.makedirs(ROBOTS, exist_ok=True)
+    os.makedirs(MODELS, exist_ok=True)
+    os.makedirs(PROVIDERS, exist_ok=True)
+    os.makedirs(KEYS, exist_ok=True)
     # Ensure the passed types are valid.
     acceptable = [NORMAL, EXTEND, DYNAMIC]
     # If noe were passed, use all.
@@ -1483,9 +1562,7 @@ def llm_ik(robots: str or list[str] or None = None, models: str or list[str] or 
             logging.info("Solving chain lengths must be at least one.")
             length = 1
         logging.info(f"Solving chains up to a length of {length}.")
-    global RUN
-    RUN = run
-    logging.info("Running LLM API calls." if RUN else "Not running LLM API calls.")
+    logging.info("Running LLM API calls." if run else "Not running LLM API calls.")
     # If there are no robots, there is nothing to do.
     existing = get_files(ROBOTS)
     if len(existing) < 1:
@@ -1581,7 +1658,13 @@ def llm_ik(robots: str or list[str] or None = None, models: str or list[str] or 
             logging.warning("No models loaded; can only perform built-in IKPy inverse kinematics.")
         else:
             logging.info(f"Loaded {total} model{'s' if total > 1 else ''}.")
-    # TODO - Actually run stuff.
+    # Load robot data.
+    for robot in robots:
+        robot.load_data()
+    # Run the solvers.
+    for solver in models:
+        solver.perform(orientation, types, length, run)
+    # TODO - Evaluate the solvers and then run overall evaluations.
 
 
 if __name__ == "__main__":

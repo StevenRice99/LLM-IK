@@ -243,10 +243,11 @@ class Robot:
                     total_angle = 0 if failures < 1 else neat(total_angle / failures)
                     total_time = neat(total_time / total)
                     successes = neat(successes / total * 100)
-                    s = "Success Rate (%),Average Failure Distance"
+                    failures = neat(failures / total * 100)
+                    s = "Success Rate (%),Failure Rate(%),Error Rate (%),Average Failure Distance"
                     if orientation:
                         s += ",Average Failure Angle (°)"
-                    s += f",Elapsed Time (s)\n{successes}%,{total_distance}"
+                    s += f",Average Elapsed Time (s)\n{successes}%,{failures}%,0%,{total_distance}"
                     if orientation:
                         s += f",{total_angle}°"
                     s += f",{total_time} s"
@@ -818,12 +819,11 @@ class Solver:
         logging.info(f"{self.model} | {self.robot.name} | Solver loaded.")
 
     def perform(self, orientation: list[bool] or None = None, mode: list[str] or None = None,
-                length: int or None = None, run: bool = False) -> None:
+                run: bool = False) -> None:
         """
         Perform solver logic.
         :param orientation: The end effector goals to run API calls with.
         :param mode: The modes to run API calls with.
-        :param length: The maximum chain length to run API calls with.
         :param run: If API calls should be run.
         :return: Nothing.
         """
@@ -854,14 +854,14 @@ class Solver:
                             message = self.handle_interactions(lower, upper, current_orientation, current_mode)
                             if message == "":
                                 break
-                            # Check if we should try continuing this with the API.
-                            if (run and current_orientation in orientation and current_mode in mode and
-                                    (length is None or upper - lower + 1 <= length)):
-                                solving = TRANSFORM if current_orientation else POSITION
-                                logging.error(f"{self.model} | {self.robot.name} | {lower + 1} to {upper + 1} | "
-                                              f"{solving} | {current_mode} | Perform | LLM interactions not yet "
-                                              "implemented.")
-                                # TODO - Run API calls.
+                            # Check if we should try using the model's API.
+                            if not run or current_orientation not in orientation or current_mode not in mode:
+                                continue
+                            solving = TRANSFORM if current_orientation else POSITION
+                            logging.error(f"{self.model} | {self.robot.name} | {lower + 1} to {upper + 1} | "
+                                          f"{solving} | {current_mode} | Perform | LLM interactions not yet "
+                                          "implemented.")
+                            # TODO - Run API calls.
 
     def handle_interactions(self, lower: int = 0, upper: int = -1, orientation: bool = False,
                             mode: str = NORMAL) -> (str, int):
@@ -944,6 +944,7 @@ class Solver:
             file.write(code)
         # Evaluate the code.
         self.load_code(lower, upper, orientation, mode)
+        self.evaluate(lower, upper, orientation, mode)
         s = self.prepare_feedback(lower, upper, orientation, mode)
         # If the code performed perfectly, we are done.
         if s == "":
@@ -1110,6 +1111,87 @@ class Solver:
                           f"returned.")
         return joints, elapsed, message
 
+    def evaluate(self, lower: int = 0, upper: int = -1, orientation: bool = False,
+                 mode: str = NORMAL) -> None:
+        """
+        Save the evaluations of this solver.
+        :param lower: The starting joint.
+        :param upper: The ending joint.
+        :param orientation: If we want to solve for orientation.
+        :param mode: The solving mode to use.
+        :return: Nothing.
+        """
+        # Nothing to do if the solver is not valid.
+        if not self.is_valid():
+            logging.error(f"{self.model} | Evaluate | Solver is not valid.")
+            return None
+        # Ensure valid values.
+        lower, upper = self.robot.validate_lower_upper(lower, upper)
+        solving = POSITION if orientation is None else TRANSFORM
+        if mode not in [NORMAL, EXTEND, DYNAMIC]:
+            logging.warning(f"{self.model} | {self.robot.name} | {lower + 1} to {upper + 1} | Evaluate | Mode "
+                            f"'{mode}' not valid, using '{NORMAL}' instead.")
+            mode = NORMAL
+        # Get the data to run the code against.
+        data = self.robot.get_data(lower, upper, False, orientation)
+        # If there is no data, there is nothing to evaluate.
+        total = len(data)
+        if total < 1:
+            logging.error(f"{self.model} | {lower + 1} to {upper + 1} | {solving} | {mode} | Evaluate | No data.")
+            return None
+        # Store results.
+        successes = 0
+        errors = 0
+        total_distance = 0
+        total_angle = 0
+        total_time = 0
+        # The expected number of joints to be returned.
+        number = upper - lower + 1
+        for point in data:
+            # Determine what to test against.
+            target_position = point["Position"]
+            target_orientation = point["Orientation"] if orientation else None
+            # Run the code.
+            joints, elapsed, error = self.run_code(lower, upper, mode, target_position, target_orientation)
+            total_time += elapsed
+            # Store if there was an error.
+            if error is not None or joints is None or len(joints) != number:
+                errors += 1
+                continue
+            # See if the move was successful.
+            positions, orientations = self.robot.forward_kinematics(lower, upper, joints)
+            distance = difference_distance(target_position, positions[-1])
+            angle = 0 if orientation is None else difference_angle(target_orientation, orientations[-1])
+            # If successful, update it.
+            if reached(distance, angle):
+                successes += 1
+                continue
+            # Otherwise, add to the failure offsets.
+            total_distance += distance
+            total_angle += angle
+        # Tabulate final results.
+        failures = total - successes
+        if failures > 0:
+            total_distance /= failures
+            total_angle /= failures
+        successes = neat(successes / total * 100)
+        failures = neat(failures / total * 100)
+        errors = neat(errors / total * 100)
+        total_distance = neat(total_distance)
+        total_angle = neat(total_angle)
+        total_time = neat(total_time / total)
+        # Save the results.
+        s = f"Success Rate (%),Failure Rate (%),Error Rate (%),Average Failure Distance"
+        if orientation:
+            s += ",Average Failure Angle (°)"
+        s += f",Average Elapsed Time (s)\n{successes}%,{failures}%,{errors}%,{total_distance}"
+        if orientation:
+            s += f",{total_angle}°"
+        s += f"{total_time} s"
+        os.makedirs(self.results, exist_ok=True)
+        with open(os.path.join(self.results, f"{lower}-{upper}-{solving}.csv"), "w") as file:
+            file.write(s)
+
     def prepare_feedback(self, lower: int = 0, upper: int = -1, orientation: bool = False,
                          mode: str = NORMAL) -> str:
         """
@@ -1135,11 +1217,13 @@ class Solver:
         data = self.robot.get_data(lower, upper, True, orientation)
         # If there is no data, there is nothing to give feedback on.
         if len(data) < 1:
-            logging.error(f"{self.model} | {lower + 1} to {upper + 1} | {solving} | {mode} | No data.")
+            logging.error(f"{self.model} | {lower + 1} to {upper + 1} | {solving} | {mode}| Prepare Feedback | No "
+                          f"data.")
             return ""
         # Store what to respond with.
         errors = []
         failures = []
+        # The expected number of joints to be returned.
         number = upper - lower + 1
         for point in data:
             # Determine what to test against.
@@ -1416,8 +1500,8 @@ def get_files(directory) -> list[str]:
 def llm_ik(robots: str or list[str] or None = None, models: str or list[str] or None = None,
            orientation: bool or None = False, types: str or list[str] or None = None, feedbacks: int = FEEDBACKS,
            examples: int = EXAMPLES, training: int = TRAINING, evaluating: int = EVALUATING, seed: int = SEED,
-           distance_error: float = DISTANCE_ERROR, angle_error: float = ANGLE_ERROR, length: int or None = None,
-           run: bool = False, cwd: str or None = None, level: str = "INFO") -> None:
+           distance_error: float = DISTANCE_ERROR, angle_error: float = ANGLE_ERROR, run: bool = False,
+           cwd: str or None = None, level: str = "INFO", bypass: bool = False) -> None:
     """
     Run LLM inverse kinematics.
     :param robots: The names of the robots.
@@ -1431,10 +1515,10 @@ def llm_ik(robots: str or list[str] or None = None, models: str or list[str] or 
     :param seed: The samples generation seed.
     :param distance_error: The acceptable distance error.
     :param angle_error: The acceptable angle error.
-    :param length: The maximum chain length to solve.
     :param run: Enable API running.
     :param cwd: The working directory.
     :param level: The logging level.
+    :param bypass: Bypass the confirmation for API running.
     :return: Nothing.
     """
     # Set the logging level.
@@ -1490,9 +1574,10 @@ def llm_ik(robots: str or list[str] or None = None, models: str or list[str] or 
     # If one was passed, but it is not a valid option, there is nothing to do.
     elif isinstance(types, str):
         if types not in acceptable:
-            logging.error(f"Solving type of '{types}' is not an option; nothing to perform.")
-            return None
-        types = [types]
+            logging.error(f"Solving type of '{types}' is not an option.")
+            types = []
+        else:
+            types = [types]
     # Ensure all list options are valid.
     else:
         found = []
@@ -1501,10 +1586,11 @@ def llm_ik(robots: str or list[str] or None = None, models: str or list[str] or 
                 logging.warning(f"Solving type of '{t}' is not an option; removing it.")
             found.append(t)
         if len(found) < 1:
-            logging.error("No valid solving types; nothing to perform.")
-            return None
-        # Ensure they are in the order of normal, extend, and then dynamic.
-        types = sorted(found, reverse=True)
+            logging.error("No valid solving types.")
+            types = []
+        else:
+            # Ensure they are in the order of normal, extend, and then dynamic.
+            types = sorted(found, reverse=True)
     logging.info(f"Solving in the following modes: {types}.")
     # Get the orientation types we wish to solve for.
     if orientation is None:
@@ -1555,14 +1641,6 @@ def llm_ik(robots: str or list[str] or None = None, models: str or list[str] or 
     global ANGLE_ERROR
     ANGLE_ERROR = angle_error
     logging.info(f"Acceptable angle error is {angle_error}°.")
-    if length is None:
-        logging.info(f"Solving chains of all lengths.")
-    else:
-        if length < 1:
-            logging.info("Solving chain lengths must be at least one.")
-            length = 1
-        logging.info(f"Solving chains up to a length of {length}.")
-    logging.info("Running LLM API calls." if run else "Not running LLM API calls.")
     # If there are no robots, there is nothing to do.
     existing = get_files(ROBOTS)
     if len(existing) < 1:
@@ -1575,8 +1653,9 @@ def llm_ik(robots: str or list[str] or None = None, models: str or list[str] or 
     elif isinstance(robots, str):
         if robots not in existing and f"{robots}.urdf" not in existing:
             logging.error(f"Robot '{robots}' does not exist in '{ROBOTS}'.")
-            return None
-        robots = [robots]
+            robots = []
+        else:
+            robots = [robots]
     # Otherwise, if a list, ensure all passed robots exist.
     else:
         found = []
@@ -1586,21 +1665,27 @@ def llm_ik(robots: str or list[str] or None = None, models: str or list[str] or 
                 continue
             found.append(robot)
         if len(found) < 1:
-            logging.error(f"No valid robots were passed; nothing to perform on.")
-            return None
+            logging.error(f"No valid robots were passed.")
         robots = found
     # Load all robots.
-    created = []
-    for name in robots:
+    created_robots = []
+    for name in existing:
         robot = Robot(name)
         if robot.is_valid():
-            created.append(robot)
-    if len(created) < 1:
+            created_robots.append(robot)
+    if len(created_robots) < 1:
         logging.error("No robots could be successfully loaded; nothing to perform on.")
         return None
-    robots = created
-    total = len(robots)
+    total = len(created_robots)
     logging.info(f"{total} robot{'s' if total > 1 else ''} loaded.")
+    # Get the robots we will actually perform API calls on.
+    perform = []
+    for robot in robots:
+        name = robot.replace(".urdf", "")
+        for c in created_robots:
+            if c.name == name:
+                perform.append(name)
+    robots = perform
     # See which models exist in the core folder.
     found = get_files(MODELS)
     # Clean out only to the models we are interested in.
@@ -1644,27 +1729,62 @@ def llm_ik(robots: str or list[str] or None = None, models: str or list[str] or 
             else:
                 logging.info(f"Loading {total} model{'s' if total > 1 else ''}.")
     # If there is at least one model we should load, let us try to fully load it.
+    created_models = []
     if total > 0:
-        created = []
         # Try for every LLM paired with every robot.
-        for name in models:
-            for robot in robots:
+        for name in found:
+            for robot in created_robots:
                 model = Solver(name, robot)
                 if model.is_valid():
-                    created.append(model)
-        models = created
-        total = len(models)
+                    created_models.append(model)
+        total = len(created_models)
         if total < 1:
             logging.warning("No models loaded; can only perform built-in IKPy inverse kinematics.")
         else:
             logging.info(f"Loaded {total} model{'s' if total > 1 else ''}.")
+    # Get the models we will actually perform API calls on.
+    perform = []
+    for model in models:
+        name = model.replace(".urdf", "")
+        for c in created_models:
+            if c.model == name:
+                perform.append(name)
+    models = perform
     # Load robot data.
-    for robot in robots:
+    for robot in created_robots:
         robot.load_data()
-    # Run the solvers.
-    for solver in models:
-        solver.perform(orientation, types, length, run)
-    # TODO - Evaluate the solvers and then run overall evaluations.
+    # If API calls should be run, have the user confirm them.
+    if run:
+        total_robots = len(robots)
+        total_models = len(models)
+        if total_robots > 0 and total_models > 0:
+            # Unless we bypassed the API call checking, confirm we want to run up to the potential number of API calls.
+            if not bypass:
+                calls = total_robots * total_models * (1 + FEEDBACKS)
+                s = (f"Performing API calls on {total_robots} robot{'s' if total_robots > 1 else ''} and {total_models}"
+                     f"model {'s' if total_models > 1 else ''} with {FEEDBACKS} feedback"
+                     f"{'' if feedbacks == 1 else 's'} resulting in up to {calls} LLM API call"
+                     f"{'s' if calls > 1 else ''}. Confirm if you accept making up to these potential {calls} LLM API "
+                     f"call{'s' if calls > 1 else ''} [y/n]: ")
+                response = input(s)
+                if not response.upper() == "Y":
+                    run = False
+                    logging.info(f"Declined running up to {calls} LLM API call{'s' if calls > 1 else ''}; disabling API"
+                                 f" calls.")
+                else:
+                    logging.info(f"Confirmed running up to {calls} LLM API call{'s' if calls > 1 else ''}.")
+        else:
+            logging.info("Not running LLM API calls as there are no selected robots are LLMs.")
+            run = False
+    else:
+        logging.info("Not running LLM API calls.")
+    # Run the solvers, making API calls only on those that should be.
+    for solver in created_models:
+        run_instance = run and solver.robot.name in robots and solver.model in models
+        if run_instance:
+            logging.info(f"Should run API calls for {solver.model} {solver.robot.name}.")
+        solver.perform(orientation, types, run_instance)
+    # TODO - Run overall evaluations.
 
 
 if __name__ == "__main__":
@@ -1685,11 +1805,11 @@ if __name__ == "__main__":
     parser.add_argument("-s", "--seed", type=int, default=SEED, help="The samples generation seed.")
     parser.add_argument("-d", "--distance", type=float, default=DISTANCE_ERROR, help="The acceptable distance error.")
     parser.add_argument("-n", "--angle", type=float, default=ANGLE_ERROR, help="The acceptable angle error.")
-    parser.add_argument("-l", "--length", type=int or None, default=None, help="The maximum chain length to solve.")
     parser.add_argument("-c", "--cwd", type=str or None, default=None, help="The working directory.")
+    parser.add_argument("-l", "--logging", type=str, default="INFO", help="The logging level.")
     parser.add_argument("-u", "--run", action="store_true", help="Enable API running.")
-    parser.add_argument("-g", "--logging", type=str, default="INFO", help="The logging level.")
+    parser.add_argument("-b", "--bypass", action="store_true", help="Bypass the confirmation for API running.")
     args = parser.parse_args()
     # Run the program.
     llm_ik(args.robots, args.models, args.orientation, args.types, args.feedbacks, args.examples, args.training,
-           args.evaluating, args.seed, args.distance, args.angle, args.length, args.run, args.cwd, args.logging)
+           args.evaluating, args.seed, args.distance, args.angle, args.run, args.cwd, args.logging, args.bypass)

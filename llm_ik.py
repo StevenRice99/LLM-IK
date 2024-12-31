@@ -1448,9 +1448,9 @@ def neat(value: float or list or tuple or np.array) -> str:
     """
     # If this contains multiple elements, clean every one.
     if isinstance(value, (list, tuple, np.ndarray)):
-        count = len(value)
+        c = len(value)
         s = "["
-        for i in range(count):
+        for i in range(c):
             if i == 0:
                 s += neat(value[i])
             else:

@@ -910,8 +910,8 @@ class Solver:
         # If there have already been the maximum number of feedbacks given, we are done.
         c = sum(RESPONSE in s for s in interactions)
         if c >= FEEDBACKS:
-            logging.info(f"{self.model} | {self.robot.name} | {lower + 1} to {upper + 1} | {solving} | {mode} | {count}"
-                         " Handle Interactions | feedbacks; done.")
+            logging.info(f"{self.model} | {self.robot.name} | {lower + 1} to {upper + 1} | {solving} | {mode} | Handle "
+                         f"Interactions | {c} feedbacks; done.")
             return ""
         # Read the last interaction.
         path = os.path.join(root, interactions[-1])

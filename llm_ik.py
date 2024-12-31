@@ -9,6 +9,7 @@ import re
 import time
 import traceback
 import warnings
+from itertools import count
 
 import ikpy.chain
 import ikpy.utils.plot as plot_utils
@@ -247,10 +248,10 @@ class Robot:
                     s = "Success Rate (%),Failure Rate(%),Error Rate (%),Average Failure Distance"
                     if orientation:
                         s += ",Average Failure Angle (°)"
-                    s += f",Average Elapsed Time (s)\n{successes}%,{failures}%,0%,{total_distance}"
+                    s += f",Average Elapsed Time (s),Feedbacks\n{successes}%,{failures}%,0%,{total_distance}"
                     if orientation:
                         s += f",{total_angle}°"
-                    s += f",{total_time} s"
+                    s += f",{total_time} s,0"
                     # Save results.
                     os.makedirs(self.results, exist_ok=True)
                     path = os.path.join(self.results, f"{lower}-{upper}-{TRANSFORM if orientation else POSITION}.csv")
@@ -907,8 +908,8 @@ class Solver:
                 return s
             return s
         # If there have already been the maximum number of feedbacks given, we are done.
-        count = sum(RESPONSE in s for s in interactions)
-        if count >= FEEDBACKS:
+        c = sum(RESPONSE in s for s in interactions)
+        if c >= FEEDBACKS:
             logging.info(f"{self.model} | {self.robot.name} | {lower + 1} to {upper + 1} | {solving} | {mode} | {count}"
                          " Handle Interactions | feedbacks; done.")
             return ""
@@ -1180,14 +1181,16 @@ class Solver:
         total_distance = neat(total_distance)
         total_angle = neat(total_angle)
         total_time = neat(total_time / total)
+        root = os.path.join(self.interactions, f"{lower}-{upper}-{solving}-{mode}")
+        feedbacks = (sum(MESSAGE in s for s in get_files(root)) - 1) if os.path.exists(root) else 0
         # Save the results.
         s = f"Success Rate (%),Failure Rate (%),Error Rate (%),Average Failure Distance"
         if orientation:
             s += ",Average Failure Angle (°)"
-        s += f",Average Elapsed Time (s)\n{successes}%,{failures}%,{errors}%,{total_distance}"
+        s += f",Average Elapsed Time (s),Feedbacks\n{successes}%,{failures}%,{errors}%,{total_distance}"
         if orientation:
             s += f",{total_angle}°"
-        s += f"{total_time} s"
+        s += f"{total_time} s,{feedbacks}"
         os.makedirs(self.results, exist_ok=True)
         with open(os.path.join(self.results, f"{lower}-{upper}-{solving}.csv"), "w") as file:
             file.write(s)

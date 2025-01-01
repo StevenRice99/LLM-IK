@@ -9,7 +9,6 @@ import re
 import time
 import traceback
 import warnings
-from itertools import count
 
 import ikpy.chain
 import ikpy.utils.plot as plot_utils
@@ -858,6 +857,21 @@ class Solver:
                             # Check if we should try using the model's API.
                             if not run or current_orientation not in orientation or current_mode not in mode:
                                 continue
+                            # For higher chains, let us only try to solve them if the lower chains were successful.
+                            if lower != upper:
+                                # Get the upper of the lower chain.
+                                previous_upper = upper - 1
+                                # Single chains cannot solve for orientation.
+                                previous_orientation = current_orientation and lower != previous_upper
+                                # Single chains can only be solved in the normal mode.
+                                previous_mode = NORMAL if lower == previous_upper else current_mode
+                                # If the previous model was not successful, do not waste API calls on this higher chain.
+                                if not self.code_successful(lower, previous_upper, previous_orientation, previous_mode):
+                                    continue
+                                # If the position-only variation was not successful, do not waste API calls.
+                                if current_orientation and not self.code_successful(lower, upper, False,
+                                                                                    current_mode):
+                                    continue
                             solving = TRANSFORM if current_orientation else POSITION
                             logging.error(f"{self.model} | {self.robot.name} | {lower + 1} to {upper + 1} | "
                                           f"{solving} | {current_mode} | Perform | LLM interactions not yet "
@@ -865,7 +879,7 @@ class Solver:
                             # TODO - Run API calls.
 
     def handle_interactions(self, lower: int = 0, upper: int = -1, orientation: bool = False,
-                            mode: str = NORMAL) -> (str, int):
+                            mode: str = NORMAL) -> str:
         """
         Handle determining what the next messages should be.
         :param lower: The starting joint.
@@ -1195,6 +1209,55 @@ class Solver:
         with open(os.path.join(self.results, f"{lower}-{upper}-{solving}.csv"), "w") as file:
             file.write(s)
 
+    def code_successful(self, lower: int = 0, upper: int = -1, orientation: bool = False,
+                        mode: str = NORMAL) -> bool:
+        """
+        See if a code is completely successful on the training data.
+        :param lower: The starting joint.
+        :param upper: The ending joint.
+        :param orientation: If we want to solve for orientation.
+        :param mode: The solving mode to use.
+        :return: True if it passes all test cases, false otherwise.
+        """
+        # Nothing to do if the solver is not valid.
+        if not self.is_valid():
+            logging.error(f"{self.model} | Code Successful | Solver is not valid.")
+            return False
+        # Ensure valid values.
+        lower, upper = self.robot.validate_lower_upper(lower, upper)
+        solving = POSITION if orientation is None else TRANSFORM
+        if mode not in [NORMAL, EXTEND, DYNAMIC]:
+            logging.warning(f"{self.model} | {self.robot.name} | {lower + 1} to {upper + 1} | Code Successful | Mode "
+                            f"'{mode}' not valid, using '{NORMAL}' instead.")
+            mode = NORMAL
+        # Get the data to run the code against.
+        data = self.robot.get_data(lower, upper, True, orientation)
+        # If there is no data, there is nothing to give feedback on.
+        if len(data) < 1:
+            logging.error(f"{self.model} | {lower + 1} to {upper + 1} | {solving} | {mode}| Code Successful | No "
+                          f"data.")
+            return False
+        # The expected number of joints to be returned.
+        number = upper - lower + 1
+        # Test every data point, stopping if one fails.
+        for point in data:
+            # Determine what to test against.
+            target_position = point["Position"]
+            target_orientation = point["Orientation"] if orientation else None
+            # Run the code.
+            joints, elapsed, error = self.run_code(lower, upper, mode, target_position, target_orientation)
+            # If any return values are errors, stop.
+            if joints is None or len(joints) != number or error is not None:
+                return False
+            # See if we reached the target.
+            positions, orientations = self.robot.forward_kinematics(lower, upper, joints)
+            distance = difference_distance(target_position, positions[-1])
+            angle = 0 if orientation is None else difference_angle(target_orientation, orientations[-1])
+            # If we did not, this was a failure so stop.
+            if not reached(distance, angle):
+                return False
+        return True
+
     def prepare_feedback(self, lower: int = 0, upper: int = -1, orientation: bool = False,
                          mode: str = NORMAL) -> str:
         """
@@ -1336,9 +1399,9 @@ class Solver:
                     logging.error(f"{self.model} | {self.robot.name} | {lower + 1} to {upper + 1} | Prepare LLM | "
                                   f"Cannot load an extending prompt as '{path}' does not exist.")
                 return ""
-            existing_feedback = self.prepare_feedback(lower, previous, orientation, previous_mode)
+            existing_successful = self.code_successful(lower, previous, orientation, previous_mode)
             # Only perform an extending prompt if the previous chain was successful.
-            if existing_feedback != "":
+            if not existing_successful:
                 logging.info(f"{self.model} | {self.robot.name} | {lower + 1} to {upper + 1} | Not performing an "
                              f"extending prompt as '{path}' is not perfectly successful.")
                 return ""
@@ -1748,7 +1811,7 @@ def llm_ik(robots: str or list[str] or None = None, models: str or list[str] or 
     # Get the models we will actually perform API calls on.
     perform = []
     for model in models:
-        name = model.replace(".urdf", "")
+        name = model.replace(".txt", "")
         for c in created_models:
             if c.model == name:
                 perform.append(name)
@@ -1763,9 +1826,21 @@ def llm_ik(robots: str or list[str] or None = None, models: str or list[str] or 
         if total_robots > 0 and total_models > 0:
             # Unless we bypassed the API call checking, confirm we want to run up to the potential number of API calls.
             if not bypass:
-                calls = total_robots * total_models * (1 + FEEDBACKS)
+                calls = 0
+                total_feedbacks = 1 + FEEDBACKS
+                total_orientations = len(orientation)
+                total_types = len(types)
+                # Check every robot which supports API calls.
+                for robot in created_robots:
+                    if robot.name in robots:
+                        # The number of chains is the summation of joints, less the last for the single-mode singles.
+                        subs = sum(range(1, robot.joints - 1))
+                        # Every chain can have full feedbacks across solving configurations plus the basic solvers.
+                        calls += subs * total_feedbacks * total_orientations * total_types + robot.joints
+                # Each will be called by every solver.
+                calls *= total_models
                 s = (f"Performing API calls on {total_robots} robot{'s' if total_robots > 1 else ''} and {total_models}"
-                     f"model {'s' if total_models > 1 else ''} with {FEEDBACKS} feedback"
+                     f" model{'s' if total_models > 1 else ''} with {FEEDBACKS} feedback"
                      f"{'' if feedbacks == 1 else 's'} resulting in up to {calls} LLM API call"
                      f"{'s' if calls > 1 else ''}. Confirm if you accept making up to these potential {calls} LLM API "
                      f"call{'s' if calls > 1 else ''} [y/n]: ")

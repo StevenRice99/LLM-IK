@@ -26,6 +26,7 @@ PROVIDERS = "Providers"
 KEYS = "Keys"
 INFO = "Info"
 INTERACTIONS = "Interactions"
+ELAPSED = "Elapsed"
 SOLUTIONS = "Solutions"
 RESULTS = "Results"
 
@@ -35,7 +36,12 @@ EXTEND = "Extend"
 DYNAMIC = "Dynamic"
 
 # API interaction file naming.
-MESSAGE = "Message"
+MESSAGE_PROMPT = "Prompt"
+MESSAGE_FEEDBACK = "Feedback"
+MESSAGE_FORWARD = "Forward"
+MESSAGE_TEST = "Test"
+MESSAGE_ERROR = "Error"
+MESSAGE_DONE = "Done"
 RESPONSE = "Response"
 
 # Data naming.
@@ -247,10 +253,11 @@ class Robot:
                     s = "Success Rate (%),Failure Rate(%),Error Rate (%),Average Failure Distance"
                     if orientation:
                         s += ",Average Failure Angle (°)"
-                    s += f",Average Elapsed Time (s),Feedbacks\n{successes}%,{failures}%,0%,{total_distance}"
+                    s += (",Average Elapsed Time (s),Mode,Generation Time (s),Feedbacks Given,Forwards Kinematics "
+                          f"Calls,Testing Calls,Reasoning,Functions\n{successes}%,{failures}%,0%,{total_distance}")
                     if orientation:
                         s += f",{total_angle}°"
-                    s += f",{total_time} s,0"
+                    s += f",,{total_time} s,0 s,0,0,0,False,False"
                     # Save results.
                     os.makedirs(self.results, exist_ok=True)
                     path = os.path.join(self.results, f"{lower}-{upper}-{TRANSFORM if orientation else POSITION}.csv")
@@ -741,6 +748,7 @@ class Solver:
         :param robot: The robot for the solver.
         """
         self.code = None
+        self.reasoning = False
         self.url = None
         self.methods = False
         self.key = ""
@@ -750,6 +758,10 @@ class Solver:
             logging.error(f"Model '{path}' does not exist.")
             self.model = ""
             self.robot = None
+            self.interactions = os.path.join(INTERACTIONS, "_Invalid", "_Invalid")
+            self.elapsed = os.path.join(ELAPSED, "_Invalid", "_Invalid")
+            self.solutions = os.path.join(SOLUTIONS, "_Invalid", "_Invalid")
+            self.results = os.path.join(RESULTS, "_Invalid", "_Invalid")
             return
         self.model = model
         self.robot = robot
@@ -757,11 +769,13 @@ class Solver:
         if self.robot is None:
             logging.error(f"{self.model} | Robot is null.")
             self.interactions = os.path.join(INTERACTIONS, "_Invalid", self.model)
+            self.elapsed = os.path.join(ELAPSED, "_Invalid", self.model)
             self.solutions = os.path.join(SOLUTIONS, "_Invalid", self.model)
             self.results = os.path.join(RESULTS, "_Invalid", self.model)
             return
         # Cache folders.
         self.interactions = os.path.join(INTERACTIONS, self.robot.name, self.model)
+        self.elapsed = os.path.join(ELAPSED, self.robot.name, self.model)
         self.solutions = os.path.join(SOLUTIONS, self.robot.name, self.model)
         self.results = os.path.join(RESULTS, self.robot.name, self.model)
         # Ensure the robot is valid.
@@ -770,8 +784,20 @@ class Solver:
             return
         # Read the models' file.
         with open(path, "r") as file:
-            provider = file.read()
-        provider = provider.strip()
+            s = file.read()
+        s = s.strip()
+        lines = s.splitlines()
+        total = len(lines)
+        if total < 1:
+            provider = ""
+        else:
+            provider = lines[0].strip()
+            # If there is a second line, use it to determine if this is a reasoning model.
+            if total >= 2:
+                reasoning = lines[1].strip().upper()
+                if reasoning == "TRUE" or reasoning == "1":
+                    self.reasoning = True
+                    logging.info(f"{self.model} | {self.robot.name} | This is a reasoning model.")
         # If there are details, this indicates the provider of the model.
         if provider != "":
             # If the provider does not exist, indicate this.
@@ -855,7 +881,8 @@ class Solver:
                             if message == "":
                                 break
                             # Check if we should try using the model's API.
-                            if not run or current_orientation not in orientation or current_mode not in mode:
+                            if (self.url is None or not run or current_orientation not in orientation or
+                                    current_mode not in mode):
                                 continue
                             # For higher chains, let us only try to solve them if the lower chains were successful.
                             if lower != upper:
@@ -909,7 +936,7 @@ class Solver:
         interactions = sorted(get_files(root)) if os.path.exists(root) else []
         total = len(interactions)
         # Create the initial prompt if needed.
-        initial = f"0-{MESSAGE}.txt"
+        initial = f"0-{MESSAGE_PROMPT}.txt"
         if total < 1 or initial not in interactions:
             s = self.prepare_llm(lower, upper, orientation, mode, True)
             if s != "":
@@ -921,35 +948,51 @@ class Solver:
                              f"Handle Interactions | Initial prompt generated to '{path}'.")
                 return s
             return s
+        # If any of the messages is the done message indicating this has been completely handled, then stop.
+        for m in interactions:
+            if MESSAGE_DONE in m:
+                logging.info(f"{self.model} | {self.robot.name} | {lower + 1} to {upper + 1} | {solving} | {mode} | "
+                             "Done")
+                return ""
+
         # If there have already been the maximum number of feedbacks given, we are done.
-        c = sum(RESPONSE in s for s in interactions)
+        c = sum(MESSAGE_FEEDBACK in s for s in interactions)
         if c >= FEEDBACKS:
             logging.info(f"{self.model} | {self.robot.name} | {lower + 1} to {upper + 1} | {solving} | {mode} | Handle "
                          f"Interactions | {c} feedbacks; done.")
             return ""
         # Read the last interaction.
-        path = os.path.join(root, interactions[-1])
+        last = interactions[-1]
+        path = os.path.join(root, last)
         with open(path, "r") as file:
             s = file.read()
         # If the last interaction was a message for the LLM, load it.
-        if MESSAGE in interactions[-1]:
+        if RESPONSE not in last:
             logging.info(f"{self.model} | {self.robot.name} | {lower + 1} to {upper + 1} | {solving} | {mode} | Handle "
                          f"Interactions | Last message loaded from '{path}'.")
             return s.strip()
         # Otherwise, it was a response from the LLM, so prepare the next message by parsing it.
         codes = re.findall(r"```python\s*([\s\S]*?)```", s, re.IGNORECASE)
-        # If not codes were returned, indicate this.
-        if len(codes) < 1:
+        # If no codes were returned, this means it was a command response or invalid, so determine this.
+        total = len(codes)
+        if total < 1:
+            # TODO - Handle commands.
             logging.info(f"{self.model} | {self.robot.name} | {lower + 1} to {upper + 1} | {solving} | {mode} | Handle "
                          f"Interactions | No Python code found in '{path}'; creating message indicating this.")
-            path = os.path.join(root, f"{total}-{MESSAGE}.txt")
-            s = "You did not respond with valid code to solve the inverse kinematics."
+            s = "You did not respond with valid code to solve the inverse kinematics or a valid command."
             os.makedirs(root, exist_ok=True)
-            with open(path, "w") as file:
+            with open(os.path.join(root, f"{total}-{MESSAGE_ERROR}.txt"), "w") as file:
                 file.write(s)
             return s
-        # Otherwise, parse the code assuming the last code would be the complete code snippet.
-        code = codes[-1].strip()
+        # Otherwise, parse the code assuming the largest code would be the complete code snippet.
+        code = codes[0].strip()
+        size = len(code)
+        for i in range(1, total):
+            temp_code = codes[i].strip()
+            temp_size = len(temp_code)
+            if temp_size >= size:
+                code = temp_code
+                size = temp_size
         logging.info(f"{self.model} | {self.robot.name} | {lower + 1} to {upper + 1} | {solving} | {mode} | Handle "
                      f"Interactions | Extracted code found in '{path}'.")
         path = os.path.join(self.interactions, f"{lower}-{upper}-{solving}-{mode}.py")
@@ -965,9 +1008,26 @@ class Solver:
         if s == "":
             logging.info(f"{self.model} | {self.robot.name} | {lower + 1} to {upper + 1} | {solving} | {mode} | Handle "
                          "Interactions | Performed perfectly on the training set; done.")
+            os.makedirs(root, exist_ok=True)
+            with open(os.path.join(root, f"{total}-{MESSAGE_DONE}.txt"), "w") as file:
+                file.write("Code performed perfectly; interactions with the model are done.")
             return ""
+        # If there were errors but the maximum number of feedbacks have been given, stop.
+        feedbacks = 0
+        for m in interactions:
+            if MESSAGE_FEEDBACK in m:
+                feedbacks += 1
+                if feedbacks >= FEEDBACKS:
+                    logging.info(f"{self.model} | {self.robot.name} | {lower + 1} to {upper + 1} | {solving} | {mode} |"
+                                 f"Code had errors but {FEEDBACKS} feedback{' has' if FEEDBACKS == 1 else 's have'} "
+                                 "been used; stopping.")
+                    os.makedirs(root, exist_ok=True)
+                    with open(os.path.join(root, f"{total}-{MESSAGE_DONE}.txt"), "w") as file:
+                        file.write(f"Code had errors but {FEEDBACKS} feedback{' has' if FEEDBACKS == 1 else 's have'} "
+                                   "been used; stopping.")
+                    return ""
         # Otherwise, prepare feedback to provide to the LLM.
-        path = os.path.join(root, f"{total}-{MESSAGE}.txt")
+        path = os.path.join(root, f"{total}-{MESSAGE_FEEDBACK}.txt")
         os.makedirs(root, exist_ok=True)
         with open(path, "w") as file:
             file.write(s)
@@ -1196,17 +1256,40 @@ class Solver:
         total_angle = neat(total_angle)
         total_time = neat(total_time / total)
         root = os.path.join(self.interactions, f"{lower}-{upper}-{solving}-{mode}")
-        feedbacks = (sum(MESSAGE in s for s in get_files(root)) - 1) if os.path.exists(root) else 0
+        if os.path.exists(root):
+            feedbacks = sum(MESSAGE_FEEDBACK in s for s in get_files(root)) - 1
+            forwards = sum(MESSAGE_FORWARD in s for s in get_files(root)) - 1
+            testings = sum(MESSAGE_TEST in s for s in get_files(root)) - 1
+        else:
+            feedbacks = 0
+            forwards = 0
+            testings = 0
+        # Get how long it took the LLM to generate the code.
+        elapsed = 0
+        name = f"{lower}-{upper}-{solving}-{mode}"
+        root = os.path.join(self.elapsed, name)
+        if os.path.exists(root):
+            times = get_files(root)
+            for t in times:
+                with open(os.path.join(root, t), "r") as file:
+                    s = file.read()
+                # noinspection PyBroadException
+                try:
+                    f = float(s.strip())
+                except:
+                    continue
+                elapsed += f
         # Save the results.
         s = f"Success Rate (%),Failure Rate (%),Error Rate (%),Average Failure Distance"
         if orientation:
             s += ",Average Failure Angle (°)"
-        s += f",Average Elapsed Time (s),Feedbacks\n{successes}%,{failures}%,{errors}%,{total_distance}"
+        s += (",Average Elapsed Time (s),Mode,Generation Time (s),Feedbacks Given,Forwards Kinematics Calls,Testing "
+              f"Calls,Reasoning,Functions\n{successes}%,{failures}%,{errors}%,{total_distance}")
         if orientation:
             s += f",{total_angle}°"
-        s += f"{total_time} s,{feedbacks}"
+        s += f"{mode},{total_time} s,{elapsed} s,{feedbacks},{forwards},{testings},{self.reasoning},{self.methods}"
         os.makedirs(self.results, exist_ok=True)
-        with open(os.path.join(self.results, f"{lower}-{upper}-{solving}.csv"), "w") as file:
+        with open(os.path.join(self.results, f"{name}.csv"), "w") as file:
             file.write(s)
 
     def code_successful(self, lower: int = 0, upper: int = -1, orientation: bool = False,
@@ -1618,12 +1701,14 @@ def llm_ik(robots: str or list[str] or None = None, models: str or list[str] or 
     global KEYS
     global INFO
     global INTERACTIONS
+    global ELAPSED
     global SOLUTIONS
     global RESULTS
     ROBOTS = os.path.join(cwd, ROBOTS)
     MODELS = os.path.join(cwd, MODELS)
     PROVIDERS = os.path.join(cwd, PROVIDERS)
     INTERACTIONS = os.path.join(cwd, INTERACTIONS)
+    ELAPSED = os.path.join(cwd, ELAPSED)
     SOLUTIONS = os.path.join(cwd, SOLUTIONS)
     RESULTS = os.path.join(cwd, RESULTS)
     INFO = os.path.join(cwd, INFO)
@@ -1813,7 +1898,8 @@ def llm_ik(robots: str or list[str] or None = None, models: str or list[str] or 
     for model in models:
         name = model.replace(".txt", "")
         for c in created_models:
-            if c.model == name:
+            # Only add API-capable models.
+            if c.url is not None and c.model == name:
                 perform.append(name)
     models = perform
     # Load robot data.

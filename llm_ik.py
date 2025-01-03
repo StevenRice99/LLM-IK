@@ -791,13 +791,13 @@ class Solver:
         if total < 1:
             provider = ""
         else:
-            provider = lines[0].strip()
-            # If there is a second line, use it to determine if this is a reasoning model.
-            if total >= 2:
-                reasoning = lines[1].strip().upper()
-                if reasoning == "TRUE" or reasoning == "1":
-                    self.reasoning = True
-                    logging.info(f"{self.model} | {self.robot.name} | This is a reasoning model.")
+            # If there was information, use it to check if this is a reasoning model.
+            reasoning = lines[0].strip().upper()
+            if reasoning == "TRUE" or reasoning == "1":
+                self.reasoning = True
+                logging.info(f"{self.model} | {self.robot.name} | This is a reasoning model.")
+            # Use a second line to indicate a provider.
+            provider = lines[1].strip() if total >= 2 else ""
         # If there are details, this indicates the provider of the model.
         if provider != "":
             # If the provider does not exist, indicate this.

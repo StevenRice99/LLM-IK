@@ -1295,11 +1295,13 @@ class Solver:
                 if line[0] == "forward_kinematics":
                     received = parts - 1
                     # Ensure the proper number of joints were given.
-                    if received != upper - lower + 1:
+                    expected = upper - lower + 1
+                    if received != expected:
                         logging.info(f"{self.model} | {self.robot.name} | {lower + 1} to {upper + 1} | {solving} | "
                                      f"{mode} | Handle Interactions | Forward kinematics call had wrong number of "
                                      "joints.")
-                        s = "<ERROR>\nResponded with the wrong number of joints to call forward kinematics.\n</ERROR>"
+                        s = ("<ERROR>\nResponded with the wrong number of joints to call forward kinematics - Responded"
+                             f" with {received} but expected {expected}.\n</ERROR>")
                     else:
                         # noinspection PyBroadException
                         try:
@@ -1337,13 +1339,15 @@ class Solver:
                     if not os.path.exists(code_path):
                         logging.info(f"{self.model} | {self.robot.name} | {lower + 1} to {upper + 1} | {solving} | "
                                      f"{mode} | Handle Interactions | No solution to test.")
-                        s = "<ERROR>\nYou have not yet provided a solution to the code for testing.\n</ERROR>"
+                        s = ("<ERROR>\nYou have not yet provided a solution to the code for testing. Please provided "
+                             "one before calling this function.\n</ERROR>")
                     # Indicate if the wrong number of parameters were received.
                     elif received != expected:
                         logging.info(f"{self.model} | {self.robot.name} | {lower + 1} to {upper + 1} | {solving} | "
                                      f"{mode} | Handle Interactions | Test solution call had wrong number of "
                                      "parameters.")
-                        s = "<ERROR>\nResponded with the wrong number of parameters to test your solution.\n</ERROR>"
+                        s = ("<ERROR>\nResponded with the wrong number of parameters to test your solution - Responded "
+                             f"with {received} but expected {expected}.\n</ERROR>")
                     else:
                         # noinspection PyBroadException
                         try:
@@ -1391,7 +1395,7 @@ class Solver:
                             logging.info(f"{self.model} | {self.robot.name} | {lower + 1} to {upper + 1} | {solving} | "
                                          f"{mode} | Handle Interactions | Test solution did not respond with valid"
                                          f" parameters.")
-                            s = ("<ERROR>\nCould not parameters to test the solution; ensure they are all  floats."
+                            s = ("<ERROR>\nCould not parse parameters to test the solution; ensure they are all floats."
                                  "</ERROR>")
                     os.makedirs(root, exist_ok=True)
                     with open(os.path.join(root, f"{total}-{MESSAGE_TEST}.txt"), "w") as file:

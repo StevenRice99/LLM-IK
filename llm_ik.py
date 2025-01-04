@@ -323,14 +323,11 @@ class Robot:
                     total_time = neat(total_time / total)
                     successes = neat(successes / total * 100)
                     failures = neat(failures / total * 100)
-                    s = "Success Rate (%),Failure Rate(%),Error Rate (%),Average Failure Distance"
-                    if orientation:
-                        s += ",Average Failure Angle (°)"
-                    s += (",Average Elapsed Time (s),Mode,Generation Time (s),Feedbacks Given,Forwards Kinematics "
-                          f"Calls,Testing Calls,Reasoning,Functions\n{successes}%,{failures}%,0%,{total_distance}")
-                    if orientation:
-                        s += f",{total_angle}°"
-                    s += f",,{total_time} s,0 s,0,0,0,False,False"
+                    s = ("Success Rate (%),Failure Rate (%),Error Rate (%),Average Failure Distance,Average Failure "
+                         "Angle (°),Average Elapsed Time (s),Generation Time (s),Mode,Feedbacks Given,Forwards "
+                         f"Kinematics Calls,Testing Calls,Reasoning,Functions,API\n{successes}%,{failures}%,0%,"
+                         f"{total_distance},{total_angle if orientation else 0}°,{total_time} s,0 s,,0,0,0,False,False,"
+                         "False")
                     # Save results.
                     os.makedirs(self.results, exist_ok=True)
                     path = os.path.join(self.results, f"{lower}-{upper}-{TRANSFORM if orientation else POSITION}.csv")
@@ -808,6 +805,187 @@ class Robot:
         # Return the updated lower and upper values.
         return lower, upper
 
+    def evaluate(self) -> None:
+        """
+        Get the results of individual solvers for this robot together.
+        :return: Nothing.
+        """
+        # Nothing to evaluate if not valid.
+        if not self.is_valid():
+            logging.error(f"{self.name} | Evaluate | Robot not configured.")
+            return None
+        results_root = os.path.join(RESULTS, self.name)
+        if not os.path.exists(results_root):
+            return None
+        results = None
+        paths = get_directories(results_root)
+        for solver in paths:
+            root = os.path.join(results_root, solver)
+            files = get_files(root)
+            for name in files:
+                path = os.path.join(root, name)
+                parts = name.split("-")
+                if len(parts) != 3:
+                    logging.error(f"{self.name} | Perform | Result '{path}' not named properly.")
+                    continue
+                # noinspection PyBroadException
+                try:
+                    lower = int(parts[0])
+                    upper = int(parts[1])
+                except:
+                    logging.error(f"{self.name} | Perform | Could not parse lower and upper from '{path}'.")
+                    continue
+                solving = parts[2].replace(".csv", "")
+                if solving != POSITION and solving != TRANSFORM:
+                    logging.error(f"{self.name} | Perform | Could not parse solving from '{path}', must be either "
+                                  f"'{POSITION}' or '{TRANSFORM}'.")
+                    continue
+                with open(path, "r") as file:
+                    s = file.read()
+                lines = s.splitlines()
+                if len(lines) != 2:
+                    logging.error(f"{self.name} | Evaluate | No result in '{path}'.")
+                    continue
+                expected = 14
+                titles = lines[0].split(",")
+                total_titles = len(titles)
+                if total_titles != expected:
+                    logging.error(f"{self.name} | Evaluate | Wrong number of titles in '{path}'; got {total_titles} but"
+                                  f" expected {expected}.")
+                    continue
+                info = lines[1].split(",")
+                total_results = len(info)
+                if total_results != expected:
+                    logging.error(f"{self.name} | Evaluate | Wrong number of results in '{path}'; got {total_results} "
+                                  f"but expected {expected}.")
+                    continue
+                if total_titles != total_results:
+                    logging.error(f"{self.name} | Evaluate | Titles and results in '{path}' do not match: "
+                                  f"{total_titles} titles and {total_results} results.")
+                    continue
+                result = {}
+                for i in range(expected):
+                    title = titles[i]
+                    data = info[i]
+                    if title == "Success Rate (%)" or title == "Failure Rate (%)" or title == "Error Rate (%)":
+                        # noinspection PyBroadException
+                        try:
+                            data = float(data.replace("%", ""))
+                        except:
+                            logging.error(f"{self.name} | Evaluate | Could not parse percentage data at index {i + 1} "
+                                          f"from '{path}'.")
+                            result = None
+                            break
+                    elif title == "Average Failure Distance":
+                        # noinspection PyBroadException
+                        try:
+                            data = float(data)
+                        except:
+                            logging.error(f"{self.name} | Evaluate | Could not parse distance data at index {i + 1} "
+                                          f"from '{path}'.")
+                            result = None
+                            break
+                    elif title == "Average Failure Angle (°)":
+                        # noinspection PyBroadException
+                        try:
+                            data = float(data.replace("°", ""))
+                        except:
+                            logging.error(f"{self.name} | Evaluate | Could not parse angle data at index {i + 1} from "
+                                          f"'{path}'.")
+                            result = None
+                            break
+                    elif title == "Average Elapsed Time (s)" or title == "Generation Time (s)":
+                        # noinspection PyBroadException
+                        try:
+                            data = float(data.replace(" s", ""))
+                        except:
+                            logging.error(f"{self.name} | Evaluate | Could not parse time data at index {i + 1} from "
+                                          f"'{path}'.")
+                            result = None
+                            break
+                    elif title == "Feedbacks Given" or title == "Forwards Kinematics Calls" or title == "Testing Calls":
+                        # noinspection PyBroadException
+                        try:
+                            data = int(data)
+                        except:
+                            logging.error(f"{self.name} | Evaluate | Could not parse data at index {i + 1} from "
+                                          f"'{path}'.")
+                            result = None
+                            break
+                    elif title == "Reasoning" or title == "Functions" or title == "API":
+                        # noinspection PyBroadException
+                        try:
+                            data = data == "True"
+                        except:
+                            logging.error(f"{self.name} | Evaluate | Could not parse data at index {i + 1} from "
+                                          f"'{path}'.")
+                            result = None
+                            break
+                    elif title != "Mode":
+                        logging.error(f"{self.name} | Evaluate | Title '{title}' at index {i + 1} from '{path}' is not "
+                                      f"valid.")
+                        result = None
+                        break
+                    result[title] = data
+                if result is None:
+                    continue
+                if results is None:
+                    results = {}
+                if lower not in results:
+                    results[lower] = {}
+                if upper not in results[lower]:
+                    results[lower][upper] = {}
+                if solving not in results[lower][upper]:
+                    results[lower][upper][solving] = {}
+                results[lower][upper][solving][solver] = result
+        if results is None:
+            return None
+        fields = ["Success Rate (%)", "Failure Rate (%)", "Error Rate (%)", "Average Failure Distance",
+                  "Average Failure Angle (°)", "Average Elapsed Time (s)", "Generation Time (s)", "Mode",
+                  "Feedbacks Given", "Forwards Kinematics Calls", "Testing Calls", "Reasoning", "Functions", "API"]
+        for lower in results:
+            for upper in results[lower]:
+                for solving in results[lower][upper]:
+                    results[lower][upper][solving] = dict(
+                        sorted(
+                            results[lower][upper][solving].items(),
+                            key=lambda item: (
+                                -item[1]["Success Rate (%)"],
+                                item[1]["Error Rate (%)"],
+                                item[1]["Average Failure Distance"],
+                                item[1]["Average Failure Angle (°)"],
+                                item[1]["Average Elapsed Time (s)"],
+                                item[1]["Generation Time (s)"],
+                                item[1]["Mode"],
+                                item[1]["Feedbacks Given"],
+                                item[1]["Forwards Kinematics Calls"],
+                                item[1]["Testing Calls"],
+                                item[1]["API"],
+                                item[1]["Reasoning"],
+                                item[1]["Functions"],
+                                item[0]
+                            )
+                        )
+                    )
+                    s = "Name," + ",".join(fields)
+                    for name in results[lower][upper][solving]:
+                        s += f"\n{name}"
+                        for field in fields:
+                            data = results[lower][upper][solving][name][field]
+                            if field == "Success Rate (%)" or field == "Failure Rate (%)" or field == "Error Rate (%)":
+                                data = f"{neat(data)}%"
+                            elif field == "Average Failure Distance":
+                                data = neat(data)
+                            elif field == "Average Failure Angle (°)":
+                                data = f"{neat(data)}°"
+                            elif field == "Average Elapsed Time (s)" or field == "Generation Time (s)":
+                                data = f"{neat(data)} s"
+                            s += f",{data}"
+                    path = os.path.join(results_root, f"{lower}-{upper}-{solving}.csv")
+                    with open(path, "w") as file:
+                        file.write(s)
+                    logging.info(f"{self.name} | Evaluate | Results saved to '{path}'.")
+
 
 class Solver:
     """
@@ -1118,7 +1296,7 @@ class Solver:
                         logging.info(f"{self.model} | {self.robot.name} | {lower + 1} to {upper + 1} | {solving} | "
                                      f"{mode} | Handle Interactions | No solution to test.")
                         s = "<ERROR>\nYou have not yet provided a solution to the code for testing.\n</ERROR>"
-                    # Indicate if the wrong number of parameters were recieved.
+                    # Indicate if the wrong number of parameters were received.
                     elif received != expected:
                         logging.info(f"{self.model} | {self.robot.name} | {lower + 1} to {upper + 1} | {solving} | "
                                      f"{mode} | Handle Interactions | Test solution call had wrong number of "
@@ -1482,14 +1660,11 @@ class Solver:
                     continue
                 elapsed += f
         # Save the results.
-        s = f"Success Rate (%),Failure Rate (%),Error Rate (%),Average Failure Distance"
-        if orientation:
-            s += ",Average Failure Angle (°)"
-        s += (",Average Elapsed Time (s),Mode,Generation Time (s),Feedbacks Given,Forwards Kinematics Calls,Testing "
-              f"Calls,Reasoning,Functions\n{successes}%,{failures}%,{errors}%,{total_distance}")
-        if orientation:
-            s += f",{total_angle}°"
-        s += f"{mode},{total_time} s,{elapsed} s,{feedbacks},{forwards},{testings},{self.reasoning},{self.methods}"
+        s = ("Success Rate (%),Failure Rate (%),Error Rate (%),Average Failure Distance,Average Failure Angle (°),"
+             "Average Elapsed Time (s),Generation Time (s),Mode,Feedbacks Given,Forwards Kinematics Calls,Testing Calls"
+             f",Reasoning,Functions,API\n{successes}%,{failures}%,{errors}%,{total_distance},"
+             f"{total_angle if orientation else 0}°,{total_time} s,{mode},{elapsed} s,{feedbacks},{forwards},{testings}"
+             f",{self.reasoning},{self.methods},{self.url is not None}")
         os.makedirs(self.results, exist_ok=True)
         with open(os.path.join(self.results, f"{name}.csv"), "w") as file:
             file.write(s)
@@ -1888,6 +2063,15 @@ def get_files(directory) -> list[str]:
     return [f for f in os.listdir(directory) if os.path.isfile(os.path.join(directory, f))]
 
 
+def get_directories(directory) -> list[str]:
+    """
+    Get all directories in a directory.
+    :param directory: The directory to get the directories from.
+    :return: The names of all directories in the directory.
+    """
+    return [f for f in os.listdir(directory) if os.path.isdir(os.path.join(directory, f))]
+
+
 def llm_ik(robots: str or list[str] or None = None, models: str or list[str] or None = None,
            orientation: bool or None = False, types: str or list[str] or None = None, feedbacks: int = FEEDBACKS,
            examples: int = EXAMPLES, training: int = TRAINING, evaluating: int = EVALUATING, seed: int = SEED,
@@ -2190,6 +2374,9 @@ def llm_ik(robots: str or list[str] or None = None, models: str or list[str] or 
         if run_instance:
             logging.info(f"Should run API calls for {solver.model} {solver.robot.name}.")
         solver.perform(orientation, types, run_instance)
+    # Get per-robot results for all solvers.
+    for robot in created_robots:
+        robot.evaluate()
     # TODO - Run overall evaluations.
 
 

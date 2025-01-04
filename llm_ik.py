@@ -83,7 +83,7 @@ TEST_CORE = {
     }
 }
 
-# The test method parameters if solving for position only.
+# The test method parameters if solving for position only to send via API.
 TEST_PARAMETERS_POSITION = {
     "type": "object",
     "properties": {
@@ -103,7 +103,7 @@ TEST_PARAMETERS_POSITION = {
     "required": ["positionX", "positionY", "positionZ"]
 }
 
-# The test method parameters if solving for position and orientation.
+# The test method parameters if solving for position and orientation to send via API.
 TEST_PARAMETERS_TRANSFORM = {
     "type": "object",
     "properties": {
@@ -861,6 +861,7 @@ class Solver:
         s = s.strip()
         lines = s.splitlines()
         total = len(lines)
+        model_methods = False
         if total < 1:
             provider = ""
         else:
@@ -871,6 +872,9 @@ class Solver:
                 logging.info(f"{self.model} | {self.robot.name} | This is a reasoning model.")
             # Use a second line to indicate a provider.
             provider = lines[1].strip() if total >= 2 else ""
+            if total >= 3:
+                model_methods = lines[2].strip().upper()
+                model_methods = model_methods == "TRUE" or model_methods == "1"
         # If there are details, this indicates the provider of the model.
         if provider != "":
             # If the provider does not exist, indicate this.
@@ -892,13 +896,23 @@ class Solver:
                     lines = s.split()
                     self.url = lines[0].strip()
                     logging.info(f"{self.model} | {self.robot.name} | Provider '{provider}' URL is '{self.url}'.")
-                    # See if this endpoint supports methods.
+                    # See if the API supports methods in addition to our per-model support.
                     if len(lines) > 1:
                         methods = lines[1].upper()
                         if methods == "TRUE" or methods == "1":
-                            self.methods = True
-                    logging.info(f"{self.model} | {self.robot.name} | Provider '{provider}' "
-                                 f"{'supports' if self.methods else 'does not support'} methods.")
+                            if model_methods:
+                                self.methods = True
+                                logging.info(f"{self.model} | {self.robot.name} | Model and provider '{provider}' "
+                                             f"support methods.")
+                            else:
+                                logging.info(f"{self.model} | {self.robot.name} | Provider '{provider}' support methods"
+                                             f" but the model does not.")
+                        else:
+                            logging.info(f"{self.model} | {self.robot.name} | Provider '{provider}' does not support "
+                                         "methods.")
+                    else:
+                        logging.info(f"{self.model} | {self.robot.name} | Provider '{provider}' does not support "
+                                     "methods.")
         else:
             logging.info(f"{self.model} | {self.robot.name} | No provider; this means this is manually for a chat "
                          "interface without methods.")

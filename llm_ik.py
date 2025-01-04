@@ -49,6 +49,7 @@ POSITION = "Position"
 TRANSFORM = "Transform"
 TRAINING_TITLE = "Training"
 EVALUATING_TITLE = "Evaluating"
+AVERAGE = "Average"
 
 # Parameters.
 TRAINING = 1
@@ -134,6 +135,16 @@ TEST_PARAMETERS_TRANSFORM = {
     },
     "required": ["positionX", "positionY", "positionZ", "orientationX", "orientationY", "orientationZ"]
 }
+
+# All fields for evaluations.
+FIELDS = ["Success Rate (%)", "Failure Rate (%)", "Error Rate (%)", "Average Failure Distance",
+          "Average Failure Angle (°)", "Average Elapsed Time (s)", "Generation Time (s)", "Mode", "Feedbacks Given",
+          "Forwards Kinematics Calls", "Testing Calls", "Reasoning", "Functions", "API"]
+
+# All numeric fields for evaluations.
+NUMERIC = ["Success Rate (%)", "Failure Rate (%)", "Error Rate (%)", "Average Failure Distance",
+           "Average Failure Angle (°)", "Average Elapsed Time (s)", "Generation Time (s)", "Feedbacks Given",
+           "Forwards Kinematics Calls", "Testing Calls"]
 
 
 class Robot:
@@ -805,29 +816,35 @@ class Robot:
         # Return the updated lower and upper values.
         return lower, upper
 
-    def evaluate(self) -> None:
+    def evaluate(self) -> (dict[str, str or float or int or bool] or None):
         """
         Get the results of individual solvers for this robot together.
-        :return: Nothing.
+        :return: The total results from all chains by all solvers.
         """
         # Nothing to evaluate if not valid.
         if not self.is_valid():
             logging.error(f"{self.name} | Evaluate | Robot not configured.")
             return None
+        # Nothing to do if there are no results.
         results_root = os.path.join(RESULTS, self.name)
         if not os.path.exists(results_root):
             return None
         results = None
+        totals = None
+        # Parse the saved individual results from all solvers.
         paths = get_directories(results_root)
         for solver in paths:
             root = os.path.join(results_root, solver)
             files = get_files(root)
+            # Get every chain this solver has done.
             for name in files:
+                # The name needs to be properly formatted to match what it is for.
                 path = os.path.join(root, name)
                 parts = name.split("-")
                 if len(parts) != 3:
                     logging.error(f"{self.name} | Perform | Result '{path}' not named properly.")
                     continue
+                # Get the joints this is for.
                 # noinspection PyBroadException
                 try:
                     lower = int(parts[0])
@@ -835,17 +852,20 @@ class Robot:
                 except:
                     logging.error(f"{self.name} | Perform | Could not parse lower and upper from '{path}'.")
                     continue
+                # Get what this was solving.
                 solving = parts[2].replace(".csv", "")
                 if solving != POSITION and solving != TRANSFORM:
                     logging.error(f"{self.name} | Perform | Could not parse solving from '{path}', must be either "
                                   f"'{POSITION}' or '{TRANSFORM}'.")
                     continue
+                # Read the file.
                 with open(path, "r") as file:
                     s = file.read()
                 lines = s.splitlines()
                 if len(lines) != 2:
                     logging.error(f"{self.name} | Evaluate | No result in '{path}'.")
                     continue
+                # Ensure the right titles and fields are in it.
                 expected = 14
                 titles = lines[0].split(",")
                 total_titles = len(titles)
@@ -863,6 +883,7 @@ class Robot:
                     logging.error(f"{self.name} | Evaluate | Titles and results in '{path}' do not match: "
                                   f"{total_titles} titles and {total_results} results.")
                     continue
+                # Parse all data from the file.
                 result = {}
                 for i in range(expected):
                     title = titles[i]
@@ -927,6 +948,7 @@ class Robot:
                         result = None
                         break
                     result[title] = data
+                # Cache the data.
                 if result is None:
                     continue
                 if results is None:
@@ -938,15 +960,31 @@ class Robot:
                 if solving not in results[lower][upper]:
                     results[lower][upper][solving] = {}
                 results[lower][upper][solving][solver] = result
+                # Cache the total results for wholistic evaluations.
+                size = upper - lower + 1
+                if totals is None:
+                    totals = {}
+                if size not in totals:
+                    totals[size] = {}
+                if solving not in totals[size]:
+                    totals[size][solving] = {}
+                if solver not in totals[size][solving]:
+                    total = copy.deepcopy(result)
+                    total["Chains"] = 1
+                    totals[size][solving][solver] = total
+                else:
+                    for field in NUMERIC:
+                        totals[size][solving][solver][field] += result[field]
+                    totals[size][solving][solver]["Chains"] += 1
+        # If there were no results, there is nothing else to do.
         if results is None:
             return None
-        fields = ["Success Rate (%)", "Failure Rate (%)", "Error Rate (%)", "Average Failure Distance",
-                  "Average Failure Angle (°)", "Average Elapsed Time (s)", "Generation Time (s)", "Mode",
-                  "Feedbacks Given", "Forwards Kinematics Calls", "Testing Calls", "Reasoning", "Functions", "API"]
+        # Otherwise, write the results for all solvers for each individual chain.
         for lower in results:
             for upper in results[lower]:
                 for solving in results[lower][upper]:
                     results[lower][upper][solving] = dict(
+                        # Sort the results to display the best solvers first.
                         sorted(
                             results[lower][upper][solving].items(),
                             key=lambda item: (
@@ -967,10 +1005,11 @@ class Robot:
                             )
                         )
                     )
-                    s = "Name," + ",".join(fields)
+                    # Format the results.
+                    s = "Name," + ",".join(FIELDS)
                     for name in results[lower][upper][solving]:
                         s += f"\n{name}"
-                        for field in fields:
+                        for field in FIELDS:
                             data = results[lower][upper][solving][name][field]
                             if field == "Success Rate (%)" or field == "Failure Rate (%)" or field == "Error Rate (%)":
                                 data = f"{neat(data)}%"
@@ -984,7 +1023,10 @@ class Robot:
                     path = os.path.join(results_root, f"{lower}-{upper}-{solving}.csv")
                     with open(path, "w") as file:
                         file.write(s)
-                    logging.info(f"{self.name} | Evaluate | Results saved to '{path}'.")
+                    logging.info(f"{self.name} | Evaluate | Chain results saved to '{path}'.")
+        # Calculate the average results.
+        evaluate_averages(totals, results_root)
+        return totals
 
 
 class Solver:
@@ -2072,6 +2114,69 @@ def get_directories(directory) -> list[str]:
     return [f for f in os.listdir(directory) if os.path.isdir(os.path.join(directory, f))]
 
 
+def evaluate_averages(totals: dict[str, str or float or int or bool] or None = None, root: str = RESULTS) -> None:
+    """
+    Evaluate average results.
+    :param totals: The total results.
+    :param root: The folder to save the results.
+    :return: Nothing.
+    """
+    if totals is None:
+        logging.info("Evaluate Averages | No total results passed; nothing saved.")
+        return None
+    # Make a copy to modify.
+    averages = copy.deepcopy(totals)
+    for length in averages:
+        for solving in averages[length]:
+            for solver in averages[length][solving]:
+                # Average out the numeric values.
+                for field in NUMERIC:
+                    averages[length][solving][solver][field] /= averages[length][solving][solver]["Chains"]
+                # Sort the values by best average performances.
+                averages[length][solving] = dict(
+                    sorted(
+                        averages[length][solving].items(),
+                        key=lambda item: (
+                            -item[1]["Success Rate (%)"],
+                            -item[1]["Chains"],
+                            item[1]["Error Rate (%)"],
+                            item[1]["Average Failure Distance"],
+                            item[1]["Average Failure Angle (°)"],
+                            item[1]["Average Elapsed Time (s)"],
+                            item[1]["Generation Time (s)"],
+                            item[1]["Mode"],
+                            item[1]["Feedbacks Given"],
+                            item[1]["Forwards Kinematics Calls"],
+                            item[1]["Testing Calls"],
+                            item[1]["API"],
+                            item[1]["Reasoning"],
+                            item[1]["Functions"],
+                            item[0]
+                        )
+                    )
+                )
+                # Format the outputs.
+                s = "Name," + ",".join(FIELDS) + ",Chains"
+                for name in averages[length][solving]:
+                    s += f"\n{name}"
+                    for field in FIELDS:
+                        data = averages[length][solving][name][field]
+                        if field == "Success Rate (%)" or field == "Failure Rate (%)" or field == "Error Rate (%)":
+                            data = f"{neat(data)}%"
+                        elif field == "Average Failure Distance":
+                            data = neat(data)
+                        elif field == "Average Failure Angle (°)":
+                            data = f"{neat(data)}°"
+                        elif field == "Average Elapsed Time (s)" or field == "Generation Time (s)":
+                            data = f"{neat(data)} s"
+                        s += f",{data}"
+                    s += f",{averages[length][solving][name]['Chains']}"
+                path = os.path.join(root, f"{AVERAGE}-{length}-{solving}.csv")
+                with open(path, "w") as file:
+                    file.write(s)
+                logging.info(f"Evaluate Averages | Results saved to '{path}'.")
+
+
 def llm_ik(robots: str or list[str] or None = None, models: str or list[str] or None = None,
            orientation: bool or None = False, types: str or list[str] or None = None, feedbacks: int = FEEDBACKS,
            examples: int = EXAMPLES, training: int = TRAINING, evaluating: int = EVALUATING, seed: int = SEED,
@@ -2375,9 +2480,30 @@ def llm_ik(robots: str or list[str] or None = None, models: str or list[str] or 
             logging.info(f"Should run API calls for {solver.model} {solver.robot.name}.")
         solver.perform(orientation, types, run_instance)
     # Get per-robot results for all solvers.
+    totals = None
     for robot in created_robots:
-        robot.evaluate()
-    # TODO - Run overall evaluations.
+        instance = robot.evaluate()
+        # If there were no results for this robot, there is nothing to do.
+        if instance is None:
+            continue
+        # Otherwise, cache the results, ensuring the data structure can hold it.
+        if totals is None:
+            totals = {}
+        for length in instance:
+            if length not in totals:
+                totals[length] = {}
+            for solving in instance[length]:
+                if solving not in totals[length]:
+                    totals[length][solving] = {}
+                for solver in instance[length][solving]:
+                    if solver not in totals[length][solving]:
+                        totals[length][solving][solver] = instance[length][solving][solver]
+                        continue
+                    for field in NUMERIC:
+                        totals[length][solving][solver][field] += instance[length][solving][solver][field]
+                    totals[length][solving][solver]["Chains"] += 1
+    # Get the overall results.
+    evaluate_averages(totals)
 
 
 if __name__ == "__main__":

@@ -62,6 +62,79 @@ ANGLE_ERROR = 0.001
 # Default bounding value.
 BOUND = 2 * np.pi
 
+# The core of the forward kinematics function to send via API.
+FORWARD_KINEMATICS_CORE = {
+    "type": "function",
+    "function": {
+        "name": "forward_kinematics",
+        "description": "Test the forward kinematics of the robot.",
+        "parameters": {
+            "type": "object"
+        }
+    }
+}
+
+# The core of the testing solutions function to send via API.
+TEST_CORE = {
+    "type": "function",
+    "function": {
+        "name": "test_solution",
+        "description": "Test your current solution.",
+    }
+}
+
+# The test method parameters if solving for position only.
+TEST_PARAMETERS_POSITION = {
+    "type": "object",
+    "properties": {
+        "positionX": {
+            "type": "number",
+            "description": "The X position to reach."
+        },
+        "positionY": {
+            "type": "number",
+            "description": "The Y position to reach."
+        },
+        "positionZ": {
+            "type": "number",
+            "description": "The Z position to reach."
+        },
+    },
+    "required": ["positionX", "positionY", "positionZ"]
+}
+
+# The test method parameters if solving for position and orientation.
+TEST_PARAMETERS_TRANSFORM = {
+    "type": "object",
+    "properties": {
+        "positionX": {
+            "type": "number",
+            "description": "The X position to reach."
+        },
+        "positionY": {
+            "type": "number",
+            "description": "The Y position to reach."
+        },
+        "positionZ": {
+            "type": "number",
+            "description": "The Z position to reach."
+        },
+        "orientationX": {
+            "type": "number",
+            "description": "The X orientation to reach in radians."
+        },
+        "orientationY": {
+            "type": "number",
+            "description": "The Y orientation to reach in radians."
+        },
+        "orientationZ": {
+            "type": "number",
+            "description": "The Z orientation to reach in radians."
+        }
+    },
+    "required": ["positionX", "positionY", "positionZ", "orientationX", "orientationY", "orientationZ"]
+}
+
 
 class Robot:
     """
@@ -878,12 +951,10 @@ class Solver:
                         while True:
                             # Get the latest message to send to the LLM.
                             message = self.handle_interactions(lower, upper, current_orientation, current_mode)
-                            if message == "":
+                            # If there is no message, or we should not call the LLM, stop.
+                            if (message == "" or self.url is None or not run or current_orientation not in orientation
+                                    or current_mode not in mode):
                                 break
-                            # Check if we should try using the model's API.
-                            if (self.url is None or not run or current_orientation not in orientation or
-                                    current_mode not in mode):
-                                continue
                             # For higher chains, let us only try to solve them if the lower chains were successful.
                             if lower != upper:
                                 # Get the upper of the lower chain.
@@ -894,11 +965,11 @@ class Solver:
                                 previous_mode = NORMAL if lower == previous_upper else current_mode
                                 # If the previous model was not successful, do not waste API calls on this higher chain.
                                 if not self.code_successful(lower, previous_upper, previous_orientation, previous_mode):
-                                    continue
+                                    break
                                 # If the position-only variation was not successful, do not waste API calls.
                                 if current_orientation and not self.code_successful(lower, upper, False,
                                                                                     current_mode):
-                                    continue
+                                    break
                             solving = TRANSFORM if current_orientation else POSITION
                             logging.error(f"{self.model} | {self.robot.name} | {lower + 1} to {upper + 1} | "
                                           f"{solving} | {current_mode} | Perform | LLM interactions not yet "
@@ -971,15 +1042,133 @@ class Solver:
             logging.info(f"{self.model} | {self.robot.name} | {lower + 1} to {upper + 1} | {solving} | {mode} | Handle "
                          f"Interactions | Last message loaded from '{path}'.")
             return s.strip()
+        code_path = os.path.join(self.interactions, f"{lower}-{upper}-{solving}-{mode}.py")
         # Otherwise, it was a response from the LLM, so prepare the next message by parsing it.
         codes = re.findall(r"```python\s*([\s\S]*?)```", s, re.IGNORECASE)
         # If no codes were returned, this means it was a command response or invalid, so determine this.
         total = len(codes)
         if total < 1:
-            # TODO - Handle commands.
+            # Try every line until a valid command is reached.
+            lines = s.splitlines()
+            total = len(lines)
+            for i in range(total):
+                line = lines[i].strip().split()
+                parts = len(line)
+                # If the line is empty, continue.
+                if parts < 1:
+                    continue
+                # Handle if this is a forward kinematics call.
+                if line[0] == "forward_kinematics":
+                    received = parts - 1
+                    # Ensure the proper number of joints were given.
+                    if received != upper - lower + 1:
+                        logging.info(f"{self.model} | {self.robot.name} | {lower + 1} to {upper + 1} | {solving} | "
+                                     f"{mode} | Handle Interactions | Forward kinematics call had wrong number of "
+                                     "joints.")
+                        s = "<ERROR>\nResponded with the wrong number of joints to call forward kinematics.\n</ERROR>"
+                    else:
+                        # noinspection PyBroadException
+                        try:
+                            # Parse the joints.
+                            joints = []
+                            for j in range(1, parts):
+                                joints.append(float(line[j]))
+                            # Run the forward kinematics and format results.
+                            positions, orientations = self.robot.forward_kinematics(lower, upper, joints)
+                            headers = ["Link", "Position", "Orientation"]
+                            data = []
+                            chain = self.robot.chains[lower][upper]
+                            num = len(chain)
+                            for j in range(num):
+                                data.append([chain[j].name, neat(positions[j]), neat(orientations[j])])
+                            s = f"<FORWARD KINEMATICS>{tabulate(data, headers, tablefmt='presto')}</FORWARD KINEMATICS>"
+                            logging.info(f"{self.model} | {self.robot.name} | {lower + 1} to {upper + 1} | {solving} | "
+                                         f"{mode} | Handle Interactions | Performed forward kinematics.")
+                        except:
+                            # Indicate if the joints could not be parsed.
+                            logging.info(f"{self.model} | {self.robot.name} | {lower + 1} to {upper + 1} | {solving} | "
+                                         f"{mode} | Handle Interactions | Forward kinematics did not respond with valid"
+                                         f" joints.")
+                            s = ("<ERROR>\nCould not parse joint values to call forward kinematics; ensure they are all"
+                                 " floats.\n</ERROR>")
+                    os.makedirs(root, exist_ok=True)
+                    with open(os.path.join(root, f"{total}-{MESSAGE_FORWARD}.txt"), "w") as file:
+                        file.write(s)
+                    return s
+                # Handle if this is a solution testing call.
+                elif line[0] == "test_solution":
+                    received = parts - 1
+                    expected = 6 if orientation else 3
+                    # If there is no solution to begin with, there is nothing to do.
+                    if not os.path.exists(code_path):
+                        logging.info(f"{self.model} | {self.robot.name} | {lower + 1} to {upper + 1} | {solving} | "
+                                     f"{mode} | Handle Interactions | No solution to test.")
+                        s = "<ERROR>\nYou have not yet provided a solution to the code for testing.\n</ERROR>"
+                    # Indicate if the wrong number of parameters were recieved.
+                    elif received != expected:
+                        logging.info(f"{self.model} | {self.robot.name} | {lower + 1} to {upper + 1} | {solving} | "
+                                     f"{mode} | Handle Interactions | Test solution call had wrong number of "
+                                     "parameters.")
+                        s = "<ERROR>\nResponded with the wrong number of parameters to test your solution.\n</ERROR>"
+                    else:
+                        # noinspection PyBroadException
+                        try:
+                            # Parse the position and orientation to reach.
+                            target_position = []
+                            for j in range(3):
+                                target_position.append(float(line[j]))
+                            if orientation:
+                                target_orientation = []
+                                for j in range(3, 6):
+                                    target_orientation.append(float(line[j]))
+                            else:
+                                target_orientation = None
+                            # Run the code.
+                            self.load_code(lower, upper, orientation, mode, True)
+                            joints, e, error = self.run_code(lower, upper, mode, target_position, target_orientation)
+                            # Indicate if there was an error.
+                            expected = upper - lower + 1
+                            if joints is None:
+                                s = f"<ERROR>\nReturned no joints - expected {expected}.\n</ERROR>"
+                            elif len(joints) != expected:
+                                s = (f"<ERROR>\nReturned the wrong number of joints - expected {expected} but got "
+                                     f"{len(joints)}.\n</ERROR>")
+                            elif error is not None:
+                                s = f"<ERROR>{error}</ERROR>"
+                            else:
+                                # Test the result otherwise and format it.
+                                positions, orientations = self.robot.forward_kinematics(lower, upper, joints)
+                                reached_position = positions[-1]
+                                reached_orientation = orientations[-1]
+                                d_p = difference_distance(target_position, reached_position)
+                                d_a = difference_angle(target_orientation, reached_orientation) if orientation else 0
+                                p = "Successfully reached the target." if reached(d_p, d_a) else ("Failed to reach the "
+                                                                                                  "target.")
+                                headers = ["Link", "Position", "Orientation"]
+                                data = []
+                                chain = self.robot.chains[lower][upper]
+                                num = len(chain)
+                                for j in range(num):
+                                    data.append([chain[j].name, neat(positions[j]), neat(orientations[j])])
+                                s = f"<TEST SOLUTION>{p}\n{tabulate(data, headers, tablefmt='presto')}</TEST SOLUTION>"
+                                logging.info(f"{self.model} | {self.robot.name} | {lower + 1} to {upper + 1} | "
+                                             f"{solving} | {mode} | Handle Interactions | Solution tested.")
+                        except:
+                            logging.info(f"{self.model} | {self.robot.name} | {lower + 1} to {upper + 1} | {solving} | "
+                                         f"{mode} | Handle Interactions | Test solution did not respond with valid"
+                                         f" parameters.")
+                            s = ("<ERROR>\nCould not parameters to test the solution; ensure they are all  floats."
+                                 "</ERROR>")
+                    os.makedirs(root, exist_ok=True)
+                    with open(os.path.join(root, f"{total}-{MESSAGE_TEST}.txt"), "w") as file:
+                        file.write(s)
+                    return s
+            # Otherwise, indicate there was an invalid response.
             logging.info(f"{self.model} | {self.robot.name} | {lower + 1} to {upper + 1} | {solving} | {mode} | Handle "
-                         f"Interactions | No Python code found in '{path}'; creating message indicating this.")
-            s = "You did not respond with valid code to solve the inverse kinematics or a valid command."
+                         f"Interactions | No Python code or functions found in '{path}'; creating message indicating "
+                         "this.")
+            s = ("<ERROR>\nYou did not respond with valid code to solve the inverse kinematics or a valid command.\n"
+                 "</ERROR>")
             os.makedirs(root, exist_ok=True)
             with open(os.path.join(root, f"{total}-{MESSAGE_ERROR}.txt"), "w") as file:
                 file.write(s)
@@ -995,10 +1184,9 @@ class Solver:
                 size = temp_size
         logging.info(f"{self.model} | {self.robot.name} | {lower + 1} to {upper + 1} | {solving} | {mode} | Handle "
                      f"Interactions | Extracted code found in '{path}'.")
-        path = os.path.join(self.interactions, f"{lower}-{upper}-{solving}-{mode}.py")
         # Save the code so it can be loaded by the program.
         os.makedirs(self.interactions, exist_ok=True)
-        with open(path, "w") as file:
+        with open(code_path, "w") as file:
             file.write(code)
         # Evaluate the code.
         self.load_code(lower, upper, orientation, mode)
@@ -1458,15 +1646,55 @@ class Solver:
             logging.warning(f"{self.model} | {self.robot.name} | {lower + 1} to {upper + 1} | Prepare LLM  | Mode "
                             f"'{mode}' not valid, using '{NORMAL}' instead.")
             mode = NORMAL
-        # Cannot do orientation if just a single joint.
+        # Cannot do orientation if just a single joint, and we can only run in the normal mode.
         if lower == upper:
             orientation = False
+            mode = NORMAL
+        # Explain how to use functions.
+        mid = "" if self.methods else 'in the "FUNCTIONS" section '
+        pre = (" You may respond by either completing the inverse kinematics method or calling either of the two "
+               f"provided functions {mid}to help you develop your solution. If you call a function, you will be "
+               "provided another response and chance to complete the inverse kinematics method.")
+        # If the solver using API-based methods, then this is handled in the API formatting.
+        if self.methods:
+            post = ""
+        # Otherwise, explain how to use the commands directly in the prompt.
+        else:
+            d = ("Test the forward kinematics of the robot, returning the position and orientation of all links in "
+                 "world space after setting the joint value")
+            if lower == upper:
+                j = " value"
+                d += ' where "value" is the joint value as a float.'
+            else:
+                j = ""
+                for i in range(lower, upper + 1):
+                    j += f" joint{i + 1}"
+                if lower + 1 == upper:
+                    f's where "joint1" and "joint2" are the joint values as floats.'
+                else:
+                    d += 's where "joint1"'
+                    for i in range(lower + 1, upper):
+                        d += f', "joint{i + 1}"'
+                    d += f', and "joint{upper}" are the joint values as floats.'
+            t = ("Returns the position and orientation of all links in world space after testing your current inverse "
+                 'kinematics solution code where "positionX", "positionY", and "positionZ" are the target position')
+            p = "test_solution positionX positionY positionZ"
+            if orientation:
+                t += ', and "orientationX", "orientationY", and "orientationZ" are the target orientation as radians.'
+                p += " orientationX orientationY orientationZ"
+            else:
+                t += "."
+            post = ('\n<FUNCTIONS>\n\t<USAGE>\n\tTo use a function, response with the format denoted in the "FORMAT" '
+                    "section of the function.\n\t</USAGE>\n\t<FORWARD KINEMATICS>\n\t\t<FORMAT>\n\t\tforward_kinematics"
+                    f"{j}\n\t\t</FORMAT>\n\t\t<DESCRIPTION>\n\t\t{d}\n\t\t</DESCRIPTION>\n\t</FORWARD KINEMATICS>\n\t"
+                    f"<TEST SOLUTION>\n\t\t<FORMAT>\n\t\t{p}\n\t\t</FORMAT>\n\t\t<DESCRIPTION>\n\t\t{t}\n\t\t"
+                    "</DESCRIPTION>\n\t</TEST SOLUTION>\n</FUNCTIONS>")
         # Can only do normal mode for single joint chains.
-        if mode == NORMAL or lower == upper:
-            prompt = self.robot.prepare_llm(lower, upper, orientation)
+        if mode == NORMAL:
+            prompt = self.robot.prepare_llm(lower, upper, orientation, pre)
             logging.info(f"{self.model} | {self.robot.name} | {lower + 1} to {upper + 1} | Prepare LLM | Normal prompt "
                          f"prepared.")
-            return prompt
+            return prompt + post
         # Cache what is being solved for file outputs.
         solving = TRANSFORM if orientation else POSITION
         # Extending prompting mode.
@@ -1492,15 +1720,15 @@ class Solver:
             total = upper - lower
             plural = "s" if total > 1 else ""
             additional = (f" To help you, a solution for solving the sub-chain of the first {total} link{plural} is "
-                          f'provided in the "EXISTING" section. This code solved the sub-chain assuming link '
+                          'provided in the "EXISTING" section. This code solved the sub-chain assuming link '
                           f"{total + 1} was the position{' and orientation' if orientation else ''} being solved for. "
-                          f"You can use this solution as a starting point to extend for the entire chain.")
+                          f"You can use this solution as a starting point to extend for the entire chain.{pre}")
             prompt = self.robot.prepare_llm(lower, upper, orientation, additional)
             prompt += "\n<EXISTING>\n"
             with open(path, "r") as file:
                 prompt += file.read().strip()
             logging.info(f"{self.model} | {self.robot.name} | {lower + 1} to {upper + 1} | Extended prompt prepared.")
-            return f"{prompt}\n</EXISTING>"
+            return f"{prompt}\n</EXISTING>{post}"
         # TODO - Implement dynamic mode prompt building.
         logging.error(f"{self.model} | {self.robot.name} | {lower + 1} to {upper + 1} | Prepare LLM | Dynamic prompts "
                       f"not yet implemented.")

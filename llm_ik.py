@@ -1243,7 +1243,7 @@ class Solver:
         # Create the initial prompt if needed.
         initial = f"0-{MESSAGE_PROMPT}.txt"
         if total < 1 or initial not in interactions:
-            s = self.prepare_llm(lower, upper, orientation, mode, True)
+            s = self.prepare_llm(lower, upper, orientation, mode)
             if s != "":
                 os.makedirs(root, exist_ok=True)
                 path = os.path.join(root, initial)
@@ -1469,7 +1469,7 @@ class Solver:
         return self.model
 
     def load_code(self, lower: int = 0, upper: int = -1, orientation: bool = False, mode: str = NORMAL,
-                  suppress: bool = False) -> None:
+                  suppress: bool = False) -> bool:
         """
         Load the code for a solver.
         :param lower: The starting joint.
@@ -1477,12 +1477,12 @@ class Solver:
         :param orientation: If this data cares about the orientation or not.
         :param mode: The mode by which the code was achieved.
         :param suppress: If the error for the code not existing should be suppressed.
-        :return: Nothing.
+        :return: If the code was loaded or not.
         """
         # Nothing to do if the solver is not valid.
         if not self.is_valid():
             logging.error(f"{self.model} | Load Code | Solver is not valid.")
-            return None
+            return False
         # Ensure valid values.
         lower, upper = self.robot.validate_lower_upper(lower, upper)
         if mode not in [NORMAL, EXTEND, DYNAMIC]:
@@ -1498,7 +1498,7 @@ class Solver:
             if not suppress:
                 logging.error(f"{self.model} | {lower + 1} to {upper + 1} | Load Code | {solving} | {mode} | Solver "
                               f"'{path}' does not exist.")
-            return None
+            return False
         # Try to load the inverse kinematics method from the Python file.
         try:
             spec = importlib.util.spec_from_file_location(name, path)
@@ -1508,12 +1508,12 @@ class Solver:
             if not hasattr(module, "inverse_kinematics"):
                 logging.error(f"{self.model} | {lower + 1} to {upper + 1} | Load Code | {solving} | {mode} | Solver "
                               f"'{path}' does not have the method 'inverse_kinematics'.")
-                return None
+                return False
             method = getattr(module, "inverse_kinematics")
         except Exception as e:
             logging.error(f"{self.model} | {lower + 1} to {upper + 1} | Load Code | {solving} | {mode} | Failed to load"
                           f" '{path}': {e}")
-            return None
+            return False
         # Cache the method.
         if self.code is None:
             self.code = {}
@@ -1524,6 +1524,7 @@ class Solver:
         if solving not in self.code[lower][upper]:
             self.code[lower][upper][solving] = {}
         self.code[lower][upper][solving][mode] = method
+        return True
 
     def run_code(self, lower: int = 0, upper: int = -1, mode: str = NORMAL, position: list[float] or None = None,
                  orientation: list[float] or None = None) -> (list[float] or None, float, str or None):
@@ -1860,15 +1861,13 @@ class Solver:
             s += f"\n{failures[i]}"
         return f"{s}\n</FEEDBACK>"
 
-    def prepare_llm(self, lower: int = 0, upper: int = -1, orientation: bool = False, mode: str = NORMAL,
-                    suppress: bool = False) -> str:
+    def prepare_llm(self, lower: int = 0, upper: int = -1, orientation: bool = False, mode: str = NORMAL) -> str:
         """
         Prepare an initial prompt for the LLM.
         :param lower: The starting joint.
         :param upper: The ending joint.
         :param orientation: If we want to solve for orientation.
         :param mode: The solving mode to use.
-        :param suppress: If the error for the code not existing should be suppressed.
         :return: The initial prompt for the LLM.
         """
         # Nothing to do if the solver is not valid.
@@ -1878,7 +1877,7 @@ class Solver:
         # Ensure valid values.
         lower, upper = self.robot.validate_lower_upper(lower, upper)
         if mode not in [NORMAL, EXTEND, DYNAMIC]:
-            logging.warning(f"{self.model} | {self.robot.name} | {lower + 1} to {upper + 1} | Prepare LLM  | Mode "
+            logging.warning(f"{self.model} | {self.robot.name} | {lower + 1} to {upper + 1} | Prepare LLM | Mode "
                             f"'{mode}' not valid, using '{NORMAL}' instead.")
             mode = NORMAL
         # Cannot do orientation if just a single joint, and we can only run in the normal mode.
@@ -1932,24 +1931,29 @@ class Solver:
             return prompt + post
         # Cache what is being solved for file outputs.
         solving = TRANSFORM if orientation else POSITION
+        # If a normal chain has successfully solved this, do not waste resources doing an extending or dynamic prompt.
+        path = os.path.join(self.solutions, f"{lower}-{upper}-{solving}-{NORMAL}.py")
+        if (os.path.exists(path) and self.load_code(lower, upper, orientation, NORMAL) and
+                self.code_successful(lower, upper, orientation, NORMAL)):
+            logging.info(f"{self.model} | {self.robot.name} | {lower + 1} to {upper + 1} | Prepare LLM | "
+                         f"Normal solution already successful; not doing mode '{mode}'.")
+            return ""
         # Extending prompting mode.
         if mode == EXTEND:
             # We need to load the results of the lower portion, which when just one joint is the normal mode.
             previous = upper - 1
             previous_mode = NORMAL if lower == previous else EXTEND
-            path = os.path.join(self.solutions,
-                                f"{lower}-{previous}-{solving}-{previous_mode}.py")
+            path = os.path.join(self.solutions, f"{lower}-{previous}-{solving}-{previous_mode}.py")
             # Cannot prepare a prompt in this mode if the chain to extend does not exist.
             if not os.path.exists(path):
-                if not suppress:
-                    logging.error(f"{self.model} | {self.robot.name} | {lower + 1} to {upper + 1} | Prepare LLM | "
-                                  f"Cannot load an extending prompt as '{path}' does not exist.")
+                logging.info(f"{self.model} | {self.robot.name} | {lower + 1} to {upper + 1} | Prepare LLM | "
+                             f"Cannot load an extending prompt as '{path}' does not exist.")
                 return ""
             existing_successful = self.code_successful(lower, previous, orientation, previous_mode)
             # Only perform an extending prompt if the previous chain was successful.
             if not existing_successful:
-                logging.info(f"{self.model} | {self.robot.name} | {lower + 1} to {upper + 1} | Not performing an "
-                             f"extending prompt as '{path}' is not perfectly successful.")
+                logging.info(f"{self.model} | {self.robot.name} | {lower + 1} to {upper + 1} | Prepare LLM | Not "
+                             f"performing an extending prompt as '{path}' is not perfectly successful.")
                 return ""
             # Add the extending prompt portions.
             total = upper - lower
@@ -1962,12 +1966,160 @@ class Solver:
             prompt += "\n<EXISTING>\n"
             with open(path, "r") as file:
                 prompt += file.read().strip()
-            logging.info(f"{self.model} | {self.robot.name} | {lower + 1} to {upper + 1} | Extended prompt prepared.")
+            logging.info(f"{self.model} | {self.robot.name} | {lower + 1} to {upper + 1} | Prepare LLM | Extended "
+                         "prompt prepared.")
             return f"{prompt}\n</EXISTING>{post}"
-        # TODO - Implement dynamic mode prompt building.
-        logging.error(f"{self.model} | {self.robot.name} | {lower + 1} to {upper + 1} | Prepare LLM | Dynamic prompts "
-                      f"not yet implemented.")
-        return ""
+        # If an extended chain has successfully solved this, do not waste resources doing a dynamic prompt.
+        path = os.path.join(self.solutions, f"{lower}-{upper}-{solving}-{EXTEND}.py")
+        if (os.path.exists(path) and self.load_code(lower, upper, orientation, EXTEND) and
+                self.code_successful(lower, upper, orientation, EXTEND)):
+            logging.info(f"{self.model} | {self.robot.name} | {lower + 1} to {upper + 1} | Prepare LLM | "
+                         f"Extending solution already successful; not doing a dynamic prompt.")
+            return ""
+        # Get the best possible dynamic option.
+        best = self.get_dynamic(lower, upper, orientation)
+        if best is None:
+            logging.info(f"{self.model} | {self.robot.name} | {lower + 1} to {upper + 1} | Prepare LLM | Not performing"
+                         " a dynamic prompt as there are no successful combinations.")
+            return ""
+        total = len(best)
+        # If somehow nothing was returned, this is an error.
+        if total == 0:
+            logging.error(f"{self.model} | {self.robot.name} | {lower + 1} to {upper + 1} | Prepare LLM | Empty dynamic"
+                          f" chain returned.")
+            return ""
+        # If this is just the same as a normal prompt, lets not waste resources running it.
+        if total == 1:
+            logging.info(f"{self.model} | {self.robot.name} | {lower + 1} to {upper + 1} | Prepare LLM | Not performing"
+                         " a dynamic prompt as this was just a single chain that was returned, thus same as a normal "
+                         "prompt.")
+            return ""
+        # If this is just the same as an extending prompt (top part is one joint), lets not waste resources running it.
+        if total == 2 and best[1]["Upper"] == best[1]["Lower"]:
+            logging.info(f"{self.model} | {self.robot.name} | {lower + 1} to {upper + 1} | Prepare LLM | Not performing"
+                         " a dynamic prompt as this was just an extended chain that was returned.")
+            return ""
+        # Load the codes.
+        codes = []
+        for chain in best:
+            c_lower = chain["Lower"]
+            c_upper = chain["Upper"]
+            c_solving = chain["Solving"]
+            c_mode = chain["Mode"]
+            path = os.path.join(self.solutions,
+                                f"{c_lower}-{c_upper}-{c_solving}-{c_mode}.py")
+            if not os.path.exists(path):
+                logging.error(f"{self.model} | {self.robot.name} | {lower + 1} to {upper + 1} | Prepare LLM | Part of "
+                              f"dynamic chain at '{path}' does not exist.")
+                return ""
+            with open(path, "r") as file:
+                codes.append(file.read().strip())
+        # Explain the dynamic chains.
+        additional = (' To help you, solutions for sub-chains have been provided in the "EXISTING" sections. Each code '
+                      "solved a sub-link assuming their last link was the position"
+                      f"{' and orientation' if orientation else ''} being solved for. You can use these solutions as a "
+                      f"starting point to extend for the entire chain.")
+        # State what sub-chain each dynamic code is for.
+        base = 0
+        for i in range(total):
+            c_lower = best[i]["Lower"]
+            c_upper = best[i]["Upper"]
+            ending = f"joint {c_lower + 1 + base}" if c_lower == c_upper else (f"joints {c_lower + 1 + base} to "
+                                                                               f"{c_upper + 1 + base}")
+            base = c_upper + 1
+            additional += f"\nExisting code {i + 1} solved {ending}."
+        # Build the prompt.
+        prompt = self.robot.prepare_llm(lower, upper, orientation, additional + pre)
+        # Add the existing codes to the prompt.
+        for i in range(total):
+            prompt += f"\n<EXISTING {i + 1}>\n{codes[i]}\n</EXISTING {i + 1}>"
+        logging.info(f"{self.model} | {self.robot.name} | {lower + 1} to {upper + 1} | Prepare LLM | Dynamic prompt "
+                     "prepared.")
+        return f"{prompt}{post}"
+
+    def get_dynamic(self, lower: int = 0, upper: int = -1,
+                    orientation: bool = False) -> list[dict[str, int or str]] or None:
+        """
+        Get the best dynamic chain.
+        :param lower: The starting joint.
+        :param upper: The ending joint.
+        :param orientation: If we want to solve for orientation.
+        :return: The best dynamic chain or none if none were found.
+        """
+        # Nothing to do if the solver is not valid.
+        if not self.is_valid():
+            logging.error(f"{self.model} | Get Dynamic | Solver is not valid.")
+            return None
+        # Ensure valid values.
+        lower, upper = self.robot.validate_lower_upper(lower, upper)
+        modes = [NORMAL] if lower == upper else [NORMAL, EXTEND, DYNAMIC]
+        # Cannot do orientation if just a single joint, and we can only run in the normal mode.
+        current_orientation = False if lower == upper else orientation
+        # See if we already have a full solution here, in which case there is no point in looking for a dynamic one.
+        for mode in modes:
+            if not self.load_code(lower, upper, current_orientation, mode, True):
+                continue
+            # If we have a working solution of this size, return it.
+            if self.code_successful(lower, upper, current_orientation, mode):
+                logging.info(f"{self.model} | Get Dynamic | {lower + 1} to {upper + 1} | Found a successful solver "
+                             f"solving for '{current_orientation}' in mode '{mode}'.")
+                return [{"Lower": lower, "Upper": upper, "Solving": TRANSFORM if current_orientation else POSITION,
+                         "Mode": mode}]
+        # If this was a base case, there are no valid options.
+        if lower == upper:
+            logging.info(f"{self.model} | Get Dynamic | {lower + 1} to {upper + 1} | No successful base cases.")
+            return None
+        # Otherwise, let us try to get the best possible sub-chain and use it.
+        best = None
+        best_size = 0
+        best_bottom = 0
+        for split in range(lower, upper):
+            # Try to get the bottom dynamic portion.
+            bottom = self.get_dynamic(lower, split, orientation)
+            if bottom is None:
+                logging.info(f"{self.model} | Get Dynamic | {lower + 1} to {upper + 1} | No bottom found from "
+                             f"{lower + 1} to {split + 1}.")
+                continue
+            # Try to get the top dynamic portion.
+            top = self.get_dynamic(split + 1, upper, orientation)
+            if top is None:
+                logging.info(f"{self.model} | Get Dynamic | {lower + 1} to {upper + 1} | No top found from {split + 2} "
+                             f"to {upper + 1}.")
+                continue
+            bottom_size = len(bottom)
+            top_size = len(top)
+            total_size = bottom_size + top_size
+            logging.info(f"{self.model} | Get Dynamic | {lower + 1} to {upper + 1} | Chains found from {lower + 1} to "
+                         f"{upper + 1} and {split + 2} to {upper + 1}. Size is {total_size} ({bottom_size} + "
+                         f"{top_size}).")
+            # Check if this is a better dynamic chain which has been found.
+            if best is not None:
+                # If the existing number of sub-chains is less, don't do anything.
+                if best_size <= total_size:
+                    logging.info(f"{self.model} | Get Dynamic | {lower + 1} to {upper + 1} | Best size of {best_size} "
+                                 f"is better than the new solution of {total_size} ({bottom_size} + {top_size}).")
+                    continue
+                # If the sizes are the same, only keep the new chain if the bottom size is larger.
+                if best_size == total_size and best_bottom < bottom_size:
+                    logging.info(f"{self.model} | Get Dynamic | {lower + 1} to {upper + 1} | New and best solution have"
+                                 f" the same size of {best_size} but the best has a larger lower chain of {best_bottom}"
+                                 f" compared to the new {bottom_size}.")
+                    continue
+                else:
+                    logging.info(f"{self.model} | Get Dynamic | {lower + 1} to {upper + 1} | New and best solution have"
+                                 f" the same size of {best_size} but the new has a larger lower chain of {bottom_size}"
+                                 f" compared to the current of {best_bottom}.")
+            else:
+                logging.info(f"{self.model} | Get Dynamic | {lower + 1} to {upper + 1} | First successful chain found.")
+            # Save the new best dynamic chain.
+            best_size = total_size
+            best_bottom = bottom_size
+            best = []
+            for chain in bottom:
+                best.append(chain)
+            for chain in top:
+                best.append(chain)
+        return best
 
     def is_valid(self) -> bool:
         """

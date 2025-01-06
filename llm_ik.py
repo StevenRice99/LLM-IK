@@ -1177,14 +1177,14 @@ class Solver:
                             continue
                         # Handle the interaction as much as possible.
                         while True:
-                            # Get the latest message to send to the LLM.
-                            message = self.handle_interactions(lower, upper, current_orientation, current_mode)
-                            # If there is no message, or we should not call the LLM, stop.
-                            if (message == "" or self.url is None or not run or current_orientation not in orientation
-                                    or current_mode not in mode):
+                            # Get the messages to send to the LLM.
+                            messages = self.handle_interactions(lower, upper, current_orientation, current_mode)
+                            # If there are no messages, or we should not call the LLM, stop.
+                            if (messages is None or self.url is None or not run or
+                                    current_orientation not in orientation or current_mode not in mode):
                                 break
                             # For higher chains, let us only try to solve them if the lower chains were successful.
-                            if lower != upper:
+                            if lower != upper and current_mode != DYNAMIC:
                                 # Get the upper of the lower chain.
                                 previous_upper = upper - 1
                                 # Single chains cannot solve for orientation.
@@ -1195,8 +1195,7 @@ class Solver:
                                 if not self.code_successful(lower, previous_upper, previous_orientation, previous_mode):
                                     break
                                 # If the position-only variation was not successful, do not waste API calls.
-                                if current_orientation and not self.code_successful(lower, upper, False,
-                                                                                    current_mode):
+                                if current_orientation and not self.code_successful(lower, upper, False, current_mode):
                                     break
                             solving = TRANSFORM if current_orientation else POSITION
                             logging.error(f"{self.model} | {self.robot.name} | {lower + 1} to {upper + 1} | {solving} |"
@@ -1204,19 +1203,19 @@ class Solver:
                             # TODO - Run API calls.
 
     def handle_interactions(self, lower: int = 0, upper: int = -1, orientation: bool = False,
-                            mode: str = NORMAL) -> str:
+                            mode: str = NORMAL) -> list[dict[str, str or bool]] or None:
         """
         Handle determining what the next messages should be.
         :param lower: The starting joint.
         :param upper: The ending joint.
         :param orientation: If this data cares about the orientation or not.
         :param mode: The mode by which the code was achieved.
-        :return: The next message to send to the LLM.
+        :return: The interactions with the LLM or none if there is an error or the interacting is done.
         """
         # Nothing to do if the solver is not valid.
         if not self.is_valid():
             logging.error(f"{self.model} | Handle Interactions | Solver is not valid.")
-            return ""
+            return None
         # Ensure valid values.
         lower, upper = self.robot.validate_lower_upper(lower, upper)
         # If only one joint, can only solve in normal mode and for the position only.
@@ -1244,34 +1243,40 @@ class Solver:
                     file.write(s)
                 logging.info(f"{self.model} | {self.robot.name} | {lower + 1} to {upper + 1} | {solving} | {mode} | "
                              f"Handle Interactions | Initial prompt generated.")
-                return s
-            return s
+                return [{"Prompt": True, "Message": s}]
+            return None
         # If any of the messages is the done message indicating this has been completely handled, then stop.
         for m in interactions:
             if MESSAGE_DONE in m:
                 logging.info(f"{self.model} | {self.robot.name} | {lower + 1} to {upper + 1} | {solving} | {mode} | "
                              "Done")
-                return ""
-        # Read the last interaction.
-        last = None
-        searching = f"{total - 1}-"
+                return None
+        # Build the conversation history.
+        history = []
+        is_prompt = True
         for i in range(total):
-            if searching in interactions[i]:
-                last = interactions[i]
-                break
-        if last is None:
-            logging.error(f"{self.model} | {self.robot.name} | {lower + 1} to {upper + 1} | {solving} | {mode} | Could "
-                          f"not load the last message.")
-            return ""
-        path = os.path.join(root, last)
-        with open(path, "r") as file:
-            s = file.read()
+            searching = f"{i}-"
+            current = None
+            for interaction in interactions:
+                if interaction.startswith(searching):
+                    current = interaction
+                    break
+            if current is None:
+                logging.error(f"{self.model} | {self.robot.name} | {lower + 1} to {upper + 1} | {solving} | {mode} | "
+                              f"Handle Interactions | No interaction starts with '{searching}'.")
+                return None
+            path = os.path.join(root, interactions[i])
+            with open(path, "r") as file:
+                s = file.read()
+            history.append({"Prompt": is_prompt, "Message": s})
+            is_prompt = not is_prompt
         # If the last interaction was a message for the LLM, load it.
+        last = interactions[-1]
         if RESPONSE not in last:
             # Otherwise, give it the message.
             logging.info(f"{self.model} | {self.robot.name} | {lower + 1} to {upper + 1} | {solving} | {mode} | Handle "
-                         f"Interactions | Last message loaded.")
-            return s.strip()
+                         f"Interactions | Messages loaded.")
+            return history
         code_path = os.path.join(self.interactions, f"{lower}-{upper}-{solving}-{mode}.py")
         # Otherwise, it was a response from the LLM, so prepare the next message by parsing it.
         codes = re.findall(r"```python\s*([\s\S]*?)```", s, re.IGNORECASE)
@@ -1326,7 +1331,8 @@ class Solver:
                     os.makedirs(root, exist_ok=True)
                     with open(os.path.join(root, f"{total}-{MESSAGE_FORWARD}.txt"), "w") as file:
                         file.write(s)
-                    return s
+                    history.append({"Prompt": True, "Message": s})
+                    return history
                 # Handle if this is a solution testing call.
                 elif line[0] == "test_solution":
                     received = parts - 1
@@ -1396,7 +1402,8 @@ class Solver:
                     os.makedirs(root, exist_ok=True)
                     with open(os.path.join(root, f"{total}-{MESSAGE_TEST}.txt"), "w") as file:
                         file.write(s)
-                    return s
+                    history.append({"Prompt": True, "Message": s})
+                    return history
             # Otherwise, indicate there was an invalid response.
             logging.info(f"{self.model} | {self.robot.name} | {lower + 1} to {upper + 1} | {solving} | {mode} | Handle "
                          "Interactions | No Python code or functions found; creating message indicating this.")
@@ -1405,7 +1412,8 @@ class Solver:
             os.makedirs(root, exist_ok=True)
             with open(os.path.join(root, f"{total}-{MESSAGE_ERROR}.txt"), "w") as file:
                 file.write(s)
-            return s
+            history.append({"Prompt": True, "Message": s})
+            return history
         # Otherwise, parse the code assuming the largest code would be the complete code snippet.
         code = codes[0].strip()
         size = len(code)
@@ -1432,7 +1440,7 @@ class Solver:
             os.makedirs(root, exist_ok=True)
             with open(os.path.join(root, f"{total}-{MESSAGE_DONE}.txt"), "w") as file:
                 file.write("Code performed perfectly; interactions with the model are done.")
-            return ""
+            return None
         # If there were errors but the maximum number of feedbacks have been given, stop.
         feedbacks = sum(MESSAGE_FEEDBACK in s for s in interactions)
         if feedbacks >= FEEDBACKS:
@@ -1443,7 +1451,7 @@ class Solver:
             with open(os.path.join(root, f"{total}-{MESSAGE_DONE}.txt"), "w") as file:
                 file.write(f"Code had errors but {FEEDBACKS} feedback{' has' if FEEDBACKS == 1 else 's have'} been "
                            "used; stopping.")
-            return ""
+            return None
         # Otherwise, prepare feedback to provide to the LLM.
         path = os.path.join(root, f"{total}-{MESSAGE_FEEDBACK}.txt")
         os.makedirs(root, exist_ok=True)
@@ -1451,7 +1459,8 @@ class Solver:
             file.write(s)
         logging.info(f"{self.model} | {self.robot.name} | {lower + 1} to {upper + 1} | {solving} | {mode} | Handle "
                      f"Interactions | New feedback saved.")
-        return s
+        history.append({"Prompt": True, "Message": s})
+        return history
 
     def __str__(self) -> str:
         """
@@ -1533,35 +1542,14 @@ class Solver:
         if not self.is_valid():
             logging.error(f"{self.model} | Run Code | Solver is not valid.")
             return None, 0, None
-        # Nothing to do if there is no code loaded.
-        if self.code is None:
-            logging.error(f"{self.model} | Run Code | No codes loaded.")
-            return None, 0, None
         # Ensure valid values.
         lower, upper = self.robot.validate_lower_upper(lower, upper)
-        if lower not in self.code:
-            logging.error(f"{self.model} | {lower + 1} to {upper + 1} | Run Code | No codes loaded for starting at "
-                          f"{lower + 1}.")
-            return None, 0, None
-        if upper not in self.code[lower]:
-            logging.error(f"{self.model} | {lower + 1} to {upper + 1} | Run Code | No codes loaded for starting at "
-                          f"{lower + 1} and ending at {upper + 1}.")
-            return None, 0, None
-        solving = POSITION if orientation is None else TRANSFORM
-        if solving not in self.code[lower][upper]:
-            logging.error(f"{self.model} | {lower + 1} to {upper + 1} | Run Code | No codes loaded for starting at "
-                          f"{lower + 1}, ending at {upper + 1}, and solving for '{solving}'.")
-            return None, 0, None
-        if mode not in [NORMAL, EXTEND, DYNAMIC]:
-            logging.warning(f"{self.model} | {self.robot.name} | {lower + 1} to {upper + 1} | Run Code | Mode "
-                            f"'{mode}' not valid, using '{NORMAL}' instead.")
-            mode = NORMAL
-        if mode not in self.code[lower][upper][solving]:
-            logging.error(f"{self.model} | {lower + 1} to {upper + 1} | Run Code | No codes loaded for starting at "
-                          f"{lower + 1}, ending at {upper + 1}, solving for '{solving}', and generated using '{mode}' "
-                          "mode.")
+        # See if there is valid code.
+        if (lower == upper and (orientation or mode != NORMAL)) or not self.load_code(lower, upper, orientation, mode,
+                                                                                      True):
             return None, 0, None
         # Ensure a position.
+        solving = TRANSFORM if orientation else POSITION
         if position is None:
             logging.warning(f"{self.model} | {lower + 1} to {upper + 1} | Run Code | {solving} | {mode} | No position "
                             "passed; solving for [0, 0, 0].")
@@ -1924,9 +1912,7 @@ class Solver:
         # Cache what is being solved for file outputs.
         solving = TRANSFORM if orientation else POSITION
         # If a normal chain has successfully solved this, do not waste resources doing an extending or dynamic prompt.
-        path = os.path.join(self.solutions, f"{lower}-{upper}-{solving}-{NORMAL}.py")
-        if (os.path.exists(path) and self.load_code(lower, upper, orientation, NORMAL) and
-                self.code_successful(lower, upper, orientation, NORMAL)):
+        if self.code_successful(lower, upper, orientation, NORMAL):
             logging.info(f"{self.model} | {self.robot.name} | {lower + 1} to {upper + 1} | Prepare LLM | "
                          f"Normal solution already successful; not doing mode '{mode}'.")
             return ""
@@ -1936,14 +1922,12 @@ class Solver:
             previous = upper - 1
             # First, try extending a normal chain.
             path = os.path.join(self.solutions, f"{lower}-{previous}-{solving}-{NORMAL}.py")
-            if (not os.path.exists(path) or not self.load_code(lower, previous, orientation, NORMAL) or not
-                    self.code_successful(lower, previous, orientation, NORMAL)):
+            if not self.code_successful(lower, previous, orientation, NORMAL):
                 path = None
             # If there was no successful lower normal chain, try to extend an extending chain.
             if path is None and lower != previous:
                 path = os.path.join(self.solutions, f"{lower}-{previous}-{solving}-{EXTEND}.py")
-                if (not os.path.exists(path) or not self.load_code(lower, previous, orientation, EXTEND) or not
-                        self.code_successful(lower, previous, orientation, EXTEND)):
+                if not self.code_successful(lower, previous, orientation, EXTEND):
                     path = None
             # If there was no chain at all to extend, there is nothing to do.
             if path is None:
@@ -1965,9 +1949,7 @@ class Solver:
                          "prompt prepared.")
             return f"{prompt}\n</EXISTING>{post}"
         # If an extended chain has successfully solved this, do not waste resources doing a dynamic prompt.
-        path = os.path.join(self.solutions, f"{lower}-{upper}-{solving}-{EXTEND}.py")
-        if (os.path.exists(path) and self.load_code(lower, upper, orientation, EXTEND) and
-                self.code_successful(lower, upper, orientation, EXTEND)):
+        if self.code_successful(lower, upper, orientation, EXTEND):
             logging.info(f"{self.model} | {self.robot.name} | {lower + 1} to {upper + 1} | Prepare LLM | "
                          f"Extending solution already successful; not doing a dynamic prompt.")
             return ""

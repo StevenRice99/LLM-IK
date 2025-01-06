@@ -1171,11 +1171,16 @@ class Solver:
         # Loop all possible combinations.
         for current_mode in [NORMAL, EXTEND, DYNAMIC]:
             for current_orientation in [False, True]:
-                for lower in range(self.robot.joints):
-                    for upper in range(lower, self.robot.joints):
+                # Solve smaller chains first so their solutions can be extended.
+                for length in range(self.robot.joints):
+                    # Determine the last "first" joint for this size.
+                    last = self.robot.joints - length
+                    for lower in range(last):
                         # No solving for orientation with just one link and can only do normal prompting.
-                        if lower == upper and (current_orientation or current_mode != NORMAL):
-                            continue
+                        if length == 0 and (current_orientation or current_mode != NORMAL):
+                            break
+                        # Get the upper joint index.
+                        upper = lower + length
                         # Handle the interaction as much as possible.
                         while True:
                             # Get the messages to send to the LLM.
@@ -1185,7 +1190,7 @@ class Solver:
                                     current_orientation not in orientation or current_mode not in mode):
                                 break
                             # For higher chains, let us only try to solve them if the lower chains were successful.
-                            if lower != upper and current_mode != DYNAMIC:
+                            if length > 0 and current_mode != DYNAMIC:
                                 # Get the upper of the lower chain.
                                 previous_upper = upper - 1
                                 # Single chains cannot solve for orientation.

@@ -1186,7 +1186,7 @@ class Solver:
                             # Get the messages to send to the LLM.
                             messages = self.handle_interactions(lower, upper, current_orientation, current_mode)
                             # If there are no messages, or we should not call the LLM, stop.
-                            if (messages is None or self.url is None or not run or
+                            if (messages is None or len(messages) < 1 or self.url is None or not run or
                                     current_orientation not in orientation or current_mode not in mode):
                                 break
                             # For higher chains, let us only try to solve them if the lower chains were successful.
@@ -1203,10 +1203,44 @@ class Solver:
                                 # If the position-only variation was not successful, do not waste API calls.
                                 if current_orientation and not self.code_successful(lower, upper, False, current_mode):
                                     break
-                            solving = TRANSFORM if current_orientation else POSITION
-                            logging.error(f"{self.model} | {self.robot.name} | {lower + 1} to {upper + 1} | {solving} |"
-                                          f" {current_mode} | Perform | LLM interactions not yet implemented.")
-                            # TODO - Run API calls.
+                            # Run the API if all checks were passed.
+                            self.run_api(lower, upper, current_orientation, current_mode)
+
+    def run_api(self, lower: int = 0, upper: int = -1, orientation: bool = False, mode: str = NORMAL,
+                messages: list[dict[str, str or bool]] or None = None) -> None:
+        """
+        Handle interacting with OpenAI-capable APIs.
+        :param lower: The starting joint.
+        :param upper: The ending joint.
+        :param orientation: If this data cares about the orientation or not.
+        :param mode: The mode by which the code was achieved.
+        :param messages: The messages to send to the LLM.
+        :return: Nothing.
+        """
+        # Nothing to do if the solver is not valid.
+        if not self.is_valid():
+            logging.error(f"{self.model} | Run API | Solver is not valid.")
+            return None
+        # Ensure valid values.
+        lower, upper = self.robot.validate_lower_upper(lower, upper)
+        # If only one joint, can only solve in normal mode and for the position only.
+        if lower == upper:
+            mode = NORMAL
+            orientation = False
+        # Ensure the mode is valid.
+        if mode not in [NORMAL, EXTEND, DYNAMIC]:
+            logging.warning(f"{self.model} | {self.robot.name} | {lower + 1} to {upper + 1} | Run API | Mode '{mode}' "
+                            f"not valid, using '{NORMAL}' instead.")
+            mode = NORMAL
+        solving = TRANSFORM if orientation else POSITION
+        # Nothing to do if there are no messages.
+        if messages is None or len(messages) < 1:
+            logging.info(f"{self.model} | {self.robot.name} | {lower + 1} to {upper + 1} | {solving} | {mode} | Run API"
+                         f" | No messages to give to the LLM.")
+            return None
+        logging.error(f"{self.model} | {self.robot.name} | {lower + 1} to {upper + 1} | {solving} | {mode} | Run API | "
+                      "LLM interactions not yet implemented.")
+        # TODO - Implement API calling.
 
     def handle_interactions(self, lower: int = 0, upper: int = -1, orientation: bool = False,
                             mode: str = NORMAL) -> list[dict[str, str or bool]] or None:

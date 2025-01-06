@@ -43,6 +43,7 @@ MESSAGE_TEST = "Test"
 MESSAGE_ERROR = "Error"
 MESSAGE_DONE = "Done"
 RESPONSE = "Response"
+DETAILS = "Details"
 
 # Data naming.
 POSITION = "Position"
@@ -1230,30 +1231,11 @@ class Solver:
         # Get all interactions.
         solving = TRANSFORM if orientation else POSITION
         root = os.path.join(self.interactions, f"{lower}-{upper}-{solving}-{mode}")
-        interactions = sorted(get_files(root)) if os.path.exists(root) else []
+        # We do not want the "Details" file as this is simply for results analysis.
+        interactions = [s for s in get_files(root) if DETAILS not in s] if os.path.exists(root) else []
         total = len(interactions)
-        # Create the initial prompt if needed.
-        initial = f"0-{MESSAGE_PROMPT}.txt"
-        if total < 1 or initial not in interactions:
-            s = self.prepare_llm(lower, upper, orientation, mode)
-            if s != "":
-                os.makedirs(root, exist_ok=True)
-                path = os.path.join(root, initial)
-                with open(path, "w") as file:
-                    file.write(s)
-                logging.info(f"{self.model} | {self.robot.name} | {lower + 1} to {upper + 1} | {solving} | {mode} | "
-                             f"Handle Interactions | Initial prompt generated.")
-                return [{"Prompt": True, "Message": s}]
-            return None
-        # If any of the messages is the done message indicating this has been completely handled, then stop.
-        for m in interactions:
-            if MESSAGE_DONE in m:
-                logging.info(f"{self.model} | {self.robot.name} | {lower + 1} to {upper + 1} | {solving} | {mode} | "
-                             "Done")
-                return None
         # Build the conversation history.
         history = []
-        is_prompt = True
         for i in range(total):
             searching = f"{i}-"
             current = None
@@ -1265,18 +1247,53 @@ class Solver:
                 logging.error(f"{self.model} | {self.robot.name} | {lower + 1} to {upper + 1} | {solving} | {mode} | "
                               f"Handle Interactions | No interaction starts with '{searching}'.")
                 return None
+            # Get the type of message this was.
+            if MESSAGE_PROMPT in current:
+                current_type = MESSAGE_PROMPT
+            elif MESSAGE_FEEDBACK in current:
+                current_type = MESSAGE_FEEDBACK
+            elif MESSAGE_TEST in current:
+                current_type = MESSAGE_TEST
+            elif MESSAGE_FORWARD in current:
+                current_type = MESSAGE_FORWARD
+            elif MESSAGE_ERROR in current:
+                current_type = MESSAGE_ERROR
+            elif MESSAGE_DONE in current:
+                current_type = MESSAGE_DONE
+            elif RESPONSE in current:
+                current_type = RESPONSE
+            else:
+                logging.error(f"{self.model} | {self.robot.name} | {lower + 1} to {upper + 1} | {solving} | {mode} | "
+                              f"Handle Interactions | No valid message type in '{searching}'.")
+                return None
             path = os.path.join(root, interactions[i])
             with open(path, "r") as file:
                 s = file.read()
-            history.append({"Prompt": is_prompt, "Message": s})
-            is_prompt = not is_prompt
+            history.append({"Type": current_type, "Message": s})
+        # Create the initial message.
+        total = len(history)
+        if total < 1:
+            s = self.prepare_llm(lower, upper, orientation, mode)
+            if s != "":
+                os.makedirs(root, exist_ok=True)
+                with open(os.path.join(root, f"0-{MESSAGE_PROMPT}.txt"), "w") as file:
+                    file.write(s)
+                logging.info(f"{self.model} | {self.robot.name} | {lower + 1} to {upper + 1} | {solving} | {mode} | "
+                             f"Handle Interactions | Initial prompt generated.")
+                return [{"Prompt": True, "Message": s}]
+            # If no prompt was made, there is nothing to return.
+            return None
         # If the last interaction was a message for the LLM, load it.
-        last = interactions[-1]
-        if RESPONSE not in last:
+        last = history[-1]
+        if last["Type"] == MESSAGE_DONE:
+            logging.info(f"{self.model} | {self.robot.name} | {lower + 1} to {upper + 1} | {solving} | {mode} | Done.")
+            return None
+        if last["Type"] != RESPONSE:
             # Otherwise, give it the message.
             logging.info(f"{self.model} | {self.robot.name} | {lower + 1} to {upper + 1} | {solving} | {mode} | Handle "
                          f"Interactions | Messages loaded.")
             return history
+        s = last["Message"]
         code_path = os.path.join(self.interactions, f"{lower}-{upper}-{solving}-{mode}.py")
         # Otherwise, it was a response from the LLM, so prepare the next message by parsing it.
         codes = re.findall(r"```python\s*([\s\S]*?)```", s, re.IGNORECASE)
@@ -1671,6 +1688,11 @@ class Solver:
             feedbacks = 0
             forwards = 0
             testings = 0
+        # Get any inherited messages.
+        i_feedbacks, i_forwards, i_testings = self.get_stats(lower, upper, orientation, mode)
+        feedbacks += i_feedbacks
+        forwards += i_forwards
+        testings += i_testings
         # Get how long it took the LLM to generate the code.
         elapsed = 0
         name = f"{lower}-{upper}-{solving}-{mode}"
@@ -1909,8 +1931,6 @@ class Solver:
             logging.info(f"{self.model} | {self.robot.name} | {lower + 1} to {upper + 1} | Prepare LLM | Normal prompt "
                          f"prepared.")
             return prompt + post
-        # Cache what is being solved for file outputs.
-        solving = TRANSFORM if orientation else POSITION
         # If a normal chain has successfully solved this, do not waste resources doing an extending or dynamic prompt.
         if self.code_successful(lower, upper, orientation, NORMAL):
             logging.info(f"{self.model} | {self.robot.name} | {lower + 1} to {upper + 1} | Prepare LLM | "
@@ -1920,14 +1940,22 @@ class Solver:
         if mode == EXTEND:
             # We need to load the results of the lower portion, which when just one joint is the normal mode.
             previous = upper - 1
+            previous_orientation = False if lower == upper else orientation
+            previous_solving = TRANSFORM if previous_orientation else POSITION
             # First, try extending a normal chain.
-            path = os.path.join(self.solutions, f"{lower}-{previous}-{solving}-{NORMAL}.py")
-            if not self.code_successful(lower, previous, orientation, NORMAL):
+            if self.code_successful(lower, previous, previous_orientation, NORMAL):
+                path = os.path.join(self.solutions, f"{lower}-{previous}-{previous_solving}-{NORMAL}.py")
+                feedbacks, forwards, tests = self.get_stats(lower, previous, previous_orientation, NORMAL)
+                self.save_stats(lower, upper, orientation, EXTEND, feedbacks, forwards, tests)
+            else:
                 path = None
             # If there was no successful lower normal chain, try to extend an extending chain.
             if path is None and lower != previous:
-                path = os.path.join(self.solutions, f"{lower}-{previous}-{solving}-{EXTEND}.py")
-                if not self.code_successful(lower, previous, orientation, EXTEND):
+                if self.code_successful(lower, previous, previous_orientation, EXTEND):
+                    path = os.path.join(self.solutions, f"{lower}-{previous}-{previous_solving}-{EXTEND}.py")
+                    feedbacks, forwards, tests = self.get_stats(lower, previous, previous_orientation, EXTEND)
+                    self.save_stats(lower, upper, orientation, EXTEND, feedbacks, forwards, tests)
+                else:
                     path = None
             # If there was no chain at all to extend, there is nothing to do.
             if path is None:
@@ -1956,7 +1984,7 @@ class Solver:
         # Get the best possible dynamic option.
         logging.info(f"{self.model} | {self.robot.name} | {lower + 1} to {upper + 1} | Prepare LLM | Beginning best "
                      "dynamic chain search.")
-        best = self.get_dynamic(lower, upper, orientation)
+        best, feedbacks, forwards, tests = self.get_dynamic(lower, upper, orientation)
         if best is None:
             logging.info(f"{self.model} | {self.robot.name} | {lower + 1} to {upper + 1} | Prepare LLM | Not performing"
                          " a dynamic prompt as there are no successful combinations.")
@@ -1978,6 +2006,8 @@ class Solver:
             logging.info(f"{self.model} | {self.robot.name} | {lower + 1} to {upper + 1} | Prepare LLM | Not performing"
                          " a dynamic prompt as this was just an extended chain that was returned.")
             return ""
+        # Otherwise, this is valid, so save the inherited information.
+        self.save_stats(lower, upper, orientation, DYNAMIC, feedbacks, forwards, tests)
         # Load the codes.
         codes = []
         for chain in best:
@@ -2016,19 +2046,104 @@ class Solver:
                      "prepared.")
         return f"{prompt}{post}"
 
+    def get_stats(self, lower: int = 0, upper: int = -1, orientation: bool = False,
+                  mode: str = NORMAL) -> (int, int, int):
+        """
+        Get any stats inherited from base model communications for this model.
+        :param lower: The starting joint.
+        :param upper: The ending joint.
+        :param orientation: If we want to solve for orientation.
+        :param mode: The solving mode to use.
+        :return: The number of inherited feedbacks, forwards kinematics calls, and testing calls.
+        """
+        # Nothing to do if the solver is not valid.
+        if not self.is_valid():
+            logging.error(f"{self.model} | Get Stats | Solver is not valid.")
+            return 0, 0, 0
+        # Ensure valid values.
+        lower, upper = self.robot.validate_lower_upper(lower, upper)
+        if mode not in [NORMAL, EXTEND, DYNAMIC]:
+            logging.warning(f"{self.model} | {self.robot.name} | {lower + 1} to {upper + 1} | Get Stats | Mode '{mode}'"
+                            f" not valid, using '{NORMAL}' instead.")
+            mode = NORMAL
+        # Cannot do orientation if just a single joint, and we can only run in the normal mode.
+        if lower == upper:
+            orientation = False
+            mode = NORMAL
+        solving = TRANSFORM if orientation else POSITION
+        path = os.path.join(self.interactions, f"{lower}-{upper}-{solving}-{mode}", f"{RESULTS}.txt")
+        if not os.path.exists(path):
+            return 0, 0, 0
+        # Read the file.
+        with open(path, "r") as file:
+            s = file.read()
+        lines = s.splitlines()
+        if len(lines) < 2:
+            logging.error(f"{self.model} | {self.robot.name} | {lower + 1} to {upper + 1} | {solving} | {mode} | Get "
+                          f"Stats | File '{path}' not properly formatted.")
+            return 0, 0, 0
+        values = lines[1].split(",")
+        if len(values) < 3:
+            logging.error(f"{self.model} | {self.robot.name} | {lower + 1} to {upper + 1} | {solving} | {mode} | Get "
+                          f"Stats | File '{path}' not properly formatted.")
+        # noinspection PyBroadException
+        try:
+            return int(values[0]), int(values[1]), int(values[2])
+        except:
+            logging.error(f"{self.model} | {self.robot.name} | {lower + 1} to {upper + 1} | {solving} | {mode} | Get "
+                          f"Stats | Could not parse the contents of '{path}'.")
+            return 0, 0, 0
+
+    def save_stats(self, lower: int = 0, upper: int = -1, orientation: bool = False, mode: str = NORMAL,
+                   feedbacks: int = 0, forwards: int = 0, tests: int = 0) -> None:
+        """
+        Save any stats inherited from base model communications for this model.
+        :param lower: The starting joint.
+        :param upper: The ending joint.
+        :param orientation: If we want to solve for orientation.
+        :param mode: The solving mode to use.
+        :param feedbacks: The number of feedbacks
+        :param forwards: The number of forwards kinematics calls.
+        :param tests: The number of testing calls.
+        :return: Nothing.
+        """
+        # Nothing to do if the solver is not valid.
+        if not self.is_valid():
+            logging.error(f"{self.model} | Save Stats | Solver is not valid.")
+            return None
+        # If nothing was inherited, don't save anything.
+        if feedbacks < 1 and forwards < 1 and tests < 1:
+            return None
+        # Ensure valid values.
+        lower, upper = self.robot.validate_lower_upper(lower, upper)
+        if mode not in [NORMAL, EXTEND, DYNAMIC]:
+            logging.warning(f"{self.model} | {self.robot.name} | {lower + 1} to {upper + 1} | Save Stats | Mode "
+                            f"'{mode}' not valid, using '{NORMAL}' instead.")
+            mode = NORMAL
+        # Cannot do orientation if just a single joint, and we can only run in the normal mode.
+        if lower == upper:
+            orientation = False
+            mode = NORMAL
+        # Write the information to the file.
+        s = f"Feedbacks Given,Forwards Kinematics Calls,Testing Calls\n{feedbacks},{forwards},{tests}"
+        path = os.path.join(self.interactions, f"{lower}-{upper}-{TRANSFORM if orientation else POSITION}-{mode}")
+        os.makedirs(path, exist_ok=True)
+        with open(os.path.join(path, f"{DETAILS}.txt"), "W") as file:
+            file.write(s)
+
     def get_dynamic(self, lower: int = 0, upper: int = -1,
-                    orientation: bool = False) -> list[dict[str, int or str]] or None:
+                    orientation: bool = False) -> (list[dict[str, int or str]] or None, int, int, int):
         """
         Get the best dynamic chain.
         :param lower: The starting joint.
         :param upper: The ending joint.
         :param orientation: If we want to solve for orientation.
-        :return: The best dynamic chain or none if none were found.
+        :return: The best dynamic chain or none if none were found and inherited messages.
         """
         # Nothing to do if the solver is not valid.
         if not self.is_valid():
             logging.error(f"{self.model} | Get Dynamic | Solver is not valid.")
-            return None
+            return None, 0, 0, 0
         # Ensure valid values.
         lower, upper = self.robot.validate_lower_upper(lower, upper)
         modes = [NORMAL] if lower == upper else [NORMAL, EXTEND, DYNAMIC]
@@ -2042,30 +2157,37 @@ class Solver:
             if self.code_successful(lower, upper, current_orientation, mode):
                 logging.info(f"{self.model} | {self.robot.name} | {lower + 1} to {upper + 1} | Get Dynamic | Found a "
                              f"successful solver solving for '{current_orientation}' in mode '{mode}'.")
+                feedbacks, forwards, tests = self.get_stats(lower, upper, current_orientation, mode)
                 return [{"Lower": lower, "Upper": upper, "Solving": TRANSFORM if current_orientation else POSITION,
-                         "Mode": mode}]
+                         "Mode": mode}], feedbacks, forwards, tests
         # If this was a base case, there are no valid options.
         if lower == upper:
             logging.info(f"{self.model} | {self.robot.name} | {lower + 1} to {upper + 1} | Get Dynamic | No successful "
                          "base cases.")
-            return None
+            return None, 0, 0, 0
         # Otherwise, let us try to get the best possible sub-chain and use it.
         best = None
         best_size = 0
         best_bottom = 0
+        feedbacks = 0
+        forwards = 0
+        tests = 0
         for split in range(lower, upper):
             # Try to get the bottom dynamic portion.
-            bottom = self.get_dynamic(lower, split, orientation)
+            bottom, n_feedbacks, n_forwards, n_tests = self.get_dynamic(lower, split, orientation)
             if bottom is None:
                 logging.info(f"{self.model} | {self.robot.name} | {lower + 1} to {upper + 1} | Get Dynamic | No bottom "
                              f"found from {lower + 1} to {split + 1}.")
                 continue
             # Try to get the top dynamic portion.
-            top = self.get_dynamic(split + 1, upper, orientation)
+            top, t_feedbacks, t_forwards, t_tests = self.get_dynamic(split + 1, upper, orientation)
             if top is None:
                 logging.info(f"{self.model} | {self.robot.name} | {lower + 1} to {upper + 1} | Get Dynamic | No top "
                              f"found from {split + 2} to {upper + 1}.")
                 continue
+            n_feedbacks += t_feedbacks
+            n_forwards += t_forwards
+            n_tests += t_tests
             bottom_size = len(bottom)
             top_size = len(top)
             total_size = bottom_size + top_size
@@ -2086,9 +2208,25 @@ class Solver:
                                  f"and best solution have the same size of {best_size} but the best has a larger lower "
                                  f"chain of {best_bottom} compared to the new {bottom_size}.")
                     continue
-                logging.info(f"{self.model} | {self.robot.name} | {lower + 1} to {upper + 1} | Get Dynamic | New and "
-                             "best solution have the same size of {best_size} but the new has a larger lower chain of "
-                             f"{bottom_size} compared to the current of {best_bottom}.")
+                # If the same overall size and bottom size, compare with the minimum inherited messages.
+                total_existing = feedbacks + forwards + tests
+                total_new = n_feedbacks + n_forwards + n_tests
+                if best_size == total_size and best_bottom == bottom_size and total_existing < total_new:
+                    logging.info(f"{self.model} | {self.robot.name} | {lower + 1} to {upper + 1} | Get Dynamic | New "
+                                 f"and best solution have the same size of {best_size} and same lower size of "
+                                 f"{best_bottom} but the existing has less inherited messages of {total_existing} "
+                                 f"compared to {total_new}.")
+                    continue
+                # Otherwise, this is a new best, so log why.
+                if best_bottom > bottom_size:
+                    logging.info(f"{self.model} | {self.robot.name} | {lower + 1} to {upper + 1} | Get Dynamic | New "
+                                 f"and best solution have the same size of {best_size} but the new has a larger lower "
+                                 f"chain of {bottom_size} compared to the current of {best_bottom}.")
+                else:
+                    logging.info(f"{self.model} | {self.robot.name} | {lower + 1} to {upper + 1} | Get Dynamic | New "
+                                 f"and best solution have the same size of {best_size} and same lower size of "
+                                 f"{best_bottom} but the new has less inherited messages of {total_new} compared to "
+                                 f"{total_existing}.")
             else:
                 logging.info(f"{self.model} | {self.robot.name} | {lower + 1} to {upper + 1} | Get Dynamic | First "
                              "successful chain found.")
@@ -2106,7 +2244,7 @@ class Solver:
         else:
             logging.info(f"{self.model} | {self.robot.name} | {lower + 1} to {upper + 1} | Get Dynamic | Successful "
                          "option found.")
-        return best
+        return best, feedbacks, forwards, tests
 
     def is_valid(self) -> bool:
         """

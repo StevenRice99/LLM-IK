@@ -9,6 +9,7 @@ import re
 import time
 import traceback
 import warnings
+from typing import Any
 
 import ikpy.chain
 import ikpy.utils.plot as plot_utils
@@ -1371,6 +1372,146 @@ class Solver:
                       "LLM interactions not yet implemented.")
         # TODO - Implement API calling.
 
+    def should_attempt(self, lower: int = 0, upper: int = -1, orientation: bool = False, mode: str = NORMAL) -> bool:
+        """
+        See if it is worth attempting a solver, as if a better one exists to be inherited, we should not.
+        :param lower: The starting joint.
+        :param upper: The ending joint.
+        :param orientation: If this data cares about the orientation or not.
+        :param mode: The mode by which the code was achieved.
+        :return: True if we should attempt to solve this, false otherwise.
+        """
+        # Nothing to do if the solver is not valid.
+        if not self.is_valid():
+            logging.error(f"{self.model} | Should Attempt | Solver is not valid.")
+            return False
+        # Ensure valid values.
+        lower, upper = self.robot.validate_lower_upper(lower, upper)
+        # Handle single chains.
+        if lower == upper:
+            # Only attempt if all cheaper methods have been run and are not successful.
+            for option in self.options:
+                # Do not check against itself.
+                if option == self:
+                    continue
+                # If each lower option does not have a folder, it has clearly not yet been run.
+                path = os.path.join(option.interactions, f"{lower}-{upper}-{POSITION}-{NORMAL}")
+                if not os.path.exists(path):
+                    logging.info(f"{self.model} | {self.robot.name} | {lower + 1} to {upper + 1} | {POSITION} | "
+                                 f"{NORMAL} | Not attempting as a cheaper model has not been attempted.")
+                    return False
+                # Check to see if the done file exists.
+                is_done = False
+                files = get_files(path)
+                for file in files:
+                    if MESSAGE_DONE in file:
+                        is_done = True
+                        break
+                # If it doesn't exist, this cheaper option must be finished first.
+                if not is_done:
+                    logging.info(f"{self.model} | {self.robot.name} | {lower + 1} to {upper + 1} | {POSITION} | "
+                                 f"{NORMAL} | Not attempting as a cheaper model has not been finished.")
+                    return False
+            # If all cheaper options have been run, still stop if one has been successful.
+            best, best_mode, cost = self.get_best(lower, upper, False, NORMAL)
+            if best is not None and best != self:
+                logging.info(f"{self.model} | {self.robot.name} | {lower + 1} to {upper + 1} | {POSITION} | "
+                             f"{NORMAL} | Not attempting as a cheaper model has been successful.")
+                return False
+            # If this is the first base chain, we can always attempt it.
+            if lower == 0:
+                return True
+            # Otherwise, attempt it if the previous link has been completed (successful or otherwise).
+            previous = lower - 1
+            # If the path does not exist, the lower chain is not done.
+            path = os.path.join(self.interactions, f"{previous}-{previous}-{POSITION}-{NORMAL}")
+            if not os.path.exists(path):
+                logging.info(f"{self.model} | {self.robot.name} | {lower + 1} to {upper + 1} | {POSITION} | {NORMAL} | "
+                             "Not attempting as the previous link has not been attempted.")
+                return False
+            # Look for the completed message.
+            files = get_files(path)
+            for file in files:
+                if MESSAGE_DONE in file:
+                    return True
+            logging.info(f"{self.model} | {self.robot.name} | {lower + 1} to {upper + 1} | {POSITION} | {NORMAL} | "
+                         "Not attempting as the previous link has not been finished.")
+            return False
+        # Ensure the mode is valid.
+        if mode not in [NORMAL, EXTEND, DYNAMIC]:
+            logging.warning(
+                f"{self.model} | {self.robot.name} | {lower + 1} to {upper + 1} | Should Attempt | Mode '{mode}' "
+                f"not valid, using '{NORMAL}' instead.")
+            mode = NORMAL
+        solving = TRANSFORM if orientation else POSITION
+        # If in normal mode, see if the sub-chain has been completed.
+        if mode == NORMAL:
+            # Otherwise, see if the lower chain worked.
+            previous = upper - 1
+            attempt = self.code_successful(lower, previous, False if lower == previous else orientation, NORMAL)
+            if not attempt:
+                logging.info(f"{self.model} | {self.robot.name} | {lower + 1} to {upper + 1} | {solving} | {mode} | "
+                             "Not attempting as the a smaller sub-chain was not successful.")
+            return attempt
+        # If the full chain has been solved with a lower mode, no point in solving it with this mode.
+        if mode == DYNAMIC:
+            mode_options = [NORMAL, EXTEND]
+        else:
+            mode_options = [NORMAL]
+        for mode_option in mode_options:
+            for solver_option in self.options:
+                if solver_option.code_successful(lower, upper, orientation, mode_option):
+                    logging.info(f"{self.model} | {self.robot.name} | {lower + 1} to {upper + 1} | {solving} | {mode} |"
+                                 " Not attempting as the a cheaper inherited model has successfully solved this.")
+                    return False
+        return True
+
+    def get_best(self, lower: int = 0, upper: int = -1, orientation: bool = False,
+                 mode: str = NORMAL) -> (Any or None, str):
+        """
+        Get the best code for a certain size.
+        :param lower: The starting joint.
+        :param upper: The ending joint.
+        :param orientation: If this data cares about the orientation or not.
+        :param mode: The mode by which the code was achieved.
+        :return: The best solver possible and the mode it was solved in.
+        """
+        # Nothing to do if the solver is not valid.
+        if not self.is_valid():
+            logging.error(f"{self.model} | Get Best | Solver is not valid.")
+            return None, NORMAL, 0
+        # Ensure valid values.
+        lower, upper = self.robot.validate_lower_upper(lower, upper)
+        # If only one joint, can only solve in normal mode and for the position only.
+        if lower == upper:
+            mode = NORMAL
+            orientation = False
+        # Ensure the mode is valid.
+        if mode not in [NORMAL, EXTEND, DYNAMIC]:
+            logging.warning(f"{self.model} | {self.robot.name} | {lower + 1} to {upper + 1} | Get Best | Mode '{mode}' "
+                            f"not valid, using '{NORMAL}' instead.")
+            mode = NORMAL
+        # Determine what modes we can search.
+        if mode == DYNAMIC:
+            mode_options = [NORMAL, EXTEND, DYNAMIC]
+        elif mode == EXTEND:
+            mode_options = [NORMAL, EXTEND]
+        else:
+            mode_options = [NORMAL]
+        # Determine the best sub-option for this.
+        best = None
+        best_mode = NORMAL
+        for mode_option in mode_options:
+            for solver_option in self.options:
+                if solver_option.code_successful(lower, upper, orientation, mode_option):
+                    if best is None:
+                        best = solver_option
+                        best_mode = mode_option
+                    else:
+                        # TODO - Load computed tokens to get cost.
+                        pass
+        return best, best_mode, 0
+
     def handle_interactions(self, lower: int = 0, upper: int = -1, orientation: bool = False,
                             mode: str = NORMAL) -> list[dict[str, str or bool]] or None:
         """
@@ -1396,8 +1537,11 @@ class Solver:
             logging.warning(f"{self.model} | {self.robot.name} | {lower + 1} to {upper + 1} | Handle Interactions | "
                             f"Mode '{mode}' not valid, using '{NORMAL}' instead.")
             mode = NORMAL
-        # Get all interactions.
+        # Check if this problem has been solved by a cheaper model.
+        if not self.should_attempt(lower, upper, orientation, mode):
+            return None
         solving = TRANSFORM if orientation else POSITION
+        # Get all interactions.
         root = os.path.join(self.interactions, f"{lower}-{upper}-{solving}-{mode}")
         # We do not want the "Details" file as this is simply for results analysis.
         interactions = [s for s in get_files(root) if INHERITED not in s] if os.path.exists(root) else []
@@ -2106,29 +2250,19 @@ class Solver:
             return ""
         # Extending prompting mode.
         if mode == EXTEND:
-            # We need to load the results of the lower portion, which when just one joint is the normal mode.
+            # We can only extend a successful lower chain.
             previous = upper - 1
             previous_orientation = False if lower == upper else orientation
-            previous_solving = TRANSFORM if previous_orientation else POSITION
-            # First, try extending a normal chain.
-            if self.code_successful(lower, previous, previous_orientation, NORMAL):
-                path = os.path.join(self.solutions, f"{lower}-{previous}-{previous_solving}-{NORMAL}.py")
-                feedbacks, forwards, tests = self.get_stats(lower, previous, previous_orientation, NORMAL)
-                self.save_stats(lower, upper, orientation, EXTEND, feedbacks, forwards, tests)
-            else:
-                path = None
-            # If there was no successful lower normal chain, try to extend an extending chain.
-            if path is None and lower != previous:
-                if self.code_successful(lower, previous, previous_orientation, EXTEND):
-                    path = os.path.join(self.solutions, f"{lower}-{previous}-{previous_solving}-{EXTEND}.py")
-                    feedbacks, forwards, tests = self.get_stats(lower, previous, previous_orientation, EXTEND)
-                    self.save_stats(lower, upper, orientation, EXTEND, feedbacks, forwards, tests)
-                else:
-                    path = None
-            # If there was no chain at all to extend, there is nothing to do.
-            if path is None:
+            best, previous_mode, cost = self.get_best(lower, previous, previous_orientation, EXTEND)
+            if best is None:
                 logging.info(f"{self.model} | {self.robot.name} | {lower + 1} to {upper + 1} | Prepare LLM | No chain "
                              "to extend.")
+                return ""
+            previous_solving = TRANSFORM if previous_orientation else POSITION
+            path = os.path.join(self.solutions, f"{lower}-{previous}-{previous_solving}-{previous_mode}.py")
+            if not os.path.exists(path):
+                logging.error(f"{self.model} | {self.robot.name} | {lower + 1} to {upper + 1} | Prepare LLM | Best "
+                              f"chain does not exist at '{path}'.")
                 return ""
             # Add the extending prompt portions.
             total = upper - lower
@@ -2152,7 +2286,7 @@ class Solver:
         # Get the best possible dynamic option.
         logging.info(f"{self.model} | {self.robot.name} | {lower + 1} to {upper + 1} | Prepare LLM | Beginning best "
                      "dynamic chain search.")
-        best, feedbacks, forwards, tests = self.get_dynamic(lower, upper, orientation)
+        best, feedbacks, forwards, tests, cost = self.get_dynamic(lower, upper, orientation)
         if best is None:
             logging.info(f"{self.model} | {self.robot.name} | {lower + 1} to {upper + 1} | Prepare LLM | Not performing"
                          " a dynamic prompt as no options.")
@@ -2299,39 +2433,35 @@ class Solver:
             file.write(s)
 
     def get_dynamic(self, lower: int = 0, upper: int = -1,
-                    orientation: bool = False) -> (list[dict[str, int or str]] or None, int, int, int):
+                    orientation: bool = False) -> (list[dict[str, int or str]] or None, int, int, int, float):
         """
         Get the best dynamic chain.
         :param lower: The starting joint.
         :param upper: The ending joint.
         :param orientation: If we want to solve for orientation.
-        :return: The best dynamic chain or none if none were found and inherited messages.
+        :return: The best dynamic chain or none if none were found and inherited messages and cost.
         """
         # Nothing to do if the solver is not valid.
         if not self.is_valid():
             logging.error(f"{self.model} | Get Dynamic | Solver is not valid.")
-            return None, 0, 0, 0
+            return None, 0, 0, 0, 0
         # Ensure valid values.
         lower, upper = self.robot.validate_lower_upper(lower, upper)
-        modes = [NORMAL] if lower == upper else [NORMAL, EXTEND, DYNAMIC]
         # Cannot do orientation if just a single joint, and we can only run in the normal mode.
         current_orientation = False if lower == upper else orientation
         # See if we already have a full solution here, in which case there is no point in looking for a dynamic one.
-        for mode in modes:
-            if not self.load_code(lower, upper, current_orientation, mode, True):
-                continue
-            # If we have a working solution of this size, return it.
-            if self.code_successful(lower, upper, current_orientation, mode):
-                logging.info(f"{self.model} | {self.robot.name} | {lower + 1} to {upper + 1} | Get Dynamic | Found a "
-                             f"successful solver solving for '{current_orientation}' in mode '{mode}'.")
-                feedbacks, forwards, tests = self.get_stats(lower, upper, current_orientation, mode)
-                return [{"Lower": lower, "Upper": upper, "Solving": TRANSFORM if current_orientation else POSITION,
-                         "Mode": mode}], feedbacks, forwards, tests
+        best, best_mode, best_cost = self.get_best(lower, upper, current_orientation, DYNAMIC)
+        if best is not None:
+            logging.info(f"{self.model} | {self.robot.name} | {lower + 1} to {upper + 1} | Get Dynamic | Found a "
+                         f"successful solver solving for '{current_orientation}' in mode '{best_mode}'.")
+            feedbacks, forwards, tests = self.get_stats(lower, upper, current_orientation, best_mode)
+            return [{"Lower": lower, "Upper": upper, "Solving": TRANSFORM if current_orientation else POSITION,
+                     "Mode": best_mode}], feedbacks, forwards, tests, best_cost
         # If this was a base case, there are no valid options.
         if lower == upper:
             logging.info(f"{self.model} | {self.robot.name} | {lower + 1} to {upper + 1} | Get Dynamic | No successful "
                          "base cases.")
-            return None, 0, 0, 0
+            return None, 0, 0, 0, 0
         # Otherwise, let us try to get the best possible sub-chain and use it.
         best = None
         best_size = 0
@@ -2339,15 +2469,16 @@ class Solver:
         feedbacks = 0
         forwards = 0
         tests = 0
+        best_cost = 0
         for split in range(lower, upper):
             # Try to get the bottom dynamic portion.
-            bottom, n_feedbacks, n_forwards, n_tests = self.get_dynamic(lower, split, orientation)
+            bottom, n_feedbacks, n_forwards, n_tests, n_cost = self.get_dynamic(lower, split, orientation)
             if bottom is None:
                 logging.info(f"{self.model} | {self.robot.name} | {lower + 1} to {upper + 1} | Get Dynamic | No bottom "
                              f"found from {lower + 1} to {split + 1}.")
                 continue
             # Try to get the top dynamic portion.
-            top, t_feedbacks, t_forwards, t_tests = self.get_dynamic(split + 1, upper, orientation)
+            top, t_feedbacks, t_forwards, t_tests, t_cost = self.get_dynamic(split + 1, upper, orientation)
             if top is None:
                 logging.info(f"{self.model} | {self.robot.name} | {lower + 1} to {upper + 1} | Get Dynamic | No top "
                              f"found from {split + 2} to {upper + 1}.")
@@ -2355,6 +2486,7 @@ class Solver:
             n_feedbacks += t_feedbacks
             n_forwards += t_forwards
             n_tests += t_tests
+            n_cost += t_cost
             bottom_size = len(bottom)
             top_size = len(top)
             total_size = bottom_size + top_size
@@ -2363,6 +2495,11 @@ class Solver:
                          f"({bottom_size} + {top_size}).")
             # Check if this is a better dynamic chain which has been found.
             if best is not None:
+                # If the existing cost is better than the new cost, don't do anything.
+                if best_cost < n_cost:
+                    logging.info(f"{self.model} | {self.robot.name} | {lower + 1} to {upper + 1} | Get Dynamic | Best "
+                                 f"cost of ${best_cost} is better than the new cost of ${n_cost}.")
+                    continue
                 # If the existing number of sub-chains is less, don't do anything.
                 if best_size <= total_size:
                     logging.info(f"{self.model} | {self.robot.name} | {lower + 1} to {upper + 1} | Get Dynamic | Best "
@@ -2411,7 +2548,7 @@ class Solver:
         else:
             logging.info(f"{self.model} | {self.robot.name} | {lower + 1} to {upper + 1} | Get Dynamic | Successful "
                          "option found.")
-        return best, feedbacks, forwards, tests
+        return best, feedbacks, forwards, tests, best_cost
 
     def is_valid(self) -> bool:
         """

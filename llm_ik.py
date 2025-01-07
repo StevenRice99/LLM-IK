@@ -43,7 +43,7 @@ MESSAGE_TEST = "Test"
 MESSAGE_ERROR = "Error"
 MESSAGE_DONE = "Done"
 RESPONSE = "Response"
-DETAILS = "Details"
+INHERITED = "Inherited"
 
 # Data naming.
 POSITION = "Position"
@@ -1034,17 +1034,21 @@ class Solver:
     Handle a solver attached to a robot.
     """
 
-    def __init__(self, model: str, robot: Robot):
+    def __init__(self, model: str, robot: Robot, inherited: list or None = None):
         """
         Load a solver.
         :param model: The name of the model.
         :param robot: The robot for the solver.
+        :param inherited: Any solvers that can be inherited from.
         """
         self.code = None
         self.reasoning = False
         self.url = None
         self.methods = False
         self.key = ""
+        self.input_cost = None
+        self.output_cost = None
+        self.options = []
         # Ensure the file exists.
         path = os.path.join(MODELS, f"{model}.txt")
         if not os.path.exists(path):
@@ -1075,6 +1079,8 @@ class Solver:
         if not robot.is_valid():
             logging.error(f"{self.model} | {self.robot.name} | Robot is not valid.")
             return
+        # Ensure itself is an option.
+        self.options.append(self)
         # Read the models' file.
         with open(path, "r") as file:
             s = file.read()
@@ -1095,6 +1101,26 @@ class Solver:
             if total >= 3:
                 model_methods = lines[2].strip().upper()
                 model_methods = model_methods == "TRUE" or model_methods == "1"
+            # Get the input token cost.
+            if total >= 4:
+                input_cost = lines[3].replace("$", "").strip()
+                # noinspection PyBroadException
+                try:
+                    self.input_cost = max(float(input_cost), 0)
+                except:
+                    logging.warning(f"{self.model} | {self.robot.name} | Could not parse input cost from "
+                                    f"'{input_cost}'.")
+                    self.input_cost = None
+            # Get the output token cost.
+            if total >= 5:
+                output_cost = lines[4].replace("$", "").strip()
+                # noinspection PyBroadException
+                try:
+                    self.output_cost = max(float(output_cost), 0)
+                except:
+                    logging.warning(f"{self.model} | {self.robot.name} | Could not parse output cost from "
+                                    f"'{output_cost}'.")
+                    self.output_cost = None
         if not self.reasoning:
             logging.info(f"{self.model} | {self.robot.name} | This is not a reasoning model.")
         # If there are details, this indicates the provider of the model.
@@ -1137,18 +1163,121 @@ class Solver:
                                      "methods.")
         else:
             logging.info(f"{self.model} | {self.robot.name} | Chat interface model.")
-        if self.url is not None:
-            path = os.path.join(KEYS, f"{provider}.txt")
-            if not os.path.exists(path):
-                logging.info(f"{self.model} | {self.robot.name} | No key at '{path}' for provider '{provider}'.")
-            else:
-                with open(path, "r") as file:
-                    s = file.read()
-                self.key = s.strip()
-                if self.key == "":
-                    logging.warning(f"{self.model} | {self.robot.name} | No key specified in '{path}'.")
-                else:
-                    logging.info(f"{self.model} | {self.robot.name} | Loaded API key.")
+        # If no path, remove costs, as non-API methods should not inherit or be inherited.
+        if self.url is None:
+            self.input_cost = None
+            self.output_cost = None
+            return
+        # Otherwise, this is an API, so ensure costs are handled properly.
+        if self.input_cost is None and self.output_cost is None:
+            logging.warning(f"{self.model} | {self.robot.name} | No costs defined; cannot be used for inheriting.")
+        else:
+            if self.input_cost is None:
+                logging.warning(f"{self.model} | {self.robot.name} | No output cost defined; using input cost of"
+                                f"${self.input_cost}.")
+                self.input_cost = self.output_cost
+            elif self.output_cost is None:
+                logging.warning(f"{self.model} | {self.robot.name} | No input cost defined; using output cost of"
+                                f"${self.output_cost}.")
+                self.output_cost = self.input_cost
+            # Set models that this API model can inherit from.
+            self.set_inherited(inherited)
+        # Load a key.
+        path = os.path.join(KEYS, f"{provider}.txt")
+        if not os.path.exists(path):
+            logging.info(f"{self.model} | {self.robot.name} | No key at '{path}' for provider '{provider}'.")
+            return
+        with open(path, "r") as file:
+            s = file.read()
+        self.key = s.strip()
+        if self.key == "":
+            logging.warning(f"{self.model} | {self.robot.name} | No key specified in '{path}'.")
+        else:
+            logging.info(f"{self.model} | {self.robot.name} | Loaded API key.")
+
+    def set_inherited(self, inherited: list or None = None) -> None:
+        """
+        Set the models an API-based model can inherit from.
+        :param inherited:
+        :return:
+        """
+        # Nothing to do if the solver is not valid.
+        if not self.is_valid():
+            logging.error(f"{self.model} | Set Inherited | Solver is not valid.")
+            return None
+        # If nothing is passed or this does not use an API with a valid cost, use only itself as an option.
+        if (inherited is None or len(inherited) < 1 or self.url is None or self.input_cost is None or
+                self.output_cost is None):
+            self.options = [self.model]
+            logging.info(f"{self.model} | {self.robot.name} | Set Inherited | Cannot inherit other models.")
+            return None
+        # Get only valid solvers which were passed.
+        options = []
+        for solver in inherited:
+            # Check if they are solvers.
+            if not isinstance(solver, Solver):
+                logging.warning(f"{self.model} | {self.robot.name} | Set Inherited | Element '{solver}' is not a "
+                                "solver.")
+                continue
+            # Ensure the solver to inherit is correct.
+            if not solver.is_valid():
+                logging.warning(f"{self.model} | {self.robot.name} | Set Inherited | Element '{solver}' is not valid.")
+                continue
+            # If this is not a reasoning model, do not inherit reasoning models.
+            if not self.reasoning and solver.reasoning:
+                logging.info(f"{self.model} | {self.robot.name} | Set Inherited | Non-reasoning models cannot inherit "
+                             "reasoning models.")
+                continue
+            # Check that they have a valid cost.
+            if solver.input_cost is None or solver.output_cost is None:
+                logging.info(f"{self.model} | {self.robot.name} | Set Inherited | Can only inherit API methods which "
+                             "have costs.")
+                continue
+            # Can only inherit models with better costs.
+            if self.input_cost < solver.input_cost:
+                logging.info(f"{self.model} | {self.robot.name} | Set Inherited | Can only inherit API methods with "
+                             "better input costs.")
+                continue
+            if self.output_cost < solver.output_cost:
+                logging.info(f"{self.model} | {self.robot.name} | Set Inherited | Can only inherit API methods with "
+                             "better output costs.")
+                continue
+            if self.input_cost == solver.input_cost and self.output_cost == solver.output_cost:
+                logging.info(f"{self.model} | {self.robot.name} | Set Inherited | Can only inherit API methods with "
+                             "better costs and these are equal.")
+                continue
+            # Make sure this is for the proper robot.
+            if self.robot.name != solver.robot.name:
+                logging.info(f"{self.model} | {self.robot.name} | Set Inherited | Can only inherit the same robot.")
+                continue
+            # Check it is not this.
+            if solver == self or solver.model == self.model:
+                logging.info(f"{self.model} | {self.robot.name} | Set Inherited | Cannot manually inherit from self.")
+                continue
+            # Check this element has not yet been added.
+            if solver in options:
+                logging.info(f"{self.model} | {self.robot.name} | Set Inherited | Can only add one instance of each to "
+                             "inherit.")
+                continue
+            # Check for name duplicates.
+            match = False
+            for option in options:
+                if solver.model == option.model:
+                    logging.info(f"{self.model} | {self.robot.name} | Set Inherited | Can only add one instance of each"
+                                 " to inherit.")
+                    match = True
+                    break
+            if match:
+                continue
+            # If all checks have been passed, we can inherit it.
+            options.append(solver)
+        # Sort by non-reasoning, output cost, input cost, and lastly name.
+        if len(options) > 1:
+            options = sorted(options, key=lambda x: (x.reasoning, x.output_cost, x.input_cost, x.model))
+        # Lastly, using itself is the final option.
+        options.append(self)
+        # Save the options.
+        self.options = options
 
     def perform(self, orientation: list[bool] or None = None, mode: list[str] or None = None,
                 run: bool = False) -> None:
@@ -1271,7 +1400,7 @@ class Solver:
         solving = TRANSFORM if orientation else POSITION
         root = os.path.join(self.interactions, f"{lower}-{upper}-{solving}-{mode}")
         # We do not want the "Details" file as this is simply for results analysis.
-        interactions = [s for s in get_files(root) if DETAILS not in s] if os.path.exists(root) else []
+        interactions = [s for s in get_files(root) if INHERITED not in s] if os.path.exists(root) else []
         total = len(interactions)
         # Build the conversation history.
         history = []
@@ -2026,7 +2155,7 @@ class Solver:
         best, feedbacks, forwards, tests = self.get_dynamic(lower, upper, orientation)
         if best is None:
             logging.info(f"{self.model} | {self.robot.name} | {lower + 1} to {upper + 1} | Prepare LLM | Not performing"
-                         " a dynamic prompt as there are no successful combinations.")
+                         " a dynamic prompt as no options.")
             return ""
         total = len(best)
         # If somehow nothing was returned, this is an error.
@@ -2037,8 +2166,7 @@ class Solver:
         # If this is just the same as a normal prompt, lets not waste resources running it.
         if total == 1:
             logging.info(f"{self.model} | {self.robot.name} | {lower + 1} to {upper + 1} | Prepare LLM | Not performing"
-                         " a dynamic prompt as this was just a single chain that was returned, thus same as a normal "
-                         "prompt.")
+                         " a dynamic prompt as just a single chain.")
             return ""
         # If this is just the same as an extending prompt, lets not waste resources running it.
         if total == 2 and best[0] != DYNAMIC and best[1]["Upper"] == best[1]["Lower"]:
@@ -2167,7 +2295,7 @@ class Solver:
         s = f"Feedbacks Given,Forwards Kinematics Calls,Testing Calls\n{feedbacks},{forwards},{tests}"
         path = os.path.join(self.interactions, f"{lower}-{upper}-{TRANSFORM if orientation else POSITION}-{mode}")
         os.makedirs(path, exist_ok=True)
-        with open(os.path.join(path, f"{DETAILS}.txt"), "W") as file:
+        with open(os.path.join(path, f"{INHERITED}.csv"), "W") as file:
             file.write(s)
 
     def get_dynamic(self, lower: int = 0, upper: int = -1,
@@ -2788,6 +2916,28 @@ def llm_ik(robots: str or list[str] or None = None, models: str or list[str] or 
             run = False
     else:
         logging.info("Not running LLM API calls.")
+    # Get the API models.
+    api_models = []
+    for solver in created_models:
+        if solver.url is not None and solver.input_cost is not None and solver.output_cost is not None:
+            api_models.append(solver)
+    # Set up inheriting for API models.
+    for solver in api_models:
+        options = []
+        # Get the inheriting options.
+        for option in api_models:
+            # Do some checks to see if this can be inherited.
+            if (solver == option or solver.robot != option.robot or solver.input_cost < option.input_cost or
+                    solver.output_cost < option.output_cost):
+                continue
+            if solver.input_cost == option.input_cost and solver.output_cost == option.output_cost:
+                continue
+            if not solver.reasoning and option.reasoning:
+                continue
+            options.append(option)
+        # No point in calling if there is nothing to inherit.
+        if len(options) > 0:
+            solver.set_inherited(options)
     # Run the solvers, making API calls only on those that should be.
     for solver in created_models:
         run_instance = run and solver.robot.name in robots and solver.model in models

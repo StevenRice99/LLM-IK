@@ -2761,7 +2761,7 @@ def evaluate_averages(totals: dict[str, str or float or int or bool] or None = N
                     file.write(s)
 
 
-def llm_ik(robots: str or list[str] or None = None, models: str or list[str] or None = None,
+def llm_ik(robots: str or list[str] or None = None, number_models: int or None = None,
            orientation: bool or None = False, types: str or list[str] or None = None, feedbacks: int = FEEDBACKS,
            examples: int = EXAMPLES, training: int = TRAINING, evaluating: int = EVALUATING, seed: int = SEED,
            distance_error: float = DISTANCE_ERROR, angle_error: float = ANGLE_ERROR, run: bool = False,
@@ -2769,7 +2769,7 @@ def llm_ik(robots: str or list[str] or None = None, models: str or list[str] or 
     """
     Run LLM inverse kinematics.
     :param robots: The names of the robots.
-    :param models: The names of the LLMs.
+    :param number_models: The number of cheapest API models to run.
     :param orientation: If we want to solve for position, transform, or both being none.
     :param types: The solving types.
     :param feedbacks: The max number of times to give feedback.
@@ -2846,17 +2846,17 @@ def llm_ik(robots: str or list[str] or None = None, models: str or list[str] or 
             types = [types]
     # Ensure all list options are valid.
     else:
-        found = []
+        models = []
         for t in types:
             if t not in acceptable:
                 logging.warning(f"Solving type of '{t}' is not an option; removing it.")
-            found.append(t)
-        if len(found) < 1:
+            models.append(t)
+        if len(models) < 1:
             logging.error("No valid solving types.")
             types = []
         else:
             # Ensure they are in the order of normal, extend, and then dynamic.
-            types = sorted(found, reverse=True)
+            types = sorted(models, reverse=True)
     logging.info(f"Solving in the following modes: {types}.")
     # Get the orientation types we wish to solve for.
     if orientation is None:
@@ -2924,15 +2924,15 @@ def llm_ik(robots: str or list[str] or None = None, models: str or list[str] or 
             robots = [robots]
     # Otherwise, if a list, ensure all passed robots exist.
     else:
-        found = []
+        models = []
         for robot in robots:
             if robot not in existing and f"{robot}.urdf" not in existing:
                 logging.warning(f"Robot '{robot}' does not exist in '{ROBOTS}'; removing it.")
                 continue
-            found.append(robot)
-        if len(found) < 1:
+            models.append(robot)
+        if len(models) < 1:
             logging.error(f"No valid robots were passed.")
-        robots = found
+        robots = models
     # Load all robots.
     created_robots = []
     for name in existing:
@@ -2953,48 +2953,22 @@ def llm_ik(robots: str or list[str] or None = None, models: str or list[str] or 
                 perform.append(name)
     robots = perform
     # See which models exist in the core folder.
-    found = get_files(MODELS)
+    models = get_files(MODELS)
     # Clean out only to the models we are interested in.
-    total = len(found)
+    total = len(models)
     # If there are no models in the first place, there is nothing to check.
     if total < 1:
         logging.warning("No models; can only perform built-in IKPy inverse kinematics.")
-        models = []
     # Otherwise, ensure our passed models are valid.
     else:
         # Clean the names of models.
         for i in range(total):
-            found[i] = found[i].replace(".txt", "")
-        # If no models were passed, use all found in the folder.
-        if models is None:
-            models = found
-        # If it was a string, make sure it exists.
-        elif isinstance(models, str):
-            if models not in found:
-                logging.error(f"Model '{models}' does not exist in '{MODELS}'; can only perform built-in IKPy inverse "
-                              f"kinematics.")
-                models = []
-                total = 0
-            else:
-                models = [models]
-                total = 1
-        # If it was a list, make sure they all are created.
-        else:
-            selected = []
-            for model in models:
-                if model not in found:
-                    logging.error(f"Model '{model}' does not exist in '{MODELS}'; removing it.")
-                else:
-                    selected.append(model)
-            models = selected
-            total = len(models)
-            if total < 1:
-                logging.error("No models being loaded; can only perform built-in IKPy inverse kinematics.")
+            models[i] = models[i].replace(".txt", "")
     # If there is at least one model we should load, let us try to fully load it.
     created_models = []
     if total > 0:
         # Try for every LLM paired with every robot.
-        for name in found:
+        for name in models:
             for robot in created_robots:
                 model = Solver(name, robot)
                 if model.is_valid():
@@ -3004,22 +2978,39 @@ def llm_ik(robots: str or list[str] or None = None, models: str or list[str] or 
             logging.warning("No models loaded; can only perform built-in IKPy inverse kinematics.")
         else:
             logging.info(f"{total} model{'s' if total > 1 else ''} loaded.")
-    # Get the models we will actually perform API calls on.
-    perform = []
-    for model in models:
-        name = model.replace(".txt", "")
-        for c in created_models:
-            # Only add API-capable models.
-            if c.url is not None and c.model == name:
-                perform.append(name)
-    models = perform
     # Load robot data.
     for robot in created_robots:
         robot.load_data()
+    # Sort API models from cheapest to most expensive.
+    created_models = sorted(created_models, key=lambda x: (x.url, x.output_cost, x.input_cost, x.model))
+    # Get the API models.
+    api_models = []
+    for solver in created_models:
+        if solver.url is not None and solver.input_cost is not None and solver.output_cost is not None:
+            api_models.append(solver)
+    # Set up inheriting for API models.
+    for solver in api_models:
+        options = []
+        # Get the inheriting options.
+        for option in api_models:
+            # Do some checks to see if this can be inherited.
+            if (solver == option or solver.robot != option.robot or solver.input_cost < option.input_cost or
+                    solver.output_cost < option.output_cost):
+                continue
+            if solver.input_cost == option.input_cost and solver.output_cost == option.output_cost:
+                continue
+            if not solver.reasoning and option.reasoning:
+                continue
+            options.append(option)
+        # No point in calling if there is nothing to inherit.
+        if len(options) > 0:
+            solver.set_inherited(options)
     # If API calls should be run, have the user confirm them.
+    if number_models is None or number_models < 1 or number_models >= total:
+        number_models = total
     if run:
         total_robots = len(robots)
-        total_models = len(models)
+        total_models = min(len(api_models), number_models)
         if total_robots > 0 and total_models > 0:
             # Unless we bypassed the API call checking, confirm we want to run up to the potential number of API calls.
             if not bypass:
@@ -3053,33 +3044,18 @@ def llm_ik(robots: str or list[str] or None = None, models: str or list[str] or 
             run = False
     else:
         logging.info("Not running LLM API calls.")
-    # Get the API models.
-    api_models = []
-    for solver in created_models:
-        if solver.url is not None and solver.input_cost is not None and solver.output_cost is not None:
-            api_models.append(solver)
-    # Set up inheriting for API models.
-    for solver in api_models:
-        options = []
-        # Get the inheriting options.
-        for option in api_models:
-            # Do some checks to see if this can be inherited.
-            if (solver == option or solver.robot != option.robot or solver.input_cost < option.input_cost or
-                    solver.output_cost < option.output_cost):
-                continue
-            if solver.input_cost == option.input_cost and solver.output_cost == option.output_cost:
-                continue
-            if not solver.reasoning and option.reasoning:
-                continue
-            options.append(option)
-        # No point in calling if there is nothing to inherit.
-        if len(options) > 0:
-            solver.set_inherited(options)
     # Run the solvers, making API calls only on those that should be.
+    ran = 0
     for solver in created_models:
         run_instance = run and solver.robot.name in robots and solver.model in models
         if run_instance:
-            logging.info(f"Should run API calls for {solver.model} {solver.robot.name}.")
+            ran += 1
+            if ran > number_models:
+                run_instance = False
+                logging.info(f"Can run API calls for {solver.model} {solver.robot.name} but hit limit of "
+                             f"{number_models}.")
+            else:
+                logging.info(f"Should run API calls for {solver.model} {solver.robot.name}.")
         solver.perform(orientation, types, run_instance)
     # Get per-robot results for all solvers.
     totals = None
@@ -3112,7 +3088,8 @@ if __name__ == "__main__":
     # Configure the argument parser.
     parser = argparse.ArgumentParser(description="LLM Inverse Kinematics")
     parser.add_argument("-r", "--robots", type=str or list[str] or None, default=None, help="The names of the robots.")
-    parser.add_argument("-m", "--models", type=str or list[str] or None, default=None, help="The names of the LLMs.")
+    parser.add_argument("-m", "--models", type=int or None, default=None, help="The number of cheapest API models to "
+                                                                               "run.")
     parser.add_argument("-o", "--orientation", type=bool or None, default=False, help="If we want to solve for "
                                                                                       "position, transform, or both "
                                                                                       "being none.")

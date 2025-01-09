@@ -1281,11 +1281,12 @@ class Solver:
         self.options = options
 
     def perform(self, orientation: list[bool] or None = None, mode: list[str] or None = None,
-                run: bool = False) -> None:
+                max_length: int = 0, run: bool = False) -> None:
         """
         Perform solver logic.
         :param orientation: The end effector goals to run API calls with.
         :param mode: The modes to run API calls with.
+        :param max_length: The maximum chain length to run.
         :param run: If API calls should be run.
         :return: Nothing.
         """
@@ -1298,6 +1299,9 @@ class Solver:
             orientation = [False, True]
         if mode is None:
             mode = [NORMAL, EXTEND, DYNAMIC]
+        # Get the maximum length of chains to run.
+        if max_length < 1:
+            max_length = self.robot.joints
         # Loop all possible combinations.
         for current_mode in [NORMAL, EXTEND, DYNAMIC]:
             for current_orientation in [False, True]:
@@ -1315,9 +1319,10 @@ class Solver:
                         while True:
                             # Get the messages to send to the LLM.
                             messages = self.handle_interactions(lower, upper, current_orientation, current_mode)
-                            # If there are no messages, or we should not call the LLM, stop.
+                            # If there are no messages, or we should not call the LLM due to parameters, stop.
                             if (messages is None or len(messages) < 1 or self.url is None or not run or
-                                    current_orientation not in orientation or current_mode not in mode):
+                                    current_orientation not in orientation or current_mode not in mode
+                                    or length >= max_length):
                                 break
                             # For higher chains, let us only try to solve them if the lower chains were successful.
                             if length > 0 and current_mode != DYNAMIC:
@@ -2761,15 +2766,15 @@ def evaluate_averages(totals: dict[str, str or float or int or bool] or None = N
                     file.write(s)
 
 
-def llm_ik(robots: str or list[str] or None = None, number_models: int or None = None,
-           orientation: bool or None = False, types: str or list[str] or None = None, feedbacks: int = FEEDBACKS,
-           examples: int = EXAMPLES, training: int = TRAINING, evaluating: int = EVALUATING, seed: int = SEED,
+def llm_ik(robots: str or list[str] or None = None, max_length: int = 0, orientation: bool or None = False,
+           types: str or list[str] or None = None, feedbacks: int = FEEDBACKS, examples: int = EXAMPLES,
+           training: int = TRAINING, evaluating: int = EVALUATING, seed: int = SEED,
            distance_error: float = DISTANCE_ERROR, angle_error: float = ANGLE_ERROR, run: bool = False,
            cwd: str or None = None, level: str = "INFO", bypass: bool = False) -> None:
     """
     Run LLM inverse kinematics.
     :param robots: The names of the robots.
-    :param number_models: The number of cheapest API models to run.
+    :param max_length: The maximum chain length to run.
     :param orientation: If we want to solve for position, transform, or both being none.
     :param types: The solving types.
     :param feedbacks: The max number of times to give feedback.
@@ -2907,6 +2912,10 @@ def llm_ik(robots: str or list[str] or None = None, number_models: int or None =
     global ANGLE_ERROR
     ANGLE_ERROR = angle_error
     logging.info(f"Acceptable angle error is {angle_error}°.")
+    if max_length < 1:
+        logging.info("Computing chains of all lengths.")
+    else:
+        logging.info(f"Computing on chains up to {max_length} long.")
     # If there are no robots, there is nothing to do.
     existing = get_files(ROBOTS)
     if len(existing) < 1:
@@ -3005,12 +3014,9 @@ def llm_ik(robots: str or list[str] or None = None, number_models: int or None =
         # No point in calling if there is nothing to inherit.
         if len(options) > 0:
             solver.set_inherited(options)
-    # If API calls should be run, have the user confirm them.
-    if number_models is None or number_models < 1 or number_models >= total:
-        number_models = total
     if run:
         total_robots = len(robots)
-        total_models = min(len(api_models), number_models)
+        total_models = len(api_models)
         if total_robots > 0 and total_models > 0:
             # Unless we bypassed the API call checking, confirm we want to run up to the potential number of API calls.
             if not bypass:
@@ -3045,18 +3051,9 @@ def llm_ik(robots: str or list[str] or None = None, number_models: int or None =
     else:
         logging.info("Not running LLM API calls.")
     # Run the solvers, making API calls only on those that should be.
-    ran = 0
     for solver in created_models:
         run_instance = run and solver.robot.name in robots and solver.model in models
-        if run_instance:
-            ran += 1
-            if ran > number_models:
-                run_instance = False
-                logging.info(f"Can run API calls for {solver.model} {solver.robot.name} but hit limit of "
-                             f"{number_models}.")
-            else:
-                logging.info(f"Should run API calls for {solver.model} {solver.robot.name}.")
-        solver.perform(orientation, types, run_instance)
+        solver.perform(orientation, types, max_length, run_instance)
     # Get per-robot results for all solvers.
     totals = None
     for robot in created_robots:
@@ -3088,8 +3085,7 @@ if __name__ == "__main__":
     # Configure the argument parser.
     parser = argparse.ArgumentParser(description="LLM Inverse Kinematics")
     parser.add_argument("-r", "--robots", type=str or list[str] or None, default=None, help="The names of the robots.")
-    parser.add_argument("-m", "--models", type=int or None, default=None, help="The number of cheapest API models to "
-                                                                               "run.")
+    parser.add_argument("-m", "--max", type=int, default=-1, help="The maximum chain length to run.")
     parser.add_argument("-o", "--orientation", type=bool or None, default=False, help="If we want to solve for "
                                                                                       "position, transform, or both "
                                                                                       "being none.")
@@ -3109,5 +3105,5 @@ if __name__ == "__main__":
     parser.add_argument("-b", "--bypass", action="store_true", help="Bypass the confirmation for API running.")
     args = parser.parse_args()
     # Run the program.
-    llm_ik(args.robots, args.models, args.orientation, args.types, args.feedbacks, args.examples, args.training,
+    llm_ik(args.robots, args.max, args.orientation, args.types, args.feedbacks, args.examples, args.training,
            args.evaluating, args.seed, args.distance, args.angle, args.run, args.cwd, args.logging, args.bypass)

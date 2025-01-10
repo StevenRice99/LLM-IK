@@ -1541,8 +1541,8 @@ class Solver:
             expected = i % 2 == 0
             if messages[i]["Prompt"] != expected:
                 logging.error(f"{self.model} | {self.robot.name} | {lower + 1} to {upper + 1} | {solving} | {mode} | "
-                             f"Run API | Message at index {i} expected to be a {'prompt' if expected else 'response'} "
-                             "but was not.")
+                              f"Run API | Message at index {i} expected to be a {'prompt' if expected else 'response'} "
+                              "but was not.")
                 return False
             # Ensure no messages are empty.
             messages[i]["Message"] = messages[i]["Message"].strip()

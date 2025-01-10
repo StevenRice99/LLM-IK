@@ -1516,13 +1516,19 @@ class Solver:
         lower, upper = self.robot.validate_lower_upper(lower, upper)
         # If only one joint, can only solve in normal mode and for the position only.
         if lower == upper:
-            mode = NORMAL
-            orientation = False
+            if mode != NORMAL:
+                logging.error(f"{self.model} | {self.robot.name} | {lower + 1} to {upper + 1} | Run API | Must be in "
+                              f"'{NORMAL}' mode for one joint.")
+                return False
+            if orientation:
+                logging.error(f"{self.model} | {self.robot.name} | {lower + 1} to {upper + 1} | Run API | Can't do "
+                              "orientation for one joint.")
+                return False
         # Ensure the mode is valid.
         if mode not in [NORMAL, EXTEND, DYNAMIC]:
-            logging.warning(f"{self.model} | {self.robot.name} | {lower + 1} to {upper + 1} | Run API | Mode '{mode}' "
-                            f"not valid, using '{NORMAL}' instead.")
-            mode = NORMAL
+            logging.error(f"{self.model} | {self.robot.name} | {lower + 1} to {upper + 1} | Run API | Mode '{mode}' is "
+                          "not valid.")
+            return False
         solving = TRANSFORM if orientation else POSITION
         # Nothing to do if there are no messages.
         if messages is None or len(messages) < 1:
@@ -1537,6 +1543,20 @@ class Solver:
         past = len(messages) - 1
         # Check the remaining messages.
         for i in range(past):
+            # Ensure the element exists.
+            if messages[i] is None:
+                logging.error(f"{self.model} | {self.robot.name} | {lower + 1} to {upper + 1} | {solving} | {mode} | "
+                              f"Run API | Message at index {i} not set.")
+                return False
+            # Ensure the needed fields exist.
+            if "Prompt" not in messages[i]:
+                logging.error(f"{self.model} | {self.robot.name} | {lower + 1} to {upper + 1} | {solving} | {mode} | "
+                              f'Run API | Message at index {i} does not have a "Prompt" field.')
+                return False
+            if "Message" not in messages[i]:
+                logging.error(f"{self.model} | {self.robot.name} | {lower + 1} to {upper + 1} | {solving} | {mode} | "
+                              f'Run API | Message at index {i} does not have a "Message" field.')
+                return False
             # Starting with the first message as a prompt (True), messages alternate between it and responses (False).
             expected = i % 2 == 0
             if messages[i]["Prompt"] != expected:

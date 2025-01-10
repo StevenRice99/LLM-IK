@@ -30,6 +30,7 @@ INTERACTIONS = "Interactions"
 ELAPSED = "Elapsed"
 SOLUTIONS = "Solutions"
 RESULTS = "Results"
+TOKENS = "Tokens"
 
 # Execution modes.
 NORMAL = "Normal"
@@ -141,12 +142,12 @@ TEST_PARAMETERS_TRANSFORM = {
 # All fields for evaluations.
 FIELDS = ["Success Rate (%)", "Failure Rate (%)", "Error Rate (%)", "Average Failure Distance",
           "Average Failure Angle (°)", "Average Elapsed Time (s)", "Generation Time (s)", "Mode", "Feedbacks Given",
-          "Forwards Kinematics Calls", "Testing Calls", "Reasoning", "Functions", "API"]
+          "Forwards Kinematics Calls", "Testing Calls", "Reasoning", "Functions", "API", "Cost ($)"]
 
 # All numeric fields for evaluations.
 NUMERIC = ["Success Rate (%)", "Failure Rate (%)", "Error Rate (%)", "Average Failure Distance",
            "Average Failure Angle (°)", "Average Elapsed Time (s)", "Generation Time (s)", "Feedbacks Given",
-           "Forwards Kinematics Calls", "Testing Calls"]
+           "Forwards Kinematics Calls", "Testing Calls", "Cost ($)"]
 
 
 class Robot:
@@ -338,9 +339,9 @@ class Robot:
                     failures = neat(failures / total * 100)
                     s = ("Success Rate (%),Failure Rate (%),Error Rate (%),Average Failure Distance,Average Failure "
                          "Angle (°),Average Elapsed Time (s),Generation Time (s),Mode,Feedbacks Given,Forwards "
-                         f"Kinematics Calls,Testing Calls,Reasoning,Functions,API\n{successes}%,{failures}%,0%,"
-                         f"{total_distance},{total_angle if orientation else 0}°,{total_time} s,0 s,,0,0,0,False,False,"
-                         "False")
+                         f"Kinematics Calls,Testing Calls,Reasoning,Functions,API,Cost ($)\n{successes}%,{failures}%,0%"
+                         f",{total_distance},{total_angle if orientation else 0}°,{total_time} s,0 s,,0,0,0,False,"
+                         "False,False,$0")
                     # Save results.
                     os.makedirs(self.results, exist_ok=True)
                     path = os.path.join(self.results, f"{lower}-{upper}-{TRANSFORM if orientation else POSITION}.csv")
@@ -868,7 +869,7 @@ class Robot:
                     logging.error(f"{self.name} | Evaluate | No result in '{path}'.")
                     continue
                 # Ensure the right titles and fields are in it.
-                expected = 14
+                expected = 15
                 titles = lines[0].split(",")
                 total_titles = len(titles)
                 if total_titles != expected:
@@ -944,6 +945,15 @@ class Robot:
                                           f"'{path}'.")
                             result = None
                             break
+                    elif title == "Cost ($)":
+                        # noinspection PyBroadException
+                        try:
+                            data = float(data.replace("$", ""))
+                        except:
+                            logging.error(f"{self.name} | Evaluate | Could not parse dollar data at index {i + 1} from "
+                                          f"'{path}'.")
+                            result = None
+                            break
                     elif title != "Mode":
                         logging.error(f"{self.name} | Evaluate | Title '{title}' at index {i + 1} from '{path}' is not "
                                       f"valid.")
@@ -995,12 +1005,13 @@ class Robot:
                                 item[1]["Average Failure Distance"],
                                 item[1]["Average Failure Angle (°)"],
                                 item[1]["Average Elapsed Time (s)"],
+                                item[1]["API"],
+                                item[1]["Cost ($)"],
                                 item[1]["Generation Time (s)"],
                                 item[1]["Mode"],
                                 item[1]["Feedbacks Given"],
                                 item[1]["Forwards Kinematics Calls"],
                                 item[1]["Testing Calls"],
-                                item[1]["API"],
                                 item[1]["Reasoning"],
                                 item[1]["Functions"],
                                 item[0]
@@ -1021,6 +1032,8 @@ class Robot:
                                 data = f"{neat(data)}°"
                             elif field == "Average Elapsed Time (s)" or field == "Generation Time (s)":
                                 data = f"{neat(data)} s"
+                            elif field == "Cost ($)":
+                                data = f"${neat(data)}"
                             s += f",{data}"
                     path = os.path.join(results_root, f"{lower}-{upper}-{solving}.csv")
                     with open(path, "w") as file:
@@ -1060,6 +1073,7 @@ class Solver:
             self.elapsed = os.path.join(ELAPSED, "_Invalid", "_Invalid")
             self.solutions = os.path.join(SOLUTIONS, "_Invalid", "_Invalid")
             self.results = os.path.join(RESULTS, "_Invalid", "_Invalid")
+            self.tokens = os.path.join(TOKENS, "_Invalid", "_Invalid")
             return
         self.model = model
         self.robot = robot
@@ -1070,12 +1084,14 @@ class Solver:
             self.elapsed = os.path.join(ELAPSED, "_Invalid", self.model)
             self.solutions = os.path.join(SOLUTIONS, "_Invalid", self.model)
             self.results = os.path.join(RESULTS, "_Invalid", self.model)
+            self.tokens = os.path.join(TOKENS, "_Invalid", self.model)
             return
         # Cache folders.
         self.interactions = os.path.join(INTERACTIONS, self.robot.name, self.model)
         self.elapsed = os.path.join(ELAPSED, self.robot.name, self.model)
         self.solutions = os.path.join(SOLUTIONS, self.robot.name, self.model)
         self.results = os.path.join(RESULTS, self.robot.name, self.model)
+        self.tokens = os.path.join(TOKENS, self.robot.name, self.model)
         # Ensure the robot is valid.
         if not robot.is_valid():
             logging.error(f"{self.model} | {self.robot.name} | Robot is not valid.")
@@ -1196,11 +1212,138 @@ class Solver:
         else:
             logging.info(f"{self.model} | {self.robot.name} | Loaded API key.")
 
+    def get_cost(self, lower: int = 0, upper: int = -1, orientation: bool = False,
+                 mode: str = NORMAL) -> (float, int, int, int):
+        """
+        Get the cost of running a model.
+        :param lower: The starting joint.
+        :param upper: The ending joint.
+        :param orientation: If this data cares about the orientation or not.
+        :param mode: The mode by which the code was achieved.
+        :return: The cost of running a model, the number of feedbacks given, and the number of each type of method call.
+        """
+        # Nothing to do if the solver is not valid.
+        if not self.is_valid():
+            logging.error(f"{self.model} | Get Cost | Solver is not valid.")
+            return 0, 0, 0, 0
+        # Ensure valid values.
+        lower, upper = self.robot.validate_lower_upper(lower, upper)
+        # If only one joint, can only solve in normal mode and for the position only.
+        if lower == upper:
+            mode = NORMAL
+            orientation = False
+        # Ensure the mode is valid.
+        if mode not in [NORMAL, EXTEND, DYNAMIC]:
+            logging.warning(f"{self.model} | {self.robot.name} | {lower + 1} to {upper + 1} | Get Cost | Mode '{mode}' "
+                            f"not valid, using '{NORMAL}' instead.")
+            mode = NORMAL
+        # Get the cost.
+        cost = 0
+        solving = TRANSFORM if orientation else POSITION
+        portion = f"{lower}-{upper}-{solving}-{mode}"
+        root = os.path.join(self.tokens, portion)
+        # Load the tokens used for each interaction.
+        if os.path.exists(root):
+            for tokens in get_files(root):
+                # Read the file.
+                path = os.path.join(root, tokens)
+                with open(path, "r") as file:
+                    s = file.read()
+                # Extract the tokens from the file.
+                lines = s.splitlines()
+                if len(lines) < 2:
+                    logging.error(f"{self.model} | {self.robot.name} | {lower + 1} to {upper + 1} | {solving} | {mode} "
+                                  f"| Get Cost | '{path}' is not properly formatted.")
+                    continue
+                data = lines[1].split(",")
+                if len(data) < 2:
+                    logging.error(f"{self.model} | {self.robot.name} | {lower + 1} to {upper + 1} | {solving} | {mode} "
+                                  f"| Get Cost | Could not parse '{path}'.")
+                    continue
+                # noinspection PyBroadException
+                try:
+                    inputs = int(data[0])
+                    outputs = int(data[1])
+                except:
+                    logging.error(f"{self.model} | {self.robot.name} | {lower + 1} to {upper + 1} | {solving} | {mode} "
+                                  f"| Get Cost | Could not extract tokens from '{path}'.")
+                    continue
+                # Add the cost for each response.
+                cost += (inputs * self.input_cost) + (outputs * self.output_cost)
+        # Get all types of interactions.
+        feedbacks = 0
+        forwards = 0
+        tests = 0
+        root = os.path.join(self.interactions, portion)
+        if os.path.exists(root):
+            for file in get_files(root):
+                if MESSAGE_FEEDBACK in file:
+                    feedbacks += 1
+                elif MESSAGE_FORWARD in file:
+                    forwards += 1
+                elif MESSAGE_DONE in file:
+                    tests += 1
+        # Load any inherited data.
+        path = os.path.join(self.interactions, portion, f"{INHERITED}.txt")
+        if os.path.exists(path):
+            with open(path, "r") as file:
+                s = file.read()
+            lines = s.splitlines()
+            for line in lines:
+                info = line.split("|")
+                # Ensure the right amount of info is present.
+                if len(info) < 5:
+                    logging.error(f"{self.model} | {self.robot.name} | {lower + 1} to {upper + 1} | {solving} | {mode} "
+                                  f"| Get Cost | Inheriting data in '{path}' not properly formatted.")
+                    continue
+                # Ensure the indicated model can be inherited.
+                sub_model = info[0]
+                found = False
+                for solver in self.options:
+                    if solver.model == sub_model:
+                        sub_model = solver
+                        found = True
+                        break
+                if not found:
+                    logging.error(f"{self.model} | {self.robot.name} | {lower + 1} to {upper + 1} | {solving} | {mode} "
+                                  f"| Get Cost | Model to inherit '{sub_model}' in '{path}' is not an option.")
+                    continue
+                # Parse lower and upper bounds.
+                # noinspection PyBroadException
+                try:
+                    sub_lower = int(info[1])
+                    sub_upper = int(info[2])
+                except:
+                    logging.error(f"{self.model} | {self.robot.name} | {lower + 1} to {upper + 1} | {solving} | {mode} "
+                                  f"| Get Cost | Could not extract joint parts from '{path}'.")
+                    continue
+                # Parse what it was solving for.
+                sub_solving = info[3]
+                if sub_solving not in [POSITION, TRANSFORM]:
+                    logging.error(f"{self.model} | {self.robot.name} | {lower + 1} to {upper + 1} | {solving} | {mode} "
+                                  f"| Get Cost | Invalid solving for of '{sub_solving}' in '{path}'.")
+                    continue
+                # Parse the mode it was done in.
+                sub_mode = info[4]
+                if sub_mode not in [NORMAL, EXTEND, DYNAMIC]:
+                    logging.error(f"{self.model} | {self.robot.name} | {lower + 1} to {upper + 1} | {solving} | {mode} "
+                                  f"| Get Cost | Invalid mode of '{sub_mode}' in '{path}'.")
+                    continue
+                # Add the cost of this inherited model.
+                s_cost, s_feedbacks, s_forwards, s_tests = sub_model.get_cost(sub_lower, sub_upper,
+                                                                              sub_solving == TRANSFORM, sub_mode)
+                cost += s_cost
+                feedbacks += s_feedbacks
+                forwards += s_forwards
+                tests += s_tests
+        # Return the overall cost.
+        return cost, feedbacks, forwards, tests
+
     def set_inherited(self, inherited: list or None = None) -> None:
         """
         Set the models an API-based model can inherit from.
-        :param inherited:
-        :return:
+        :param inherited: The models to potentially inherit.
+        :return: Nothing.
         """
         # Nothing to do if the solver is not valid.
         if not self.is_valid():
@@ -1324,7 +1467,7 @@ class Solver:
                                     current_orientation not in orientation or current_mode not in mode
                                     or length >= max_length):
                                 break
-                            # For higher chains, let us only try to solve them if the lower chains were successful.
+                            # For higher chains, one more check to only solve them if the lower chains were successful.
                             if length > 0 and current_mode != DYNAMIC:
                                 # Get the upper of the lower chain.
                                 previous_upper = upper - 1
@@ -1371,8 +1514,23 @@ class Solver:
         # Nothing to do if there are no messages.
         if messages is None or len(messages) < 1:
             logging.info(f"{self.model} | {self.robot.name} | {lower + 1} to {upper + 1} | {solving} | {mode} | Run API"
-                         f" | No messages to give to the LLM.")
+                         " | No messages to give to the LLM.")
             return None
+        # The last message must be a prompt for the LLM.
+        if not messages[-1]["Prompt"]:
+            logging.info(f"{self.model} | {self.robot.name} | {lower + 1} to {upper + 1} | {solving} | {mode} | Run API"
+                         " | Last message is not a prompt.")
+            return None
+        past = len(messages) - 1
+        # Check the remaining messages.
+        for i in range(past):
+            # Starting with the first message as a prompt (True), messages alternate between it and responses (False).
+            expected = i % 2 == 0
+            if messages[i] != expected:
+                logging.info(f"{self.model} | {self.robot.name} | {lower + 1} to {upper + 1} | {solving} | {mode} | Run"
+                             f" API | Message at index {i} expected to be a {'prompt' if expected else 'response'} but "
+                             "was not.")
+                return None
         logging.error(f"{self.model} | {self.robot.name} | {lower + 1} to {upper + 1} | {solving} | {mode} | Run API | "
                       "LLM interactions not yet implemented.")
         # TODO - Implement API calling.
@@ -1479,7 +1637,7 @@ class Solver:
         :param upper: The ending joint.
         :param orientation: If this data cares about the orientation or not.
         :param mode: The mode by which the code was achieved.
-        :return: The best solver possible and the mode it was solved in.
+        :return: The best solver possible, the mode it was solved in, and the cost it took to solve.
         """
         # Nothing to do if the solver is not valid.
         if not self.is_valid():
@@ -1506,16 +1664,24 @@ class Solver:
         # Determine the best sub-option for this.
         best = None
         best_mode = NORMAL
+        best_cost = 0
         for mode_option in mode_options:
             for solver_option in self.options:
                 if solver_option.code_successful(lower, upper, orientation, mode_option):
+                    # If this is the first successful one, use it.
                     if best is None:
                         best = solver_option
                         best_mode = mode_option
+                        best_cost, feedbacks, forwards, tests = solver_option.get_cost(lower, upper, orientation, mode)
+                    # Otherwise, use it if it is a better cost.
                     else:
-                        # TODO - Load computed tokens to get cost.
-                        pass
-        return best, best_mode, 0
+                        cost, feedbacks, forwards, tests = solver_option.get_cost(lower, upper, orientation, mode)
+                        if cost >= best_cost:
+                            continue
+                        best = solver_option
+                        best_mode = mode_option
+                        best_cost = cost
+        return best, best_mode, best_cost
 
     def handle_interactions(self, lower: int = 0, upper: int = -1, orientation: bool = False,
                             mode: str = NORMAL) -> list[dict[str, str or bool]] or None:
@@ -1996,20 +2162,8 @@ class Solver:
         total_distance = neat(total_distance)
         total_angle = neat(total_angle)
         total_time = neat(total_time / total)
-        root = os.path.join(self.interactions, f"{lower}-{upper}-{solving}-{mode}")
-        if os.path.exists(root):
-            feedbacks = sum(MESSAGE_FEEDBACK in s for s in get_files(root)) - 1
-            forwards = sum(MESSAGE_FORWARD in s for s in get_files(root)) - 1
-            testings = sum(MESSAGE_TEST in s for s in get_files(root)) - 1
-        else:
-            feedbacks = 0
-            forwards = 0
-            testings = 0
-        # Get any inherited messages.
-        i_feedbacks, i_forwards, i_testings = self.get_stats(lower, upper, orientation, mode)
-        feedbacks += i_feedbacks
-        forwards += i_forwards
-        testings += i_testings
+        # Get all stats
+        cost, feedbacks, forwards, testings = self.get_cost(lower, upper, orientation, mode)
         # Get how long it took the LLM to generate the code.
         elapsed = 0
         name = f"{lower}-{upper}-{solving}-{mode}"
@@ -2028,9 +2182,9 @@ class Solver:
         # Save the results.
         s = ("Success Rate (%),Failure Rate (%),Error Rate (%),Average Failure Distance,Average Failure Angle (°),"
              "Average Elapsed Time (s),Generation Time (s),Mode,Feedbacks Given,Forwards Kinematics Calls,Testing Calls"
-             f",Reasoning,Functions,API\n{successes}%,{failures}%,{errors}%,{total_distance},"
+             f",Reasoning,Functions,API,Cost ($)\n{successes}%,{failures}%,{errors}%,{total_distance},"
              f"{total_angle if orientation else 0}°,{total_time} s,{mode},{elapsed} s,{feedbacks},{forwards},{testings}"
-             f",{self.reasoning},{self.methods},{self.url is not None}")
+             f",{self.reasoning},{self.methods},{self.url is not None},${neat(cost)}")
         os.makedirs(self.results, exist_ok=True)
         with open(os.path.join(self.results, f"{name}.csv"), "w") as file:
             file.write(s)
@@ -2269,6 +2423,13 @@ class Solver:
                 logging.error(f"{self.model} | {self.robot.name} | {lower + 1} to {upper + 1} | Prepare LLM | Best "
                               f"chain does not exist at '{path}'.")
                 return ""
+            # Save the inherited information.
+            s = f"{best.model}|{lower}|{previous}|{previous_solving}|{previous_mode}"
+            path = os.path.join(self.interactions, f"{lower}-{upper}-{TRANSFORM if orientation else POSITION}-{EXTEND}")
+            os.makedirs(path, exist_ok=True)
+            path = os.path.join(path, f"{INHERITED}.txt")
+            with open(path, "w") as file:
+                file.write(s)
             # Add the extending prompt portions.
             total = upper - lower
             plural = "s" if total > 1 else ""
@@ -2312,16 +2473,16 @@ class Solver:
             logging.info(f"{self.model} | {self.robot.name} | {lower + 1} to {upper + 1} | Prepare LLM | Not performing"
                          " a dynamic prompt as this was just an extended chain that was returned.")
             return ""
-        # Otherwise, this is valid, so save the inherited information.
-        self.save_stats(lower, upper, orientation, DYNAMIC, feedbacks, forwards, tests)
         # Load the codes.
         codes = []
+        inherit = ""
         for chain in best:
+            solver = chain["Solver"]
             c_lower = chain["Lower"]
             c_upper = chain["Upper"]
             c_solving = chain["Solving"]
             c_mode = chain["Mode"]
-            path = os.path.join(self.solutions,
+            path = os.path.join(solver.solutions,
                                 f"{c_lower}-{c_upper}-{c_solving}-{c_mode}.py")
             if not os.path.exists(path):
                 logging.error(f"{self.model} | {self.robot.name} | {lower + 1} to {upper + 1} | Prepare LLM | Part of "
@@ -2329,6 +2490,18 @@ class Solver:
                 return ""
             with open(path, "r") as file:
                 codes.append(file.read().strip())
+            # Add the inherited data.
+            t = f"{solver.model}|{c_lower}|{c_upper}|{c_solving}|{c_mode}"
+            if inherit == "":
+                inherit = t
+            else:
+                inherit += f"\n{t}"
+        # Save the inherited data.
+        path = os.path.join(self.interactions, f"{lower}-{upper}-{TRANSFORM if orientation else POSITION}-{mode}")
+        os.makedirs(path, exist_ok=True)
+        path = os.path.join(path, f"{INHERITED}.txt")
+        with open(path, "w") as file:
+            file.write(inherit)
         # Explain the dynamic chains.
         additional = (' To help you, solutions for sub-chains have been provided in the "EXISTING" sections. Each code '
                       "solved a sub-link assuming their last link was the position"
@@ -2352,91 +2525,6 @@ class Solver:
                      "prepared.")
         return f"{prompt}{post}"
 
-    def get_stats(self, lower: int = 0, upper: int = -1, orientation: bool = False,
-                  mode: str = NORMAL) -> (int, int, int):
-        """
-        Get any stats inherited from base model communications for this model.
-        :param lower: The starting joint.
-        :param upper: The ending joint.
-        :param orientation: If we want to solve for orientation.
-        :param mode: The solving mode to use.
-        :return: The number of inherited feedbacks, forwards kinematics calls, and testing calls.
-        """
-        # Nothing to do if the solver is not valid.
-        if not self.is_valid():
-            logging.error(f"{self.model} | Get Stats | Solver is not valid.")
-            return 0, 0, 0
-        # Ensure valid values.
-        lower, upper = self.robot.validate_lower_upper(lower, upper)
-        if mode not in [NORMAL, EXTEND, DYNAMIC]:
-            logging.warning(f"{self.model} | {self.robot.name} | {lower + 1} to {upper + 1} | Get Stats | Mode '{mode}'"
-                            f" not valid, using '{NORMAL}' instead.")
-            mode = NORMAL
-        # Cannot do orientation if just a single joint, and we can only run in the normal mode.
-        if lower == upper:
-            orientation = False
-            mode = NORMAL
-        solving = TRANSFORM if orientation else POSITION
-        path = os.path.join(self.interactions, f"{lower}-{upper}-{solving}-{mode}", f"{RESULTS}.txt")
-        if not os.path.exists(path):
-            return 0, 0, 0
-        # Read the file.
-        with open(path, "r") as file:
-            s = file.read()
-        lines = s.splitlines()
-        if len(lines) < 2:
-            logging.error(f"{self.model} | {self.robot.name} | {lower + 1} to {upper + 1} | {solving} | {mode} | Get "
-                          f"Stats | File '{path}' not properly formatted.")
-            return 0, 0, 0
-        values = lines[1].split(",")
-        if len(values) < 3:
-            logging.error(f"{self.model} | {self.robot.name} | {lower + 1} to {upper + 1} | {solving} | {mode} | Get "
-                          f"Stats | File '{path}' not properly formatted.")
-        # noinspection PyBroadException
-        try:
-            return int(values[0]), int(values[1]), int(values[2])
-        except:
-            logging.error(f"{self.model} | {self.robot.name} | {lower + 1} to {upper + 1} | {solving} | {mode} | Get "
-                          f"Stats | Could not parse the contents of '{path}'.")
-            return 0, 0, 0
-
-    def save_stats(self, lower: int = 0, upper: int = -1, orientation: bool = False, mode: str = NORMAL,
-                   feedbacks: int = 0, forwards: int = 0, tests: int = 0) -> None:
-        """
-        Save any stats inherited from base model communications for this model.
-        :param lower: The starting joint.
-        :param upper: The ending joint.
-        :param orientation: If we want to solve for orientation.
-        :param mode: The solving mode to use.
-        :param feedbacks: The number of feedbacks
-        :param forwards: The number of forwards kinematics calls.
-        :param tests: The number of testing calls.
-        :return: Nothing.
-        """
-        # Nothing to do if the solver is not valid.
-        if not self.is_valid():
-            logging.error(f"{self.model} | Save Stats | Solver is not valid.")
-            return None
-        # If nothing was inherited, don't save anything.
-        if feedbacks < 1 and forwards < 1 and tests < 1:
-            return None
-        # Ensure valid values.
-        lower, upper = self.robot.validate_lower_upper(lower, upper)
-        if mode not in [NORMAL, EXTEND, DYNAMIC]:
-            logging.warning(f"{self.model} | {self.robot.name} | {lower + 1} to {upper + 1} | Save Stats | Mode "
-                            f"'{mode}' not valid, using '{NORMAL}' instead.")
-            mode = NORMAL
-        # Cannot do orientation if just a single joint, and we can only run in the normal mode.
-        if lower == upper:
-            orientation = False
-            mode = NORMAL
-        # Write the information to the file.
-        s = f"Feedbacks Given,Forwards Kinematics Calls,Testing Calls\n{feedbacks},{forwards},{tests}"
-        path = os.path.join(self.interactions, f"{lower}-{upper}-{TRANSFORM if orientation else POSITION}-{mode}")
-        os.makedirs(path, exist_ok=True)
-        with open(os.path.join(path, f"{INHERITED}.csv"), "W") as file:
-            file.write(s)
-
     def get_dynamic(self, lower: int = 0, upper: int = -1,
                     orientation: bool = False) -> (list[dict[str, int or str]] or None, int, int, int, float):
         """
@@ -2459,9 +2547,10 @@ class Solver:
         if best is not None:
             logging.info(f"{self.model} | {self.robot.name} | {lower + 1} to {upper + 1} | Get Dynamic | Found a "
                          f"successful solver solving for '{current_orientation}' in mode '{best_mode}'.")
-            feedbacks, forwards, tests = self.get_stats(lower, upper, current_orientation, best_mode)
-            return [{"Lower": lower, "Upper": upper, "Solving": TRANSFORM if current_orientation else POSITION,
-                     "Mode": best_mode}], feedbacks, forwards, tests, best_cost
+            costs, feedbacks, forwards, tests = best.get_cost(lower, upper, current_orientation, best_mode)
+            return ([{"Solver": best, "Lower": lower, "Upper": upper,
+                     "Solving": TRANSFORM if current_orientation else POSITION, "Mode": best_mode}], feedbacks,
+                    forwards, tests, costs)
         # If this was a base case, there are no valid options.
         if lower == upper:
             logging.info(f"{self.model} | {self.robot.name} | {lower + 1} to {upper + 1} | Get Dynamic | No successful "
@@ -2733,12 +2822,13 @@ def evaluate_averages(totals: dict[str, str or float or int or bool] or None = N
                             item[1]["Average Failure Distance"],
                             item[1]["Average Failure Angle (°)"],
                             item[1]["Average Elapsed Time (s)"],
+                            item[1]["API"],
+                            item[1]["Cost ($)"],
                             item[1]["Generation Time (s)"],
                             item[1]["Mode"],
                             item[1]["Feedbacks Given"],
                             item[1]["Forwards Kinematics Calls"],
                             item[1]["Testing Calls"],
-                            item[1]["API"],
                             item[1]["Reasoning"],
                             item[1]["Functions"],
                             item[0]
@@ -2759,6 +2849,8 @@ def evaluate_averages(totals: dict[str, str or float or int or bool] or None = N
                             data = f"{neat(data)}°"
                         elif field == "Average Elapsed Time (s)" or field == "Generation Time (s)":
                             data = f"{neat(data)} s"
+                        elif field == "Cost ($)":
+                            data = f"${neat(data)}"
                         s += f",{data}"
                     s += f",{averages[length][solving][name]['Chains']}"
                 path = os.path.join(root, f"{AVERAGE}-{length}-{solving}.csv")
@@ -2824,6 +2916,7 @@ def llm_ik(robots: str or list[str] or None = None, max_length: int = 0, orienta
     global ELAPSED
     global SOLUTIONS
     global RESULTS
+    global TOKENS
     ROBOTS = os.path.join(cwd, ROBOTS)
     MODELS = os.path.join(cwd, MODELS)
     PROVIDERS = os.path.join(cwd, PROVIDERS)
@@ -2833,6 +2926,7 @@ def llm_ik(robots: str or list[str] or None = None, max_length: int = 0, orienta
     RESULTS = os.path.join(cwd, RESULTS)
     INFO = os.path.join(cwd, INFO)
     KEYS = os.path.join(cwd, KEYS)
+    TOKENS = os.path.join(cwd, TOKENS)
     os.makedirs(ROBOTS, exist_ok=True)
     os.makedirs(MODELS, exist_ok=True)
     os.makedirs(PROVIDERS, exist_ok=True)
@@ -2991,7 +3085,7 @@ def llm_ik(robots: str or list[str] or None = None, max_length: int = 0, orienta
     for robot in created_robots:
         robot.load_data()
     # Sort API models from cheapest to most expensive.
-    created_models = sorted(created_models, key=lambda x: (x.url, x.output_cost, x.input_cost, x.model))
+    created_models = sorted(created_models, key=lambda x: (x.url, x.reasoning, x.output_cost, x.input_cost, x.model))
     # Get the API models.
     api_models = []
     for solver in created_models:

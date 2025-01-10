@@ -2495,14 +2495,18 @@ class Solver:
             logging.info(f"{self.model} | {self.robot.name} | {lower + 1} to {upper + 1} | Prepare LLM | "
                          f"Extending solution already successful; not doing a dynamic prompt.")
             return ""
-        # Only perform a dynamic prompt if the immediate sub-chain was in some way successful.
+        # Only perform a dynamic prompt if one of the immediate sub-chains were in some way successful.
         previous = upper - 1
         previous_orientation = orientation and lower != previous
+        # Look for a lower-portion chain first.
         best, previous_mode, cost = self.get_best(lower, previous, previous_orientation, DYNAMIC)
         if best is None:
-            logging.info(f"{self.model} | {self.robot.name} | {lower + 1} to {upper + 1} | Prepare LLM | Nothing was "
-                         "successful for a smaller chain; not attempting a dynamic prompt.")
-            return ""
+            # Look at the upper-portion chain otherwise.
+            best, previous_mode, cost = self.get_best(lower + 1, upper, previous_orientation, DYNAMIC)
+            if best is None:
+                logging.info(f"{self.model} | {self.robot.name} | {lower + 1} to {upper + 1} | Prepare LLM | Nothing "
+                             "was successful for a smaller chain; not attempting a dynamic prompt.")
+                return ""
         # Do not attempt an orientation solving if the position has not been solved first.
         if orientation:
             pos, m, c = self.get_best(lower, upper, False, DYNAMIC)

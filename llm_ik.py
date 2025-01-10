@@ -9,6 +9,7 @@ import re
 import time
 import traceback
 import warnings
+from decimal import Decimal
 from typing import Any
 
 import ikpy.chain
@@ -55,11 +56,11 @@ EVALUATING_TITLE = "Evaluating"
 AVERAGE = "Average"
 
 # Parameters.
-TRAINING = 1
-EVALUATING = 1
+TRAINING = 100
+EVALUATING = 100
 SEED = 42
-FEEDBACKS = 0
-EXAMPLES = 1
+FEEDBACKS = 3
+EXAMPLES = 10
 DISTANCE_ERROR = 0.001
 ANGLE_ERROR = 0.001
 
@@ -616,7 +617,8 @@ class Robot:
              'link\'s "origin" element parsed from the URDF.')
         if revolute > 0:
             s += (' The "Axis" column in the table represents the rotational axis of the revolute '
-                  f"link{'s' if revolute > 1 else ''}; return their values in radians.")
+                  f"link{'s' if revolute > 1 else ''}; return {'their values' if revolute > 1 else 'the value'} in "
+                  "radians")
             if limits:
                 s += f" and {'their' if revolute > 1 else 'the'} limits are in radians"
             s += "."
@@ -626,11 +628,11 @@ class Robot:
         if fixed > 0:
             s += (f" The fixed link{'s do' if fixed > 1 else ' does'} not have any movement; do not return anything "
                   f"for these links.")
-        s += (" You are to respond with only the code for the completed inverse kinematics method with no additional "
-              "text. Do not write any code to run the method for testing. You may use any methods included in Python, "
-              "NumPy, SymPy, and SciPy to write your solution except for any interative optimization methods."
-              f"{additional}\n</INSTRUCTIONS>\n<DETAILS>\n{table}\n</DETAILS>\n<CODE>\ndef inverse_kinematics(p: "
-              "tuple[float, float, float]")
+        s += (" Do not write any code to run or test the method, as this will be handled for you. Assume all targets "
+              "given as inputs to the method will be reachable, and as such do not write code to check if the target is"
+              " reachable. You may use any methods included in Python, NumPy, SymPy, and SciPy to write your solution "
+              f"except for any iterative optimization methods.{additional}\n</INSTRUCTIONS>\n<DETAILS>\n{table}\n"
+              "</DETAILS>\n<CODE>\ndef inverse_kinematics(p: tuple[float, float, float]")
         if orientation:
             s += ", r: tuple[float, float, float]"
         reach = ' and orientation "r"' if orientation else ""
@@ -844,7 +846,7 @@ class Robot:
                 # The name needs to be properly formatted to match what it is for.
                 path = os.path.join(root, name)
                 parts = name.split("-")
-                if len(parts) != 3:
+                if len(parts) < 3:
                     logging.error(f"{self.name} | Perform | Result '{path}' not named properly.")
                     continue
                 # Get the joints this is for.
@@ -1777,16 +1779,16 @@ class Solver:
                          f"Interactions | Messages loaded.")
             return history
         s = last["Message"]
-        code_path = os.path.join(self.interactions, f"{lower}-{upper}-{solving}-{mode}.py")
+        code_path = os.path.join(self.solutions, f"{lower}-{upper}-{solving}-{mode}.py")
         # Otherwise, it was a response from the LLM, so prepare the next message by parsing it.
         codes = re.findall(r"```python\s*([\s\S]*?)```", s, re.IGNORECASE)
         # If no codes were returned, this means it was a command response or invalid, so determine this.
-        total = len(codes)
-        if total < 1:
+        total_codes = len(codes)
+        if total_codes < 1:
             # Try every line until a valid command is reached.
             lines = s.splitlines()
-            total = len(lines)
-            for i in range(total):
+            total_codes = len(lines)
+            for i in range(total_codes):
                 line = lines[i].strip().split()
                 parts = len(line)
                 # If the line is empty, continue.
@@ -1917,7 +1919,7 @@ class Solver:
         # Otherwise, parse the code assuming the largest code would be the complete code snippet.
         code = codes[0].strip()
         size = len(code)
-        for i in range(1, total):
+        for i in range(1, total_codes):
             temp_code = codes[i].strip()
             temp_size = len(temp_code)
             if temp_size >= size:
@@ -1926,7 +1928,7 @@ class Solver:
         logging.info(f"{self.model} | {self.robot.name} | {lower + 1} to {upper + 1} | {solving} | {mode} | Handle "
                      "Interactions | Extracted code.")
         # Save the code so it can be loaded by the program.
-        os.makedirs(self.interactions, exist_ok=True)
+        os.makedirs(self.solutions, exist_ok=True)
         with open(code_path, "w") as file:
             file.write(code)
         # Evaluate the code.
@@ -2079,15 +2081,20 @@ class Solver:
                 logging.error(f"{self.model} | {lower + 1} to {upper + 1} | Run Code | {solving} | {mode} | Error: {e}")
         # Parse the joints.
         if joints is not None:
-            try:
-                temp = []
-                for joint in joints:
-                    temp.append(joint)
-                joints = temp
-            except Exception as e:
-                logging.error(f"{self.model} | {lower + 1} to {upper + 1} | Run Code | {solving} | {mode} | Joints "
-                              f"could not be cast to a list: {e}")
-                joints = None
+            # If a single float was returned (as should be for single-link chains), make it a list.
+            if isinstance(joints, float):
+                joints = [joints]
+            # Otherwise, get the list.
+            else:
+                try:
+                    temp = []
+                    for joint in joints:
+                        temp.append(joint)
+                    joints = temp
+                except Exception as e:
+                    logging.error(f"{self.model} | {lower + 1} to {upper + 1} | Run Code | {solving} | {mode} | Joints "
+                                  f"could not be cast to a list: {e}")
+                    joints = None
         else:
             logging.error(f"{self.model} | {lower + 1} to {upper + 1} | Run Code | {solving} | {mode} | No joints "
                           f"returned.")
@@ -2109,7 +2116,7 @@ class Solver:
             return None
         # Ensure valid values.
         lower, upper = self.robot.validate_lower_upper(lower, upper)
-        solving = POSITION if orientation is None else TRANSFORM
+        solving = TRANSFORM if orientation else POSITION
         if mode not in [NORMAL, EXTEND, DYNAMIC]:
             logging.warning(f"{self.model} | {self.robot.name} | {lower + 1} to {upper + 1} | Evaluate | Mode "
                             f"'{mode}' not valid, using '{NORMAL}' instead.")
@@ -2143,7 +2150,7 @@ class Solver:
             # See if the move was successful.
             positions, orientations = self.robot.forward_kinematics(lower, upper, joints)
             distance = difference_distance(target_position, positions[-1])
-            angle = 0 if orientation is None else difference_angle(target_orientation, orientations[-1])
+            angle = difference_angle(target_orientation, orientations[-1]) if orientation else 0
             # If successful, update it.
             if reached(distance, angle):
                 successes += 1
@@ -2183,7 +2190,7 @@ class Solver:
         s = ("Success Rate (%),Failure Rate (%),Error Rate (%),Average Failure Distance,Average Failure Angle (°),"
              "Average Elapsed Time (s),Generation Time (s),Mode,Feedbacks Given,Forwards Kinematics Calls,Testing Calls"
              f",Reasoning,Functions,API,Cost ($)\n{successes}%,{failures}%,{errors}%,{total_distance},"
-             f"{total_angle if orientation else 0}°,{total_time} s,{mode},{elapsed} s,{feedbacks},{forwards},{testings}"
+             f"{total_angle if orientation else 0}°,{total_time} s,{elapsed} s,{mode},{feedbacks},{forwards},{testings}"
              f",{self.reasoning},{self.methods},{self.url is not None},${neat(cost)}")
         os.makedirs(self.results, exist_ok=True)
         with open(os.path.join(self.results, f"{name}.csv"), "w") as file:
@@ -2205,7 +2212,7 @@ class Solver:
             return False
         # Ensure valid values.
         lower, upper = self.robot.validate_lower_upper(lower, upper)
-        solving = POSITION if orientation is None else TRANSFORM
+        solving = TRANSFORM if orientation else POSITION
         if mode not in [NORMAL, EXTEND, DYNAMIC]:
             logging.warning(f"{self.model} | {self.robot.name} | {lower + 1} to {upper + 1} | Code Successful | Mode "
                             f"'{mode}' not valid, using '{NORMAL}' instead.")
@@ -2232,7 +2239,7 @@ class Solver:
             # See if we reached the target.
             positions, orientations = self.robot.forward_kinematics(lower, upper, joints)
             distance = difference_distance(target_position, positions[-1])
-            angle = 0 if orientation is None else difference_angle(target_orientation, orientations[-1])
+            angle = difference_angle(target_orientation, orientations[-1]) if orientation else 0
             # If we did not, this was a failure so stop.
             if not reached(distance, angle):
                 return False
@@ -2254,7 +2261,7 @@ class Solver:
             return ""
         # Ensure valid values.
         lower, upper = self.robot.validate_lower_upper(lower, upper)
-        solving = POSITION if orientation is None else TRANSFORM
+        solving = TRANSFORM if orientation else POSITION
         if mode not in [NORMAL, EXTEND, DYNAMIC]:
             logging.warning(f"{self.model} | {self.robot.name} | {lower + 1} to {upper + 1} | Prepare Feedback | Mode "
                             f"'{mode}' not valid, using '{NORMAL}' instead.")
@@ -2306,7 +2313,7 @@ class Solver:
             # See if we reached the target.
             positions, orientations = self.robot.forward_kinematics(lower, upper, joints)
             distance = difference_distance(target_position, positions[-1])
-            angle = 0 if orientation is None else difference_angle(target_orientation, orientations[-1])
+            angle = difference_angle(target_orientation, orientations[-1]) if orientation else 0
             # If we did, this was a success so continue.
             if reached(distance, angle):
                 continue
@@ -2362,6 +2369,9 @@ class Solver:
         pre = (" You may respond by either completing the inverse kinematics method or calling either of the two "
                f"provided functions {mid}to help you develop your solution. If you call a function, you will be "
                "provided another response and chance to complete the inverse kinematics method.")
+        # If this is not a reasoning model, let us manually add in a prompt to do some reasoning.
+        if not self.reasoning:
+            pre += " Think step by step and show all your work."
         # If the solver using API-based methods, then this is handled in the API formatting.
         if self.methods:
             post = ""
@@ -2411,7 +2421,7 @@ class Solver:
         if mode == EXTEND:
             # We can only extend a successful lower chain.
             previous = upper - 1
-            previous_orientation = False if lower == upper else orientation
+            previous_orientation = orientation and lower != previous
             best, previous_mode, cost = self.get_best(lower, previous, previous_orientation, EXTEND)
             if best is None:
                 logging.info(f"{self.model} | {self.robot.name} | {lower + 1} to {upper + 1} | Prepare LLM | No chain "
@@ -2741,7 +2751,12 @@ def neat(value: float or list or tuple or np.array) -> str:
                 s += f", {neat(value[i])}"
         return f"{s}]"
     # Otherwise, clean the value.
-    value = str(value).rstrip('0').rstrip('.')
+    # noinspection PyBroadException
+    try:
+        value = str(Decimal(value))
+    except:
+        value = str(value)
+    value = value.rstrip('0').rstrip('.')
     return "0" if value == "" else value
 
 
@@ -3139,8 +3154,10 @@ def llm_ik(robots: str or list[str] or None = None, max_length: int = 0, orienta
                                  f" calls.")
                 else:
                     logging.info(f"Confirmed running up to {calls} LLM API call{'s' if calls > 1 else ''}.")
+            else:
+                logging.info("Running LLM API calls with confirmation bypassed.")
         else:
-            logging.info("Not running LLM API calls as there are no selected robots are LLMs.")
+            logging.info("Not running LLM API calls as there are no selected robots or LLMs.")
             run = False
     else:
         logging.info("Not running LLM API calls.")

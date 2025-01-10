@@ -1539,10 +1539,16 @@ class Solver:
         for i in range(past):
             # Starting with the first message as a prompt (True), messages alternate between it and responses (False).
             expected = i % 2 == 0
-            if messages[i] != expected:
-                logging.info(f"{self.model} | {self.robot.name} | {lower + 1} to {upper + 1} | {solving} | {mode} | Run"
-                             f" API | Message at index {i} expected to be a {'prompt' if expected else 'response'} but "
-                             "was not.")
+            if messages[i]["Prompt"] != expected:
+                logging.error(f"{self.model} | {self.robot.name} | {lower + 1} to {upper + 1} | {solving} | {mode} | "
+                             f"Run API | Message at index {i} expected to be a {'prompt' if expected else 'response'} "
+                             "but was not.")
+                return False
+            # Ensure no messages are empty.
+            messages[i]["Message"] = messages[i]["Message"].strip()
+            if messages[i]["Message"] == "":
+                logging.error(f"{self.model} | {self.robot.name} | {lower + 1} to {upper + 1} | {solving} | {mode} | "
+                              f"Run API | Message at index {i} is empty.")
                 return False
         logging.error(f"{self.model} | {self.robot.name} | {lower + 1} to {upper + 1} | {solving} | {mode} | Run API | "
                       "LLM interactions not yet implemented.")

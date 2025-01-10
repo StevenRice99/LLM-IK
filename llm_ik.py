@@ -1425,19 +1425,19 @@ class Solver:
         # Save the options.
         self.options = options
 
-    def perform(self, orientation: bool = False, mode: str = NORMAL, max_length: int = 0, run: bool = False) -> None:
+    def perform(self, orientation: bool = False, mode: str = NORMAL, max_length: int = 0, run: bool = False) -> bool:
         """
         Perform solver logic.
         :param orientation: If we want to solve for orientation in addition to position.
         :param mode: The highest mode we want to run API calls with
         :param max_length: The maximum chain length to run.
         :param run: If API calls should be run.
-        :return: Nothing.
+        :return: True if there were no API errors, false otherwise.
         """
         # Nothing to load if the solver is not valid.
         if not self.is_valid():
             logging.error(f"{self.model} | Perform | Solver is not valid.")
-            return None
+            return True
         # Set the solution types we want to solve for.
         orientation = [False, True] if orientation else [False]
         # Get the mode to run in.
@@ -1451,6 +1451,7 @@ class Solver:
         if max_length < 1:
             max_length = self.robot.joints
         # Loop all possible combinations.
+        successful = True
         for current_mode in [NORMAL, EXTEND, DYNAMIC]:
             for current_orientation in [False, True]:
                 # Solve smaller chains first so their solutions can be extended.
@@ -1487,10 +1488,17 @@ class Solver:
                                 if current_orientation and not self.code_successful(lower, upper, False, current_mode):
                                     break
                             # Run the API if all checks were passed.
-                            self.run_api(lower, upper, current_orientation, current_mode)
+                            if not self.run_api(lower, upper, current_orientation, current_mode):
+                                logging.error(f"{self.model} | {self.robot.name} | {lower + 1} to {upper + 1} | "
+                                              f"{TRANSFORM if current_orientation else POSITION} | {current_mode} | "
+                                              "Stopping API calls as there was an error.")
+                                run = False
+                                successful = False
+        # Return if everything was successful or not.
+        return successful
 
     def run_api(self, lower: int = 0, upper: int = -1, orientation: bool = False, mode: str = NORMAL,
-                messages: list[dict[str, str or bool]] or None = None) -> None:
+                messages: list[dict[str, str or bool]] or None = None) -> bool:
         """
         Handle interacting with OpenAI-capable APIs.
         :param lower: The starting joint.
@@ -1498,12 +1506,12 @@ class Solver:
         :param orientation: If this data cares about the orientation or not.
         :param mode: The mode by which the code was achieved.
         :param messages: The messages to send to the LLM.
-        :return: Nothing.
+        :return: True if the API was successfully queried, false otherwise.
         """
         # Nothing to do if the solver is not valid.
         if not self.is_valid():
             logging.error(f"{self.model} | Run API | Solver is not valid.")
-            return None
+            return False
         # Ensure valid values.
         lower, upper = self.robot.validate_lower_upper(lower, upper)
         # If only one joint, can only solve in normal mode and for the position only.
@@ -1520,12 +1528,12 @@ class Solver:
         if messages is None or len(messages) < 1:
             logging.info(f"{self.model} | {self.robot.name} | {lower + 1} to {upper + 1} | {solving} | {mode} | Run API"
                          " | No messages to give to the LLM.")
-            return None
+            return False
         # The last message must be a prompt for the LLM.
         if not messages[-1]["Prompt"]:
             logging.info(f"{self.model} | {self.robot.name} | {lower + 1} to {upper + 1} | {solving} | {mode} | Run API"
                          " | Last message is not a prompt.")
-            return None
+            return False
         past = len(messages) - 1
         # Check the remaining messages.
         for i in range(past):
@@ -1535,10 +1543,11 @@ class Solver:
                 logging.info(f"{self.model} | {self.robot.name} | {lower + 1} to {upper + 1} | {solving} | {mode} | Run"
                              f" API | Message at index {i} expected to be a {'prompt' if expected else 'response'} but "
                              "was not.")
-                return None
+                return False
         logging.error(f"{self.model} | {self.robot.name} | {lower + 1} to {upper + 1} | {solving} | {mode} | Run API | "
                       "LLM interactions not yet implemented.")
         # TODO - Implement API calling.
+        return True
 
     def should_attempt(self, lower: int = 0, upper: int = -1, orientation: bool = False, mode: str = NORMAL) -> bool:
         """
@@ -1566,7 +1575,8 @@ class Solver:
                 path = os.path.join(option.interactions, f"{lower}-{upper}-{POSITION}-{NORMAL}")
                 if not os.path.exists(path):
                     logging.info(f"{self.model} | {self.robot.name} | {lower + 1} to {upper + 1} | {POSITION} | "
-                                 f"{NORMAL} | Not attempting as a cheaper model has not been attempted.")
+                                 f"{NORMAL} | Should Attempt | Not attempting as a cheaper model has not been "
+                                 "attempted.")
                     return False
                 # Check to see if the done file exists.
                 is_done = False
@@ -1578,13 +1588,14 @@ class Solver:
                 # If it doesn't exist, this cheaper option must be finished first.
                 if not is_done:
                     logging.info(f"{self.model} | {self.robot.name} | {lower + 1} to {upper + 1} | {POSITION} | "
-                                 f"{NORMAL} | Not attempting as a cheaper model has not been finished.")
+                                 f"{NORMAL} | Should Attempt | Not attempting as a cheaper model has not been "
+                                 f"finished.")
                     return False
             # If all cheaper options have been run, still stop if one has been successful.
             best, best_mode, cost = self.get_best(lower, upper, False, NORMAL)
             if best is not None and best != self:
                 logging.info(f"{self.model} | {self.robot.name} | {lower + 1} to {upper + 1} | {POSITION} | "
-                             f"{NORMAL} | Not attempting as a cheaper model has been successful.")
+                             f"{NORMAL} | Should Attempt | Not attempting as a cheaper model has been successful.")
                 return False
             # If this is the first base chain, we can always attempt it.
             if lower == 0:
@@ -1595,7 +1606,7 @@ class Solver:
             path = os.path.join(self.interactions, f"{previous}-{previous}-{POSITION}-{NORMAL}")
             if not os.path.exists(path):
                 logging.info(f"{self.model} | {self.robot.name} | {lower + 1} to {upper + 1} | {POSITION} | {NORMAL} | "
-                             "Not attempting as the previous link has not been attempted.")
+                             "Should Attempt | Not attempting as the previous link has not been attempted.")
                 return False
             # Look for the completed message.
             files = get_files(path)
@@ -1603,7 +1614,7 @@ class Solver:
                 if MESSAGE_DONE in file:
                     return True
             logging.info(f"{self.model} | {self.robot.name} | {lower + 1} to {upper + 1} | {POSITION} | {NORMAL} | "
-                         "Not attempting as the previous link has not been finished.")
+                         "Should Attempt | Not attempting as the previous link has not been finished.")
             return False
         # Ensure the mode is valid.
         if mode not in [NORMAL, EXTEND, DYNAMIC]:
@@ -1619,7 +1630,7 @@ class Solver:
             attempt = self.code_successful(lower, previous, False if lower == previous else orientation, NORMAL)
             if not attempt:
                 logging.info(f"{self.model} | {self.robot.name} | {lower + 1} to {upper + 1} | {solving} | {mode} | "
-                             "Not attempting as the a smaller sub-chain was not successful.")
+                             "Should Attempt | Not attempting as the smaller sub-chain was not successful.")
             return attempt
         # If the full chain has been solved with a lower mode, no point in solving it with this mode.
         if mode == DYNAMIC:
@@ -1630,7 +1641,8 @@ class Solver:
             for solver_option in self.options:
                 if solver_option.code_successful(lower, upper, orientation, mode_option):
                     logging.info(f"{self.model} | {self.robot.name} | {lower + 1} to {upper + 1} | {solving} | {mode} |"
-                                 " Not attempting as the a cheaper inherited model has successfully solved this.")
+                                 " Should Attempt | Not attempting as the a cheaper inherited model has successfully "
+                                 "solved this.")
                     return False
         return True
 
@@ -2368,6 +2380,12 @@ class Solver:
         if lower == upper:
             orientation = False
             mode = NORMAL
+        # If there is a better option, do point in performing this.
+        best, previous_mode, cost = self.get_best(lower, upper, orientation, NORMAL)
+        if best is not None:
+            logging.info(f"{self.model} | {self.robot.name} | {lower + 1} to {upper + 1} | Prepare LLM | "
+                         "A cheaper solution is already successful in normal mode; not doing mode a normal prompt.")
+            return ""
         # Explain how to use functions.
         mid = "" if self.methods else 'in the "FUNCTIONS" section '
         pre = (" You may respond by either completing the inverse kinematics method or calling either of the two "
@@ -2412,15 +2430,9 @@ class Solver:
                     "</DESCRIPTION>\n\t</TEST SOLUTION>\n</FUNCTIONS>")
         # Perform normal prompts.
         if mode == NORMAL:
-            # If there is a better option, do point in performing this.
-            best, previous_mode, cost = self.get_best(lower, upper, orientation, NORMAL)
-            if best is not None:
-                logging.info(f"{self.model} | {self.robot.name} | {lower + 1} to {upper + 1} | Prepare LLM | "
-                             "A cheaper solution is already successful; not doing mode a normal prompt.")
-                return ""
             # Do not do transform prompts until the position-only equivalent is done.
             if orientation:
-                pos, m, c = self.get_best(lower, upper, False, EXTEND)
+                pos, m, c = self.get_best(lower, upper, False, NORMAL)
                 if pos is None:
                     logging.info(f"{self.model} | {self.robot.name} | {lower + 1} to {upper + 1} | Prepare LLM | "
                                  "Position-only not successful; not doing mode a normal prompt with orientation.")
@@ -2429,10 +2441,10 @@ class Solver:
             logging.info(f"{self.model} | {self.robot.name} | {lower + 1} to {upper + 1} | Prepare LLM | Normal prompt "
                          f"prepared.")
             return prompt + post
-        # If a normal chain has successfully solved this, do not waste resources doing an extending or dynamic prompt.
-        if self.code_successful(lower, upper, orientation, NORMAL):
+        # If an extending chain has successfully solved this, do not waste resources.
+        if self.code_successful(lower, upper, orientation, EXTEND):
             logging.info(f"{self.model} | {self.robot.name} | {lower + 1} to {upper + 1} | Prepare LLM | "
-                         f"Normal solution already successful; not doing mode '{mode}'.")
+                         f"Extended solution already successful; not doing mode '{mode}'.")
             return ""
         # Extending prompting mode.
         if mode == EXTEND:
@@ -2483,6 +2495,21 @@ class Solver:
             logging.info(f"{self.model} | {self.robot.name} | {lower + 1} to {upper + 1} | Prepare LLM | "
                          f"Extending solution already successful; not doing a dynamic prompt.")
             return ""
+        # Only perform a dynamic prompt if the immediate sub-chain was in some way successful.
+        previous = upper - 1
+        previous_orientation = orientation and lower != previous
+        best, previous_mode, cost = self.get_best(lower, previous, previous_orientation, DYNAMIC)
+        if best is None:
+            logging.info(f"{self.model} | {self.robot.name} | {lower + 1} to {upper + 1} | Prepare LLM | Nothing was "
+                         "successful for a smaller chain; not attempting a dynamic prompt.")
+            return ""
+        # Do not attempt an orientation solving if the position has not been solved first.
+        if orientation:
+            pos, m, c = self.get_best(lower, upper, False, DYNAMIC)
+            if pos is None:
+                logging.info(f"{self.model} | {self.robot.name} | {lower + 1} to {upper + 1} | Prepare LLM | "
+                             "Position only chain has not yet been solved in dynamic mode; not solving with it.")
+                return ""
         # Get the best possible dynamic option.
         logging.info(f"{self.model} | {self.robot.name} | {lower + 1} to {upper + 1} | Prepare LLM | Beginning best "
                      "dynamic chain search.")
@@ -3165,7 +3192,9 @@ def llm_ik(robots: str or list[str] or None = None, max_length: int = 0, orienta
     # Run the solvers, making API calls only on those that should be.
     for solver in created_models:
         run_instance = run and solver.robot.name in robots and solver.model in models
-        solver.perform(orientation, types, max_length, run_instance)
+        if not solver.perform(orientation, types, max_length, run_instance):
+            logging.error("Not performing any more API calls as there were errors.")
+            run = False
     # Get per-robot results for all solvers.
     totals = None
     for robot in created_robots:

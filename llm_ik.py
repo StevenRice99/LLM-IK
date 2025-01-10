@@ -1535,14 +1535,9 @@ class Solver:
             logging.info(f"{self.model} | {self.robot.name} | {lower + 1} to {upper + 1} | {solving} | {mode} | Run API"
                          " | No messages to give to the LLM.")
             return False
-        # The last message must be a prompt for the LLM.
-        if not messages[-1]["Prompt"]:
-            logging.info(f"{self.model} | {self.robot.name} | {lower + 1} to {upper + 1} | {solving} | {mode} | Run API"
-                         " | Last message is not a prompt.")
-            return False
-        past = len(messages) - 1
-        # Check the remaining messages.
-        for i in range(past):
+        # Check all messages.
+        total = len(messages)
+        for i in range(total):
             # Ensure the element exists.
             if messages[i] is None:
                 logging.error(f"{self.model} | {self.robot.name} | {lower + 1} to {upper + 1} | {solving} | {mode} | "
@@ -1570,6 +1565,11 @@ class Solver:
                 logging.error(f"{self.model} | {self.robot.name} | {lower + 1} to {upper + 1} | {solving} | {mode} | "
                               f"Run API | Message at index {i} is empty.")
                 return False
+        # The last message must be a prompt for the LLM.
+        if not messages[-1]["Prompt"]:
+            logging.info(f"{self.model} | {self.robot.name} | {lower + 1} to {upper + 1} | {solving} | {mode} | Run API"
+                         " | Last message is not a prompt.")
+            return False
         logging.error(f"{self.model} | {self.robot.name} | {lower + 1} to {upper + 1} | {solving} | {mode} | Run API | "
                       "LLM interactions not yet implemented.")
         # TODO - Implement API calling.
@@ -3000,7 +3000,8 @@ def llm_ik(robots: str or list[str] or None = None, max_length: int = 0, orienta
     elif not os.path.exists(cwd):
         logging.error(f"Working directory of '{cwd}' does not exist.")
         return None
-    logging.info(f"Set '{cwd}' as the working directory.")
+    else:
+        logging.info(f"Set '{cwd}' as the working directory.")
     # Set all paths relative to the working directory and make sure the "required" folders for a human to use exist.
     global ROBOTS
     global MODELS
@@ -3190,12 +3191,17 @@ def llm_ik(robots: str or list[str] or None = None, max_length: int = 0, orienta
                 calls = 0
                 total_feedbacks = 1 + FEEDBACKS
                 total_orientations = 2 if orientation else 1
-                total_types = len(types)
+                if types == DYNAMIC:
+                    total_types = 3
+                elif types == EXTEND:
+                    total_types = 2
+                else:
+                    total_types = 1
                 # Check every robot which supports API calls.
                 for robot in created_robots:
                     if robot.name in robots:
                         # The number of chains is the summation of joints, less the last for the single-mode singles.
-                        subs = sum(range(1, robot.joints - 1))
+                        subs = sum(range(1, max(robot.joints, max_length) - 1))
                         # Every chain can have full feedbacks across solving configurations plus the basic solvers.
                         calls += subs * total_feedbacks * total_orientations * total_types + robot.joints
                 # Each will be called by every solver.

@@ -1425,12 +1425,11 @@ class Solver:
         # Save the options.
         self.options = options
 
-    def perform(self, orientation: list[bool] or None = None, mode: list[str] or None = None,
-                max_length: int = 0, run: bool = False) -> None:
+    def perform(self, orientation: bool = False, mode: str = NORMAL, max_length: int = 0, run: bool = False) -> None:
         """
         Perform solver logic.
-        :param orientation: The end effector goals to run API calls with.
-        :param mode: The modes to run API calls with.
+        :param orientation: If we want to solve for orientation in addition to position.
+        :param mode: The highest mode we want to run API calls with
         :param max_length: The maximum chain length to run.
         :param run: If API calls should be run.
         :return: Nothing.
@@ -1439,11 +1438,15 @@ class Solver:
         if not self.is_valid():
             logging.error(f"{self.model} | Perform | Solver is not valid.")
             return None
-        # Set default values if none are passed.
-        if orientation is None:
-            orientation = [False, True]
-        if mode is None:
+        # Set the solution types we want to solve for.
+        orientation = [False, True] if orientation else [False]
+        # Get the mode to run in.
+        if mode == DYNAMIC:
             mode = [NORMAL, EXTEND, DYNAMIC]
+        elif mode == EXTEND:
+            mode = [NORMAL, EXTEND]
+        else:
+            mode = [NORMAL]
         # Get the maximum length of chains to run.
         if max_length < 1:
             max_length = self.robot.joints
@@ -1789,7 +1792,8 @@ class Solver:
             lines = s.splitlines()
             total_codes = len(lines)
             for i in range(total_codes):
-                line = lines[i].strip().split()
+                # In case the command was wrapped in a code block, remove it.
+                line = lines[i].replace("`", "").strip().split()
                 parts = len(line)
                 # If the line is empty, continue.
                 if parts < 1:
@@ -2406,8 +2410,21 @@ class Solver:
                     f"{j}\n\t\t</FORMAT>\n\t\t<DESCRIPTION>\n\t\t{d}\n\t\t</DESCRIPTION>\n\t</FORWARD KINEMATICS>\n\t"
                     f"<TEST SOLUTION>\n\t\t<FORMAT>\n\t\t{p}\n\t\t</FORMAT>\n\t\t<DESCRIPTION>\n\t\t{t}\n\t\t"
                     "</DESCRIPTION>\n\t</TEST SOLUTION>\n</FUNCTIONS>")
-        # Can only do normal mode for single joint chains.
+        # Perform normal prompts.
         if mode == NORMAL:
+            # If there is a better option, do point in performing this.
+            best, previous_mode, cost = self.get_best(lower, upper, orientation, NORMAL)
+            if best is not None:
+                logging.info(f"{self.model} | {self.robot.name} | {lower + 1} to {upper + 1} | Prepare LLM | "
+                             "A cheaper solution is already successful; not doing mode a normal prompt.")
+                return ""
+            # Do not do transform prompts until the position-only equivalent is done.
+            if orientation:
+                pos, m, c = self.get_best(lower, upper, False, EXTEND)
+                if pos is None:
+                    logging.info(f"{self.model} | {self.robot.name} | {lower + 1} to {upper + 1} | Prepare LLM | "
+                                 "Position-only not successful; not doing mode a normal prompt with orientation.")
+                    return ""
             prompt = self.robot.prepare_llm(lower, upper, orientation, pre)
             logging.info(f"{self.model} | {self.robot.name} | {lower + 1} to {upper + 1} | Prepare LLM | Normal prompt "
                          f"prepared.")
@@ -2433,6 +2450,13 @@ class Solver:
                 logging.error(f"{self.model} | {self.robot.name} | {lower + 1} to {upper + 1} | Prepare LLM | Best "
                               f"chain does not exist at '{path}'.")
                 return ""
+            # Do not attempt an orientation solving if the position has not been solved first.
+            if orientation:
+                pos, m, c = self.get_best(lower, upper, False, EXTEND)
+                if pos is None:
+                    logging.info(f"{self.model} | {self.robot.name} | {lower + 1} to {upper + 1} | Prepare LLM | "
+                                 "Position only chain has not yet been solved in extending mode; not solving with it.")
+                    return ""
             # Save the inherited information.
             s = f"{best.model}|{lower}|{previous}|{previous_solving}|{previous_mode}"
             path = os.path.join(self.interactions, f"{lower}-{upper}-{TRANSFORM if orientation else POSITION}-{EXTEND}")
@@ -2873,17 +2897,16 @@ def evaluate_averages(totals: dict[str, str or float or int or bool] or None = N
                     file.write(s)
 
 
-def llm_ik(robots: str or list[str] or None = None, max_length: int = 0, orientation: bool or None = False,
-           types: str or list[str] or None = None, feedbacks: int = FEEDBACKS, examples: int = EXAMPLES,
-           training: int = TRAINING, evaluating: int = EVALUATING, seed: int = SEED,
-           distance_error: float = DISTANCE_ERROR, angle_error: float = ANGLE_ERROR, run: bool = False,
-           cwd: str or None = None, level: str = "INFO", bypass: bool = False) -> None:
+def llm_ik(robots: str or list[str] or None = None, max_length: int = 0, orientation: bool = False, types: str = NORMAL,
+           feedbacks: int = FEEDBACKS, examples: int = EXAMPLES, training: int = TRAINING, evaluating: int = EVALUATING,
+           seed: int = SEED, distance_error: float = DISTANCE_ERROR, angle_error: float = ANGLE_ERROR,
+           run: bool = False, cwd: str or None = None, level: str = "INFO", bypass: bool = False) -> None:
     """
     Run LLM inverse kinematics.
     :param robots: The names of the robots.
     :param max_length: The maximum chain length to run.
-    :param orientation: If we want to solve for position, transform, or both being none.
-    :param types: The solving types.
+    :param orientation: If we want to solve for orientation in addition to position.
+    :param types: The highest solving type to run.
     :param feedbacks: The max number of times to give feedback.
     :param examples: The number of examples to give with feedbacks.
     :param training: The number of training samples.
@@ -2946,39 +2969,17 @@ def llm_ik(robots: str or list[str] or None = None, max_length: int = 0, orienta
     os.makedirs(MODELS, exist_ok=True)
     os.makedirs(PROVIDERS, exist_ok=True)
     os.makedirs(KEYS, exist_ok=True)
-    # Ensure the passed types are valid.
-    acceptable = [NORMAL, EXTEND, DYNAMIC]
-    # If noe were passed, use all.
-    if types is None:
-        types = acceptable
-    # If one was passed, but it is not a valid option, there is nothing to do.
-    elif isinstance(types, str):
-        if types not in acceptable:
-            logging.error(f"Solving type of '{types}' is not an option.")
-            types = []
-        else:
-            types = [types]
-    # Ensure all list options are valid.
+    # Get the solving types.
+    if types not in [NORMAL, EXTEND, DYNAMIC]:
+        logging.warning(f"Solving mode '{types}' not valid; using '{NORMAL}'.")
+        types = NORMAL
     else:
-        models = []
-        for t in types:
-            if t not in acceptable:
-                logging.warning(f"Solving type of '{t}' is not an option; removing it.")
-            models.append(t)
-        if len(models) < 1:
-            logging.error("No valid solving types.")
-            types = []
-        else:
-            # Ensure they are in the order of normal, extend, and then dynamic.
-            types = sorted(models, reverse=True)
-    logging.info(f"Solving in the following modes: {types}.")
+        logging.info(f"Solving up to mode '{types}'.")
     # Get the orientation types we wish to solve for.
-    if orientation is None:
+    if orientation:
         logging.info("Solving for both position and transform.")
-        orientation = [False, True]
     else:
-        logging.info(f"Solving for only {'transform' if orientation else 'position'}.")
-        orientation = [orientation]
+        logging.info(f"Solving for only position only.")
     # Ensure all other values are valid and assigned.
     if feedbacks < 0:
         feedbacks = 0
@@ -3131,7 +3132,7 @@ def llm_ik(robots: str or list[str] or None = None, max_length: int = 0, orienta
             if not bypass:
                 calls = 0
                 total_feedbacks = 1 + FEEDBACKS
-                total_orientations = len(orientation)
+                total_orientations = 2 if orientation else 1
                 total_types = len(types)
                 # Check every robot which supports API calls.
                 for robot in created_robots:
@@ -3197,10 +3198,9 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="LLM Inverse Kinematics")
     parser.add_argument("-r", "--robots", type=str or list[str] or None, default=None, help="The names of the robots.")
     parser.add_argument("-m", "--max", type=int, default=-1, help="The maximum chain length to run.")
-    parser.add_argument("-o", "--orientation", type=bool or None, default=False, help="If we want to solve for "
-                                                                                      "position, transform, or both "
-                                                                                      "being none.")
-    parser.add_argument("-t", "--types", type=str or list[str] or None, default=None, help="The solving types.")
+    parser.add_argument("-o", "--orientation", type=bool, default=False, help="If we want to solve for orientation "
+                                                                              "in addition to position.")
+    parser.add_argument("-t", "--types", type=str, default=NORMAL, help="The highest solving type to run.")
     parser.add_argument("-f", "--feedbacks", type=int, default=FEEDBACKS, help="The max number of times to give "
                                                                                "feedback.")
     parser.add_argument("-e", "--examples", type=int, default=EXAMPLES, help="The number of examples to give with "

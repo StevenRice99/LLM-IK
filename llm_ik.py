@@ -2043,7 +2043,6 @@ class Solver:
                         s = ("<ERROR>\nResponded with the wrong number of joints to call forward kinematics - Responded"
                              f" with {received} but expected {expected}.\n</ERROR>")
                     else:
-                        # noinspection PyBroadException
                         try:
                             # Parse the joints.
                             joints = []
@@ -2054,17 +2053,18 @@ class Solver:
                             headers = ["Link", "Position", "Orientation"]
                             data = []
                             chain = self.robot.chains[lower][upper]
-                            num = len(chain)
+                            num = len(chain.links)
                             for j in range(num):
-                                data.append([chain[j].name, neat(positions[j]), neat(orientations[j])])
-                            s = f"<FORWARD KINEMATICS>{tabulate(data, headers, tablefmt='presto')}</FORWARD KINEMATICS>"
+                                data.append([chain.links[j].name, neat(positions[j]), neat(orientations[j])])
+                            s = (f"<FORWARD KINEMATICS>\n{tabulate(data, headers, tablefmt='presto')}\n"
+                                 "</FORWARD KINEMATICS>")
                             logging.info(f"{self.model} | {self.robot.name} | {lower + 1} to {upper + 1} | {solving} | "
                                          f"{mode} | Handle Interactions | Performed forward kinematics.")
-                        except:
+                        except Exception as e:
                             # Indicate if the joints could not be parsed.
                             logging.info(f"{self.model} | {self.robot.name} | {lower + 1} to {upper + 1} | {solving} | "
                                          f"{mode} | Handle Interactions | Forward kinematics did not respond with valid"
-                                         f" joints.")
+                                         f" joints: {e}")
                             s = ("<ERROR>\nCould not parse joint values to call forward kinematics; ensure they are all"
                                  " floats.\n</ERROR>")
                     os.makedirs(root, exist_ok=True)
@@ -2090,7 +2090,6 @@ class Solver:
                         s = ("<ERROR>\nResponded with the wrong number of parameters to test your solution - Responded "
                              f"with {received} but expected {expected}.\n</ERROR>")
                     else:
-                        # noinspection PyBroadException
                         try:
                             # Parse the position and orientation to reach.
                             target_position = []
@@ -2126,16 +2125,17 @@ class Solver:
                                 headers = ["Link", "Position", "Orientation"]
                                 data = []
                                 chain = self.robot.chains[lower][upper]
-                                num = len(chain)
+                                num = len(chain.links)
                                 for j in range(num):
-                                    data.append([chain[j].name, neat(positions[j]), neat(orientations[j])])
-                                s = f"<TEST SOLUTION>{p}\n{tabulate(data, headers, tablefmt='presto')}</TEST SOLUTION>"
+                                    data.append([chain.links[j].name, neat(positions[j]), neat(orientations[j])])
+                                s = (f"<TEST SOLUTION>\n{p}\n{tabulate(data, headers, tablefmt='presto')}\n"
+                                     "</TEST SOLUTION>")
                                 logging.info(f"{self.model} | {self.robot.name} | {lower + 1} to {upper + 1} | "
                                              f"{solving} | {mode} | Handle Interactions | Solution tested.")
-                        except:
+                        except Exception as e:
                             logging.info(f"{self.model} | {self.robot.name} | {lower + 1} to {upper + 1} | {solving} | "
                                          f"{mode} | Handle Interactions | Test solution did not respond with valid"
-                                         f" parameters.")
+                                         f" parameters: {e}")
                             s = ("<ERROR>\nCould not parse parameters to test the solution; ensure they are all floats."
                                  "</ERROR>")
                     os.makedirs(root, exist_ok=True)

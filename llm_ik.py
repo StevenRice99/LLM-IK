@@ -107,10 +107,6 @@ class Robot:
         if not os.path.exists(path):
             logging.error(f"{self.name} | Path '{path}' does not exist.")
             return
-        # Nothing to do if a directory was passed.
-        if not os.path.isfile(path):
-            logging.error(f"{self.name} | Path '{path}' is not a file.")
-            return
         # Try to load the file, exiting if there are errors.
         try:
             with warnings.catch_warnings():

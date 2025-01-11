@@ -61,7 +61,7 @@ AVERAGE = "Average"
 TRAINING = 100
 EVALUATING = 100
 SEED = 42
-FEEDBACKS = 3
+MAX_PROMPTS = 5
 EXAMPLES = 10
 DISTANCE_ERROR = 0.001
 ANGLE_ERROR = 0.001
@@ -1091,6 +1091,9 @@ class Solver:
                 else:
                     lines = s.split()
                     self.url = lines[0].strip()
+                    # The API paths should end with a "/".
+                    if not self.url.endswith("/"):
+                        self.url = f"{self.url}/"
                     logging.info(f"{self.model} | {self.robot.name} | Provider '{provider}' URL is '{self.url}'.")
                     # See if the API supports methods in addition to our per-model support.
                     if len(lines) > 1:
@@ -1607,133 +1610,130 @@ class Solver:
             logging.error(f"{self.model} | {self.robot.name} | {lower + 1} to {upper + 1} | {solving} | {mode} | Run "
                           f"API | Error calling the API: {e}")
             return False
+        # Log the raw response.
+        logging.info(f"{self.model} | {self.robot.name} | {lower + 1} to {upper + 1} | {solving} | {mode} | Run API | "
+                     f"Response | {completion}")
         # Get the response message.
-        if "choices" not in completion or len(completion["choices"]) < 1:
+        if completion.choices is None or len(completion.choices) < 1:
             logging.error(f"{self.model} | {self.robot.name} | {lower + 1} to {upper + 1} | {solving} | {mode} | Run "
                           "API | No response returned.")
             return False
         # See if there was an error that caused the API to stop.
-        response = completion["choices"][0]
-        if "finish_reason" not in response:
+        response = completion.choices[0]
+        if response.finish_reason is None:
+            if response.message is not None and response.message.refusal is not None:
+                reason = f": {response.message.refusal}"
+            else:
+                reason = "."
             logging.error(f"{self.model} | {self.robot.name} | {lower + 1} to {upper + 1} | {solving} | {mode} | Run "
-                          "API | No finish reason given in the response.")
+                          f"API | No finish reason given in the response{reason}")
             return False
-        # Cache the reason for responding.
-        finish_reason = response["finish_reason"]
         # Check if we ran out of tokens.
-        if finish_reason == "length":
-            if ("message" in response and "refusal" in response["message"] and
-                    response["message"]["refusal"] is not None):
-                reason = f": {response['message']['refusal']}"
+        if response.finish_reason == "length":
+            if response.message is not None and response.message.refusal is not None:
+                reason = f": {response.message.refusal}"
             else:
                 reason = "."
             logging.error(f"{self.model} | {self.robot.name} | {lower + 1} to {upper + 1} | {solving} | {mode} | Run "
                           f"API | Stopped as ran out of tokens{reason}")
             return False
         # Check if the content filter flagged this.
-        if finish_reason == "content_filter":
-            if ("message" in response and "refusal" in response["message"] and
-                    response["message"]["refusal"] is not None):
-                reason = f": {response['message']['refusal']}"
+        if response.finish_reason == "content_filter":
+            if response.message is not None and response.message.refusal is not None:
+                reason = f": {response.message.refusal}"
             else:
                 reason = "."
             logging.error(f"{self.model} | {self.robot.name} | {lower + 1} to {upper + 1} | {solving} | {mode} | Run "
                           f"API | Stopped as this was flagged by the content filter{reason}")
             return False
         # Check if no message was returned.
-        if "message" not in response:
+        if response.message is None:
             logging.error(f"{self.model} | {self.robot.name} | {lower + 1} to {upper + 1} | {solving} | {mode} | Run "
                           "API | No message in the response.")
             return False
         # Get the message in the response.
-        message = response["message"]
+        message = response.message
         # Check if there is a reason for refusing to create the proper message.
-        if message["refusal"] is not None:
+        if message.refusal is not None:
             logging.error(f"{self.model} | {self.robot.name} | {lower + 1} to {upper + 1} | {solving} | {mode} | Run "
-                          f"API | Refused to return a message: {message['refusal']}")
+                          f"API | Refused to return a message: {message.refusal}")
             return False
         # Handle if this was a regular text response.
-        if finish_reason == "stop":
+        if response.finish_reason == "stop":
             # If for some reason there was no content, there was some undocumented error.
-            if "content" not in message or message["content"] is None or len(message["content"]) < 1:
+            if message.content is None or len(message.content) < 1:
                 logging.error(f"{self.model} | {self.robot.name} | {lower + 1} to {upper + 1} | {solving} | {mode} | "
                               "Run API | No content returned in the message.")
                 return False
             # Get the message.
-            s = message["content"].strip()
+            s = message.content.strip()
             if len(s) < 1:
                 logging.error(f"{self.model} | {self.robot.name} | {lower + 1} to {upper + 1} | {solving} | {mode} | "
                               "Run API | Returned content was whitespace.")
                 return False
         # Handle if this was a tools call, also checking the older deprecated function call name.
-        elif finish_reason == "tool_calls" or finish_reason == "function_call":
+        elif response.finish_reason == "tool_calls" or response.finish_reason == "function_call":
             # Ensure there is a call to a function.
-            if "tool_calls" not in message or message["tool_calls"] is None or len(message["tool_calls"]) < 1:
+            if message.tool_calls is None or len(message.tool_calls) < 1:
                 logging.error(f"{self.model} | {self.robot.name} | {lower + 1} to {upper + 1} | {solving} | {mode} | "
                               "Run API | No tools calls returned in the message.")
                 return False
             # Get the first call as there should only be one anyway.
-            call = message["tool_calls"][0]
+            call = message.tool_calls[0]
             # If the object is not set, there was some undocumented error.
             if call is None:
                 logging.error(f"{self.model} | {self.robot.name} | {lower + 1} to {upper + 1} | {solving} | {mode} | "
                               "Run API | Tool call not set.")
                 return False
             # Get the function object.
-            if "function" not in call:
+            if call.function is None:
                 logging.error(f"{self.model} | {self.robot.name} | {lower + 1} to {upper + 1} | {solving} | {mode} | "
                               "Run API | No function in the tools response.")
                 return False
             # We only need to focus on the call.
-            call = call["function"]
+            call = call.function
             # If the name was not present, there was some undocumented error.
-            if "name" not in call or call["name"] is None:
+            if call.name is None:
                 logging.error(f"{self.model} | {self.robot.name} | {lower + 1} to {upper + 1} | {solving} | {mode} | "
                               "Run API | No called function name in response.")
                 return False
-            # Ensure a valid method was called.
-            if call["name"] != "forward_kinematics" and call["name"] != "test_solution":
-                logging.error(f"{self.model} | {self.robot.name} | {lower + 1} to {upper + 1} | {solving} | {mode} | "
-                              f"Run API | Function '{call['name']}' is not valid.")
-                return False
-            # If the arguments were not present, there was some undocumented error.
-            if "arguments" not in call or call["arguments"] is None:
-                logging.error(f"{self.model} | {self.robot.name} | {lower + 1} to {upper + 1} | {solving} | {mode} | "
-                              "Run API | No arguments for the function in the response.")
-                return False
-            # Try to extract the arguments.
-            try:
-                arguments = json.loads(call["arguments"])
-            except Exception as e:
-                logging.error(f"{self.model} | {self.robot.name} | {lower + 1} to {upper + 1} | {solving} | {mode} | "
-                              f"Run API | Could not parse the arguments: {e}")
-                return False
-            # Sort the arguments.
-            arguments = dict(sorted(arguments.items(), key=lambda item: (item[0], item[1])))
-            # Build the information to save.
-            s = call["name"]
-            for argument in arguments:
-                s += f" {call[argument]}"
+            # Get the name to save.
+            s = call.name
+            # If the arguments were not present, we will assume they will be empty.
+            if call.arguments is not None:
+                # Try to extract the arguments.
+                try:
+                    arguments = json.loads(call.arguments)
+                except Exception as e:
+                    logging.error(
+                        f"{self.model} | {self.robot.name} | {lower + 1} to {upper + 1} | {solving} | {mode} | "
+                        f"Run API | Could not parse the arguments: {e}")
+                    return False
+                # Sort the arguments.
+                arguments = dict(sorted(arguments.items(), key=lambda item: (item[0], item[1])))
+                # Add the arguments to save.
+                for argument in arguments:
+                    s += f" {arguments[argument]}"
         # Otherwise, the finish reason is an undocumented error.
         else:
             logging.error(f"{self.model} | {self.robot.name} | {lower + 1} to {upper + 1} | {solving} | {mode} | Run "
-                          f"API | Unknown finish reason of '{finish_reason}' returned.")
+                          f"API | Unknown finish reason of '{response.finish_reason}' returned.")
             return False
         # Get the number of tokens used to handle this interaction.
-        if "usage" not in completion:
+        if completion.usage is None:
             logging.error(f"{self.model} | {self.robot.name} | {lower + 1} to {upper + 1} | {solving} | {mode} | Run "
                           f"API | No usage statistics returned.")
             return False
-        if "prompt_tokens" not in completion["usage"]:
+        if completion.usage.prompt_tokens is None:
             logging.error(f"{self.model} | {self.robot.name} | {lower + 1} to {upper + 1} | {solving} | {mode} | Run "
                           f"API | No prompt tokens returned.")
             return False
-        input_tokens = completion["usage"]["prompt_tokens"]
-        if "completion_tokens" not in completion["usage"]:
+        input_tokens = completion.usage.prompt_tokens
+        if completion.usage.completion_tokens is None:
             logging.error(f"{self.model} | {self.robot.name} | {lower + 1} to {upper + 1} | {solving} | {mode} | Run "
                           f"API | No completion tokens returned.")
             return False
-        output_tokens = completion["usage"]["completion_tokens"]
+        output_tokens = completion.usage.completion_tokens
         # Save the interaction.
         root = os.path.join(self.interactions, core)
         os.makedirs(root, exist_ok=True)
@@ -1988,7 +1988,19 @@ class Solver:
         if last["Type"] == MESSAGE_DONE:
             logging.info(f"{self.model} | {self.robot.name} | {lower + 1} to {upper + 1} | {solving} | {mode} | Done.")
             return None
+        # See if we should be done.
+        are_done = total - sum(RESPONSE in s for s in interactions) > MAX_PROMPTS
+        # If this is a message for the model, we should try to load it.
         if last["Type"] != RESPONSE:
+            # See if we are done.
+            if are_done:
+                logging.info(f"{self.model} | {self.robot.name} | {lower + 1} to {upper + 1} | {solving} | {mode} | "
+                             f"Handle Interactions | A message for the model exists but {MAX_PROMPTS} feedback"
+                             f"{' has' if MAX_PROMPTS == 1 else 's have'} been used; stopping.")
+                with open(os.path.join(root, f"{total}-{MESSAGE_DONE}.txt"), "w") as file:
+                    file.write(f"A message for the model exists but {MAX_PROMPTS} feedback"
+                               f"{' has' if MAX_PROMPTS == 1 else 's have'} been used; stopping.")
+                return None
             # Otherwise, give it the message.
             logging.info(f"{self.model} | {self.robot.name} | {lower + 1} to {upper + 1} | {solving} | {mode} | Handle "
                          f"Interactions | Messages loaded.")
@@ -2000,6 +2012,15 @@ class Solver:
         # If no codes were returned, this means it was a command response or invalid, so determine this.
         total_codes = len(codes)
         if total_codes < 1:
+            # See if we are done.
+            if are_done:
+                logging.info(f"{self.model} | {self.robot.name} | {lower + 1} to {upper + 1} | {solving} | {mode} | "
+                             f"Handle Interactions | A command was requested but {MAX_PROMPTS} feedback"
+                             f"{' has' if MAX_PROMPTS == 1 else 's have'} been used; stopping.")
+                with open(os.path.join(root, f"{total}-{MESSAGE_DONE}.txt"), "w") as file:
+                    file.write(f"A command was requested but {MAX_PROMPTS} feedback"
+                               f"{' has' if MAX_PROMPTS == 1 else 's have'} been used; stopping.")
+                return None
             # Try every line until a valid command is reached.
             lines = s.splitlines()
             total_codes = len(lines)
@@ -2160,14 +2181,13 @@ class Solver:
                 file.write("Code performed perfectly; interactions with the model are done.")
             return None
         # If there were errors but the maximum number of feedbacks have been given, stop.
-        feedbacks = sum(MESSAGE_FEEDBACK in s for s in interactions)
-        if feedbacks >= FEEDBACKS:
+        if are_done:
             logging.info(f"{self.model} | {self.robot.name} | {lower + 1} to {upper + 1} | {solving} | {mode} | Code "
-                         f"had errors but {FEEDBACKS} feedback{' has' if FEEDBACKS == 1 else 's have'} been used; "
+                         f"had errors but {MAX_PROMPTS} feedback{' has' if MAX_PROMPTS == 1 else 's have'} been used; "
                          "stopping.")
             os.makedirs(root, exist_ok=True)
             with open(os.path.join(root, f"{total}-{MESSAGE_DONE}.txt"), "w") as file:
-                file.write(f"Code had errors but {FEEDBACKS} feedback{' has' if FEEDBACKS == 1 else 's have'} been "
+                file.write(f"Code had errors but {MAX_PROMPTS} feedback{' has' if MAX_PROMPTS == 1 else 's have'} been "
                            "used; stopping.")
             return None
         # Otherwise, prepare feedback to provide to the LLM.
@@ -3006,11 +3026,14 @@ def neat(value: float or list or tuple or np.array) -> str:
                 s += f", {neat(value[i])}"
         return f"{s}]"
     # Otherwise, clean the value.
-    # noinspection PyBroadException
-    try:
-        value = str(Decimal(value))
-    except:
-        value = str(value)
+    value = str(value)
+    # Ensure this is not in exponent form.
+    if "e" in value:
+        # noinspection PyBroadException
+        try:
+            value = str(Decimal(value))
+        except:
+            value = str(value)
     value = value.rstrip('0').rstrip('.')
     return "0" if value == "" else value
 
@@ -3129,7 +3152,7 @@ def evaluate_averages(totals: dict[str, str or float or int or bool] or None = N
 
 
 def llm_ik(robots: str or list[str] or None = None, max_length: int = 0, orientation: bool = False, types: str = NORMAL,
-           feedbacks: int = FEEDBACKS, examples: int = EXAMPLES, training: int = TRAINING, evaluating: int = EVALUATING,
+           feedbacks: int = MAX_PROMPTS, examples: int = EXAMPLES, training: int = TRAINING, evaluating: int = EVALUATING,
            seed: int = SEED, distance_error: float = DISTANCE_ERROR, angle_error: float = ANGLE_ERROR,
            run: bool = False, cwd: str or None = None, level: str = "INFO", bypass: bool = False) -> None:
     """
@@ -3227,9 +3250,9 @@ def llm_ik(robots: str or list[str] or None = None, max_length: int = 0, orienta
     global EVALUATING
     EVALUATING = evaluating
     logging.info(f"Evaluating with {EVALUATING} sample{'' if EVALUATING == 1 else 's'}.")
-    global FEEDBACKS
-    FEEDBACKS = feedbacks
-    logging.info(f"Providing {FEEDBACKS} feedback{'' if FEEDBACKS == 1 else 's'}.")
+    global MAX_PROMPTS
+    MAX_PROMPTS = feedbacks
+    logging.info(f"Providing {MAX_PROMPTS} feedback{'' if MAX_PROMPTS == 1 else 's'}.")
     if examples < 1:
         logging.warning("Examples must be at minimum one.")
         examples = 1
@@ -3363,7 +3386,7 @@ def llm_ik(robots: str or list[str] or None = None, max_length: int = 0, orienta
             # Unless we bypassed the API call checking, confirm we want to run up to the potential number of API calls.
             if not bypass:
                 calls = 0
-                total_feedbacks = 1 + FEEDBACKS
+                total_feedbacks = 1 + MAX_PROMPTS
                 total_orientations = 2 if orientation else 1
                 if types == DYNAMIC:
                     total_types = 3
@@ -3381,7 +3404,7 @@ def llm_ik(robots: str or list[str] or None = None, max_length: int = 0, orienta
                 # Each will be called by every solver.
                 calls *= total_models
                 s = (f"Performing API calls on {total_robots} robot{'s' if total_robots > 1 else ''} and {total_models}"
-                     f" model{'s' if total_models > 1 else ''} with {FEEDBACKS} feedback"
+                     f" model{'s' if total_models > 1 else ''} with {MAX_PROMPTS} feedback"
                      f"{'' if feedbacks == 1 else 's'} resulting in up to {calls} LLM API call"
                      f"{'s' if calls > 1 else ''}. Confirm if you accept making up to these potential {calls} LLM API "
                      f"call{'s' if calls > 1 else ''} [y/n]: ")
@@ -3440,7 +3463,7 @@ if __name__ == "__main__":
     parser.add_argument("-o", "--orientation", type=bool, default=False, help="If we want to solve for orientation "
                                                                               "in addition to position.")
     parser.add_argument("-t", "--types", type=str, default=NORMAL, help="The highest solving type to run.")
-    parser.add_argument("-f", "--feedbacks", type=int, default=FEEDBACKS, help="The max number of times to give "
+    parser.add_argument("-f", "--feedbacks", type=int, default=MAX_PROMPTS, help="The max number of times to give "
                                                                                "feedback.")
     parser.add_argument("-e", "--examples", type=int, default=EXAMPLES, help="The number of examples to give with "
                                                                              "feedbacks.")

@@ -18,6 +18,7 @@ import numpy as np
 import pandas as pd
 from ikpy.link import URDFLink
 from matplotlib import pyplot as plt
+from openai import OpenAI, NOT_GIVEN
 from scipy.spatial.transform import Rotation
 from tabulate import tabulate
 
@@ -66,79 +67,6 @@ ANGLE_ERROR = 0.001
 
 # Default bounding value.
 BOUND = 2 * np.pi
-
-# The core of the forward kinematics function to send via API.
-FORWARD_KINEMATICS_CORE = {
-    "type": "function",
-    "function": {
-        "name": "forward_kinematics",
-        "description": "Test the forward kinematics of the robot.",
-        "parameters": {
-            "type": "object"
-        }
-    }
-}
-
-# The core of the testing solutions function to send via API.
-TEST_CORE = {
-    "type": "function",
-    "function": {
-        "name": "test_solution",
-        "description": "Test your current solution.",
-    }
-}
-
-# The test method parameters if solving for position only to send via API.
-TEST_PARAMETERS_POSITION = {
-    "type": "object",
-    "properties": {
-        "positionX": {
-            "type": "number",
-            "description": "The X position to reach."
-        },
-        "positionY": {
-            "type": "number",
-            "description": "The Y position to reach."
-        },
-        "positionZ": {
-            "type": "number",
-            "description": "The Z position to reach."
-        },
-    },
-    "required": ["positionX", "positionY", "positionZ"]
-}
-
-# The test method parameters if solving for position and orientation to send via API.
-TEST_PARAMETERS_TRANSFORM = {
-    "type": "object",
-    "properties": {
-        "positionX": {
-            "type": "number",
-            "description": "The X position to reach."
-        },
-        "positionY": {
-            "type": "number",
-            "description": "The Y position to reach."
-        },
-        "positionZ": {
-            "type": "number",
-            "description": "The Z position to reach."
-        },
-        "orientationX": {
-            "type": "number",
-            "description": "The X orientation to reach in radians."
-        },
-        "orientationY": {
-            "type": "number",
-            "description": "The Y orientation to reach in radians."
-        },
-        "orientationZ": {
-            "type": "number",
-            "description": "The Z orientation to reach in radians."
-        }
-    },
-    "required": ["positionX", "positionY", "positionZ", "orientationX", "orientationY", "orientationZ"]
-}
 
 # All fields for evaluations.
 FIELDS = ["Success Rate (%)", "Failure Rate (%)", "Error Rate (%)", "Average Failure Distance",
@@ -1354,7 +1282,7 @@ class Solver:
         # If nothing is passed or this does not use an API with a valid cost, use only itself as an option.
         if (inherited is None or len(inherited) < 1 or self.url is None or self.input_cost is None or
                 self.output_cost is None):
-            self.options = [self.model]
+            self.options = [self]
             logging.info(f"{self.model} | {self.robot.name} | Set Inherited | Cannot inherit other models.")
             return None
         # Get only valid solvers which were passed.
@@ -1488,7 +1416,7 @@ class Solver:
                                 if current_orientation and not self.code_successful(lower, upper, False, current_mode):
                                     break
                             # Run the API if all checks were passed.
-                            if not self.run_api(lower, upper, current_orientation, current_mode):
+                            if not self.run_api(lower, upper, current_orientation, current_mode, messages):
                                 logging.error(f"{self.model} | {self.robot.name} | {lower + 1} to {upper + 1} | "
                                               f"{TRANSFORM if current_orientation else POSITION} | {current_mode} | "
                                               "Stopping API calls as there was an error.")
@@ -1532,8 +1460,8 @@ class Solver:
         solving = TRANSFORM if orientation else POSITION
         # Nothing to do if there are no messages.
         if messages is None or len(messages) < 1:
-            logging.info(f"{self.model} | {self.robot.name} | {lower + 1} to {upper + 1} | {solving} | {mode} | Run API"
-                         " | No messages to give to the LLM.")
+            logging.error(f"{self.model} | {self.robot.name} | {lower + 1} to {upper + 1} | {solving} | {mode} | Run "
+                          "API | No messages to give to the LLM.")
             return False
         # Check all messages.
         total = len(messages)
@@ -1544,20 +1472,23 @@ class Solver:
                               f"Run API | Message at index {i} not set.")
                 return False
             # Ensure the needed fields exist.
-            if "Prompt" not in messages[i]:
+            if "Type" not in messages[i]:
                 logging.error(f"{self.model} | {self.robot.name} | {lower + 1} to {upper + 1} | {solving} | {mode} | "
-                              f'Run API | Message at index {i} does not have a "Prompt" field.')
+                              f'Run API | Message at index {i} does not have a "Type" field.')
                 return False
             if "Message" not in messages[i]:
                 logging.error(f"{self.model} | {self.robot.name} | {lower + 1} to {upper + 1} | {solving} | {mode} | "
                               f'Run API | Message at index {i} does not have a "Message" field.')
                 return False
-            # Starting with the first message as a prompt (True), messages alternate between it and responses (False).
-            expected = i % 2 == 0
-            if messages[i]["Prompt"] != expected:
+            # Starting with the first message as a prompt, messages alternate between it and responses.
+            is_prompt = i % 2 == 0
+            if is_prompt and messages[i]["Type"] == RESPONSE:
                 logging.error(f"{self.model} | {self.robot.name} | {lower + 1} to {upper + 1} | {solving} | {mode} | "
-                              f"Run API | Message at index {i} expected to be a {'prompt' if expected else 'response'} "
-                              "but was not.")
+                              f"Run API | Message at index {i} expected to be a prompt but was not.")
+                return False
+            elif not is_prompt and messages[i]["Type"] != RESPONSE:
+                logging.error(f"{self.model} | {self.robot.name} | {lower + 1} to {upper + 1} | {solving} | {mode} | "
+                              f"Run API | Message at index {i} expected to be a response but was not.")
                 return False
             # Ensure no messages are empty.
             messages[i]["Message"] = messages[i]["Message"].strip()
@@ -1565,14 +1496,194 @@ class Solver:
                 logging.error(f"{self.model} | {self.robot.name} | {lower + 1} to {upper + 1} | {solving} | {mode} | "
                               f"Run API | Message at index {i} is empty.")
                 return False
+            # Reformat the messages to ensure they are ready for the API.
+            messages[i] = {"role": "user" if is_prompt else "assistant", "content": messages[i]["Message"]}
         # The last message must be a prompt for the LLM.
-        if not messages[-1]["Prompt"]:
+        if messages[-1]["role"] != "user":
             logging.info(f"{self.model} | {self.robot.name} | {lower + 1} to {upper + 1} | {solving} | {mode} | Run API"
                          " | Last message is not a prompt.")
             return False
-        logging.error(f"{self.model} | {self.robot.name} | {lower + 1} to {upper + 1} | {solving} | {mode} | Run API | "
-                      "LLM interactions not yet implemented.")
-        # TODO - Implement API calling.
+        # If this can use methods, set them.
+        if self.methods:
+            tools = []
+            tool_choice = "auto"
+            # Build the command to use forward kinematics.
+            forwards = {
+                "type": "function",
+                "function": {
+                    "name": "forward_kinematics",
+                    "description": "Test the forward kinematics of the robot.",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {}
+                    }
+                }
+            }
+            # Add every joint.
+            joints = upper - lower + 1
+            required = []
+            for i in range(joints):
+                num = i + 1
+                forwards["function"]["parameters"]["properties"][f"joint{num}"] = {
+                    "type":  "number",
+                    "description": f"The value to set joint {num} to."
+                }
+                required.append(f"joint{num}")
+            forwards["function"]["parameters"]["required"] = required
+            tools.append(forwards)
+            # If a solution exists, we can add the command to test it.
+            if os.path.exists(os.path.join(self.solutions, f"{lower}-{upper}-{solving}-{mode}.py")):
+                tests = {
+                    "type": "function",
+                    "function": {
+                        "name": "test_solution",
+                        "description": "Test your current solution."
+                    }
+                }
+                if orientation:
+                    tests["function"]["parameters"] = {
+                        "type": "object",
+                        "properties": {
+                            "positionX": {
+                                "type": "number",
+                                "description": "The X position to reach."
+                            },
+                            "positionY": {
+                                "type": "number",
+                                "description": "The Y position to reach."
+                            },
+                            "positionZ": {
+                                "type": "number",
+                                "description": "The Z position to reach."
+                            },
+                            "orientationX": {
+                                "type": "number",
+                                "description": "The X orientation to reach in radians."
+                            },
+                            "orientationY": {
+                                "type": "number",
+                                "description": "The Y orientation to reach in radians."
+                            },
+                            "orientationZ": {
+                                "type": "number",
+                                "description": "The Z orientation to reach in radians."
+                            }
+                        },
+                        "required": ["positionX", "positionY", "positionZ", "orientationX", "orientationY",
+                                     "orientationZ"]
+                    }
+                else:
+                    tests["function"]["parameters"] = {
+                        "type": "object",
+                        "properties": {
+                            "positionX": {
+                                "type": "number",
+                                "description": "The X position to reach."
+                            },
+                            "positionY": {
+                                "type": "number",
+                                "description": "The Y position to reach."
+                            },
+                            "positionZ": {
+                                "type": "number",
+                                "description": "The Z position to reach."
+                            },
+                        },
+                        "required": ["positionX", "positionY", "positionZ"]
+                    }
+        else:
+            tools = NOT_GIVEN
+            tool_choice = NOT_GIVEN
+        # Build the API client.
+        client = OpenAI(api_key=self.key, base_url=self.url)
+        # Try to call the API.
+        try:
+            completion = client.chat.completions.create(model=self.model, messages=messages, tools=tools,
+                                                        tool_choice=tool_choice, seed=SEED, temperature=0, n=1,
+                                                        stream=False)
+        except Exception as e:
+            logging.error(f"{self.model} | {self.robot.name} | {lower + 1} to {upper + 1} | {solving} | {mode} | Run "
+                          f"API | Error calling the API: {e}")
+            return False
+        # Get the response message.
+        if "choices" not in completion or len(completion["choices"]) < 1:
+            logging.error(f"{self.model} | {self.robot.name} | {lower + 1} to {upper + 1} | {solving} | {mode} | Run "
+                          "API | No response returned.")
+            return False
+        # See if there was an error that caused the API to stop.
+        response = completion["choices"][0]
+        if "finish_reason" not in response:
+            logging.error(f"{self.model} | {self.robot.name} | {lower + 1} to {upper + 1} | {solving} | {mode} | Run "
+                          "API | No finish reason given in the response.")
+            return False
+        # Cache the reason for responding.
+        finish_reason = response["finish_reason"]
+        # Check if we ran out of tokens.
+        if finish_reason == "length":
+            if ("message" in response and "refusal" in response["message"] and
+                    response["message"]["refusal"] is not None):
+                reason = f": {response['message']['refusal']}"
+            else:
+                reason = "."
+            logging.error(f"{self.model} | {self.robot.name} | {lower + 1} to {upper + 1} | {solving} | {mode} | Run "
+                          f"API | Stopped as ran out of tokens{reason}")
+            return False
+        # Check if the content filter flagged this.
+        if finish_reason == "content_filter":
+            if ("message" in response and "refusal" in response["message"] and
+                    response["message"]["refusal"] is not None):
+                reason = f": {response['message']['refusal']}"
+            else:
+                reason = "."
+            logging.error(f"{self.model} | {self.robot.name} | {lower + 1} to {upper + 1} | {solving} | {mode} | Run "
+                          f"API | Stopped as this was flagged by the content filter{reason}")
+            return False
+        # Check if no message was returned.
+        if "message" not in response:
+            logging.error(f"{self.model} | {self.robot.name} | {lower + 1} to {upper + 1} | {solving} | {mode} | Run "
+                          "API | No message in the response.")
+            return False
+        # Get the message in the response.
+        message = response["message"]
+        # Check if there is a reason for refusing to create the proper message.
+        if message["refusal"] is not None:
+            logging.error(f"{self.model} | {self.robot.name} | {lower + 1} to {upper + 1} | {solving} | {mode} | Run "
+                          f"API | Refused to return a message: {message['refusal']}")
+            return False
+        # Handle if this was a regular text response.
+        if finish_reason == "stop":
+            # If for some reason there was no content, there was some undocumented error.
+            if "content" not in message or len(message["content"]) < 1:
+                logging.error(f"{self.model} | {self.robot.name} | {lower + 1} to {upper + 1} | {solving} | {mode} | "
+                              "Run API | No content returned in the message.")
+                return False
+            save = message["content"].strip()
+        # Handle if this was a tools call, also checking the older deprecated function call name.
+        elif finish_reason == "tool_calls" or finish_reason == "function_call":
+            # TODO - Parse function response into the string to save.
+            pass
+        # Otherwise, the finish reason is an undocumented error.
+        else:
+            logging.error(f"{self.model} | {self.robot.name} | {lower + 1} to {upper + 1} | {solving} | {mode} | Run "
+                          f"API | Unknown finish reason of '{finish_reason}' returned.")
+            return False
+        # Get the number of tokens used to handle this interaction.
+        if "usage" not in completion:
+            logging.error(f"{self.model} | {self.robot.name} | {lower + 1} to {upper + 1} | {solving} | {mode} | Run "
+                          f"API | No usage statistics returned.")
+            return False
+        if "prompt_tokens" not in completion["usage"]:
+            logging.error(f"{self.model} | {self.robot.name} | {lower + 1} to {upper + 1} | {solving} | {mode} | Run "
+                          f"API | No prompt tokens returned.")
+            return False
+        input_tokens = completion["usage"]["prompt_tokens"]
+        if "completion_tokens" not in completion["usage"]:
+            logging.error(f"{self.model} | {self.robot.name} | {lower + 1} to {upper + 1} | {solving} | {mode} | Run "
+                          f"API | No completion tokens returned.")
+            return False
+        output_tokens = completion["usage"]["completion_tokens"]
+        # TODO - Save the response.
+        # TODO - Save tokens.
         return True
 
     def should_attempt(self, lower: int = 0, upper: int = -1, orientation: bool = False, mode: str = NORMAL) -> bool:
@@ -1806,7 +1917,7 @@ class Solver:
                     file.write(s)
                 logging.info(f"{self.model} | {self.robot.name} | {lower + 1} to {upper + 1} | {solving} | {mode} | "
                              f"Handle Interactions | Initial prompt generated.")
-                return [{"Prompt": True, "Message": s}]
+                return [{"Type": MESSAGE_PROMPT, "Message": s}]
             # If no prompt was made, there is nothing to return.
             return None
         # If the last interaction was a message for the LLM, load it.
@@ -1875,7 +1986,7 @@ class Solver:
                     os.makedirs(root, exist_ok=True)
                     with open(os.path.join(root, f"{total}-{MESSAGE_FORWARD}.txt"), "w") as file:
                         file.write(s)
-                    history.append({"Prompt": True, "Message": s})
+                    history.append({"Type": MESSAGE_FORWARD, "Message": s})
                     return history
                 # Handle if this is a solution testing call.
                 elif line[0] == "test_solution":
@@ -1946,7 +2057,7 @@ class Solver:
                     os.makedirs(root, exist_ok=True)
                     with open(os.path.join(root, f"{total}-{MESSAGE_TEST}.txt"), "w") as file:
                         file.write(s)
-                    history.append({"Prompt": True, "Message": s})
+                    history.append({"Type": MESSAGE_TEST, "Message": s})
                     return history
             # Otherwise, indicate there was an invalid response.
             logging.info(f"{self.model} | {self.robot.name} | {lower + 1} to {upper + 1} | {solving} | {mode} | Handle "
@@ -1956,7 +2067,7 @@ class Solver:
             os.makedirs(root, exist_ok=True)
             with open(os.path.join(root, f"{total}-{MESSAGE_ERROR}.txt"), "w") as file:
                 file.write(s)
-            history.append({"Prompt": True, "Message": s})
+            history.append({"Type": MESSAGE_ERROR, "Message": s})
             return history
         # Otherwise, parse the code assuming the largest code would be the complete code snippet.
         code = codes[0].strip()
@@ -2003,7 +2114,7 @@ class Solver:
             file.write(s)
         logging.info(f"{self.model} | {self.robot.name} | {lower + 1} to {upper + 1} | {solving} | {mode} | Handle "
                      f"Interactions | New feedback saved.")
-        history.append({"Prompt": True, "Message": s})
+        history.append({"Type": MESSAGE_FEEDBACK, "Message": s})
         return history
 
     def __str__(self) -> str:

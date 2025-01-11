@@ -3152,9 +3152,10 @@ def evaluate_averages(totals: dict[str, str or float or int or bool] or None = N
 
 
 def llm_ik(robots: str or list[str] or None = None, max_length: int = 0, orientation: bool = False, types: str = NORMAL,
-           feedbacks: int = MAX_PROMPTS, examples: int = EXAMPLES, training: int = TRAINING, evaluating: int = EVALUATING,
-           seed: int = SEED, distance_error: float = DISTANCE_ERROR, angle_error: float = ANGLE_ERROR,
-           run: bool = False, cwd: str or None = None, level: str = "INFO", bypass: bool = False) -> None:
+           feedbacks: int = MAX_PROMPTS, examples: int = EXAMPLES, training: int = TRAINING,
+           evaluating: int = EVALUATING, seed: int = SEED, distance_error: float = DISTANCE_ERROR,
+           angle_error: float = ANGLE_ERROR, run: bool = False, cwd: str or None = None, level: str = "INFO",
+           bypass: bool = False) -> None:
     """
     Run LLM inverse kinematics.
     :param robots: The names of the robots.
@@ -3464,7 +3465,7 @@ if __name__ == "__main__":
                                                                               "in addition to position.")
     parser.add_argument("-t", "--types", type=str, default=NORMAL, help="The highest solving type to run.")
     parser.add_argument("-f", "--feedbacks", type=int, default=MAX_PROMPTS, help="The max number of times to give "
-                                                                               "feedback.")
+                                                                                 "feedback.")
     parser.add_argument("-e", "--examples", type=int, default=EXAMPLES, help="The number of examples to give with "
                                                                              "feedbacks.")
     parser.add_argument("-a", "--training", type=int, default=TRAINING, help="The number of training samples.")

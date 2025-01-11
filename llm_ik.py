@@ -19,7 +19,7 @@ import numpy as np
 import pandas as pd
 from ikpy.link import URDFLink
 from matplotlib import pyplot as plt
-from openai import OpenAI, NOT_GIVEN
+from openai import NOT_GIVEN, OpenAI
 from scipy.spatial.transform import Rotation
 from tabulate import tabulate
 
@@ -1605,7 +1605,7 @@ class Solver:
         try:
             completion = client.chat.completions.create(model=self.model, messages=messages, tools=tools,
                                                         tool_choice=tool_choice, seed=SEED, temperature=0, n=1,
-                                                        stream=False)
+                                                        reasoning_effort="high")
         except Exception as e:
             logging.error(f"{self.model} | {self.robot.name} | {lower + 1} to {upper + 1} | {solving} | {mode} | Run "
                           f"API | Error calling the API: {e}")
@@ -1616,7 +1616,7 @@ class Solver:
         # Get the response message.
         if completion.choices is None or len(completion.choices) < 1:
             logging.error(f"{self.model} | {self.robot.name} | {lower + 1} to {upper + 1} | {solving} | {mode} | Run "
-                          "API | No response returned.")
+                          "API | No content in the response")
             return False
         # See if there was an error that caused the API to stop.
         response = completion.choices[0]

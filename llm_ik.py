@@ -2,6 +2,7 @@ import argparse
 import copy
 import importlib
 import importlib.util
+import json
 import logging
 import os.path
 import random
@@ -1503,6 +1504,7 @@ class Solver:
             logging.info(f"{self.model} | {self.robot.name} | {lower + 1} to {upper + 1} | {solving} | {mode} | Run API"
                          " | Last message is not a prompt.")
             return False
+        core = f"{lower}-{upper}-{solving}-{mode}"
         # If this can use methods, set them.
         if self.methods:
             tools = []
@@ -1532,7 +1534,7 @@ class Solver:
             forwards["function"]["parameters"]["required"] = required
             tools.append(forwards)
             # If a solution exists, we can add the command to test it.
-            if os.path.exists(os.path.join(self.solutions, f"{lower}-{upper}-{solving}-{mode}.py")):
+            if os.path.exists(os.path.join(self.solutions, f"{core}.py")):
                 tests = {
                     "type": "function",
                     "function": {
@@ -1653,15 +1655,65 @@ class Solver:
         # Handle if this was a regular text response.
         if finish_reason == "stop":
             # If for some reason there was no content, there was some undocumented error.
-            if "content" not in message or len(message["content"]) < 1:
+            if "content" not in message or message["content"] is None or len(message["content"]) < 1:
                 logging.error(f"{self.model} | {self.robot.name} | {lower + 1} to {upper + 1} | {solving} | {mode} | "
                               "Run API | No content returned in the message.")
                 return False
-            save = message["content"].strip()
+            # Get the message.
+            s = message["content"].strip()
+            if len(s) < 1:
+                logging.error(f"{self.model} | {self.robot.name} | {lower + 1} to {upper + 1} | {solving} | {mode} | "
+                              "Run API | Returned content was whitespace.")
+                return False
         # Handle if this was a tools call, also checking the older deprecated function call name.
         elif finish_reason == "tool_calls" or finish_reason == "function_call":
-            # TODO - Parse function response into the string to save.
-            pass
+            # Ensure there is a call to a function.
+            if "tool_calls" not in message or message["tool_calls"] is None or len(message["tool_calls"]) < 1:
+                logging.error(f"{self.model} | {self.robot.name} | {lower + 1} to {upper + 1} | {solving} | {mode} | "
+                              "Run API | No tools calls returned in the message.")
+                return False
+            # Get the first call as there should only be one anyway.
+            call = message["tool_calls"][0]
+            # If the object is not set, there was some undocumented error.
+            if call is None:
+                logging.error(f"{self.model} | {self.robot.name} | {lower + 1} to {upper + 1} | {solving} | {mode} | "
+                              "Run API | Tool call not set.")
+                return False
+            # Get the function object.
+            if "function" not in call:
+                logging.error(f"{self.model} | {self.robot.name} | {lower + 1} to {upper + 1} | {solving} | {mode} | "
+                              "Run API | No function in the tools response.")
+                return False
+            # We only need to focus on the call.
+            call = call["function"]
+            # If the name was not present, there was some undocumented error.
+            if "name" not in call or call["name"] is None:
+                logging.error(f"{self.model} | {self.robot.name} | {lower + 1} to {upper + 1} | {solving} | {mode} | "
+                              "Run API | No called function name in response.")
+                return False
+            # Ensure a valid method was called.
+            if call["name"] != "forward_kinematics" and call["name"] != "test_solution":
+                logging.error(f"{self.model} | {self.robot.name} | {lower + 1} to {upper + 1} | {solving} | {mode} | "
+                              f"Run API | Function '{call['name']}' is not valid.")
+                return False
+            # If the arguments were not present, there was some undocumented error.
+            if "arguments" not in call or call["arguments"] is None:
+                logging.error(f"{self.model} | {self.robot.name} | {lower + 1} to {upper + 1} | {solving} | {mode} | "
+                              "Run API | No arguments for the function in the response.")
+                return False
+            # Try to extract the arguments.
+            try:
+                arguments = json.loads(call["arguments"])
+            except Exception as e:
+                logging.error(f"{self.model} | {self.robot.name} | {lower + 1} to {upper + 1} | {solving} | {mode} | "
+                              f"Run API | Could not parse the arguments: {e}")
+                return False
+            # Sort the arguments.
+            arguments = dict(sorted(arguments.items(), key=lambda item: (item[0], item[1])))
+            # Build the information to save.
+            s = call["name"]
+            for argument in arguments:
+                s += f" {call[argument]}"
         # Otherwise, the finish reason is an undocumented error.
         else:
             logging.error(f"{self.model} | {self.robot.name} | {lower + 1} to {upper + 1} | {solving} | {mode} | Run "
@@ -1682,8 +1734,19 @@ class Solver:
                           f"API | No completion tokens returned.")
             return False
         output_tokens = completion["usage"]["completion_tokens"]
-        # TODO - Save the response.
-        # TODO - Save tokens.
+        # Save the interaction.
+        root = os.path.join(self.interactions, core)
+        os.makedirs(root, exist_ok=True)
+        with open(os.path.join(root, f"{total}-{RESPONSE}.txt"), "w") as file:
+            file.write(s)
+        # Save the tokens.
+        s = f"Input Tokens,Output Tokens\n{input_tokens},{output_tokens}"
+        root = os.path.join(self.tokens, core)
+        os.makedirs(root, exist_ok=True)
+        with open(os.path.join(root, f"{total}.csv"), "w") as file:
+            file.write(s)
+        logging.info(f"{self.model} | {self.robot.name} | {lower + 1} to {upper + 1} | {solving} | {mode} | Run API | "
+                     "Response received.")
         return True
 
     def should_attempt(self, lower: int = 0, upper: int = -1, orientation: bool = False, mode: str = NORMAL) -> bool:

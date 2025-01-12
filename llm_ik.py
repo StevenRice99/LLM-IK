@@ -45,7 +45,6 @@ MESSAGE_PROMPT = "Prompt"
 MESSAGE_FEEDBACK = "Feedback"
 MESSAGE_FORWARD = "Forward"
 MESSAGE_TEST = "Test"
-MESSAGE_ERROR = "Error"
 MESSAGE_DONE = "Done"
 RESPONSE = "Response"
 INHERITED = "Inherited"
@@ -1932,6 +1931,7 @@ class Solver:
         total = len(interactions)
         # Build the conversation history.
         history = []
+        replies = 0
         for i in range(total):
             searching = f"{i}-"
             current = None
@@ -1948,12 +1948,13 @@ class Solver:
                 current_type = MESSAGE_PROMPT
             elif MESSAGE_FEEDBACK in current:
                 current_type = MESSAGE_FEEDBACK
+                replies += 1
             elif MESSAGE_TEST in current:
                 current_type = MESSAGE_TEST
+                replies += 1
             elif MESSAGE_FORWARD in current:
                 current_type = MESSAGE_FORWARD
-            elif MESSAGE_ERROR in current:
-                current_type = MESSAGE_ERROR
+                replies += 1
             elif MESSAGE_DONE in current:
                 current_type = MESSAGE_DONE
             elif RESPONSE in current:
@@ -1985,7 +1986,7 @@ class Solver:
             logging.info(f"{self.model} | {self.robot.name} | {lower + 1} to {upper + 1} | {solving} | {mode} | Done.")
             return None
         # See if we should be done.
-        are_done = total - sum(RESPONSE in s for s in interactions) > MAX_PROMPTS
+        are_done = replies >= MAX_PROMPTS
         # If this is a message for the model, we should try to load it.
         if last["Type"] != RESPONSE:
             # See if we are done.
@@ -2145,9 +2146,9 @@ class Solver:
             s = ("<ERROR>\nYou did not respond with valid code to solve the inverse kinematics or a valid command.\n"
                  "</ERROR>")
             os.makedirs(root, exist_ok=True)
-            with open(os.path.join(root, f"{total}-{MESSAGE_ERROR}.txt"), "w") as file:
+            with open(os.path.join(root, f"{total}-{MESSAGE_FEEDBACK}.txt"), "w") as file:
                 file.write(s)
-            history.append({"Type": MESSAGE_ERROR, "Message": s})
+            history.append({"Type": MESSAGE_FEEDBACK, "Message": s})
             return history
         # Otherwise, parse the code assuming the largest code would be the complete code snippet.
         code = codes[0].strip()

@@ -56,9 +56,9 @@ TRAINING_TITLE = "Training"
 EVALUATING_TITLE = "Evaluating"
 AVERAGE = "Average"
 
-# Parameters.
-TRAINING = 100
-EVALUATING = 100
+# Default Parameters.
+TRAINING = 1000
+EVALUATING = 1000
 SEED = 42
 MAX_PROMPTS = 5
 EXAMPLES = 10
@@ -1276,13 +1276,21 @@ class Solver:
         """
         # Nothing to do if the solver is not valid.
         if not self.is_valid():
+            self.options = []
             logging.error(f"{self.model} | Set Inherited | Solver is not valid.")
             return None
         # If nothing is passed or this does not use an API with a valid cost, use only itself as an option.
-        if (inherited is None or len(inherited) < 1 or self.url is None or self.input_cost is None or
-                self.output_cost is None):
+        if self.url is None:
             self.options = [self]
-            logging.info(f"{self.model} | {self.robot.name} | Set Inherited | Cannot inherit other models.")
+            logging.info(f"{self.model} | {self.robot.name} | Set Inherited | Only API models can inherit.")
+            return None
+        if self.input_cost is None or self.output_cost is None:
+            self.options = [self]
+            logging.info(f"{self.model} | {self.robot.name} | Set Inherited | Cannot inherit as no costs defined.")
+            return None
+        if inherited is None or len(inherited) < 1:
+            self.options = [self]
+            logging.info(f"{self.model} | {self.robot.name} | Set Inherited | Nothing to inherit.")
             return None
         # Get only valid solvers which were passed.
         options = []
@@ -1502,6 +1510,8 @@ class Solver:
             logging.info(f"{self.model} | {self.robot.name} | {lower + 1} to {upper + 1} | {solving} | {mode} | Run API"
                          " | Last message is not a prompt.")
             return False
+        logging.info(f"{self.model} | {self.robot.name} | {lower + 1} to {upper + 1} | {solving} | {mode} | Run API | "
+                     f"Messages: {messages}")
         core = f"{lower}-{upper}-{solving}-{mode}"
         # If this can use methods, set them.
         if self.methods:
@@ -1591,6 +1601,8 @@ class Solver:
                         },
                         "required": ["positionX", "positionY", "positionZ"]
                     }
+            logging.info(f"{self.model} | {self.robot.name} | {lower + 1} to {upper + 1} | {solving} | {mode} | Run API"
+                         f" | Tools: {tools}")
         else:
             tools = NOT_GIVEN
             tool_choice = NOT_GIVEN
@@ -1598,9 +1610,11 @@ class Solver:
         client = OpenAI(api_key=self.key, base_url=self.url)
         # Try to call the API.
         try:
+            start_time = time.perf_counter()
             completion = client.chat.completions.create(model=self.model, messages=messages, tools=tools,
                                                         tool_choice=tool_choice, seed=SEED, temperature=0, n=1,
                                                         reasoning_effort="high")
+            elapsed = time.perf_counter() - start_time
         except Exception as e:
             logging.error(f"{self.model} | {self.robot.name} | {lower + 1} to {upper + 1} | {solving} | {mode} | Run "
                           f"API | Error calling the API: {e}")
@@ -1737,6 +1751,12 @@ class Solver:
         # Save the tokens.
         s = f"Input Tokens,Output Tokens\n{input_tokens},{output_tokens}"
         root = os.path.join(self.tokens, core)
+        os.makedirs(root, exist_ok=True)
+        with open(os.path.join(root, f"{total}.csv"), "w") as file:
+            file.write(s)
+        # Save the elapsed time.
+        s = f"Generation Time (s)\n{elapsed} s"
+        root = os.path.join(self.elapsed, core)
         os.makedirs(root, exist_ok=True)
         with open(os.path.join(root, f"{total}.csv"), "w") as file:
             file.write(s)
@@ -2374,8 +2394,8 @@ class Solver:
             target_position = point["Position"]
             target_orientation = point["Orientation"] if orientation else None
             # Run the code.
-            joints, elapsed, error = self.run_code(lower, upper, mode, target_position, target_orientation)
-            total_time += elapsed
+            joints, generation_time, error = self.run_code(lower, upper, mode, target_position, target_orientation)
+            total_time += generation_time
             # Store if there was an error.
             if error is not None or joints is None or len(joints) != number:
                 errors += 1
@@ -2405,26 +2425,33 @@ class Solver:
         # Get all stats
         cost, feedbacks, forwards, testings = self.get_cost(lower, upper, orientation, mode)
         # Get how long it took the LLM to generate the code.
-        elapsed = 0
+        generation_time = 0
         name = f"{lower}-{upper}-{solving}-{mode}"
         root = os.path.join(self.elapsed, name)
         if os.path.exists(root):
             times = get_files(root)
             for t in times:
-                with open(os.path.join(root, t), "r") as file:
+                p = os.path.join(root, t)
+                with open(p, "r") as file:
                     s = file.read()
-                # noinspection PyBroadException
-                try:
-                    f = float(s.strip())
-                except:
+                lines = s.splitlines()
+                if len(lines) < 2:
+                    logging.error(f"{self.model} | {lower + 1} to {upper + 1} | {solving} | {mode} | Evaluate | "
+                                  f"Incorrect elapsed time data in '{p}'.")
                     continue
-                elapsed += f
+                try:
+                    f = float(s.replace("s", "").strip())
+                except Exception as e:
+                    logging.error(f"{self.model} | {lower + 1} to {upper + 1} | {solving} | {mode} | Evaluate | Could "
+                                  f"not parse time data from '{p}': {e}")
+                    continue
+                generation_time += f
         # Save the results.
         s = ("Success Rate (%),Failure Rate (%),Error Rate (%),Average Failure Distance,Average Failure Angle (°),"
              "Average Elapsed Time (s),Generation Time (s),Mode,Feedbacks Given,Forwards Kinematics Calls,Testing Calls"
              f",Reasoning,Functions,API,Cost ($)\n{successes}%,{failures}%,{errors}%,{total_distance},"
-             f"{total_angle if orientation else 0}°,{total_time} s,{elapsed} s,{mode},{feedbacks},{forwards},{testings}"
-             f",{self.reasoning},{self.methods},{self.url is not None},${neat(cost)}")
+             f"{total_angle if orientation else 0}°,{total_time} s,{generation_time} s,{mode},{feedbacks},{forwards},"
+             f"{testings},{self.reasoning},{self.methods},{self.url is not None},${neat(cost)}")
         os.makedirs(self.results, exist_ok=True)
         with open(os.path.join(self.results, f"{name}.csv"), "w") as file:
             file.write(s)
@@ -3023,16 +3050,19 @@ def neat(value: float or list or tuple or np.array) -> str:
                 s += f", {neat(value[i])}"
         return f"{s}]"
     # Otherwise, clean the value.
-    value = str(value)
+    formatted = str(value)
     # Ensure this is not in exponent form.
-    if "e" in value:
-        # noinspection PyBroadException
+    if "e" in formatted:
+        # If it is in exponent form, we need to expand it as a decimal value.
         try:
-            value = str(Decimal(value))
-        except:
-            value = str(value)
-    value = value.rstrip('0').rstrip('.')
-    return "0" if value == "" else value
+            formatted = str(Decimal(value))
+        except Exception as e:
+            logging.error(f"Could not neatly format '{value}' as a deciaml: {e}")
+    # Strip any extra zeros from the decimals, removing the decimal space if nothing remains.
+    if "." in formatted:
+        formatted = formatted.rstrip("0").rstrip(".")
+    # Failsafe check to ensure we actually return a number which should never be needed.
+    return "0" if formatted == "" else formatted
 
 
 def reached(distance: float = 0, angle: float = 0) -> bool:

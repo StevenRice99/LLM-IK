@@ -3057,7 +3057,7 @@ def neat(value: float or list or tuple or np.array) -> str:
         try:
             formatted = str(Decimal(value))
         except Exception as e:
-            logging.error(f"Could not neatly format '{value}' as a deciaml: {e}")
+            logging.error(f"Could not neatly format '{value}' as a decimal: {e}")
     # Strip any extra zeros from the decimals, removing the decimal space if nothing remains.
     if "." in formatted:
         formatted = formatted.rstrip("0").rstrip(".")

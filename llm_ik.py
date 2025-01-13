@@ -2159,7 +2159,21 @@ class Solver:
                 file.write(s)
             history.append({"Type": MESSAGE_FEEDBACK, "Message": s})
             return history
-        # Otherwise, parse the code assuming the largest code would be the complete code snippet.
+        # Ensure every code does not have any extra running or testing code.
+        for i in range(total_codes):
+            # Delete any "main" portion.
+            codes[i] = codes[i].split('if __name__ == "__main__":')[0].split("if __name__ == '__main__'")[0].strip()
+            # Get every individual line.
+            lines = codes[i].splitlines()
+            # Remove any of the extra running or testing code.
+            last_valid = len(lines)
+            for line in reversed(lines):
+                if lines == "" or line.startswith(" ") or line.startswith("\t"):
+                    break
+                last_valid -= 1
+            # Put the code together again.
+            codes[i] = "\n".join(lines[0:last_valid]).strip()
+        # Parse the code assuming the largest code would be the complete code snippet.
         code = codes[0].strip()
         size = len(code)
         for i in range(1, total_codes):
@@ -2591,8 +2605,10 @@ class Solver:
             a = f" and orientation {neat(target_orientation)}" if orientation else ""
             b = f" and orientation {neat(orientations[-1])}" if orientation else ""
             failures.append(f"Failed to reach position {neat(target_position)}{a}. Instead reached position "
-                            f"{neat(positions[-1])}{b}. The correct joint values were {neat(point['Joints'])} and the "
-                            f"joints produced by the code were {neat(joints)}.")
+                            f"{neat(positions[-1])}{b}. The correct joint value"
+                            f"{'s were' if len(point['Joints']) > 1 else ' was'} {neat(point['Joints'])} and the "
+                            f"joint{'' if len(joints) == 1 else 's'} produced by the code "
+                            f"{'was' if len(joints) == 1 else 'were'} {neat(joints)}.")
         total = len(errors)
         if total > 0:
             plural = "s" if total > 1 else ""

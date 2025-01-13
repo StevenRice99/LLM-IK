@@ -1607,9 +1607,10 @@ class Solver:
         # Try to call the API.
         try:
             start_time = time.perf_counter()
-            completion = client.chat.completions.create(model=self.model, messages=messages, tools=tools,
-                                                        tool_choice=tool_choice, seed=SEED, temperature=0, n=1,
-                                                        reasoning_effort="high")
+            # Use the API-specific name if one exists.
+            completion = client.chat.completions.create(model=self.model if self.api_name is None else self.api_name,
+                                                        messages=messages, tools=tools, tool_choice=tool_choice,
+                                                        seed=SEED, temperature=0, n=1, reasoning_effort="high")
             elapsed = time.perf_counter() - start_time
         except Exception as e:
             logging.error(f"{self.model} | {self.robot.name} | {lower + 1} to {upper + 1} | {solving} | {mode} | Run "

@@ -2062,8 +2062,8 @@ class Solver:
                 return None
             # Try every line until a valid command is reached.
             lines = s.splitlines()
-            total_codes = len(lines)
-            for i in range(total_codes):
+            total_lines = len(lines)
+            for i in range(total_lines):
                 # In case the command was wrapped in a code block, remove it.
                 line = lines[i].replace("`", "").strip().split()
                 parts = len(line)

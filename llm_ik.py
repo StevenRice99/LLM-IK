@@ -981,6 +981,7 @@ class Solver:
         self.input_cost = None
         self.output_cost = None
         self.options = []
+        self.api_name = None
         # Ensure the file exists.
         path = os.path.join(MODELS, f"{model}.txt")
         if not os.path.exists(path):
@@ -1055,6 +1056,12 @@ class Solver:
             if total >= 5:
                 model_methods = lines[4].strip().upper()
                 model_methods = model_methods == "TRUE" or model_methods == "1"
+            # Get a custom API name if one is provided
+            if total >= 6:
+                api_name = lines[5].strip()
+                if api_name != "":
+                    self.api_name = api_name
+                    logging.info(f"{self.model} | {self.robot.name} | Using custom API name of '{self.api_name}'.")
         if not self.reasoning:
             logging.info(f"{self.model} | {self.robot.name} | This is not a reasoning model.")
         # If there are details, this indicates the provider of the model.

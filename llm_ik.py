@@ -774,12 +774,11 @@ class Robot:
                     logging.error(f"{self.name} | Perform | Result '{path}' not named properly.")
                     continue
                 # Get the joints this is for.
-                # noinspection PyBroadException
                 try:
                     lower = int(parts[0])
                     upper = int(parts[1])
-                except:
-                    logging.error(f"{self.name} | Perform | Could not parse lower and upper from '{path}'.")
+                except Exception as e:
+                    logging.error(f"{self.name} | Perform | Could not parse lower and upper from '{path}': {e}")
                     continue
                 # Get what this was solving.
                 solving = parts[2].replace(".csv", "")
@@ -818,66 +817,59 @@ class Robot:
                     title = titles[i]
                     data = info[i]
                     if title == "Success Rate (%)" or title == "Failure Rate (%)" or title == "Error Rate (%)":
-                        # noinspection PyBroadException
                         try:
                             data = float(data.replace("%", ""))
-                        except:
+                        except Exception as e:
                             logging.error(f"{self.name} | Evaluate | Could not parse percentage data at index {i + 1} "
-                                          f"from '{path}'.")
+                                          f"from '{path}': {e}")
                             result = None
                             break
                     elif title == "Average Failure Distance":
-                        # noinspection PyBroadException
                         try:
                             data = float(data)
-                        except:
+                        except Exception as e:
                             logging.error(f"{self.name} | Evaluate | Could not parse distance data at index {i + 1} "
-                                          f"from '{path}'.")
+                                          f"from '{path}': {e}")
                             result = None
                             break
                     elif title == "Average Failure Angle (°)":
-                        # noinspection PyBroadException
                         try:
                             data = float(data.replace("°", ""))
-                        except:
+                        except Exception as e:
                             logging.error(f"{self.name} | Evaluate | Could not parse angle data at index {i + 1} from "
-                                          f"'{path}'.")
+                                          f"'{path}': {e}")
                             result = None
                             break
                     elif title == "Average Elapsed Time (s)" or title == "Generation Time (s)":
-                        # noinspection PyBroadException
                         try:
                             data = float(data.replace(" s", ""))
-                        except:
+                        except Exception as e:
                             logging.error(f"{self.name} | Evaluate | Could not parse time data at index {i + 1} from "
-                                          f"'{path}'.")
+                                          f"'{path}': {e}")
                             result = None
                             break
                     elif title == "Feedbacks Given" or title == "Forwards Kinematics Calls" or title == "Testing Calls":
-                        # noinspection PyBroadException
                         try:
                             data = int(data)
-                        except:
+                        except Exception as e:
                             logging.error(f"{self.name} | Evaluate | Could not parse data at index {i + 1} from "
-                                          f"'{path}'.")
+                                          f"'{path}': {e}")
                             result = None
                             break
                     elif title == "Reasoning" or title == "Functions" or title == "API":
-                        # noinspection PyBroadException
                         try:
                             data = data == "True"
-                        except:
+                        except Exception as e:
                             logging.error(f"{self.name} | Evaluate | Could not parse data at index {i + 1} from "
-                                          f"'{path}'.")
+                                          f"'{path}': {e}")
                             result = None
                             break
                     elif title == "Cost ($)":
-                        # noinspection PyBroadException
                         try:
                             data = float(data.replace("$", ""))
-                        except:
+                        except Exception as e:
                             logging.error(f"{self.name} | Evaluate | Could not parse dollar data at index {i + 1} from "
-                                          f"'{path}'.")
+                                          f"'{path}': {e}")
                             result = None
                             break
                     elif title != "Mode":
@@ -1030,7 +1022,7 @@ class Solver:
         s = s.strip()
         lines = s.splitlines()
         total = len(lines)
-        model_methods = False
+        model_methods = None
         if total < 1:
             provider = ""
         else:
@@ -1041,29 +1033,28 @@ class Solver:
                 logging.info(f"{self.model} | {self.robot.name} | This is a reasoning model.")
             # Use a second line to indicate a provider.
             provider = lines[1].strip() if total >= 2 else ""
-            if total >= 3:
-                model_methods = lines[2].strip().upper()
-                model_methods = model_methods == "TRUE" or model_methods == "1"
             # Get the input token cost.
-            if total >= 4:
-                input_cost = lines[3].replace("$", "").strip()
-                # noinspection PyBroadException
+            if total >= 3:
+                input_cost = lines[2].replace("$", "").strip()
                 try:
                     self.input_cost = max(float(input_cost), 0)
-                except:
+                except Exception as e:
                     logging.warning(f"{self.model} | {self.robot.name} | Could not parse input cost from "
-                                    f"'{input_cost}'.")
+                                    f"'{input_cost}': {e}")
                     self.input_cost = None
             # Get the output token cost.
-            if total >= 5:
-                output_cost = lines[4].replace("$", "").strip()
-                # noinspection PyBroadException
+            if total >= 4:
+                output_cost = lines[3].replace("$", "").strip()
                 try:
                     self.output_cost = max(float(output_cost), 0)
-                except:
+                except Exception as e:
                     logging.warning(f"{self.model} | {self.robot.name} | Could not parse output cost from "
-                                    f"'{output_cost}'.")
+                                    f"'{output_cost}': {e}")
                     self.output_cost = None
+            # Get if this model supports methods.
+            if total >= 5:
+                model_methods = lines[4].strip().upper()
+                model_methods = model_methods == "TRUE" or model_methods == "1"
         if not self.reasoning:
             logging.info(f"{self.model} | {self.robot.name} | This is not a reasoning model.")
         # If there are details, this indicates the provider of the model.
@@ -1094,7 +1085,7 @@ class Solver:
                     if len(lines) > 1:
                         methods = lines[1].upper()
                         if methods == "TRUE" or methods == "1":
-                            if model_methods:
+                            if model_methods is None or model_methods is True:
                                 self.methods = True
                                 logging.info(f"{self.model} | {self.robot.name} | Model and provider '{provider}' "
                                              f"support methods.")
@@ -1189,13 +1180,12 @@ class Solver:
                     logging.error(f"{self.model} | {self.robot.name} | {lower + 1} to {upper + 1} | {solving} | {mode} "
                                   f"| Get Cost | Could not parse '{path}'.")
                     continue
-                # noinspection PyBroadException
                 try:
                     inputs = int(data[0])
                     outputs = int(data[1])
-                except:
+                except Exception as e:
                     logging.error(f"{self.model} | {self.robot.name} | {lower + 1} to {upper + 1} | {solving} | {mode} "
-                                  f"| Get Cost | Could not extract tokens from '{path}'.")
+                                  f"| Get Cost | Could not extract tokens from '{path}': {e}")
                     continue
                 # Add the cost for each response.
                 cost += (inputs * self.input_cost) + (outputs * self.output_cost)
@@ -1238,13 +1228,12 @@ class Solver:
                                   f"| Get Cost | Model to inherit '{sub_model}' in '{path}' is not an option.")
                     continue
                 # Parse lower and upper bounds.
-                # noinspection PyBroadException
                 try:
                     sub_lower = int(info[1])
                     sub_upper = int(info[2])
-                except:
+                except Exception as e:
                     logging.error(f"{self.model} | {self.robot.name} | {lower + 1} to {upper + 1} | {solving} | {mode} "
-                                  f"| Get Cost | Could not extract joint parts from '{path}'.")
+                                  f"| Get Cost | Could not extract joint parts from '{path}': {e}")
                     continue
                 # Parse what it was solving for.
                 sub_solving = info[3]
@@ -1535,7 +1524,7 @@ class Solver:
             for i in range(joints):
                 num = i + 1
                 forwards["function"]["parameters"]["properties"][f"joint{num}"] = {
-                    "type":  "number",
+                    "type": "number",
                     "description": f"The value to set joint {num} to."
                 }
                 required.append(f"joint{num}")
@@ -2220,9 +2209,30 @@ class Solver:
     def __str__(self) -> str:
         """
         Print as a string.
-        :return: The name of this solver.
+        :return: The details of this solver.
         """
-        return self.model
+        # If the solver is not valid, return the name and state this.
+        if not self.is_valid():
+            return f"{self.model} | Invalid"
+        is_api = self.url is not None
+        # Chat models don't have much to display.
+        s = f"{self.robot.name} | {self.model} | "
+        if not is_api:
+            return f"{s}Chat | Reasoning = {self.reasoning}"
+        s += (f"API | Reasoning = {self.reasoning} | Input = "
+              f"{'None' if self.input_cost is None else f'${neat(self.input_cost)}'} | Output = "
+              f"{'None' if self.output_cost is None else f'${neat(self.output_cost)}'} | URL = {self.url} | Inherited "
+              f"=")
+        # Add the names of all inherited models.
+        has_inherited = False
+        for inherited in self.options:
+            if self == inherited or inherited.model == self.model:
+                continue
+            has_inherited = True
+            s += f" {inherited.model}"
+        if not has_inherited:
+            s += " None"
+        return s
 
     def load_code(self, lower: int = 0, upper: int = -1, orientation: bool = False, mode: str = NORMAL,
                   suppress: bool = False) -> bool:
@@ -2858,7 +2868,7 @@ class Solver:
                          f"successful solver solving for '{current_orientation}' in mode '{best_mode}'.")
             costs, feedbacks, forwards, tests = best.get_cost(lower, upper, current_orientation, best_mode)
             return ([{"Solver": best, "Lower": lower, "Upper": upper,
-                     "Solving": TRANSFORM if current_orientation else POSITION, "Mode": best_mode}], feedbacks,
+                      "Solving": TRANSFORM if current_orientation else POSITION, "Mode": best_mode}], feedbacks,
                     forwards, tests, costs)
         # If this was a base case, there are no valid options.
         if lower == upper:
@@ -3384,7 +3394,8 @@ def llm_ik(robots: str or list[str] or None = None, max_length: int = 0, orienta
     for robot in created_robots:
         robot.load_data()
     # Sort API models from cheapest to most expensive.
-    created_models = sorted(created_models, key=lambda x: (x.url, x.reasoning, x.output_cost, x.input_cost, x.model))
+    created_models = sorted(created_models, key=lambda x: (x.robot.name, x.url, x.reasoning, x.output_cost,
+                                                           x.input_cost, x.model))
     # Get the API models.
     api_models = []
     for solver in created_models:
@@ -3407,6 +3418,9 @@ def llm_ik(robots: str or list[str] or None = None, max_length: int = 0, orienta
         # No point in calling if there is nothing to inherit.
         if len(options) > 0:
             solver.set_inherited(options)
+    # Log the inherited options.
+    for solver in created_models:
+        logging.info(solver)
     if run:
         total_robots = len(robots)
         total_models = len(api_models)

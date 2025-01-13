@@ -2168,7 +2168,7 @@ class Solver:
             # Remove any of the extra running or testing code.
             last_valid = len(lines)
             for line in reversed(lines):
-                if lines == "" or line.startswith(" ") or line.startswith("\t"):
+                if line == "" or line.startswith(" ") or line.startswith("\t"):
                     break
                 last_valid -= 1
             # Put the code together again.

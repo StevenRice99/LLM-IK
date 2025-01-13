@@ -64,6 +64,7 @@ MAX_PROMPTS = 5
 EXAMPLES = 10
 DISTANCE_ERROR = 0.001
 ANGLE_ERROR = 0.001
+WAIT = 10
 
 # Default bounding value.
 BOUND = 2 * np.pi
@@ -1356,13 +1357,15 @@ class Solver:
         # Save the options.
         self.options = options
 
-    def perform(self, orientation: bool = False, mode: str = NORMAL, max_length: int = 0, run: bool = False) -> bool:
+    def perform(self, orientation: bool = False, mode: str = NORMAL, max_length: int = 0, run: bool = False,
+                wait: int = WAIT) -> bool:
         """
         Perform solver logic.
         :param orientation: If we want to solve for orientation in addition to position.
         :param mode: The highest mode we want to run API calls with
         :param max_length: The maximum chain length to run.
         :param run: If API calls should be run.
+        :param wait: How long to wait between API calls.
         :return: True if there were no API errors, false otherwise.
         """
         # Nothing to load if the solver is not valid.
@@ -1420,11 +1423,23 @@ class Solver:
                                     break
                             # Run the API if all checks were passed.
                             if not self.run_api(lower, upper, current_orientation, current_mode, messages):
-                                logging.error(f"{self.model} | {self.robot.name} | {lower + 1} to {upper + 1} | "
-                                              f"{TRANSFORM if current_orientation else POSITION} | {current_mode} | "
-                                              "Stopping API calls as there was an error.")
-                                run = False
-                                successful = False
+                                if self.input_cost > 0 or self.output_cost > 0:
+                                    logging.error(f"{self.model} | {self.robot.name} | {lower + 1} to {upper + 1} | "
+                                                  f"{TRANSFORM if current_orientation else POSITION} | {current_mode} |"
+                                                  " Model is not free; stopping API calls as there was an error.")
+                                    run = False
+                                    successful = False
+                                else:
+                                    logging.error(f"{self.model} | {self.robot.name} | {lower + 1} to {upper + 1} | "
+                                                  f"{TRANSFORM if current_orientation else POSITION} | {current_mode} |"
+                                                  " Error but model was free, continuing.")
+                            # On a success or a continue error, wait for the next API call if needed.
+                            if run and wait > 1:
+                                logging.info(f"{self.model} | {self.robot.name} | {lower + 1} to {upper + 1} | "
+                                             f"{TRANSFORM if current_orientation else POSITION} | {current_mode} | "
+                                             f"Waiting for {wait} second{'' if wait == 1 else 's'} before next API "
+                                             f"call.")
+                                time.sleep(wait)
         # Return if everything was successful or not.
         return successful
 
@@ -1619,6 +1634,15 @@ class Solver:
         # Log the raw response.
         logging.info(f"{self.model} | {self.robot.name} | {lower + 1} to {upper + 1} | {solving} | {mode} | Run API | "
                      f"Response | {completion}")
+        # See if there is an error directly indicated.
+        if hasattr(completion, "error") and completion.error is not None:
+            s = f"{self.model} | {self.robot.name} | {lower + 1} to {upper + 1} | {solving} | {mode} | Run API"
+            if "code" in completion.error:
+                s += f" | Code: {completion.error['code']}"
+            if "message" in completion.error:
+                s += f" | Message: {completion.error['message']}"
+            logging.error(s)
+            return False
         # Get the response message.
         if completion.choices is None or len(completion.choices) < 1:
             logging.error(f"{self.model} | {self.robot.name} | {lower + 1} to {upper + 1} | {solving} | {mode} | Run "
@@ -1635,7 +1659,8 @@ class Solver:
                           f"API | No finish reason given in the response{reason}")
             return False
         # Check if we ran out of tokens.
-        if response.finish_reason == "length":
+        finish_reason = response.finish_reason.upper()
+        if finish_reason == "LENGTH":
             if response.message is not None and response.message.refusal is not None:
                 reason = f": {response.message.refusal}"
             else:
@@ -1644,7 +1669,7 @@ class Solver:
                           f"API | Stopped as ran out of tokens{reason}")
             return False
         # Check if the content filter flagged this.
-        if response.finish_reason == "content_filter":
+        if finish_reason == "CONTENT_FILTER":
             if response.message is not None and response.message.refusal is not None:
                 reason = f": {response.message.refusal}"
             else:
@@ -1660,12 +1685,12 @@ class Solver:
         # Get the message in the response.
         message = response.message
         # Check if there is a reason for refusing to create the proper message.
-        if message.refusal is not None:
+        if message.refusal is not None and message.refusal != "":
             logging.error(f"{self.model} | {self.robot.name} | {lower + 1} to {upper + 1} | {solving} | {mode} | Run "
                           f"API | Refused to return a message: {message.refusal}")
             return False
         # Handle if this was a regular text response.
-        if response.finish_reason == "stop":
+        if finish_reason == "STOP":
             # If for some reason there was no content, there was some undocumented error.
             if message.content is None or len(message.content) < 1:
                 logging.error(f"{self.model} | {self.robot.name} | {lower + 1} to {upper + 1} | {solving} | {mode} | "
@@ -1678,7 +1703,7 @@ class Solver:
                               "Run API | Returned content was whitespace.")
                 return False
         # Handle if this was a tools call, also checking the older deprecated function call name.
-        elif response.finish_reason == "tool_calls" or response.finish_reason == "function_call":
+        elif finish_reason == "TOOL_CALLS" or finish_reason == "FUNCTION_CALL":
             # Ensure there is a call to a function.
             if message.tool_calls is None or len(message.tool_calls) < 1:
                 logging.error(f"{self.model} | {self.robot.name} | {lower + 1} to {upper + 1} | {solving} | {mode} | "
@@ -1723,7 +1748,7 @@ class Solver:
         # Otherwise, the finish reason is an undocumented error.
         else:
             logging.error(f"{self.model} | {self.robot.name} | {lower + 1} to {upper + 1} | {solving} | {mode} | Run "
-                          f"API | Unknown finish reason of '{response.finish_reason}' returned.")
+                          f"API | Unknown finish reason of '{finish_reason}' returned.")
             return False
         # Get the number of tokens used to handle this interaction.
         if completion.usage is None:
@@ -2472,7 +2497,7 @@ class Solver:
                                   f"Incorrect elapsed time data in '{p}'.")
                     continue
                 try:
-                    f = float(s.replace("s", "").strip())
+                    f = float(lines[1].replace("s", "").strip())
                 except Exception as e:
                     logging.error(f"{self.model} | {lower + 1} to {upper + 1} | {solving} | {mode} | Evaluate | Could "
                                   f"not parse time data from '{p}': {e}")
@@ -3216,7 +3241,7 @@ def llm_ik(robots: str or list[str] or None = None, max_length: int = 0, orienta
            feedbacks: int = MAX_PROMPTS, examples: int = EXAMPLES, training: int = TRAINING,
            evaluating: int = EVALUATING, seed: int = SEED, distance_error: float = DISTANCE_ERROR,
            angle_error: float = ANGLE_ERROR, run: bool = False, cwd: str or None = None, level: str = "INFO",
-           bypass: bool = False) -> None:
+           bypass: bool = False, wait: int = WAIT) -> None:
     """
     Run LLM inverse kinematics.
     :param robots: The names of the robots.
@@ -3234,6 +3259,7 @@ def llm_ik(robots: str or list[str] or None = None, max_length: int = 0, orienta
     :param cwd: The working directory.
     :param level: The logging level.
     :param bypass: Bypass the confirmation for API running.
+    :param wait: How long to wait between API calls.
     :return: Nothing.
     """
     # Set the logging level.
@@ -3488,10 +3514,12 @@ def llm_ik(robots: str or list[str] or None = None, max_length: int = 0, orienta
             run = False
     else:
         logging.info("Not running LLM API calls.")
+    if run and wait > 1:
+        logging.info(f"Waiting for {wait} second {'' if wait == 1 else 's'} between API calls.")
     # Run the solvers, making API calls only on those that should be.
     for solver in created_models:
         run_instance = run and solver.robot.name in robots and solver.model in models
-        if not solver.perform(orientation, types, max_length, run_instance):
+        if not solver.perform(orientation, types, max_length, run_instance, wait):
             logging.error("Not performing any more API calls as there were errors.")
             run = False
     # Get per-robot results for all solvers.
@@ -3540,9 +3568,11 @@ if __name__ == "__main__":
     parser.add_argument("-n", "--angle", type=float, default=ANGLE_ERROR, help="The acceptable angle error.")
     parser.add_argument("-c", "--cwd", type=str or None, default=None, help="The working directory.")
     parser.add_argument("-l", "--logging", type=str, default="INFO", help="The logging level.")
+    parser.add_argument("-w", "--wait", type=int, default=WAIT, help="How long to wait between API calls.")
     parser.add_argument("-u", "--run", action="store_true", help="Enable API running.")
     parser.add_argument("-b", "--bypass", action="store_true", help="Bypass the confirmation for API running.")
     args = parser.parse_args()
     # Run the program.
     llm_ik(args.robots, args.max, args.orientation, args.types, args.feedbacks, args.examples, args.training,
-           args.evaluating, args.seed, args.distance, args.angle, args.run, args.cwd, args.logging, args.bypass)
+           args.evaluating, args.seed, args.distance, args.angle, args.run, args.cwd, args.logging, args.bypass,
+           args.wait)

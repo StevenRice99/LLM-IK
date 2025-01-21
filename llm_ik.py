@@ -767,9 +767,9 @@ class Robot:
                   f"for these links.")
         s += (" Do not write any code to run or test the method, as this will be handled for you. Assume all targets "
               "given as inputs to the method will be reachable, and as such do not write code to check if the target is"
-              " reachable. You may use any methods included in Python, NumPy, SymPy, and SciPy to write your solution "
-              f"except for any iterative optimization methods.{additional}\n</INSTRUCTIONS>\n<DETAILS>\n{table}\n"
-              "</DETAILS>\n<CODE>\ndef inverse_kinematics(p: tuple[float, float, float]")
+              " reachable. You may use any methods included in Python, NumPy, and SymPy to write your solution except "
+              f"for any optimization methods.{additional}\n</INSTRUCTIONS>\n<DETAILS>\n{table}\n</DETAILS>\n<CODE>\n"
+              "def inverse_kinematics(p: tuple[float, float, float]")
         if orientation:
             s += ", r: tuple[float, float, float]"
         reach = ' and orientation "r"' if orientation else ""

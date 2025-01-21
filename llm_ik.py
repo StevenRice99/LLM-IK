@@ -421,7 +421,8 @@ class Robot:
                     chain = ikpy.chain.Chain(instance_links, instance_active,
                                              f"{self.name} from joints {lower + 1} to {upper + 1}")
                     self.chains[lower][upper] = chain
-                    with open(os.path.join(self.info, f"{lower + 1}-{upper + 1}.txt"), "w") as file:
+                    with open(os.path.join(self.info, f"{lower + 1}-{upper + 1}.txt"), "w", encoding="utf-8",
+                              errors="ignore") as file:
                         file.write(self.details(lower, upper)[0])
         logging.info(f"{self.name} | Loaded.")
 
@@ -483,7 +484,7 @@ class Robot:
                     # Save results.
                     os.makedirs(self.results, exist_ok=True)
                     path = os.path.join(self.results, f"{lower}-{upper}-{TRANSFORM if orientation else POSITION}.csv")
-                    with open(path, "w") as file:
+                    with open(path, "w", encoding="utf-8", errors="ignore") as file:
                         file.write(s)
         logging.info(f"{self.name} | Save Results | IKPy results saved.")
 
@@ -1000,7 +1001,7 @@ class Robot:
                                   f"'{POSITION}' or '{TRANSFORM}'.")
                     continue
                 # Read the file.
-                with open(path, "r") as file:
+                with open(path, "r", encoding="utf-8", errors="ignore") as file:
                     s = file.read()
                 lines = s.splitlines()
                 if len(lines) != 2:
@@ -1167,7 +1168,7 @@ class Robot:
                                 data = f"${neat(data)}"
                             s += f",{data}"
                     path = os.path.join(results_root, f"{lower}-{upper}-{solving}.csv")
-                    with open(path, "w") as file:
+                    with open(path, "w", encoding="utf-8", errors="ignore") as file:
                         file.write(s)
         # Calculate the average results.
         evaluate_averages(totals, results_root)
@@ -1231,7 +1232,7 @@ class Solver:
         # Ensure itself is an option.
         self.options.append(self)
         # Read the models' file.
-        with open(path, "r") as file:
+        with open(path, "r", encoding="utf-8", errors="ignore") as file:
             s = file.read()
         s = s.strip()
         lines = s.splitlines()
@@ -1286,7 +1287,7 @@ class Solver:
                                 "a chat interface without methods instead.")
             # Otherwise, load the provider.
             else:
-                with open(path, "r") as file:
+                with open(path, "r", encoding="utf-8", errors="ignore") as file:
                     s = file.read()
                 s = s.strip()
                 # If there was no URL for the provider, indicate this.
@@ -1344,7 +1345,7 @@ class Solver:
         if not os.path.exists(path):
             logging.info(f"{self.model} | {self.robot.name} | No key at '{path}' for provider '{provider}'.")
             return
-        with open(path, "r") as file:
+        with open(path, "r", encoding="utf-8", errors="ignore") as file:
             s = file.read()
         self.key = s.strip()
         if self.key == "":
@@ -1387,7 +1388,7 @@ class Solver:
             for tokens in get_files(root):
                 # Read the file.
                 path = os.path.join(root, tokens)
-                with open(path, "r") as file:
+                with open(path, "r", encoding="utf-8", errors="ignore") as file:
                     s = file.read()
                 # Extract the tokens from the file.
                 lines = s.splitlines()
@@ -1425,7 +1426,7 @@ class Solver:
         # Load any inherited data.
         path = os.path.join(self.interactions, portion, f"{INHERITED}.txt")
         if os.path.exists(path):
-            with open(path, "r") as file:
+            with open(path, "r", encoding="utf-8", errors="ignore") as file:
                 s = file.read()
             lines = s.splitlines()
             for line in lines:
@@ -1980,19 +1981,19 @@ class Solver:
         # Save the interaction.
         root = os.path.join(self.interactions, core)
         os.makedirs(root, exist_ok=True)
-        with open(os.path.join(root, f"{total}-{RESPONSE}.txt"), "w") as file:
+        with open(os.path.join(root, f"{total}-{RESPONSE}.txt"), "w", encoding="utf-8", errors="ignore") as file:
             file.write(s)
         # Save the tokens.
         s = f"Input Tokens,Output Tokens\n{input_tokens},{output_tokens}"
         root = os.path.join(self.tokens, core)
         os.makedirs(root, exist_ok=True)
-        with open(os.path.join(root, f"{total}.csv"), "w") as file:
+        with open(os.path.join(root, f"{total}.csv"), "w", encoding="utf-8", errors="ignore") as file:
             file.write(s)
         # Save the elapsed time.
         s = f"Generation Time (s)\n{elapsed} s"
         root = os.path.join(self.elapsed, core)
         os.makedirs(root, exist_ok=True)
-        with open(os.path.join(root, f"{total}.csv"), "w") as file:
+        with open(os.path.join(root, f"{total}.csv"), "w", encoding="utf-8", errors="ignore") as file:
             file.write(s)
         logging.info(f"{self.model} | {self.robot.name} | {lower + 1} to {upper + 1} | {solving} | {mode} | Run API | "
                      "Response received.")
@@ -2218,7 +2219,7 @@ class Solver:
                               f"Handle Interactions | No valid message type in '{searching}'.")
                 return None
             path = os.path.join(root, interactions[i])
-            with open(path, "r") as file:
+            with open(path, "r", encoding="utf-8", errors="ignore") as file:
                 s = file.read()
             history.append({"Type": current_type, "Message": s})
         # Create the initial message.
@@ -2227,7 +2228,8 @@ class Solver:
             s = self.prepare_llm(lower, upper, orientation, mode)
             if s != "":
                 os.makedirs(root, exist_ok=True)
-                with open(os.path.join(root, f"0-{MESSAGE_PROMPT}.txt"), "w") as file:
+                with open(os.path.join(root, f"0-{MESSAGE_PROMPT}.txt"), "w", encoding="utf-8",
+                          errors="ignore") as file:
                     file.write(s)
                 logging.info(f"{self.model} | {self.robot.name} | {lower + 1} to {upper + 1} | {solving} | {mode} | "
                              f"Handle Interactions | Initial prompt generated.")
@@ -2248,7 +2250,8 @@ class Solver:
                 logging.info(f"{self.model} | {self.robot.name} | {lower + 1} to {upper + 1} | {solving} | {mode} | "
                              f"Handle Interactions | A message for the model exists but {MAX_PROMPTS} feedback"
                              f"{' has' if MAX_PROMPTS == 1 else 's have'} been used; stopping.")
-                with open(os.path.join(root, f"{total}-{MESSAGE_DONE}.txt"), "w") as file:
+                with open(os.path.join(root, f"{total}-{MESSAGE_DONE}.txt"), "w", encoding="utf-8",
+                          errors="ignore") as file:
                     file.write(f"A message for the model exists but {MAX_PROMPTS} feedback"
                                f"{' has' if MAX_PROMPTS == 1 else 's have'} been used; stopping.")
                 return None
@@ -2268,7 +2271,8 @@ class Solver:
                 logging.info(f"{self.model} | {self.robot.name} | {lower + 1} to {upper + 1} | {solving} | {mode} | "
                              f"Handle Interactions | A command was requested but {MAX_PROMPTS} feedback"
                              f"{' has' if MAX_PROMPTS == 1 else 's have'} been used; stopping.")
-                with open(os.path.join(root, f"{total}-{MESSAGE_DONE}.txt"), "w") as file:
+                with open(os.path.join(root, f"{total}-{MESSAGE_DONE}.txt"), "w", encoding="utf-8",
+                          errors="ignore") as file:
                     file.write(f"A command was requested but {MAX_PROMPTS} feedback"
                                f"{' has' if MAX_PROMPTS == 1 else 's have'} been used; stopping.")
                 return None
@@ -2314,7 +2318,8 @@ class Solver:
                             s = ("<ERROR>\nCould not parse joint values to call forward kinematics; ensure they are all"
                                  " floats.\n</ERROR>")
                     os.makedirs(root, exist_ok=True)
-                    with open(os.path.join(root, f"{total}-{MESSAGE_FORWARD}.txt"), "w") as file:
+                    with open(os.path.join(root, f"{total}-{MESSAGE_FORWARD}.txt"), "w", encoding="utf-8",
+                              errors="ignore") as file:
                         file.write(s)
                     history.append({"Type": MESSAGE_FORWARD, "Message": s})
                     return history
@@ -2384,7 +2389,8 @@ class Solver:
                             s = ("<ERROR>\nCould not parse parameters to test the solution; ensure they are all floats."
                                  "</ERROR>")
                     os.makedirs(root, exist_ok=True)
-                    with open(os.path.join(root, f"{total}-{MESSAGE_TEST}.txt"), "w") as file:
+                    with open(os.path.join(root, f"{total}-{MESSAGE_TEST}.txt"), "w", encoding="utf-8",
+                              errors="ignore") as file:
                         file.write(s)
                     history.append({"Type": MESSAGE_TEST, "Message": s})
                     return history
@@ -2394,7 +2400,8 @@ class Solver:
             s = ("<ERROR>\nYou did not respond with valid code to solve the inverse kinematics or a valid command.\n"
                  "</ERROR>")
             os.makedirs(root, exist_ok=True)
-            with open(os.path.join(root, f"{total}-{MESSAGE_FEEDBACK}.txt"), "w") as file:
+            with open(os.path.join(root, f"{total}-{MESSAGE_FEEDBACK}.txt"), "w", encoding="utf-8",
+                      errors="ignore") as file:
                 file.write(s)
             history.append({"Type": MESSAGE_FEEDBACK, "Message": s})
             return history
@@ -2411,7 +2418,7 @@ class Solver:
                      "Interactions | Extracted code.")
         # Save the code so it can be loaded by the program.
         os.makedirs(self.solutions, exist_ok=True)
-        with open(code_path, "w") as file:
+        with open(code_path, "w", encoding="utf-8", errors="ignore") as file:
             file.write(code)
         # Evaluate the code.
         self.load_code(lower, upper, orientation, mode)
@@ -2422,7 +2429,8 @@ class Solver:
             logging.info(f"{self.model} | {self.robot.name} | {lower + 1} to {upper + 1} | {solving} | {mode} | Handle "
                          "Interactions | Performed perfectly on the training set; done.")
             os.makedirs(root, exist_ok=True)
-            with open(os.path.join(root, f"{total}-{MESSAGE_DONE}.txt"), "w") as file:
+            with open(os.path.join(root, f"{total}-{MESSAGE_DONE}.txt"), "w", encoding="utf-8",
+                      errors="ignore") as file:
                 file.write("Code performed perfectly; interactions with the model are done.")
             return None
         # If there were errors but the maximum number of feedbacks have been given, stop.
@@ -2431,14 +2439,15 @@ class Solver:
                          f"had errors but {MAX_PROMPTS} feedback{' has' if MAX_PROMPTS == 1 else 's have'} been used; "
                          "stopping.")
             os.makedirs(root, exist_ok=True)
-            with open(os.path.join(root, f"{total}-{MESSAGE_DONE}.txt"), "w") as file:
+            with open(os.path.join(root, f"{total}-{MESSAGE_DONE}.txt"), "w", encoding="utf-8",
+                      errors="ignore") as file:
                 file.write(f"Code had errors but {MAX_PROMPTS} feedback{' has' if MAX_PROMPTS == 1 else 's have'} been "
                            "used; stopping.")
             return None
         # Otherwise, prepare feedback to provide to the LLM.
         path = os.path.join(root, f"{total}-{MESSAGE_FEEDBACK}.txt")
         os.makedirs(root, exist_ok=True)
-        with open(path, "w") as file:
+        with open(path, "w", encoding="utf-8", errors="ignore") as file:
             file.write(s)
         logging.info(f"{self.model} | {self.robot.name} | {lower + 1} to {upper + 1} | {solving} | {mode} | Handle "
                      f"Interactions | New feedback saved.")
@@ -2681,7 +2690,7 @@ class Solver:
             times = get_files(root)
             for t in times:
                 p = os.path.join(root, t)
-                with open(p, "r") as file:
+                with open(p, "r", encoding="utf-8", errors="ignore") as file:
                     s = file.read()
                 lines = s.splitlines()
                 if len(lines) < 2:
@@ -2702,7 +2711,7 @@ class Solver:
              f"{total_angle if orientation else 0}°,{total_time} s,{generation_time} s,{mode},{feedbacks},{forwards},"
              f"{testings},{self.reasoning},{self.methods},{self.url != ''},${neat(cost)}")
         os.makedirs(self.results, exist_ok=True)
-        with open(os.path.join(self.results, f"{name}.csv"), "w") as file:
+        with open(os.path.join(self.results, f"{name}.csv"), "w", encoding="utf-8", errors="ignore") as file:
             file.write(s)
 
     def code_successful(self, lower: int = 0, upper: int = -1, orientation: bool = False,
@@ -2966,10 +2975,11 @@ class Solver:
                     return ""
             # Save the inherited information.
             s = f"{best.model}|{lower}|{previous}|{previous_solving}|{previous_mode}"
-            path = os.path.join(self.interactions, f"{lower}-{upper}-{TRANSFORM if orientation else POSITION}-{EXTEND}")
-            os.makedirs(path, exist_ok=True)
-            path = os.path.join(path, f"{INHERITED}.txt")
-            with open(path, "w") as file:
+            inherited_path = os.path.join(self.interactions,
+                                          f"{lower}-{upper}-{TRANSFORM if orientation else POSITION}-{EXTEND}")
+            os.makedirs(inherited_path, exist_ok=True)
+            inherited_path = os.path.join(inherited_path, f"{INHERITED}.txt")
+            with open(inherited_path, "w", encoding="utf-8", errors="ignore") as file:
                 file.write(s)
             # Add the extending prompt portions.
             total = upper - lower
@@ -2980,7 +2990,7 @@ class Solver:
                           f"You can use this solution as a starting point to extend for the entire chain.{pre}")
             prompt = self.robot.prepare_llm(lower, upper, orientation, additional)
             prompt += "\n<EXISTING>\n"
-            with open(path, "r") as file:
+            with open(path, "r", encoding="utf-8", errors="ignore") as file:
                 prompt += file.read().strip()
             logging.info(f"{self.model} | {self.robot.name} | {lower + 1} to {upper + 1} | Prepare LLM | Extended "
                          "prompt prepared.")
@@ -3048,7 +3058,7 @@ class Solver:
                 logging.error(f"{self.model} | {self.robot.name} | {lower + 1} to {upper + 1} | Prepare LLM | Part of "
                               f"dynamic chain at '{path}' does not exist.")
                 return ""
-            with open(path, "r") as file:
+            with open(path, "r", encoding="utf-8", errors="ignore") as file:
                 codes.append(file.read().strip())
             # Add the inherited data.
             t = f"{solver.model}|{c_lower}|{c_upper}|{c_solving}|{c_mode}"
@@ -3060,7 +3070,7 @@ class Solver:
         path = os.path.join(self.interactions, f"{lower}-{upper}-{TRANSFORM if orientation else POSITION}-{mode}")
         os.makedirs(path, exist_ok=True)
         path = os.path.join(path, f"{INHERITED}.txt")
-        with open(path, "w") as file:
+        with open(path, "w", encoding="utf-8", errors="ignore") as file:
             file.write(inherit)
         # Explain the dynamic chains.
         additional = (' To help you, solutions for sub-chains have been provided in the "EXISTING" sections. Each code '
@@ -3425,7 +3435,7 @@ def evaluate_averages(totals: dict[str, str or float or int or bool] or None = N
                         s += f",{data}"
                     s += f",{averages[length][solving][name]['Chains']}"
                 path = os.path.join(root, f"{AVERAGE}-{length}-{solving}.csv")
-                with open(path, "w") as file:
+                with open(path, "w", encoding="utf-8", errors="ignore") as file:
                     file.write(s)
 
 

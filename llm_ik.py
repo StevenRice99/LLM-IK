@@ -1188,11 +1188,11 @@ class Solver:
         """
         self.code = None
         self.reasoning = False
-        self.url = None
+        self.url = ""
         self.methods = False
         self.key = ""
-        self.input_cost = None
-        self.output_cost = None
+        self.input_cost = 0
+        self.output_cost = 0
         self.options = []
         self.api_name = None
         # Ensure the file exists.
@@ -1321,9 +1321,10 @@ class Solver:
         else:
             logging.info(f"{self.model} | {self.robot.name} | Chat interface model.")
         # If no path, remove costs, as non-API methods should not inherit or be inherited.
-        if self.url is None:
-            self.input_cost = None
-            self.output_cost = None
+        if self.url is None or self.url == "":
+            self.url = ""
+            self.input_cost = 0
+            self.output_cost = 0
             return
         # Otherwise, this is an API, so ensure costs are handled properly.
         if self.input_cost is None and self.output_cost is None:
@@ -1489,7 +1490,7 @@ class Solver:
             logging.error(f"{self.model} | Set Inherited | Solver is not valid.")
             return None
         # If nothing is passed or this does not use an API with a valid cost, use only itself as an option.
-        if self.url is None:
+        if self.url is None or self.url == "":
             self.options = [self]
             logging.info(f"{self.model} | {self.robot.name} | Set Inherited | Only API models can inherit.")
             return None
@@ -1615,8 +1616,8 @@ class Solver:
                             # Get the messages to send to the LLM.
                             messages = self.handle_interactions(lower, upper, current_orientation, current_mode)
                             # If there are no messages, or we should not call the LLM due to parameters, stop.
-                            if (messages is None or len(messages) < 1 or self.url is None or not run or
-                                    current_orientation not in orientation or current_mode not in mode
+                            if (messages is None or len(messages) < 1 or self.url is None or self.url == "" or not run
+                                    or current_orientation not in orientation or current_mode not in mode
                                     or length >= max_length):
                                 break
                             # For higher chains, one more check to only solve them if the lower chains were successful.
@@ -2453,7 +2454,7 @@ class Solver:
         # If the solver is not valid, return the name and state this.
         if not self.is_valid():
             return f"{self.model} | Invalid"
-        is_api = self.url is not None
+        is_api = self.url is not None and self.url != ""
         # Chat models don't have much to display.
         s = f"{self.robot.name} | {self.model} | "
         if not is_api:
@@ -2700,7 +2701,7 @@ class Solver:
              "Average Elapsed Time (s),Generation Time (s),Mode,Feedbacks Given,Forwards Kinematics Calls,Testing Calls"
              f",Reasoning,Functions,API,Cost ($)\n{successes}%,{failures}%,{errors}%,{total_distance},"
              f"{total_angle if orientation else 0}°,{total_time} s,{generation_time} s,{mode},{feedbacks},{forwards},"
-             f"{testings},{self.reasoning},{self.methods},{self.url is not None},${neat(cost)}")
+             f"{testings},{self.reasoning},{self.methods},{self.url is not None and self.url != ''},${neat(cost)}")
         os.makedirs(self.results, exist_ok=True)
         with open(os.path.join(self.results, f"{name}.csv"), "w") as file:
             file.write(s)
@@ -3640,9 +3641,9 @@ def llm_ik(robots: str or list[str] or None = None, max_length: int = 0, orienta
                                                            x.input_cost, x.model))
     # Get the API models.
     api_models = []
-    for solver in created_models:
-        if solver.url is not None and solver.input_cost is not None and solver.output_cost is not None:
-            api_models.append(solver)
+    for s in created_models:
+        if s.url is not None and s.url != "" and s.input_cost is not None and s.output_cost is not None:
+            api_models.append(s)
     # Set up inheriting for API models.
     for solver in api_models:
         options = []

@@ -65,7 +65,7 @@ MAX_PROMPTS = 5
 EXAMPLES = 10
 DISTANCE_ERROR = 0.001
 ANGLE_ERROR = 0.001
-WAIT = 10
+WAIT = 1
 
 # Default bounding value.
 BOUND = 2 * np.pi
@@ -79,6 +79,47 @@ FIELDS = ["Success Rate (%)", "Failure Rate (%)", "Error Rate (%)", "Average Fai
 NUMERIC = ["Success Rate (%)", "Failure Rate (%)", "Error Rate (%)", "Average Failure Distance",
            "Average Failure Angle (°)", "Average Elapsed Time (s)", "Generation Time (s)", "Feedbacks Given",
            "Forwards Kinematics Calls", "Testing Calls", "Cost ($)"]
+
+
+def extract_method_call(s: str, forward_parameters: int, test_parameters: int) -> str:
+    """
+    Extracts the last occurrence of either "FORWARD_KINEMATICS" or "TEST_SOLUTION" along with up to the specified
+    number of parameters from the input string.
+    :param s: The input plain-text string.
+    :param forward_parameters: Maximum number of parameters for "FORWARD_KINEMATICS".
+    :param test_parameters: Maximum number of parameters for "TEST_SOLUTION".
+    :return: The method call with parameters as a single string, or an empty string if neither method is found.
+    """
+    # Define the method names and their corresponding max parameters.
+    methods = {
+        "FORWARD_KINEMATICS": forward_parameters,
+        "TEST_SOLUTION": test_parameters
+    }
+    # Compile a regex pattern to match either method name ensuring they are not part of larger words.
+    pattern = re.compile(r"(?<!\w)(FORWARD_KINEMATICS|TEST_SOLUTION)\b")
+    # Find all matches in the string.
+    matches = list(pattern.finditer(s))
+    # If no matches found, return empty string.
+    if not matches:
+        return ""
+    # Select the last match.
+    last_match = matches[-1]
+    method_name = last_match.group(1)
+    max_params = methods[method_name]
+    # Get the substring starting right after the method name.
+    start_pos = last_match.end()
+    substring = s[start_pos:]
+    # Define a regex pattern to match numeric values including positive and negative values with scientific notation.
+    number_pattern = re.compile(r"[+-]?\d+(?:\.\d+)?(?:[eE][+-]?\d+)?")
+    # Find all numeric matches in the substring.
+    numeric_params = number_pattern.findall(substring)
+    # Extract up to the maximum number of parameters.
+    extracted_params = numeric_params[:max_params]
+    # If no numeric parameters found, return just the method name
+    if not extracted_params:
+        return method_name
+    # Combine the method name and parameters into a single string
+    return " ".join([method_name] + extracted_params)
 
 
 def process_code(code: str) -> str:
@@ -1703,7 +1744,7 @@ class Solver:
             forwards = {
                 "type": "function",
                 "function": {
-                    "name": "forward_kinematics",
+                    "name": "FORWARD_KINEMATICS",
                     "description": "Test the forward kinematics of the robot.",
                     "parameters": {
                         "type": "object",
@@ -1728,7 +1769,7 @@ class Solver:
                 tests = {
                     "type": "function",
                     "function": {
-                        "name": "test_solution",
+                        "name": "TEST_SOLUTION",
                         "description": "Test your current solution."
                     }
                 }
@@ -2231,27 +2272,22 @@ class Solver:
                     file.write(f"A command was requested but {MAX_PROMPTS} feedback"
                                f"{' has' if MAX_PROMPTS == 1 else 's have'} been used; stopping.")
                 return None
-            # Try every line until a valid command is reached.
-            lines = s.splitlines()
-            total_lines = len(lines)
-            for i in range(total_lines):
-                # In case the command was wrapped in a code block, remove it.
-                line = lines[i].replace("`", "").strip().split()
-                parts = len(line)
-                # If the line is empty, continue.
-                if parts < 1:
-                    continue
+            # Extract the method call.
+            forwards_expected = upper - lower + 1
+            testing_expected = 6 if orientation else 3
+            line = extract_method_call(s, forwards_expected, testing_expected).split()
+            parts = len(line)
+            if parts > 0:
                 # Handle if this is a forward kinematics call.
-                if line[0] == "forward_kinematics":
+                if line[0] == "FORWARD_KINEMATICS":
                     received = parts - 1
                     # Ensure the proper number of joints were given.
-                    expected = upper - lower + 1
-                    if received != expected:
+                    if received != forwards_expected:
                         logging.info(f"{self.model} | {self.robot.name} | {lower + 1} to {upper + 1} | {solving} | "
                                      f"{mode} | Handle Interactions | Forward kinematics call had wrong number of "
                                      "joints.")
                         s = ("<ERROR>\nResponded with the wrong number of joints to call forward kinematics - Responded"
-                             f" with {received} but expected {expected}.\n</ERROR>")
+                             f" with {received} but expected {forwards_expected}.\n</ERROR>")
                     else:
                         try:
                             # Parse the joints.
@@ -2266,8 +2302,8 @@ class Solver:
                             num = len(chain.links)
                             for j in range(num):
                                 data.append([chain.links[j].name, neat(positions[j]), neat(orientations[j])])
-                            s = (f"<FORWARD KINEMATICS>\n{tabulate(data, headers, tablefmt='presto')}\n"
-                                 "</FORWARD KINEMATICS>")
+                            s = (f"<FORWARD_KINEMATICS>\n{tabulate(data, headers, tablefmt='presto')}\n"
+                                 "</FORWARD_KINEMATICS>")
                             logging.info(f"{self.model} | {self.robot.name} | {lower + 1} to {upper + 1} | {solving} | "
                                          f"{mode} | Handle Interactions | Performed forward kinematics.")
                         except Exception as e:
@@ -2283,9 +2319,8 @@ class Solver:
                     history.append({"Type": MESSAGE_FORWARD, "Message": s})
                     return history
                 # Handle if this is a solution testing call.
-                elif line[0] == "test_solution":
+                elif line[0] == "TEST_SOLUTION":
                     received = parts - 1
-                    expected = 6 if orientation else 3
                     # If there is no solution to begin with, there is nothing to do.
                     if not os.path.exists(code_path):
                         logging.info(f"{self.model} | {self.robot.name} | {lower + 1} to {upper + 1} | {solving} | "
@@ -2293,12 +2328,12 @@ class Solver:
                         s = ("<ERROR>\nYou have not yet provided a solution to the code for testing. Please provided "
                              "one before calling this function.\n</ERROR>")
                     # Indicate if the wrong number of parameters were received.
-                    elif received != expected:
+                    elif received != testing_expected:
                         logging.info(f"{self.model} | {self.robot.name} | {lower + 1} to {upper + 1} | {solving} | "
                                      f"{mode} | Handle Interactions | Test solution call had wrong number of "
                                      "parameters.")
                         s = ("<ERROR>\nResponded with the wrong number of parameters to test your solution - Responded "
-                             f"with {received} but expected {expected}.\n</ERROR>")
+                             f"with {received} but expected {testing_expected}.\n</ERROR>")
                     else:
                         try:
                             # Parse the position and orientation to reach.
@@ -2338,8 +2373,8 @@ class Solver:
                                 num = len(chain.links)
                                 for j in range(num):
                                     data.append([chain.links[j].name, neat(positions[j]), neat(orientations[j])])
-                                s = (f"<TEST SOLUTION>\n{p}\n{tabulate(data, headers, tablefmt='presto')}\n"
-                                     "</TEST SOLUTION>")
+                                s = (f"<TEST_SOLUTION>\n{p}\n{tabulate(data, headers, tablefmt='presto')}\n"
+                                     "</TEST_SOLUTION>")
                                 logging.info(f"{self.model} | {self.robot.name} | {lower + 1} to {upper + 1} | "
                                              f"{solving} | {mode} | Handle Interactions | Solution tested.")
                         except Exception as e:
@@ -2877,17 +2912,17 @@ class Solver:
                     d += f', and "joint{upper}" are the joint values as floats.'
             t = ("Returns the position and orientation of all links in world space after testing your current inverse "
                  'kinematics solution code where "positionX", "positionY", and "positionZ" are the target position')
-            p = "test_solution positionX positionY positionZ"
+            p = "TEST_SOLUTION positionX positionY positionZ"
             if orientation:
                 t += ', and "orientationX", "orientationY", and "orientationZ" are the target orientation as radians.'
                 p += " orientationX orientationY orientationZ"
             else:
                 t += "."
             post = ('\n<FUNCTIONS>\n\t<USAGE>\n\tTo use a function, response with the format denoted in the "FORMAT" '
-                    "section of the function.\n\t</USAGE>\n\t<FORWARD KINEMATICS>\n\t\t<FORMAT>\n\t\tforward_kinematics"
-                    f"{j}\n\t\t</FORMAT>\n\t\t<DESCRIPTION>\n\t\t{d}\n\t\t</DESCRIPTION>\n\t</FORWARD KINEMATICS>\n\t"
-                    f"<TEST SOLUTION>\n\t\t<FORMAT>\n\t\t{p}\n\t\t</FORMAT>\n\t\t<DESCRIPTION>\n\t\t{t}\n\t\t"
-                    "</DESCRIPTION>\n\t</TEST SOLUTION>\n</FUNCTIONS>")
+                    "section of the function.\n\t</USAGE>\n\t<FORWARD_KINEMATICS>\n\t\t<FORMAT>\n\t\tFORWARD_KINEMATICS"
+                    f"{j}\n\t\t</FORMAT>\n\t\t<DESCRIPTION>\n\t\t{d}\n\t\t</DESCRIPTION>\n\t</FORWARD_KINEMATICS>\n\t"
+                    f"<TEST_SOLUTION>\n\t\t<FORMAT>\n\t\t{p}\n\t\t</FORMAT>\n\t\t<DESCRIPTION>\n\t\t{t}\n\t\t"
+                    "</DESCRIPTION>\n\t</TEST_SOLUTION>\n</FUNCTIONS>")
         # Perform normal prompts.
         if mode == NORMAL:
             # Do not do transform prompts until the position-only equivalent is done.

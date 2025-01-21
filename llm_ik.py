@@ -1,4 +1,5 @@
 import argparse
+import ast
 import copy
 import importlib
 import importlib.util
@@ -78,6 +79,176 @@ FIELDS = ["Success Rate (%)", "Failure Rate (%)", "Error Rate (%)", "Average Fai
 NUMERIC = ["Success Rate (%)", "Failure Rate (%)", "Error Rate (%)", "Average Failure Distance",
            "Average Failure Angle (°)", "Average Elapsed Time (s)", "Generation Time (s)", "Feedbacks Given",
            "Forwards Kinematics Calls", "Testing Calls", "Cost ($)"]
+
+
+def process_code(code: str) -> str:
+    """
+    Processes the input Python code string according to the specified rules:
+    1. Replace print statements with pass.
+    2. Remove empty if conditions with only pass.
+    3. Remove empty loops with only pass.
+    4. Remove empty functions with only pass and their calls.
+    5. Remove trailing code after the last function.
+    :param code: The code to clean.
+    :return: The cleaned code.
+    """
+
+    class CodeTransformer(ast.NodeTransformer):
+        """
+        Helper class to transform code.
+        """
+        def __init__(self):
+            """
+            Initialize the code to flag that there are no empty functions and nothing has changed.
+            """
+            super().__init__()
+            self.empty_functions = set()
+            self.changed = False
+
+        def replace_print_with_pass(self, node):
+            """
+            Replace print statements with passes.
+            :param node: The node to replace.
+            :return: The updated node.
+            """
+            if isinstance(node, ast.Expr) and isinstance(node.value, ast.Call):
+                func = node.value.func
+                if isinstance(func, ast.Name) and func.id == "print":
+                    self.changed = True
+                    return ast.Pass()
+            return node
+
+        def visit_Expr(self, node):
+            """
+            Visit an expression.
+            :param node: The mode.
+            :return: The node with all prints removed.
+            """
+            return self.replace_print_with_pass(node)
+
+        def visit_Call(self, node):
+            """
+            Visit a call.
+            :param node: The mode.
+            :return: The node after visiting.
+            """
+            return self.generic_visit(node)
+
+        def visit_FunctionDef(self, node):
+            """
+            Visit a function definition.
+            :param node: The node.
+            :return: The node after visiting.
+            """
+            self.generic_visit(node)
+            if all(isinstance(stmt, ast.Pass) for stmt in node.body):
+                self.empty_functions.add(node.name)
+                self.changed = True
+                # Remove the function.
+                return None
+            return node
+
+        def visit_If(self, node):
+            """
+            Visit an if statement.
+            :param node: The node.
+            :return: The node after visiting.
+            """
+            self.generic_visit(node)
+            if all(isinstance(stmt, ast.Pass) for stmt in node.body) and not node.orelse:
+                self.changed = True
+                # Remove the if statement.
+                return None
+            return node
+
+        def visit_For(self, node):
+            """
+            Visit a for loop.
+            :param node: The node.
+            :return: The node after visiting.
+            """
+            self.generic_visit(node)
+            if all(isinstance(stmt, ast.Pass) for stmt in node.body):
+                self.changed = True
+                # Remove the for loop.
+                return None
+            return node
+
+        def visit_While(self, node):
+            """
+            Visit a while loop.
+            :param node: The node.
+            :return: The node after visiting.
+            """
+            self.generic_visit(node)
+            if all(isinstance(stmt, ast.Pass) for stmt in node.body):
+                self.changed = True
+                # Remove the while loop.
+                return None
+            return node
+
+        def remove_function_calls(self, node):
+            """
+            Removes standalone calls to empty functions.
+            :param node: The node.
+            :return: The node after visiting.
+            """
+            if isinstance(node, ast.Expr) and isinstance(node.value, ast.Call):
+                func = node.value.func
+                if isinstance(func, ast.Name) and func.id in self.empty_functions:
+                    self.changed = True
+                    # Remove the call.
+                    return None
+            return node
+
+        def visit_Module(self, node):
+            """
+            Visit the entire module.
+            :param node: The node.
+            :return: The node after visiting.
+            """
+            self.generic_visit(node)
+            # Remove trailing code after the last function.
+            last_func = None
+            for idx, stmt in enumerate(node.body):
+                if isinstance(stmt, ast.FunctionDef):
+                    last_func = idx
+            if last_func is not None and last_func < len(node.body) - 1:
+                node.body = node.body[:last_func + 1]
+                self.changed = True
+            return node
+    # Parse the code into an AST.
+    try:
+        tree = ast.parse(code)
+    except Exception as e:
+        logging.error(f"Invalid Python code provided: {e}")
+        return code
+    transformer = CodeTransformer()
+    # Step 1 to 5 with multiple passes.
+    while True:
+        transformer.changed = False
+        tree = transformer.visit(tree)
+        ast.fix_missing_locations(tree)
+        # Step 4: Remove calls to empty functions.
+        if transformer.empty_functions:
+            # Create a new transformer to remove calls to empty functions.
+            call_remover = CodeTransformer()
+            call_remover.empty_functions = transformer.empty_functions.copy()
+            call_remover.visit = call_remover.remove_function_calls
+            # Override to prevent further changes.
+            call_remover.generic_visit = lambda node: node
+            # noinspection PyArgumentList
+            tree = call_remover.visit(tree)
+            ast.fix_missing_locations(tree)
+            transformer.changed = transformer.changed or call_remover.changed
+        # If no changes in this pass, break.
+        if not transformer.changed:
+            break
+        # Reset empty_functions for the next pass.
+        transformer.empty_functions.clear()
+    # Unparse the AST back to code.
+    processed_code = ast.unparse(tree)
+    return processed_code
 
 
 class Robot:
@@ -2196,25 +2367,11 @@ class Solver:
         for i in range(total_codes):
             # Delete any "main" portion.
             codes[i] = codes[i].split('if __name__ == "__main__":')[0].split("if __name__ == '__main__'")[0].strip()
-            # Get every individual line.
-            lines = codes[i].splitlines()
-            # Remove any of the extra running or testing code.
-            last_valid = len(lines)
-            for line in reversed(lines):
-                if line == "" or line.startswith(" ") or line.startswith("\t"):
-                    break
-                last_valid -= 1
-            # Put the code together again.
-            codes[i] = "\n".join(lines[0:last_valid]).strip()
-        # Parse the code assuming the largest code would be the complete code snippet.
-        code = codes[0].strip()
-        size = len(code)
-        for i in range(1, total_codes):
-            temp_code = codes[i].strip()
-            temp_size = len(temp_code)
-            if temp_size >= size:
-                code = temp_code
-                size = temp_size
+            # Process out only what we need.
+            codes[i] = process_code(codes[i]).strip()
+        # Use the largest code block if multiple.
+        codes.sort(key=len, reverse=True)
+        code = codes[0]
         logging.info(f"{self.model} | {self.robot.name} | {lower + 1} to {upper + 1} | {solving} | {mode} | Handle "
                      "Interactions | Extracted code.")
         # Save the code so it can be loaded by the program.

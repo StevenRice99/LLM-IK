@@ -1191,8 +1191,8 @@ class Solver:
         self.url = ""
         self.methods = False
         self.key = ""
-        self.input_cost = 0
-        self.output_cost = 0
+        self.input_cost = -1
+        self.output_cost = -1
         self.options = []
         self.api_name = None
         # Ensure the file exists.
@@ -1255,7 +1255,7 @@ class Solver:
                 except Exception as e:
                     logging.warning(f"{self.model} | {self.robot.name} | Could not parse input cost from "
                                     f"'{input_cost}': {e}")
-                    self.input_cost = None
+                    self.input_cost = -1
             # Get the output token cost.
             if total >= 4:
                 output_cost = lines[3].replace("$", "").strip()
@@ -1264,7 +1264,7 @@ class Solver:
                 except Exception as e:
                     logging.warning(f"{self.model} | {self.robot.name} | Could not parse output cost from "
                                     f"'{output_cost}': {e}")
-                    self.output_cost = None
+                    self.output_cost = -1
             # Get if this model supports methods.
             if total >= 5:
                 model_methods = lines[4].strip().upper()
@@ -1321,20 +1321,19 @@ class Solver:
         else:
             logging.info(f"{self.model} | {self.robot.name} | Chat interface model.")
         # If no path, remove costs, as non-API methods should not inherit or be inherited.
-        if self.url is None or self.url == "":
-            self.url = ""
-            self.input_cost = 0
-            self.output_cost = 0
+        if self.url == "":
+            self.input_cost = -1
+            self.output_cost = -1
             return
         # Otherwise, this is an API, so ensure costs are handled properly.
-        if self.input_cost is None and self.output_cost is None:
+        if self.input_cost < 0 and self.output_cost < 0:
             logging.warning(f"{self.model} | {self.robot.name} | No costs defined; cannot be used for inheriting.")
         else:
-            if self.input_cost is None:
+            if self.input_cost < 0:
                 logging.warning(f"{self.model} | {self.robot.name} | No output cost defined; using input cost of"
                                 f"${self.input_cost}.")
                 self.input_cost = self.output_cost
-            elif self.output_cost is None:
+            elif self.output_cost < 0:
                 logging.warning(f"{self.model} | {self.robot.name} | No input cost defined; using output cost of"
                                 f"${self.output_cost}.")
                 self.output_cost = self.input_cost
@@ -1490,11 +1489,11 @@ class Solver:
             logging.error(f"{self.model} | Set Inherited | Solver is not valid.")
             return None
         # If nothing is passed or this does not use an API with a valid cost, use only itself as an option.
-        if self.url is None or self.url == "":
+        if self.url == "":
             self.options = [self]
             logging.info(f"{self.model} | {self.robot.name} | Set Inherited | Only API models can inherit.")
             return None
-        if self.input_cost is None or self.output_cost is None:
+        if self.input_cost < 0 or self.output_cost < 0:
             self.options = [self]
             logging.info(f"{self.model} | {self.robot.name} | Set Inherited | Cannot inherit as no costs defined.")
             return None
@@ -1520,7 +1519,7 @@ class Solver:
                              "reasoning models.")
                 continue
             # Check that they have a valid cost.
-            if solver.input_cost is None or solver.output_cost is None:
+            if solver.input_cost < 0 or solver.output_cost < 0:
                 logging.info(f"{self.model} | {self.robot.name} | Set Inherited | Can only inherit API methods which "
                              "have costs.")
                 continue
@@ -1616,7 +1615,7 @@ class Solver:
                             # Get the messages to send to the LLM.
                             messages = self.handle_interactions(lower, upper, current_orientation, current_mode)
                             # If there are no messages, or we should not call the LLM due to parameters, stop.
-                            if (messages is None or len(messages) < 1 or self.url is None or self.url == "" or not run
+                            if (messages is None or len(messages) < 1 or self.url == "" or not run
                                     or current_orientation not in orientation or current_mode not in mode
                                     or length >= max_length):
                                 break
@@ -2454,14 +2453,14 @@ class Solver:
         # If the solver is not valid, return the name and state this.
         if not self.is_valid():
             return f"{self.model} | Invalid"
-        is_api = self.url is not None and self.url != ""
+        is_api = self.url != ""
         # Chat models don't have much to display.
         s = f"{self.robot.name} | {self.model} | "
         if not is_api:
             return f"{s}Chat | Reasoning = {self.reasoning}"
         s += (f"API | Reasoning = {self.reasoning} | Input = "
-              f"{'None' if self.input_cost is None else f'${neat(self.input_cost)}'} | Output = "
-              f"{'None' if self.output_cost is None else f'${neat(self.output_cost)}'} | URL = {self.url} | Inherited "
+              f"{'None' if self.input_cost < 0 else f'${neat(self.input_cost)}'} | Output = "
+              f"{'None' if self.output_cost < 0 else f'${neat(self.output_cost)}'} | URL = {self.url} | Inherited "
               f"=")
         # Add the names of all inherited models.
         has_inherited = False
@@ -2701,7 +2700,7 @@ class Solver:
              "Average Elapsed Time (s),Generation Time (s),Mode,Feedbacks Given,Forwards Kinematics Calls,Testing Calls"
              f",Reasoning,Functions,API,Cost ($)\n{successes}%,{failures}%,{errors}%,{total_distance},"
              f"{total_angle if orientation else 0}°,{total_time} s,{generation_time} s,{mode},{feedbacks},{forwards},"
-             f"{testings},{self.reasoning},{self.methods},{self.url is not None and self.url != ''},${neat(cost)}")
+             f"{testings},{self.reasoning},{self.methods},{self.url != ''},${neat(cost)}")
         os.makedirs(self.results, exist_ok=True)
         with open(os.path.join(self.results, f"{name}.csv"), "w") as file:
             file.write(s)
@@ -3642,7 +3641,7 @@ def llm_ik(robots: str or list[str] or None = None, max_length: int = 0, orienta
     # Get the API models.
     api_models = []
     for s in created_models:
-        if s.url is not None and s.url != "" and s.input_cost is not None and s.output_cost is not None:
+        if s.url != "" and s.input_cost >= 0 and s.output_cost >= 0:
             api_models.append(s)
     # Set up inheriting for API models.
     for solver in api_models:

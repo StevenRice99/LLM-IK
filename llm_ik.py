@@ -2890,7 +2890,8 @@ class Solver:
         mid = "" if self.methods else 'in the "FUNCTIONS" section '
         pre = (" You may respond by either completing the inverse kinematics method or calling either of the two "
                f"provided functions {mid}to help you develop your solution. If you call a function, you will be "
-               "provided another response and chance to complete the inverse kinematics method.")
+               "provided another response and chance to complete the inverse kinematics method. You may only call a "
+               "single function per response.")
         # If this is not a reasoning model, let us manually add in a prompt to do some reasoning.
         if not self.reasoning:
             pre += " Think step by step and show all your work."

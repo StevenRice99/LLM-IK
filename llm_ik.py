@@ -1533,10 +1533,6 @@ class Solver:
                 logging.info(f"{self.model} | {self.robot.name} | Set Inherited | Can only inherit API methods with "
                              "better output costs.")
                 continue
-            if self.input_cost == solver.input_cost and self.output_cost == solver.output_cost:
-                logging.info(f"{self.model} | {self.robot.name} | Set Inherited | Can only inherit API methods with "
-                             "better costs and these are equal.")
-                continue
             # Make sure this is for the proper robot.
             if self.robot.name != solver.robot.name:
                 logging.info(f"{self.model} | {self.robot.name} | Set Inherited | Can only inherit the same robot.")
@@ -3660,11 +3656,7 @@ def llm_ik(robots: str or list[str] or None = None, max_length: int = 0, orienta
         for option in api_models:
             # Do some checks to see if this can be inherited.
             if (solver == option or solver.robot != option.robot or solver.input_cost < option.input_cost or
-                    solver.output_cost < option.output_cost):
-                continue
-            if solver.input_cost == option.input_cost and solver.output_cost == option.output_cost:
-                continue
-            if not solver.reasoning and option.reasoning:
+                    solver.output_cost < option.output_cost or (not solver.reasoning and option.reasoning)):
                 continue
             options.append(option)
         # No point in calling if there is nothing to inherit.

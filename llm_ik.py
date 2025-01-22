@@ -81,13 +81,14 @@ NUMERIC = ["Success Rate (%)", "Failure Rate (%)", "Error Rate (%)", "Average Fa
            "Forwards Kinematics Calls", "Testing Calls", "Cost ($)"]
 
 
-def extract_method_call(s: str, forward_parameters: int, test_parameters: int) -> str:
+def extract_method_call(s: str, forward_parameters: int, test_parameters: int, prioritize_forward: bool = False) -> str:
     """
     Extracts the last occurrence of either "FORWARD_KINEMATICS" or "TEST_SOLUTION" along with up to the specified
     number of parameters from the input string.
     :param s: The input plain-text string.
     :param forward_parameters: Maximum number of parameters for "FORWARD_KINEMATICS".
     :param test_parameters: Maximum number of parameters for "TEST_SOLUTION".
+    :param prioritize_forward: On initial calls, we want to prioritize extracting forwards calls if multiple were made.
     :return: The method call with parameters as a single string, or an empty string if neither method is found.
     """
     # Define the method names and their corresponding max parameters.
@@ -95,11 +96,25 @@ def extract_method_call(s: str, forward_parameters: int, test_parameters: int) -
         "FORWARD_KINEMATICS": forward_parameters,
         "TEST_SOLUTION": test_parameters
     }
-    # Compile a regex pattern to match either method name ensuring they are not part of larger words.
-    pattern = re.compile(r"(?<!\w)(FORWARD_KINEMATICS|TEST_SOLUTION)\b")
-    # Find all matches in the string.
-    matches = list(pattern.finditer(s))
-    # If no matches found, return empty string.
+    # See if we should prioritize forward kinematics calls.
+    if prioritize_forward:
+        # Compile a regex pattern to match only the forward kinematics calls.
+        pattern = re.compile(r"(?<!\w)(FORWARD_KINEMATICS)\b")
+        # Find all matches in the string.
+        matches = list(pattern.finditer(s))
+        # Otherwise, get the testing calls.
+        if not matches:
+            # Compile a regex pattern to match only the testing calls.
+            pattern = re.compile(r"(?<!\w)(TEST_SOLUTION)\b")
+            # Find all matches in the string.
+            matches = list(pattern.finditer(s))
+    # Otherwise, if not prioritized or no forward kinematics matches, search for all matches.
+    else:
+        # Compile a regex pattern to match either method name ensuring they are not part of larger words.
+        pattern = re.compile(r"(?<!\w)(FORWARD_KINEMATICS|TEST_SOLUTION)\b")
+        # Find all matches in the string.
+        matches = list(pattern.finditer(s))
+        # If no matches found, return empty string.
     if not matches:
         return ""
     # Select the last match.
@@ -2275,7 +2290,8 @@ class Solver:
             # Extract the method call.
             forwards_expected = upper - lower + 1
             testing_expected = 6 if orientation else 3
-            line = extract_method_call(s, forwards_expected, testing_expected).split()
+            # If no solution exists yet, we should prioritize extracting forward kinematics calls.
+            line = extract_method_call(s, forwards_expected, testing_expected, not os.path.exists(code_path)).split()
             parts = len(line)
             if parts > 0:
                 # Handle if this is a forward kinematics call.
@@ -3395,7 +3411,6 @@ def evaluate_averages(totals: dict[str, str or float or int or bool] or None = N
                         averages[length][solving].items(),
                         key=lambda item: (
                             -item[1]["Success Rate (%)"],
-                            -item[1]["Chains"],
                             item[1]["Error Rate (%)"],
                             item[1]["Average Failure Distance"],
                             item[1]["Average Failure Angle (°)"],
@@ -3409,6 +3424,7 @@ def evaluate_averages(totals: dict[str, str or float or int or bool] or None = N
                             item[1]["Testing Calls"],
                             item[1]["Reasoning"],
                             item[1]["Functions"],
+                            -item[1]["Chains"],
                             item[0]
                         )
                     )

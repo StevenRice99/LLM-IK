@@ -7,11 +7,11 @@ if os.path.exists(path):
     with open(path, "r") as file:
         api_key = file.read()
     # Define the API endpoint
-    url = 'https://openrouter.ai/api/v1/auth/key'
+    url = "https://openrouter.ai/api/v1/auth/key"
     # Set up the headers with the Authorization bearer token
     headers = {
-        'Authorization': f'Bearer {api_key}',
-        'Accept': 'application/json'
+        "Authorization": f"Bearer {api_key}",
+        "Accept": "application/json"
     }
     try:
         # Make the GET request to the API endpoint
@@ -21,7 +21,7 @@ if os.path.exists(path):
         # Parse the JSON response
         data = response.json()
         # Check if there's an error in the response data
-        if 'error' in data:
+        if "error" in data:
             print(f"Error: {data['error']['message']}")
         else:
             # Print the API key details.

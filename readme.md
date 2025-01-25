@@ -6,10 +6,11 @@ This repository is for generating and testing the [inverse kinematics](https://e
 
 - Can load URDF files.
 - Supports both Chat-based and API-based LLMs.
-- Can solve in three modes.
+- Can solve in four modes.
   - **Normal:** Directly attempts to solve the chain.
   - **Extend:** Tries to extend an existing solution for a chain one link smaller than the current.
   - **Dynamic:** Tries to base the solution off of already solved sub-chains.
+  - **Transfer:** Tries to base the solution for an position and orientation solver off of a position only solver.
 - Model-inheriting where more expensive models can extend or dynamically build from the solutions of cheaper models.
 
 # Setup

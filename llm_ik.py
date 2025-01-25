@@ -40,6 +40,7 @@ TOKENS = "Tokens"
 NORMAL = "Normal"
 EXTEND = "Extend"
 DYNAMIC = "Dynamic"
+TRANSFER = "Transfer"
 
 # API interaction file naming.
 MESSAGE_PROMPT = "Prompt"
@@ -1155,7 +1156,10 @@ class Robot:
                                 item[1]["API"],
                                 item[1]["Cost ($)"],
                                 item[1]["Generation Time (s)"],
-                                item[1]["Mode"],
+                                item[1]["Mode"] == TRANSFER,
+                                item[1]["Mode"] == DYNAMIC,
+                                item[1]["Mode"] == EXTEND,
+                                item[1]["Mode"] == NORMAL,
                                 item[1]["Feedbacks Given"],
                                 item[1]["Forwards Kinematics Calls"],
                                 item[1]["Testing Calls"],
@@ -1389,7 +1393,7 @@ class Solver:
             mode = NORMAL
             orientation = False
         # Ensure the mode is valid.
-        if mode not in [NORMAL, EXTEND, DYNAMIC]:
+        if mode not in [NORMAL, EXTEND, DYNAMIC, TRANSFER]:
             logging.warning(f"{self.model} | {self.robot.name} | {lower + 1} to {upper + 1} | Get Cost | Mode '{mode}' "
                             f"not valid, using '{NORMAL}' instead.")
             mode = NORMAL
@@ -1479,7 +1483,7 @@ class Solver:
                     continue
                 # Parse the mode it was done in.
                 sub_mode = info[4]
-                if sub_mode not in [NORMAL, EXTEND, DYNAMIC]:
+                if sub_mode not in [NORMAL, EXTEND, DYNAMIC, TRANSFER]:
                     logging.error(f"{self.model} | {self.robot.name} | {lower + 1} to {upper + 1} | {solving} | {mode} "
                                   f"| Get Cost | Invalid mode of '{sub_mode}' in '{path}'.")
                     continue
@@ -1598,8 +1602,10 @@ class Solver:
             return True
         # Set the solution types we want to solve for.
         orientation = [False, True] if orientation else [False]
-        # Get the mode to run in.
-        if mode == DYNAMIC:
+        # Get the modes to run in.
+        if mode == TRANSFER:
+            mode = [NORMAL, EXTEND, DYNAMIC, TRANSFER]
+        elif mode == DYNAMIC:
             mode = [NORMAL, EXTEND, DYNAMIC]
         elif mode == EXTEND:
             mode = [NORMAL, EXTEND]
@@ -1610,8 +1616,11 @@ class Solver:
             max_length = self.robot.joints
         # Loop all possible combinations.
         successful = True
-        for current_mode in [NORMAL, EXTEND, DYNAMIC]:
+        for current_mode in [NORMAL, EXTEND, DYNAMIC, TRANSFER]:
             for current_orientation in [False, True]:
+                # Transfer mode is only for orientation.
+                if not current_orientation and current_mode == TRANSFER:
+                    continue
                 # Solve smaller chains first so their solutions can be extended.
                 for length in range(self.robot.joints):
                     # Determine the last "first" joint for this size.
@@ -1695,7 +1704,7 @@ class Solver:
                               "orientation for one joint.")
                 return False
         # Ensure the mode is valid.
-        if mode not in [NORMAL, EXTEND, DYNAMIC]:
+        if mode not in [NORMAL, EXTEND, DYNAMIC, TRANSFER]:
             logging.error(f"{self.model} | {self.robot.name} | {lower + 1} to {upper + 1} | Run API | Mode '{mode}' is "
                           "not valid.")
             return False
@@ -2049,11 +2058,10 @@ class Solver:
                 # If it doesn't exist, this cheaper option must be finished first.
                 if not is_done:
                     logging.info(f"{self.model} | {self.robot.name} | {lower + 1} to {upper + 1} | {POSITION} | "
-                                 f"{NORMAL} | Should Attempt | Not attempting as a cheaper model has not been "
-                                 f"finished.")
+                                 f"{NORMAL} | Should Attempt | Not attempting as a cheaper model has not finished.")
                     return False
             # If all cheaper options have been run, still stop if one has been successful.
-            best, best_mode, cost = self.get_best(lower, upper, False, NORMAL)
+            best, best_mode, cost = self.get_best(lower, upper, False)
             if best is not None and best != self:
                 logging.info(f"{self.model} | {self.robot.name} | {lower + 1} to {upper + 1} | {POSITION} | "
                              f"{NORMAL} | Should Attempt | Not attempting as a cheaper model has been successful.")
@@ -2078,10 +2086,9 @@ class Solver:
                          "Should Attempt | Not attempting as the previous link has not been finished.")
             return False
         # Ensure the mode is valid.
-        if mode not in [NORMAL, EXTEND, DYNAMIC]:
-            logging.warning(
-                f"{self.model} | {self.robot.name} | {lower + 1} to {upper + 1} | Should Attempt | Mode '{mode}' "
-                f"not valid, using '{NORMAL}' instead.")
+        if mode not in [NORMAL, EXTEND, DYNAMIC, TRANSFER]:
+            logging.warning(f"{self.model} | {self.robot.name} | {lower + 1} to {upper + 1} | Should Attempt | Mode "
+                            f"'{mode}' not valid, using '{NORMAL}' instead.")
             mode = NORMAL
         solving = TRANSFORM if orientation else POSITION
         # If in normal mode, see if the sub-chain has been completed.
@@ -2093,12 +2100,24 @@ class Solver:
                 logging.info(f"{self.model} | {self.robot.name} | {lower + 1} to {upper + 1} | {solving} | {mode} | "
                              "Should Attempt | Not attempting as the smaller sub-chain was not successful.")
             return attempt
-        # If the full chain has been solved with a lower mode, no point in solving it with this mode.
-        if mode == DYNAMIC:
-            mode_options = [NORMAL, EXTEND]
-        else:
-            mode_options = [NORMAL]
-        for mode_option in mode_options:
+        # Can only transfer if the position has been solved.
+        if mode == TRANSFER:
+            if not orientation:
+                logging.info(f"{self.model} | {self.robot.name} | {lower + 1} to {upper + 1} | {solving} | {mode} | "
+                             "Should Attempt | Cannot attempt a transfer mode for position only solving.")
+                return False
+            # We can transfer any mode.
+            attempt = self.code_successful(lower, upper, False, NORMAL)
+            if not attempt:
+                attempt = self.code_successful(lower, upper, False, EXTEND)
+                if not attempt:
+                    attempt = self.code_successful(lower, upper, False, DYNAMIC)
+                    if not attempt:
+                        logging.info(f"{self.model} | {self.robot.name} | {lower + 1} to {upper + 1} | {solving} | "
+                                     f"{mode} | Should Attempt | No options to transfer.")
+            return attempt
+        # If the full chain has been solved with another model on any mode, don't solve it again to save resources.
+        for mode_option in [NORMAL, EXTEND, DYNAMIC, TRANSFER]:
             for solver_option in self.options:
                 if solver_option.code_successful(lower, upper, orientation, mode_option):
                     logging.info(f"{self.model} | {self.robot.name} | {lower + 1} to {upper + 1} | {solving} | {mode} |"
@@ -2107,14 +2126,12 @@ class Solver:
                     return False
         return True
 
-    def get_best(self, lower: int = 0, upper: int = -1, orientation: bool = False,
-                 mode: str = NORMAL) -> (Any or None, str):
+    def get_best(self, lower: int = 0, upper: int = -1, orientation: bool = False) -> (Any or None, str):
         """
         Get the best code for a certain size.
         :param lower: The starting joint.
         :param upper: The ending joint.
         :param orientation: If this data cares about the orientation or not.
-        :param mode: The mode by which the code was achieved.
         :return: The best solver possible, the mode it was solved in, and the cost it took to solve.
         """
         # Nothing to do if the solver is not valid.
@@ -2123,37 +2140,26 @@ class Solver:
             return None, NORMAL, 0
         # Ensure valid values.
         lower, upper = self.robot.validate_lower_upper(lower, upper)
-        # If only one joint, can only solve in normal mode and for the position only.
+        # If only one joint, can only solve for the position only.
         if lower == upper:
-            mode = NORMAL
             orientation = False
-        # Ensure the mode is valid.
-        if mode not in [NORMAL, EXTEND, DYNAMIC]:
-            logging.warning(f"{self.model} | {self.robot.name} | {lower + 1} to {upper + 1} | Get Best | Mode '{mode}' "
-                            f"not valid, using '{NORMAL}' instead.")
-            mode = NORMAL
-        # Determine what modes we can search.
-        if mode == DYNAMIC:
-            mode_options = [NORMAL, EXTEND, DYNAMIC]
-        elif mode == EXTEND:
-            mode_options = [NORMAL, EXTEND]
-        else:
-            mode_options = [NORMAL]
-        # Determine the best sub-option for this.
+        # Determine the best sub-option for this across all possible modes.
         best = None
         best_mode = NORMAL
         best_cost = 0
-        for mode_option in mode_options:
+        for mode_option in [NORMAL, EXTEND, DYNAMIC, TRANSFER]:
             for solver_option in self.options:
                 if solver_option.code_successful(lower, upper, orientation, mode_option):
                     # If this is the first successful one, use it.
                     if best is None:
                         best = solver_option
                         best_mode = mode_option
-                        best_cost, feedbacks, forwards, tests = solver_option.get_cost(lower, upper, orientation, mode)
+                        best_cost, feedbacks, forwards, tests = solver_option.get_cost(lower, upper, orientation,
+                                                                                       mode_option)
                     # Otherwise, use it if it is a better cost.
                     else:
-                        cost, feedbacks, forwards, tests = solver_option.get_cost(lower, upper, orientation, mode)
+                        cost, feedbacks, forwards, tests = solver_option.get_cost(lower, upper, orientation,
+                                                                                  mode_option)
                         if cost >= best_cost:
                             continue
                         best = solver_option
@@ -2181,8 +2187,13 @@ class Solver:
         if lower == upper:
             mode = NORMAL
             orientation = False
+        # Can only transfer to orientation mode.
+        if not orientation and mode == TRANSFER:
+            logging.info(f"{self.model} | {self.robot.name} | {lower + 1} to {upper + 1} | Can only use transfer mode "
+                         "for orientation solving.")
+            return None
         # Ensure the mode is valid.
-        if mode not in [NORMAL, EXTEND, DYNAMIC]:
+        if mode not in [NORMAL, EXTEND, DYNAMIC, TRANSFER]:
             logging.warning(f"{self.model} | {self.robot.name} | {lower + 1} to {upper + 1} | Handle Interactions | "
                             f"Mode '{mode}' not valid, using '{NORMAL}' instead.")
             mode = NORMAL
@@ -2512,7 +2523,7 @@ class Solver:
             return False
         # Ensure valid values.
         lower, upper = self.robot.validate_lower_upper(lower, upper)
-        if mode not in [NORMAL, EXTEND, DYNAMIC]:
+        if mode not in [NORMAL, EXTEND, DYNAMIC, TRANSFER]:
             logging.warning(f"{self.model} | {self.robot.name} | {lower + 1} to {upper + 1} | Load Code | Mode "
                             f"'{mode}' not valid, using '{NORMAL}' instead.")
             mode = NORMAL
@@ -2641,7 +2652,7 @@ class Solver:
         # Ensure valid values.
         lower, upper = self.robot.validate_lower_upper(lower, upper)
         solving = TRANSFORM if orientation else POSITION
-        if mode not in [NORMAL, EXTEND, DYNAMIC]:
+        if mode not in [NORMAL, EXTEND, DYNAMIC, TRANSFER]:
             logging.warning(f"{self.model} | {self.robot.name} | {lower + 1} to {upper + 1} | Evaluate | Mode "
                             f"'{mode}' not valid, using '{NORMAL}' instead.")
             mode = NORMAL
@@ -2744,7 +2755,7 @@ class Solver:
         # Ensure valid values.
         lower, upper = self.robot.validate_lower_upper(lower, upper)
         solving = TRANSFORM if orientation else POSITION
-        if mode not in [NORMAL, EXTEND, DYNAMIC]:
+        if mode not in [NORMAL, EXTEND, DYNAMIC, TRANSFER]:
             logging.warning(f"{self.model} | {self.robot.name} | {lower + 1} to {upper + 1} | Code Successful | Mode "
                             f"'{mode}' not valid, using '{NORMAL}' instead.")
             mode = NORMAL
@@ -2793,7 +2804,7 @@ class Solver:
         # Ensure valid values.
         lower, upper = self.robot.validate_lower_upper(lower, upper)
         solving = TRANSFORM if orientation else POSITION
-        if mode not in [NORMAL, EXTEND, DYNAMIC]:
+        if mode not in [NORMAL, EXTEND, DYNAMIC, TRANSFER]:
             logging.warning(f"{self.model} | {self.robot.name} | {lower + 1} to {upper + 1} | Prepare Feedback | Mode "
                             f"'{mode}' not valid, using '{NORMAL}' instead.")
             mode = NORMAL
@@ -2889,7 +2900,7 @@ class Solver:
             return ""
         # Ensure valid values.
         lower, upper = self.robot.validate_lower_upper(lower, upper)
-        if mode not in [NORMAL, EXTEND, DYNAMIC]:
+        if mode not in [NORMAL, EXTEND, DYNAMIC, TRANSFER]:
             logging.warning(f"{self.model} | {self.robot.name} | {lower + 1} to {upper + 1} | Prepare LLM | Mode "
                             f"'{mode}' not valid, using '{NORMAL}' instead.")
             mode = NORMAL
@@ -2897,8 +2908,11 @@ class Solver:
         if lower == upper:
             orientation = False
             mode = NORMAL
+        # No prompt to make if we cannot transfer.
+        if not orientation and mode == TRANSFER:
+            return ""
         # If there is a better option, do point in performing this.
-        best, previous_mode, cost = self.get_best(lower, upper, orientation, NORMAL)
+        best, previous_mode, cost = self.get_best(lower, upper, orientation)
         if best is not None:
             logging.info(f"{self.model} | {self.robot.name} | {lower + 1} to {upper + 1} | Prepare LLM | "
                          "A cheaper solution is already successful in normal mode; not doing mode a normal prompt.")
@@ -2950,7 +2964,7 @@ class Solver:
         if mode == NORMAL:
             # Do not do transform prompts until the position-only equivalent is done.
             if orientation:
-                pos, m, c = self.get_best(lower, upper, False, NORMAL)
+                pos, m, c = self.get_best(lower, upper, False)
                 if pos is None:
                     logging.info(f"{self.model} | {self.robot.name} | {lower + 1} to {upper + 1} | Prepare LLM | "
                                  "Position-only not successful; not doing mode a normal prompt with orientation.")
@@ -2964,12 +2978,43 @@ class Solver:
             logging.info(f"{self.model} | {self.robot.name} | {lower + 1} to {upper + 1} | Prepare LLM | "
                          f"Extended solution already successful; not doing mode '{mode}'.")
             return ""
+        # Transfer prompting mode.
+        if mode == TRANSFER:
+            # See if there is an orientation to model to transfer.
+            best, best_mode, cost = self.get_best(lower, upper, False)
+            if best is None:
+                logging.info(f"{self.model} | {self.robot.name} | {lower + 1} to {upper + 1} | Prepare LLM | No chain "
+                             "to transfer.")
+                return ""
+            path = os.path.join(self.solutions, f"{lower}-{upper}-{POSITION}-{best_mode}.py")
+            if not os.path.exists(path):
+                logging.error(f"{self.model} | {self.robot.name} | {lower + 1} to {upper + 1} | Prepare LLM | Best "
+                              f"chain does not exist at '{path}'.")
+                return ""
+            # Save the inherited information.
+            s = f"{best.model}|{lower}|{upper}|{POSITION}|{best_mode}"
+            inherited_path = os.path.join(self.interactions, f"{lower}-{upper}-{TRANSFORM}-{TRANSFORM}")
+            os.makedirs(inherited_path, exist_ok=True)
+            inherited_path = os.path.join(inherited_path, f"{INHERITED}.txt")
+            with open(inherited_path, "w", encoding="utf-8", errors="ignore") as file:
+                file.write(s)
+            # Add the transfer prompt portion.
+            additional = (f" To help you, a solution for solving the chain for position only is provided in the "
+                          '"EXISTING" section. You can use this solution as a starting point to solve for the '
+                          f"position and orientation.{pre}")
+            prompt = self.robot.prepare_llm(lower, upper, orientation, additional)
+            prompt += "\n<EXISTING>\n"
+            with open(path, "r", encoding="utf-8", errors="ignore") as file:
+                prompt += file.read().strip()
+            logging.info(f"{self.model} | {self.robot.name} | {lower + 1} to {upper + 1} | Prepare LLM | Transfer "
+                         "prompt prepared.")
+            return f"{prompt}\n</EXISTING>{post}"
         # Extending prompting mode.
         if mode == EXTEND:
             # We can only extend a successful lower chain.
             previous = upper - 1
             previous_orientation = orientation and lower != previous
-            best, previous_mode, cost = self.get_best(lower, previous, previous_orientation, EXTEND)
+            best, previous_mode, cost = self.get_best(lower, previous, previous_orientation)
             if best is None:
                 logging.info(f"{self.model} | {self.robot.name} | {lower + 1} to {upper + 1} | Prepare LLM | No chain "
                              "to extend.")
@@ -2982,7 +3027,7 @@ class Solver:
                 return ""
             # Do not attempt an orientation solving if the position has not been solved first.
             if orientation:
-                pos, m, c = self.get_best(lower, upper, False, EXTEND)
+                pos, m, c = self.get_best(lower, upper, False)
                 if pos is None:
                     logging.info(f"{self.model} | {self.robot.name} | {lower + 1} to {upper + 1} | Prepare LLM | "
                                  "Position only chain has not yet been solved in extending mode; not solving with it.")
@@ -3018,17 +3063,17 @@ class Solver:
         previous = upper - 1
         previous_orientation = orientation and lower != previous
         # Look for a lower-portion chain first.
-        best, previous_mode, cost = self.get_best(lower, previous, previous_orientation, DYNAMIC)
+        best, previous_mode, cost = self.get_best(lower, previous, previous_orientation)
         if best is None:
             # Look at the upper-portion chain otherwise.
-            best, previous_mode, cost = self.get_best(lower + 1, upper, previous_orientation, DYNAMIC)
+            best, previous_mode, cost = self.get_best(lower + 1, upper, previous_orientation)
             if best is None:
                 logging.info(f"{self.model} | {self.robot.name} | {lower + 1} to {upper + 1} | Prepare LLM | Nothing "
                              "was successful for a smaller chain; not attempting a dynamic prompt.")
                 return ""
         # Do not attempt an orientation solving if the position has not been solved first.
         if orientation:
-            pos, m, c = self.get_best(lower, upper, False, DYNAMIC)
+            pos, m, c = self.get_best(lower, upper, False)
             if pos is None:
                 logging.info(f"{self.model} | {self.robot.name} | {lower + 1} to {upper + 1} | Prepare LLM | "
                              "Position only chain has not yet been solved in dynamic mode; not solving with it.")
@@ -3127,7 +3172,7 @@ class Solver:
         # Cannot do orientation if just a single joint, and we can only run in the normal mode.
         current_orientation = False if lower == upper else orientation
         # See if we already have a full solution here, in which case there is no point in looking for a dynamic one.
-        best, best_mode, best_cost = self.get_best(lower, upper, current_orientation, DYNAMIC)
+        best, best_mode, best_cost = self.get_best(lower, upper, current_orientation)
         if best is not None:
             logging.info(f"{self.model} | {self.robot.name} | {lower + 1} to {upper + 1} | Get Dynamic | Found a "
                          f"successful solver solving for '{current_orientation}' in mode '{best_mode}'.")
@@ -3419,7 +3464,10 @@ def evaluate_averages(totals: dict[str, str or float or int or bool] or None = N
                             item[1]["API"],
                             item[1]["Cost ($)"],
                             item[1]["Generation Time (s)"],
-                            item[1]["Mode"],
+                            item[1]["Mode"] == TRANSFER,
+                            item[1]["Mode"] == DYNAMIC,
+                            item[1]["Mode"] == EXTEND,
+                            item[1]["Mode"] == NORMAL,
                             item[1]["Feedbacks Given"],
                             item[1]["Forwards Kinematics Calls"],
                             item[1]["Testing Calls"],
@@ -3529,7 +3577,7 @@ def llm_ik(robots: str or list[str] or None = None, max_length: int = 0, orienta
     os.makedirs(PROVIDERS, exist_ok=True)
     os.makedirs(KEYS, exist_ok=True)
     # Get the solving types.
-    if types not in [NORMAL, EXTEND, DYNAMIC]:
+    if types not in [NORMAL, EXTEND, DYNAMIC, TRANSFER]:
         logging.warning(f"Solving mode '{types}' not valid; using '{NORMAL}'.")
         types = NORMAL
     else:

@@ -798,7 +798,7 @@ class Robot:
         else:
             ret = "float"
             ret_param = "The value to set the link"
-        s += (f') -> {ret}:\n    """\n    Gets the joint values needed to reach position "p"{reach}.\n    :param p :The'
+        s += (f') -> {ret}:\n    """\n    Gets the joint values needed to reach position "p"{reach}.\n    :param p: The'
               f" position to reach in the form [x, y, z].")
         if orientation:
             s += "\n    :param r: The orientation to reach in radians in the form [x, y, z]."
@@ -2480,18 +2480,19 @@ class Solver:
         if not is_api:
             return f"{s}Chat | Reasoning = {self.reasoning}"
         s += (f"API | Reasoning = {self.reasoning} | Input = "
-              f"{'None' if self.input_cost < 0 else f'${neat(self.input_cost)}'} | Output = "
-              f"{'None' if self.output_cost < 0 else f'${neat(self.output_cost)}'} | URL = {self.url} | Inherited "
-              f"=")
+              f"{'None' if self.input_cost < 0 else f'${self.input_cost}'} | Output = "
+              f"{'None' if self.output_cost < 0 else f'${self.output_cost}'} | URL = {self.url} | Inherited "
+              f"= ")
         # Add the names of all inherited models.
-        has_inherited = False
+        names = []
         for inherited in self.options:
             if self == inherited or inherited.model == self.model:
                 continue
-            has_inherited = True
-            s += f" {inherited.model}"
-        if not has_inherited:
-            s += " None"
+            names.append(inherited.model)
+        if len(names) == 0:
+            s += "None"
+        else:
+            s += ", ".join(names)
         return s
 
     def load_code(self, lower: int = 0, upper: int = -1, orientation: bool = False, mode: str = NORMAL,
@@ -3659,7 +3660,7 @@ def llm_ik(robots: str or list[str] or None = None, max_length: int = 0, orienta
     for robot in created_robots:
         robot.load_data()
     # Sort API models from cheapest to most expensive.
-    created_models = sorted(created_models, key=lambda x: (x.robot.name, x.url, x.reasoning, x.output_cost,
+    created_models = sorted(created_models, key=lambda x: (x.robot.name, x.url is not None, x.reasoning, x.output_cost,
                                                            x.input_cost, x.model))
     # Get the API models.
     api_models = []

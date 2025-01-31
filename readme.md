@@ -6,11 +6,12 @@ This repository is for generating and testing the [inverse kinematics](https://e
 
 - Can load URDF files.
 - Supports both Chat-based and API-based LLMs.
-- Can solve in four modes.
+- Can solve in five modes.
   - **Normal:** Directly attempts to solve the chain.
   - **Extend:** Tries to extend an existing solution for a chain one link smaller than the current.
   - **Dynamic:** Tries to base the solution off of already solved sub-chains.
-  - **Transfer:** Tries to base the solution for an position and orientation solver off of a position only solver.
+  - **Cumulative:** Like dynamic but passes all possible solved-sub-chains.
+  - **Transfer:** Tries to base the solution for a position and orientation solver off of a position only solver.
 - Model-inheriting where more expensive models can extend or dynamically build from the solutions of cheaper models.
 
 # Setup
@@ -59,9 +60,9 @@ This repository is for generating and testing the [inverse kinematics](https://e
 ## Arguments
 
 - ``-r`` or ``--robots`` - The names of the robots. Defaults to ``None`` which will load all robot URDF files in the ``Robots`` folder.
-- ``-m`` or ``--max`` - The maximum chain length to run. Defaults to ``-1`` which means there is no limit.
-- ``-o`` or ``--orientation`` - If we want to solve for orientation in addition to position. Defaults to ``False``
-- ``-t`` or ``--types`` - The highest solving type to run. Defaults to ``Normal``.
+- ``-m`` or ``--max`` - The maximum chain length to run. Defaults to ``0`` which means there is no limit.
+- ``-o`` or ``--orientation`` - If we want to solve for orientation in addition to position. Defaults to ``True``.
+- ``-t`` or ``--types`` - The highest solving type to run. Defaults to ``Transfer``, meaning all are run.
 - ``-f`` or ``--feedbacks`` - The max number of times to give feedback. Defaults to ``5``.
 - ``-e`` or ``--examples`` - The number of examples to give with feedbacks. Defaults to ``10``.
 - ``-a`` or ``--training`` - The number of training samples. Defaults to ``1000``.

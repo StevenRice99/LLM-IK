@@ -40,6 +40,7 @@ TOKENS = "Tokens"
 NORMAL = "Normal"
 EXTEND = "Extend"
 DYNAMIC = "Dynamic"
+CUMULATIVE = "Cumulative"
 TRANSFER = "Transfer"
 
 # API interaction file naming.
@@ -1157,6 +1158,7 @@ class Robot:
                                 item[1]["Cost ($)"],
                                 item[1]["Generation Time (s)"],
                                 item[1]["Mode"] == TRANSFER,
+                                item[1]["Mode"] == CUMULATIVE,
                                 item[1]["Mode"] == DYNAMIC,
                                 item[1]["Mode"] == EXTEND,
                                 item[1]["Mode"] == NORMAL,
@@ -1393,7 +1395,7 @@ class Solver:
             mode = NORMAL
             orientation = False
         # Ensure the mode is valid.
-        if mode not in [NORMAL, EXTEND, DYNAMIC, TRANSFER]:
+        if mode not in [NORMAL, EXTEND, DYNAMIC, CUMULATIVE, TRANSFER]:
             logging.warning(f"{self.model} | {self.robot.name} | {lower + 1} to {upper + 1} | Get Cost | Mode '{mode}' "
                             f"not valid, using '{NORMAL}' instead.")
             mode = NORMAL
@@ -1483,7 +1485,7 @@ class Solver:
                     continue
                 # Parse the mode it was done in.
                 sub_mode = info[4]
-                if sub_mode not in [NORMAL, EXTEND, DYNAMIC, TRANSFER]:
+                if sub_mode not in [NORMAL, EXTEND, DYNAMIC, CUMULATIVE, TRANSFER]:
                     logging.error(f"{self.model} | {self.robot.name} | {lower + 1} to {upper + 1} | {solving} | {mode} "
                                   f"| Get Cost | Invalid mode of '{sub_mode}' in '{path}'.")
                     continue
@@ -1604,7 +1606,9 @@ class Solver:
         orientation = [False, True] if orientation else [False]
         # Get the modes to run in.
         if mode == TRANSFER:
-            mode = [NORMAL, EXTEND, DYNAMIC, TRANSFER]
+            mode = [NORMAL, EXTEND, DYNAMIC, CUMULATIVE, TRANSFER]
+        elif mode == CUMULATIVE:
+            mode = [NORMAL, EXTEND, DYNAMIC, CUMULATIVE]
         elif mode == DYNAMIC:
             mode = [NORMAL, EXTEND, DYNAMIC]
         elif mode == EXTEND:
@@ -1624,7 +1628,7 @@ class Solver:
                 for lower in range(last):
                     # Get the upper joint index.
                     upper = lower + length
-                    for current_mode in [NORMAL, EXTEND, DYNAMIC, TRANSFER]:
+                    for current_mode in [NORMAL, EXTEND, DYNAMIC, CUMULATIVE, TRANSFER]:
                         # No solving for orientation with just one link and can only do normal prompting.
                         if length == 0 and (current_orientation or current_mode != NORMAL):
                             break
@@ -1685,7 +1689,7 @@ class Solver:
                               "orientation for one joint.")
                 return False
         # Ensure the mode is valid.
-        if mode not in [NORMAL, EXTEND, DYNAMIC, TRANSFER]:
+        if mode not in [NORMAL, EXTEND, DYNAMIC, CUMULATIVE, TRANSFER]:
             logging.error(f"{self.model} | {self.robot.name} | {lower + 1} to {upper + 1} | Run API | Mode '{mode}' is "
                           "not valid.")
             return False
@@ -2065,7 +2069,7 @@ class Solver:
                          "Should Attempt | Not attempting as the previous link has not been finished.")
             return False
         # Ensure the mode is valid.
-        if mode not in [NORMAL, EXTEND, DYNAMIC, TRANSFER]:
+        if mode not in [NORMAL, EXTEND, DYNAMIC, CUMULATIVE, TRANSFER]:
             logging.warning(f"{self.model} | {self.robot.name} | {lower + 1} to {upper + 1} | Should Attempt | Mode "
                             f"'{mode}' not valid, using '{NORMAL}' instead.")
             mode = NORMAL
@@ -2126,7 +2130,7 @@ class Solver:
         best = None
         best_mode = NORMAL
         best_cost = 0
-        for mode_option in [NORMAL, EXTEND, DYNAMIC, TRANSFER]:
+        for mode_option in [NORMAL, EXTEND, DYNAMIC, CUMULATIVE, TRANSFER]:
             for solver_option in self.options:
                 if solver_option.code_successful(lower, upper, orientation, mode_option):
                     # If this is the first successful one, use it.
@@ -2172,7 +2176,7 @@ class Solver:
                          "for orientation solving.")
             return None
         # Ensure the mode is valid.
-        if mode not in [NORMAL, EXTEND, DYNAMIC, TRANSFER]:
+        if mode not in [NORMAL, EXTEND, DYNAMIC, CUMULATIVE, TRANSFER]:
             logging.warning(f"{self.model} | {self.robot.name} | {lower + 1} to {upper + 1} | Handle Interactions | "
                             f"Mode '{mode}' not valid, using '{NORMAL}' instead.")
             mode = NORMAL
@@ -2502,7 +2506,7 @@ class Solver:
             return False
         # Ensure valid values.
         lower, upper = self.robot.validate_lower_upper(lower, upper)
-        if mode not in [NORMAL, EXTEND, DYNAMIC, TRANSFER]:
+        if mode not in [NORMAL, EXTEND, DYNAMIC, CUMULATIVE, TRANSFER]:
             logging.warning(f"{self.model} | {self.robot.name} | {lower + 1} to {upper + 1} | Load Code | Mode "
                             f"'{mode}' not valid, using '{NORMAL}' instead.")
             mode = NORMAL
@@ -2631,7 +2635,7 @@ class Solver:
         # Ensure valid values.
         lower, upper = self.robot.validate_lower_upper(lower, upper)
         solving = TRANSFORM if orientation else POSITION
-        if mode not in [NORMAL, EXTEND, DYNAMIC, TRANSFER]:
+        if mode not in [NORMAL, EXTEND, DYNAMIC, CUMULATIVE, TRANSFER]:
             logging.warning(f"{self.model} | {self.robot.name} | {lower + 1} to {upper + 1} | Evaluate | Mode "
                             f"'{mode}' not valid, using '{NORMAL}' instead.")
             mode = NORMAL
@@ -2734,7 +2738,7 @@ class Solver:
         # Ensure valid values.
         lower, upper = self.robot.validate_lower_upper(lower, upper)
         solving = TRANSFORM if orientation else POSITION
-        if mode not in [NORMAL, EXTEND, DYNAMIC, TRANSFER]:
+        if mode not in [NORMAL, EXTEND, DYNAMIC, CUMULATIVE, TRANSFER]:
             logging.warning(f"{self.model} | {self.robot.name} | {lower + 1} to {upper + 1} | Code Successful | Mode "
                             f"'{mode}' not valid, using '{NORMAL}' instead.")
             mode = NORMAL
@@ -2783,7 +2787,7 @@ class Solver:
         # Ensure valid values.
         lower, upper = self.robot.validate_lower_upper(lower, upper)
         solving = TRANSFORM if orientation else POSITION
-        if mode not in [NORMAL, EXTEND, DYNAMIC, TRANSFER]:
+        if mode not in [NORMAL, EXTEND, DYNAMIC, CUMULATIVE, TRANSFER]:
             logging.warning(f"{self.model} | {self.robot.name} | {lower + 1} to {upper + 1} | Prepare Feedback | Mode "
                             f"'{mode}' not valid, using '{NORMAL}' instead.")
             mode = NORMAL
@@ -2879,7 +2883,7 @@ class Solver:
             return ""
         # Ensure valid values.
         lower, upper = self.robot.validate_lower_upper(lower, upper)
-        if mode not in [NORMAL, EXTEND, DYNAMIC, TRANSFER]:
+        if mode not in [NORMAL, EXTEND, DYNAMIC, CUMULATIVE, TRANSFER]:
             logging.warning(f"{self.model} | {self.robot.name} | {lower + 1} to {upper + 1} | Prepare LLM | Mode "
                             f"'{mode}' not valid, using '{NORMAL}' instead.")
             mode = NORMAL
@@ -2895,6 +2899,13 @@ class Solver:
             logging.info(f"{self.model} | {self.robot.name} | {lower + 1} to {upper + 1} | Prepare LLM | "
                          "A cheaper solution is already successful in normal mode; not doing mode a normal prompt.")
             return ""
+        # Do not attempt an orientation solving if the position has not been solved first.
+        if orientation:
+            pos, m, c = self.get_best(lower, upper, False)
+            if pos is None:
+                logging.info(f"{self.model} | {self.robot.name} | {lower + 1} to {upper + 1} | Prepare LLM | "
+                             "Position only chain has not yet been solved in dynamic mode; not solving with it.")
+                return ""
         # Explain how to use functions.
         mid = "" if self.methods else 'in the "FUNCTIONS" section '
         pre = (" You may respond by either completing the inverse kinematics method or calling either of the two "
@@ -3005,13 +3016,6 @@ class Solver:
                 logging.error(f"{self.model} | {self.robot.name} | {lower + 1} to {upper + 1} | Prepare LLM | Best "
                               f"chain does not exist at '{path}'.")
                 return ""
-            # Do not attempt an orientation solving if the position has not been solved first.
-            if orientation:
-                pos, m, c = self.get_best(lower, upper, False)
-                if pos is None:
-                    logging.info(f"{self.model} | {self.robot.name} | {lower + 1} to {upper + 1} | Prepare LLM | "
-                                 "Position only chain has not yet been solved in extending mode; not solving with it.")
-                    return ""
             # Save the inherited information.
             s = f"{best.model}|{lower}|{previous}|{previous_solving}|{previous_mode}"
             inherited_path = os.path.join(self.interactions,
@@ -3034,7 +3038,7 @@ class Solver:
             logging.info(f"{self.model} | {self.robot.name} | {lower + 1} to {upper + 1} | Prepare LLM | Extended "
                          "prompt prepared.")
             return f"{prompt}\n</EXISTING>{post}"
-        # Only perform a dynamic prompt if one of the immediate sub-chains were in some way successful.
+        # Only perform a dynamic or cumulative prompt if the immediate sub-chains were in some way successful.
         previous = upper - 1
         previous_orientation = orientation and lower != previous
         # Look for a lower-portion chain first.
@@ -3046,87 +3050,153 @@ class Solver:
                 logging.info(f"{self.model} | {self.robot.name} | {lower + 1} to {upper + 1} | Prepare LLM | Nothing "
                              "was successful for a smaller chain; not attempting a dynamic prompt.")
                 return ""
-        # Do not attempt an orientation solving if the position has not been solved first.
-        if orientation:
-            pos, m, c = self.get_best(lower, upper, False)
-            if pos is None:
-                logging.info(f"{self.model} | {self.robot.name} | {lower + 1} to {upper + 1} | Prepare LLM | "
-                             "Position only chain has not yet been solved in dynamic mode; not solving with it.")
+        if mode == DYNAMIC:
+            # Get the best possible dynamic option.
+            logging.info(f"{self.model} | {self.robot.name} | {lower + 1} to {upper + 1} | Prepare LLM | Beginning best"
+                         " dynamic chain search.")
+            best, feedbacks, forwards, tests, cost = self.get_dynamic(lower, upper, orientation)
+            if best is None:
+                logging.info(f"{self.model} | {self.robot.name} | {lower + 1} to {upper + 1} | Prepare LLM | Not "
+                             "performing a dynamic prompt as no options.")
                 return ""
-        # Get the best possible dynamic option.
-        logging.info(f"{self.model} | {self.robot.name} | {lower + 1} to {upper + 1} | Prepare LLM | Beginning best "
-                     "dynamic chain search.")
-        best, feedbacks, forwards, tests, cost = self.get_dynamic(lower, upper, orientation)
-        if best is None:
-            logging.info(f"{self.model} | {self.robot.name} | {lower + 1} to {upper + 1} | Prepare LLM | Not performing"
-                         " a dynamic prompt as no options.")
+            total = len(best)
+            # If somehow nothing was returned, this is an error.
+            if total == 0:
+                logging.error(f"{self.model} | {self.robot.name} | {lower + 1} to {upper + 1} | Prepare LLM | Empty "
+                              "dynamic chain returned.")
+                return ""
+            # If this is just the same as a normal prompt, lets not waste resources running it.
+            if total == 1:
+                logging.info(f"{self.model} | {self.robot.name} | {lower + 1} to {upper + 1} | Prepare LLM | Not "
+                             "performing a dynamic prompt as just a single chain.")
+                return ""
+            # If this is just the same as an extending prompt, lets not waste resources running it.
+            if total == 2 and best[0] != DYNAMIC and best[1]["Upper"] == best[1]["Lower"]:
+                logging.info(f"{self.model} | {self.robot.name} | {lower + 1} to {upper + 1} | Prepare LLM | Not "
+                             "performing a dynamic prompt as this was just an extended chain that was returned.")
+                return ""
+            # Load the codes.
+            codes = []
+            inherit = ""
+            for chain in best:
+                solver = chain["Solver"]
+                c_lower = chain["Lower"]
+                c_upper = chain["Upper"]
+                c_solving = chain["Solving"]
+                c_mode = chain["Mode"]
+                path = os.path.join(solver.solutions,
+                                    f"{c_lower}-{c_upper}-{c_solving}-{c_mode}.py")
+                if not os.path.exists(path):
+                    logging.error(f"{self.model} | {self.robot.name} | {lower + 1} to {upper + 1} | Prepare LLM | Part "
+                                  f"of dynamic chain at '{path}' does not exist.")
+                    return ""
+                with open(path, "r", encoding="utf-8", errors="ignore") as file:
+                    codes.append(file.read().strip())
+                # Add the inherited data.
+                t = f"{solver.model}|{c_lower}|{c_upper}|{c_solving}|{c_mode}"
+                if inherit == "":
+                    inherit = t
+                else:
+                    inherit += f"\n{t}"
+            # Save the inherited data.
+            path = os.path.join(self.interactions, f"{lower}-{upper}-{TRANSFORM if orientation else POSITION}-{mode}")
+            os.makedirs(path, exist_ok=True)
+            path = os.path.join(path, f"{INHERITED}.txt")
+            with open(path, "w", encoding="utf-8", errors="ignore") as file:
+                file.write(inherit)
+            # Explain the dynamic chains.
+            additional = (' To help you, solutions for sub-chains have been provided in the "EXISTING" sections. Each '
+                          "code solved a sub-link assuming their last link was the position"
+                          f"{' and orientation' if orientation else ''} being solved for. You can use these solutions "
+                          "as a starting point to extend for the entire chain.")
+            # State what sub-chain each dynamic code is for.
+            base = 0
+            for i in range(total):
+                c_lower = best[i]["Lower"]
+                c_upper = best[i]["Upper"]
+                ending = f"joint {c_lower + 1 + base}" if c_lower == c_upper else (f"joints {c_lower + 1 + base} to "
+                                                                                   f"{c_upper + 1 + base}")
+                base = c_upper + 1
+                additional += f"\nExisting code {i + 1} solved {ending}."
+            # Build the prompt.
+            prompt = self.robot.prepare_llm(lower, upper, orientation, additional + pre)
+            # Add the existing codes to the prompt.
+            for i in range(total):
+                prompt += f"\n<EXISTING {i + 1}>\n{codes[i]}\n</EXISTING {i + 1}>"
+            logging.info(f"{self.model} | {self.robot.name} | {lower + 1} to {upper + 1} | Prepare LLM | Dynamic prompt"
+                         " prepared.")
+            return f"{prompt}{post}"
+        if lower == upper - 1:
+            logging.info(f"{self.model} | {self.robot.name} | {lower + 1} to {upper + 1} | Prepare LLM | Not doing a"
+                         " cumulative prompt as this is just 2 DOF which would mean either a dynamic or extending.")
             return ""
-        total = len(best)
-        # If somehow nothing was returned, this is an error.
+        # Lastly, do cumulative prompts, collecting all solutions to sub-chains.
+        sequences = []
+        last_lower = upper - 1
+        for sub_lower in range(lower, last_lower):
+            for sub_upper in range(sub_lower, upper):
+                sub_orientation = False if sub_lower == sub_upper else orientation
+                best, best_cost, best_mode = self.get_best(sub_lower, sub_upper, sub_orientation)
+                if best is None:
+                    continue
+                sub_solving = TRANSFORM if sub_orientation else POSITION
+                path = os.path.join(best.model, f"{sub_lower}-{sub_upper}-{sub_solving}-{best_mode}.py")
+                if not os.path.exists(path):
+                    logging.error(f"{self.model} | {self.robot.name} | {lower + 1} to {upper + 1} | Prepare LLM | "
+                                  f" Best cumulative part from {lower + 1} to {upper + 1} does not exist.")
+                    continue
+                with open(path, "r", encoding="utf-8", errors="ignore") as file:
+                    code = file.read().strip()
+                sequences.append({"Lower": sub_lower, "Upper": sub_upper, "Code": code})
+        # If there are no sub-chain solutions, there is nothing to do.
+        total = len(sequences)
         if total == 0:
-            logging.error(f"{self.model} | {self.robot.name} | {lower + 1} to {upper + 1} | Prepare LLM | Empty dynamic"
-                          f" chain returned.")
+            logging.info(f"{self.model} | {self.robot.name} | {lower + 1} to {upper + 1} | Prepare LLM | Not "
+                         "performing a cumulative prompt as there are no parts to prompt with.")
             return ""
-        # If this is just the same as a normal prompt, lets not waste resources running it.
-        if total == 1:
-            logging.info(f"{self.model} | {self.robot.name} | {lower + 1} to {upper + 1} | Prepare LLM | Not performing"
-                         " a dynamic prompt as just a single chain.")
+        # See if this is just an extending solution.
+        if total == 1 and sequences[0]["Lower"] == lower and sequences[0]["Upper"] == upper - 1:
+            logging.info(f"{self.model} | {self.robot.name} | {lower + 1} to {upper + 1} | Prepare LLM | Not "
+                         "performing a cumulative prompt as this is the same as an extending prompt.")
             return ""
-        # If this is just the same as an extending prompt, lets not waste resources running it.
-        if total == 2 and best[0] != DYNAMIC and best[1]["Upper"] == best[1]["Lower"]:
-            logging.info(f"{self.model} | {self.robot.name} | {lower + 1} to {upper + 1} | Prepare LLM | Not performing"
-                         " a dynamic prompt as this was just an extended chain that was returned.")
+        # See if this is just a dynamic prompt.
+        covered = []
+        for i in range(lower, upper):
+            covered.append(0)
+        is_cumulative = False
+        for sequence in sequences:
+            for i in range(sequence["Lower"], sequence["Upper"]):
+                covered[i] += 1
+                if covered[i] > 1:
+                    is_cumulative = True
+                    break
+        if not is_cumulative:
+            links = len(covered)
+            for i in range(links):
+                if covered[i] != 1:
+                    is_cumulative = True
+                    break
+        if not is_cumulative:
+            logging.info(f"{self.model} | {self.robot.name} | {lower + 1} to {upper + 1} | Prepare LLM | Not "
+                         "performing a cumulative prompt as this is the same as a dynamic prompt.")
             return ""
-        # Load the codes.
-        codes = []
-        inherit = ""
-        for chain in best:
-            solver = chain["Solver"]
-            c_lower = chain["Lower"]
-            c_upper = chain["Upper"]
-            c_solving = chain["Solving"]
-            c_mode = chain["Mode"]
-            path = os.path.join(solver.solutions,
-                                f"{c_lower}-{c_upper}-{c_solving}-{c_mode}.py")
-            if not os.path.exists(path):
-                logging.error(f"{self.model} | {self.robot.name} | {lower + 1} to {upper + 1} | Prepare LLM | Part of "
-                              f"dynamic chain at '{path}' does not exist.")
-                return ""
-            with open(path, "r", encoding="utf-8", errors="ignore") as file:
-                codes.append(file.read().strip())
-            # Add the inherited data.
-            t = f"{solver.model}|{c_lower}|{c_upper}|{c_solving}|{c_mode}"
-            if inherit == "":
-                inherit = t
-            else:
-                inherit += f"\n{t}"
-        # Save the inherited data.
-        path = os.path.join(self.interactions, f"{lower}-{upper}-{TRANSFORM if orientation else POSITION}-{mode}")
-        os.makedirs(path, exist_ok=True)
-        path = os.path.join(path, f"{INHERITED}.txt")
-        with open(path, "w", encoding="utf-8", errors="ignore") as file:
-            file.write(inherit)
-        # Explain the dynamic chains.
-        additional = (' To help you, solutions for sub-chains have been provided in the "EXISTING" sections. Each code '
-                      "solved a sub-link assuming their last link was the position"
-                      f"{' and orientation' if orientation else ''} being solved for. You can use these solutions as a "
-                      f"starting point to extend for the entire chain.")
+        # Actually build the cumulative prompt.
+        additional = (' To help you, solutions for sub-chains have been provided in the "EXISTING" sections. Each '
+                      "code solved a sub-link assuming their last link was the target being solved for."
+                      f" You can use these solutions as a starting point to extend for the entire chain.")
         # State what sub-chain each dynamic code is for.
-        base = 0
         for i in range(total):
-            c_lower = best[i]["Lower"]
-            c_upper = best[i]["Upper"]
-            ending = f"joint {c_lower + 1 + base}" if c_lower == c_upper else (f"joints {c_lower + 1 + base} to "
-                                                                               f"{c_upper + 1 + base}")
-            base = c_upper + 1
+            c_lower = sequences[i]["Lower"]
+            c_upper = sequences[i]["Upper"]
+            ending = f"joint {c_lower + 1}" if c_lower == c_upper else f"joints {c_lower + 1} to {c_upper + 1}"
             additional += f"\nExisting code {i + 1} solved {ending}."
         # Build the prompt.
         prompt = self.robot.prepare_llm(lower, upper, orientation, additional + pre)
         # Add the existing codes to the prompt.
         for i in range(total):
-            prompt += f"\n<EXISTING {i + 1}>\n{codes[i]}\n</EXISTING {i + 1}>"
-        logging.info(f"{self.model} | {self.robot.name} | {lower + 1} to {upper + 1} | Prepare LLM | Dynamic prompt "
-                     "prepared.")
+            prompt += f"\n<EXISTING {i + 1}>\n{sequences[i]['Code']}\n</EXISTING {i + 1}>"
+        logging.info(f"{self.model} | {self.robot.name} | {lower + 1} to {upper + 1} | Prepare LLM | Cumulative prompt"
+                     " prepared.")
         return f"{prompt}{post}"
 
     def get_dynamic(self, lower: int = 0, upper: int = -1,
@@ -3440,6 +3510,7 @@ def evaluate_averages(totals: dict[str, str or float or int or bool] or None = N
                             item[1]["Cost ($)"],
                             item[1]["Generation Time (s)"],
                             item[1]["Mode"] == TRANSFER,
+                            item[1]["Mode"] == CUMULATIVE,
                             item[1]["Mode"] == DYNAMIC,
                             item[1]["Mode"] == EXTEND,
                             item[1]["Mode"] == NORMAL,
@@ -3476,8 +3547,8 @@ def evaluate_averages(totals: dict[str, str or float or int or bool] or None = N
                     file.write(s)
 
 
-def llm_ik(robots: str or list[str] or None = None, max_length: int = 0, orientation: bool = False, types: str = NORMAL,
-           feedbacks: int = MAX_PROMPTS, examples: int = EXAMPLES, training: int = TRAINING,
+def llm_ik(robots: str or list[str] or None = None, max_length: int = 0, orientation: bool = True,
+           types: str = TRANSFER, feedbacks: int = MAX_PROMPTS, examples: int = EXAMPLES, training: int = TRAINING,
            evaluating: int = EVALUATING, seed: int = SEED, distance_error: float = DISTANCE_ERROR,
            angle_error: float = ANGLE_ERROR, run: bool = False, cwd: str or None = None, level: str = "INFO",
            bypass: bool = False, wait: int = WAIT) -> None:
@@ -3502,7 +3573,7 @@ def llm_ik(robots: str or list[str] or None = None, max_length: int = 0, orienta
     :return: Nothing.
     """
     # Set the logging level.
-    level = level.upper()
+    level = level.strip().upper()
     if level == "CRITICAL" or level == "FATAL":
         level = logging.CRITICAL
     elif level == "ERROR":
@@ -3552,7 +3623,7 @@ def llm_ik(robots: str or list[str] or None = None, max_length: int = 0, orienta
     os.makedirs(PROVIDERS, exist_ok=True)
     os.makedirs(KEYS, exist_ok=True)
     # Get the solving types.
-    if types not in [NORMAL, EXTEND, DYNAMIC, TRANSFER]:
+    if types not in [NORMAL, EXTEND, DYNAMIC, CUMULATIVE, TRANSFER]:
         logging.warning(f"Solving mode '{types}' not valid; using '{NORMAL}'.")
         types = NORMAL
     else:
@@ -3788,10 +3859,10 @@ if __name__ == "__main__":
     # Configure the argument parser.
     parser = argparse.ArgumentParser(description="LLM Inverse Kinematics")
     parser.add_argument("-r", "--robots", type=str or list[str] or None, default=None, help="The names of the robots.")
-    parser.add_argument("-m", "--max", type=int, default=-1, help="The maximum chain length to run.")
-    parser.add_argument("-o", "--orientation", type=bool, default=False, help="If we want to solve for orientation "
-                                                                              "in addition to position.")
-    parser.add_argument("-t", "--types", type=str, default=NORMAL, help="The highest solving type to run.")
+    parser.add_argument("-m", "--max", type=int, default=0, help="The maximum chain length to run.")
+    parser.add_argument("-o", "--orientation", type=bool, default=True, help="If we want to solve for orientation "
+                                                                             "in addition to position.")
+    parser.add_argument("-t", "--types", type=str, default=TRANSFER, help="The highest solving type to run.")
     parser.add_argument("-f", "--feedbacks", type=int, default=MAX_PROMPTS, help="The max number of times to give "
                                                                                  "feedback.")
     parser.add_argument("-e", "--examples", type=int, default=EXAMPLES, help="The number of examples to give with "

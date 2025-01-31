@@ -1616,66 +1616,60 @@ class Solver:
             max_length = self.robot.joints
         # Loop all possible combinations.
         successful = True
-        updates = True
-        while successful and updates:
-            updates = False
-            for current_orientation in [False, True]:
-                for current_mode in [NORMAL, EXTEND, DYNAMIC, TRANSFER]:
-                    # Transfer mode is only for orientation.
-                    if not current_orientation and current_mode == TRANSFER:
-                        continue
-                    # Solve smaller chains first so their solutions can be extended.
-                    for length in range(self.robot.joints):
-                        # Determine the last "first" joint for this size.
-                        last = self.robot.joints - length
-                        for lower in range(last):
-                            # No solving for orientation with just one link and can only do normal prompting.
-                            if length == 0 and (current_orientation or current_mode != NORMAL):
+        for current_orientation in [False, True]:
+            # Solve smaller chains first so their solutions can be extended.
+            for length in range(self.robot.joints):
+                # Determine the last "first" joint for this size.
+                last = self.robot.joints - length
+                for lower in range(last):
+                    # Get the upper joint index.
+                    upper = lower + length
+                    for current_mode in [NORMAL, EXTEND, DYNAMIC, TRANSFER]:
+                        # No solving for orientation with just one link and can only do normal prompting.
+                        if length == 0 and (current_orientation or current_mode != NORMAL):
+                            break
+                        # Transfer mode is only for orientation.
+                        if not current_orientation and current_mode == TRANSFER:
+                            continue
+                        # Handle the interaction as much as possible.
+                        while True:
+                            # Get the messages to send to the LLM.
+                            messages = self.handle_interactions(lower, upper, current_orientation, current_mode)
+                            # If there are no messages, or we should not call the LLM due to parameters, stop.
+                            if (messages is None or len(messages) < 1 or self.url == "" or not run
+                                    or current_orientation not in orientation or current_mode not in mode
+                                    or length >= max_length):
                                 break
-                            # Get the upper joint index.
-                            upper = lower + length
-                            # Handle the interaction as much as possible.
-                            while True:
-                                # Get the messages to send to the LLM.
-                                messages = self.handle_interactions(lower, upper, current_orientation, current_mode)
-                                # If there are no messages, or we should not call the LLM due to parameters, stop.
-                                if (messages is None or len(messages) < 1 or self.url == "" or not run
-                                        or current_orientation not in orientation or current_mode not in mode
-                                        or length >= max_length):
+                            # For higher chains, one more check to only solve them if the lower were successful.
+                            if length > 0 and current_mode != DYNAMIC:
+                                # Get the upper of the lower chain.
+                                previous_upper = upper - 1
+                                # Single chains cannot solve for orientation.
+                                previous_orientation = current_orientation and lower != previous_upper
+                                # Single chains can only be solved in the normal mode.
+                                previous_mode = NORMAL if lower == previous_upper else current_mode
+                                # If the previous was not successful, do not waste API calls on this higher chain.
+                                if not self.code_successful(lower, previous_upper, previous_orientation,
+                                                            previous_mode):
                                     break
-                                # For higher chains, one more check to only solve them if the lower were successful.
-                                if length > 0 and current_mode != DYNAMIC:
-                                    # Get the upper of the lower chain.
-                                    previous_upper = upper - 1
-                                    # Single chains cannot solve for orientation.
-                                    previous_orientation = current_orientation and lower != previous_upper
-                                    # Single chains can only be solved in the normal mode.
-                                    previous_mode = NORMAL if lower == previous_upper else current_mode
-                                    # If the previous was not successful, do not waste API calls on this higher chain.
-                                    if not self.code_successful(lower, previous_upper, previous_orientation,
-                                                                previous_mode):
-                                        break
-                                    # If the position-only variation was not successful, do not waste API calls.
-                                    if current_orientation and not self.code_successful(lower, upper, False,
-                                                                                        current_mode):
-                                        break
-                                # Run the API if all checks were passed.
-                                if not self.run_api(lower, upper, current_orientation, current_mode, messages):
-                                    logging.error(f"{self.model} | {self.robot.name} | {lower + 1} to {upper + 1} | "
-                                                  f"{TRANSFORM if current_orientation else POSITION} | {current_mode} |"
-                                                  "Stopping API calls as there was an error.")
-                                    run = False
-                                    successful = False
-                                # If we have not yet had to stop because of an error, flag there has been updates
-                                elif successful:
-                                    updates = True
-                                # On a success or a continue error, wait for the next API call if needed.
-                                if run and wait > 1:
-                                    logging.info(f"{self.model} | {self.robot.name} | {lower + 1} to {upper + 1} | "
-                                                 f"{TRANSFORM if current_orientation else POSITION} | {current_mode} | "
-                                                 f"Waiting for {wait} second{'' if wait == 1 else 's'} before next API "
-                                                 f"call.")
-                                    time.sleep(wait)
+                                # If the position-only variation was not successful, do not waste API calls.
+                                if current_orientation and not self.code_successful(lower, upper, False,
+                                                                                    current_mode):
+                                    break
+                            # Run the API if all checks were passed.
+                            if not self.run_api(lower, upper, current_orientation, current_mode, messages):
+                                logging.error(f"{self.model} | {self.robot.name} | {lower + 1} to {upper + 1} | "
+                                              f"{TRANSFORM if current_orientation else POSITION} | {current_mode} |"
+                                              "Stopping API calls as there was an error.")
+                                run = False
+                                successful = False
+                            # On a success or a continue error, wait for the next API call if needed.
+                            if run and wait > 1:
+                                logging.info(f"{self.model} | {self.robot.name} | {lower + 1} to {upper + 1} | "
+                                             f"{TRANSFORM if current_orientation else POSITION} | {current_mode} | "
+                                             f"Waiting for {wait} second{'' if wait == 1 else 's'} before next API "
+                                             f"call.")
+                                time.sleep(wait)
         # Return if everything was successful or not.
         return successful
 
@@ -2037,6 +2031,10 @@ class Solver:
             return False
         # Ensure valid values.
         lower, upper = self.robot.validate_lower_upper(lower, upper)
+        # If a solution exists, obviously nothing to do.
+        best, best_mode, best_cost = self.get_best(lower, upper, False if lower == upper else orientation)
+        if best is not None:
+            return False
         # Handle single chains.
         if lower == upper:
             # Only attempt if all cheaper methods have been run and are not successful.

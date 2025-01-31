@@ -3786,7 +3786,11 @@ def llm_ik(robots: str or list[str] or None = None, max_length: int = 0, orienta
                 calls = 0
                 total_feedbacks = 1 + MAX_PROMPTS
                 total_orientations = 2 if orientation else 1
-                if types == DYNAMIC:
+                if types == TRANSFER:
+                    total_types = 5
+                elif types == CUMULATIVE:
+                    total_types = 4
+                elif types == DYNAMIC:
                     total_types = 3
                 elif types == EXTEND:
                     total_types = 2

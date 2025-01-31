@@ -1640,22 +1640,6 @@ class Solver:
                                     or current_orientation not in orientation or current_mode not in mode
                                     or length >= max_length):
                                 break
-                            # For higher chains, one more check to only solve them if the lower were successful.
-                            if length > 0 and current_mode != DYNAMIC:
-                                # Get the upper of the lower chain.
-                                previous_upper = upper - 1
-                                # Single chains cannot solve for orientation.
-                                previous_orientation = current_orientation and lower != previous_upper
-                                # Single chains can only be solved in the normal mode.
-                                previous_mode = NORMAL if lower == previous_upper else current_mode
-                                # If the previous was not successful, do not waste API calls on this higher chain.
-                                if not self.code_successful(lower, previous_upper, previous_orientation,
-                                                            previous_mode):
-                                    break
-                                # If the position-only variation was not successful, do not waste API calls.
-                                if current_orientation and not self.code_successful(lower, upper, False,
-                                                                                    current_mode):
-                                    break
                             # Run the API if all checks were passed.
                             if not self.run_api(lower, upper, current_orientation, current_mode, messages):
                                 logging.error(f"{self.model} | {self.robot.name} | {lower + 1} to {upper + 1} | "
@@ -2061,12 +2045,6 @@ class Solver:
                     logging.info(f"{self.model} | {self.robot.name} | {lower + 1} to {upper + 1} | {POSITION} | "
                                  f"{NORMAL} | Should Attempt | Not attempting as a cheaper model has not finished.")
                     return False
-            # If all cheaper options have been run, still stop if one has been successful.
-            best, best_mode, cost = self.get_best(lower, upper, False)
-            if best is not None and best != self:
-                logging.info(f"{self.model} | {self.robot.name} | {lower + 1} to {upper + 1} | {POSITION} | "
-                             f"{NORMAL} | Should Attempt | Not attempting as a cheaper model has been successful.")
-                return False
             # If this is the first base chain, we can always attempt it.
             if lower == 0:
                 return True
@@ -2117,14 +2095,14 @@ class Solver:
                         logging.info(f"{self.model} | {self.robot.name} | {lower + 1} to {upper + 1} | {solving} | "
                                      f"{mode} | Should Attempt | No options to transfer.")
             return attempt
-        # If the full chain has been solved with another model on any mode, don't solve it again to save resources.
-        for mode_option in [NORMAL, EXTEND, DYNAMIC, TRANSFER]:
-            for solver_option in self.options:
-                if solver_option.code_successful(lower, upper, orientation, mode_option):
-                    logging.info(f"{self.model} | {self.robot.name} | {lower + 1} to {upper + 1} | {solving} | {mode} |"
-                                 " Should Attempt | Not attempting as the a cheaper inherited model has successfully "
-                                 "solved this.")
-                    return False
+        # Can only extend if there is something to extend.
+        if mode == EXTEND:
+            previous = upper - 1
+            best, best_mode, best_cost = self.get_best(lower, previous, False if lower == previous else orientation)
+            if best is not None:
+                logging.info(f"{self.model} | {self.robot.name} | {lower + 1} to {upper + 1} | {solving} | "
+                             f"{mode} | Should Attempt | No options to extend.")
+                return False
         return True
 
     def get_best(self, lower: int = 0, upper: int = -1, orientation: bool = False) -> (Any or None, str):
@@ -2198,7 +2176,7 @@ class Solver:
             logging.warning(f"{self.model} | {self.robot.name} | {lower + 1} to {upper + 1} | Handle Interactions | "
                             f"Mode '{mode}' not valid, using '{NORMAL}' instead.")
             mode = NORMAL
-        # Check if this problem has been solved by a cheaper model.
+        # Check if this problem has been solved by a cheaper model or there is a basis to solve from.
         if not self.should_attempt(lower, upper, orientation, mode):
             return None
         solving = TRANSFORM if orientation else POSITION
@@ -2906,9 +2884,8 @@ class Solver:
                             f"'{mode}' not valid, using '{NORMAL}' instead.")
             mode = NORMAL
         # Cannot do orientation if just a single joint, and we can only run in the normal mode.
-        if lower == upper:
-            orientation = False
-            mode = NORMAL
+        if lower == upper and (orientation or mode != NORMAL):
+            return ""
         # No prompt to make if we cannot transfer.
         if not orientation and mode == TRANSFER:
             return ""
@@ -2965,20 +2942,22 @@ class Solver:
         if mode == NORMAL:
             # Do not do transform prompts until the position-only equivalent is done.
             if orientation:
-                pos, m, c = self.get_best(lower, upper, False)
-                if pos is None:
+                if not self.code_successful(lower, upper, False, NORMAL):
                     logging.info(f"{self.model} | {self.robot.name} | {lower + 1} to {upper + 1} | Prepare LLM | "
                                  "Position-only not successful; not doing mode a normal prompt with orientation.")
+                    return ""
+            # Do not attempt if the smaller problem failed.
+            if lower != upper:
+                previous = upper - 1
+                previous_orientation = False if lower == previous else orientation
+                if not self.code_successful(lower, previous, previous_orientation, mode):
+                    logging.info(f"{self.model} | {self.robot.name} | {lower + 1} to {upper + 1} | Prepare LLM | "
+                                 "Prior length not successful; not doing mode a normal prompt.")
                     return ""
             prompt = self.robot.prepare_llm(lower, upper, orientation, pre)
             logging.info(f"{self.model} | {self.robot.name} | {lower + 1} to {upper + 1} | Prepare LLM | Normal prompt "
                          f"prepared.")
             return prompt + post
-        # If an extending chain has successfully solved this, do not waste resources.
-        if self.code_successful(lower, upper, orientation, EXTEND):
-            logging.info(f"{self.model} | {self.robot.name} | {lower + 1} to {upper + 1} | Prepare LLM | "
-                         f"Extended solution already successful; not doing mode '{mode}'.")
-            return ""
         # Transfer prompting mode.
         if mode == TRANSFER:
             # See if there is an orientation to model to transfer.
@@ -3055,11 +3034,6 @@ class Solver:
             logging.info(f"{self.model} | {self.robot.name} | {lower + 1} to {upper + 1} | Prepare LLM | Extended "
                          "prompt prepared.")
             return f"{prompt}\n</EXISTING>{post}"
-        # If an extended chain has successfully solved this, do not waste resources doing a dynamic prompt.
-        if self.code_successful(lower, upper, orientation, EXTEND):
-            logging.info(f"{self.model} | {self.robot.name} | {lower + 1} to {upper + 1} | Prepare LLM | "
-                         f"Extending solution already successful; not doing a dynamic prompt.")
-            return ""
         # Only perform a dynamic prompt if one of the immediate sub-chains were in some way successful.
         previous = upper - 1
         previous_orientation = orientation and lower != previous

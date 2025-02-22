@@ -768,7 +768,7 @@ class Robot:
              f"position{' and orientation' if orientation else ''} of the {'TCP' if has_tcp else 'last link'} as "
              'detailed in the "DETAILS" section by completing the Python function provided in the "CODE" section. The '
              '"Position" and "Orientation" columns represent link coordinates in local space relative to their parent '
-             'link. The positions are from the "xyx" attribute and the orientations are the "rpy" attribute from each '
+             'link. The positions are from the "xyz" attribute and the orientations are the "rpy" attribute from each '
              'link\'s "origin" element parsed from the URDF.')
         if revolute > 0:
             s += (' The "Axis" column in the table represents the rotational axis of the revolute '

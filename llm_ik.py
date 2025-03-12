@@ -2078,7 +2078,14 @@ class Solver:
         if mode == NORMAL:
             # Otherwise, see if the lower chain worked.
             previous = upper - 1
-            attempt = self.code_successful(lower, previous, False if lower == previous else orientation, NORMAL)
+            prev_ori = False if lower == previous else orientation
+            attempt = self.code_successful(lower, previous, prev_ori, NORMAL)
+            # If an inherited model worked, we can count that too.
+            if not attempt:
+                for option in self.options:
+                    attempt = option.code_successful(lower, previous, prev_ori, NORMAL)
+                    if attempt:
+                        break
             if not attempt:
                 logging.info(f"{self.model} | {self.robot.name} | {lower + 1} to {upper + 1} | {solving} | {mode} | "
                              "Should Attempt | Not attempting as the smaller sub-chain was not successful.")

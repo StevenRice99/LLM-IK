@@ -3185,13 +3185,11 @@ class Solver:
         covered = []
         for i in range(lower, upper):
             covered.append(0)
-        logging.info(covered)
         is_cumulative = False
         for sequence in sequences:
-            sequence_lower = lower - sequence['Lower']
-            sequence_upper = upper - sequence['Upper']
-            for i in range(sequence_lower, sequence_upper + 1):
-                logging.info(i)
+            sequence_lower = lower - sequence["Lower"]
+            sequence_upper = upper - sequence["Upper"]
+            for i in range(sequence_lower, sequence_upper):
                 covered[i] += 1
                 if covered[i] > 1:
                     is_cumulative = True

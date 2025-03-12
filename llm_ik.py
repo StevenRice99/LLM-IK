@@ -3147,6 +3147,7 @@ class Solver:
         # Lastly, do cumulative prompts, collecting all solutions to sub-chains.
         sequences = []
         last_lower = upper - 1
+        inherited = ""
         for sub_lower in range(lower, last_lower):
             for sub_upper in range(sub_lower, upper):
                 sub_orientation = False if sub_lower == sub_upper else orientation
@@ -3163,6 +3164,11 @@ class Solver:
                 with open(path, "r", encoding="utf-8", errors="ignore") as file:
                     code = file.read().strip()
                 sequences.append({"Lower": sub_lower, "Upper": sub_upper, "Code": code})
+                current_inherited = f"{best.model}|{sub_lower}|{sub_upper}|{sub_solving}|{best_mode}"
+                if inherited == "":
+                    inherited = current_inherited
+                else:
+                    inherited += current_inherited
         # If there are no sub-chain solutions, there is nothing to do.
         total = len(sequences)
         if total == 0:
@@ -3200,18 +3206,25 @@ class Solver:
                       "code solved a sub-link assuming their last link was the target being solved for."
                       f" You can use these solutions as a starting point to extend for the entire chain.")
         # State what sub-chain each dynamic code is for.
+        inherited = ""
         for i in range(total):
             c_lower = sequences[i]["Lower"]
             c_upper = sequences[i]["Upper"]
             ending = f"joint {c_lower + 1}" if c_lower == c_upper else f"joints {c_lower + 1} to {c_upper + 1}"
             additional += f"\nExisting code {i + 1} solved {ending}."
         # Build the prompt.
-        prompt = self.robot.prepare_llm(lower, upper, orientation, additional + pre)
+        prompt = self.robot.prepare_llm(lower, upper, orientation, additional + "\n" + pre)
         # Add the existing codes to the prompt.
         for i in range(total):
             prompt += f"\n<EXISTING {i + 1}>\n{sequences[i]['Code']}\n</EXISTING {i + 1}>"
         logging.info(f"{self.model} | {self.robot.name} | {lower + 1} to {upper + 1} | Prepare LLM | Cumulative prompt"
                      " prepared.")
+        # Save the inherited data.
+        path = os.path.join(self.interactions, f"{lower}-{upper}-{TRANSFORM if orientation else POSITION}-{mode}")
+        os.makedirs(path, exist_ok=True)
+        path = os.path.join(path, f"{INHERITED}.txt")
+        with open(path, "w", encoding="utf-8", errors="ignore") as file:
+            file.write(inherited)
         return f"{prompt}{post}"
 
     def get_dynamic(self, lower: int = 0, upper: int = -1,

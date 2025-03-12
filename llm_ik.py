@@ -3206,7 +3206,6 @@ class Solver:
                       "code solved a sub-link assuming their last link was the target being solved for."
                       f" You can use these solutions as a starting point to extend for the entire chain.")
         # State what sub-chain each dynamic code is for.
-        inherited = ""
         for i in range(total):
             c_lower = sequences[i]["Lower"]
             c_upper = sequences[i]["Upper"]

@@ -2586,7 +2586,7 @@ class Solver:
             except Exception as e:
                 elapsed = time.perf_counter() - start_time
                 message = traceback.format_exc()
-                logging.error(f"{self.model} | {lower + 1} to {upper + 1} | Run Code | {solving} | {mode} | Error: {e}")
+                logging.info(f"{self.model} | {lower + 1} to {upper + 1} | Run Code | {solving} | {mode} | Error: {e}")
         else:
             orientation = tuple(orientation)
             start_time = time.perf_counter()
@@ -2596,7 +2596,7 @@ class Solver:
             except Exception as e:
                 elapsed = time.perf_counter() - start_time
                 message = traceback.format_exc()
-                logging.error(f"{self.model} | {lower + 1} to {upper + 1} | Run Code | {solving} | {mode} | Error: {e}")
+                logging.info(f"{self.model} | {lower + 1} to {upper + 1} | Run Code | {solving} | {mode} | Error: {e}")
         # Parse the joints.
         if joints is not None:
             # If a single float was returned (as should be for single-link chains), make it a list.
@@ -3136,15 +3136,18 @@ class Solver:
         for sub_lower in range(lower, last_lower):
             for sub_upper in range(sub_lower, upper):
                 sub_orientation = False if sub_lower == sub_upper else orientation
-                best, best_cost, best_mode = self.get_best(sub_lower, sub_upper, sub_orientation)
+                best, best_mode, best_cost = self.get_best(sub_lower, sub_upper, sub_orientation)
                 if best is None:
                     continue
                 sub_solving = TRANSFORM if sub_orientation else POSITION
-                path = os.path.join(best.model, f"{sub_lower}-{sub_upper}-{sub_solving}-{best_mode}.py")
+                path = os.path.join(SOLUTIONS, self.robot.name, best.model,
+                                    f"{sub_lower}-{sub_upper}-{sub_solving}-{best_mode}.py")
                 if not os.path.exists(path):
                     logging.error(f"{self.model} | {self.robot.name} | {lower + 1} to {upper + 1} | Prepare LLM | "
-                                  f" Best cumulative part from {lower + 1} to {upper + 1} does not exist.")
+                                  f"Best cumulative part from {lower + 1} to {upper + 1} does not exist: {path}")
                     continue
+                else:
+                    print(path)
                 with open(path, "r", encoding="utf-8", errors="ignore") as file:
                     code = file.read().strip()
                 sequences.append({"Lower": sub_lower, "Upper": sub_upper, "Code": code})
@@ -3220,7 +3223,8 @@ class Solver:
         best, best_mode, best_cost = self.get_best(lower, upper, current_orientation)
         if best is not None:
             logging.info(f"{self.model} | {self.robot.name} | {lower + 1} to {upper + 1} | Get Dynamic | Found a "
-                         f"successful solver solving for '{current_orientation}' in mode '{best_mode}'.")
+                         f"successful solver solving for '{TRANSFORM if current_orientation else POSITION}' in mode "
+                         f"'{best_mode}'.")
             costs, feedbacks, forwards, tests = best.get_cost(lower, upper, current_orientation, best_mode)
             return ([{"Solver": best, "Lower": lower, "Upper": upper,
                       "Solving": TRANSFORM if current_orientation else POSITION, "Mode": best_mode}], feedbacks,

@@ -1647,7 +1647,7 @@ class Solver:
                             # Run the API if all checks were passed.
                             if not self.run_api(lower, upper, current_orientation, current_mode, messages):
                                 logging.error(f"{self.model} | {self.robot.name} | {lower + 1} to {upper + 1} | "
-                                              f"{TRANSFORM if current_orientation else POSITION} | {current_mode} |"
+                                              f"{TRANSFORM if current_orientation else POSITION} | {current_mode} | "
                                               "Stopping API calls as there was an error.")
                                 run = False
                                 successful = False

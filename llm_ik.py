@@ -3160,8 +3160,6 @@ class Solver:
                     logging.error(f"{self.model} | {self.robot.name} | {lower + 1} to {upper + 1} | Prepare LLM | "
                                   f"Best cumulative part from {lower + 1} to {upper + 1} does not exist: {path}")
                     continue
-                else:
-                    print(path)
                 with open(path, "r", encoding="utf-8", errors="ignore") as file:
                     code = file.read().strip()
                 sequences.append({"Lower": sub_lower, "Upper": sub_upper, "Code": code})

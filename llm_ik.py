@@ -3168,7 +3168,7 @@ class Solver:
                 if inherited == "":
                     inherited = current_inherited
                 else:
-                    inherited += current_inherited
+                    inherited += f"\n{current_inherited}"
         # If there are no sub-chain solutions, there is nothing to do.
         total = len(sequences)
         if total == 0:

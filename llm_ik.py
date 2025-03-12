@@ -2958,7 +2958,7 @@ class Solver:
                     "</DESCRIPTION>\n\t</TEST_SOLUTION>\n</FUNCTIONS>")
         # Perform normal prompts.
         if mode == NORMAL:
-            # Do not do transform prompts until the position-only equivalent is done.
+            # Do not do orientation prompts until the position-only equivalent is done.
             if orientation:
                 if not self.code_successful(lower, upper, False, NORMAL):
                     logging.info(f"{self.model} | {self.robot.name} | {lower + 1} to {upper + 1} | Prepare LLM | "
@@ -2968,7 +2968,14 @@ class Solver:
             if lower != upper:
                 previous = upper - 1
                 previous_orientation = False if lower == previous else orientation
-                if not self.code_successful(lower, previous, previous_orientation, mode):
+                do = self.code_successful(lower, previous, previous_orientation, NORMAL)
+                # See if a cheaper model did the smaller size, because if so let us assume we should try with this.
+                if not do:
+                    for option in self.options:
+                        do = option.code_successful(lower, previous, previous_orientation, NORMAL)
+                        if do:
+                            break
+                if not do:
                     logging.info(f"{self.model} | {self.robot.name} | {lower + 1} to {upper + 1} | Prepare LLM | "
                                  "Prior length not successful; not doing mode a normal prompt.")
                     return ""

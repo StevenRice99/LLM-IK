@@ -2984,7 +2984,7 @@ class Solver:
                 return ""
             # Save the inherited information.
             s = f"{best.model}|{lower}|{upper}|{POSITION}|{best_mode}"
-            inherited_path = os.path.join(self.interactions, f"{lower}-{upper}-{TRANSFORM}-{TRANSFORM}")
+            inherited_path = os.path.join(self.interactions, f"{lower}-{upper}-{TRANSFORM}-{TRANSFER}")
             os.makedirs(inherited_path, exist_ok=True)
             inherited_path = os.path.join(inherited_path, f"{INHERITED}.txt")
             with open(inherited_path, "w", encoding="utf-8", errors="ignore") as file:

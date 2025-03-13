@@ -2113,7 +2113,7 @@ class Solver:
         if mode == EXTEND:
             previous = upper - 1
             best, best_mode, best_cost = self.get_best(lower, previous, False if lower == previous else orientation)
-            if best is not None:
+            if best is None:
                 logging.info(f"{self.model} | {self.robot.name} | {lower + 1} to {upper + 1} | {solving} | "
                              f"{mode} | Should Attempt | No options to extend.")
                 return False

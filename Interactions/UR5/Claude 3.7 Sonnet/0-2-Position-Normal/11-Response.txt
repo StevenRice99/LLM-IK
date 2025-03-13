@@ -1,104 +1,11 @@
-I see the issues with my solution. Let me analyze the failures and develop a correct inverse kinematics solution.
+I see the issues with my previous solution. Let me analyze the feedback and develop a correct inverse kinematics solution.
 
-The main problems with my previous solution appear to be:
+The main problems appear to be:
+1. Incorrect handling of the robot's geometry
+2. Issues with joint angle calculations
+3. Not properly accounting for multiple possible solutions
 
-1. Not properly handling the multiple possible configurations (elbow up vs. elbow down)
-2. Not correctly accounting for the joint orientations and link offsets
-3. Issues with angle ranges and quadrant selection
-
-Let me develop a more accurate solution:
-
-```python
-def inverse_kinematics(p: tuple[float, float, float]) -> tuple[float, float, float]:
-    """
-    Gets the joint values needed to reach position "p".
-    :param p: The position to reach in the form [x, y, z].
-    :return: A list of the values to set the links to for reaching position "p".
-    """
-    import numpy as np
-    
-    x, y, z = p
-    
-    # Link parameters from the URDF
-    joint2_offset = 0.13585  # Z offset of joint 2 from joint 1
-    joint3_y_offset = -0.1197  # Y offset of joint 3 from joint 2
-    joint3_z_offset = 0.425  # Z offset of joint 3 from joint 2
-    tcp_z_offset = 0.39225  # Z offset of TCP from joint 3
-    
-    # Calculate joint 1 (rotation around Z-axis)
-    theta1 = np.arctan2(y, x)
-    
-    # Transform the target point to the XZ plane after rotation by theta1
-    # This is the plane where joints 2 and 3 operate
-    r = np.sqrt(x**2 + y**2)
-    
-    # Adjust target position to account for joint 2's height
-    target_r = r
-    target_z = z - joint2_offset
-    
-    # Calculate the position of the wrist (joint 3) relative to joint 2
-    # We need to solve for joint angles that place joint 3 in a position
-    # such that the TCP can reach the target
-    
-    # First, calculate the vector from joint 3 to TCP in the local frame
-    # when all joints are at zero
-    # We need to transform this based on joint 3 angle
-    
-    # This is a 2D problem in the r-z plane now
-    # We need to find joint 2 and 3 angles that position the TCP at (target_r, target_z)
-    
-    # Distance from joint 2 to joint 3 (in the r-z plane when joints are at zero)
-    l2 = np.sqrt(joint3_y_offset**2 + joint3_z_offset**2)
-    
-    # Angle of joint 3 link relative to joint 2 when at zero position
-    alpha2 = np.arctan2(joint3_z_offset, joint3_y_offset)
-    
-    # Distance from joint 3 to TCP
-    l3 = tcp_z_offset
-    
-    # Calculate the distance from joint 2 to the target
-    d = np.sqrt(target_r**2 + target_z**2)
-    
-    # Use the law of cosines to find the angle between the links
-    # at joint 3
-    cos_phi = (l2**2 + l3**2 - d**2) / (2 * l2 * l3)
-    cos_phi = np.clip(cos_phi, -1.0, 1.0)  # Ensure within valid range
-    
-    # The internal angle at joint 3
-    phi = np.arccos(cos_phi)
-    
-    # Calculate theta3 (joint 3 angle)
-    # When joint 3 is at zero, the TCP extends along the z-axis of joint 3
-    # phi is the internal angle, we need to convert to joint angle
-    theta3 = np.pi - phi
-    
-    # Now calculate theta2 (joint 2 angle)
-    # First, find the angle from horizontal to the line from joint 2 to target
-    psi = np.arctan2(target_z, target_r)
-    
-    # Then find the angle from horizontal to the line from joint 2 to joint 3
-    # when the internal angle at joint 3 is phi
-    # Use the law of sines
-    sin_gamma = l3 * np.sin(phi) / d
-    sin_gamma = np.clip(sin_gamma, -1.0, 1.0)
-    gamma = np.arcsin(sin_gamma)
-    
-    # Calculate theta2
-    theta2 = psi - gamma - alpha2
-    
-    # Adjust angles based on the correct configuration
-    # This is determined by comparing with the provided correct solutions
-    
-    # Check if we need to use the "elbow down" configuration
-    # This is a heuristic based on the failed examples
-    if z < 0 and target_z < 0:
-        theta3 = -theta3
-        theta2 = psi + gamma - alpha2
-    
-    return (theta1, theta2, theta3)
-```
-
-Wait, I need to reconsider this solution. The failures show that my approach isn't handling all cases correctly. Let me revise with a more comprehensive understanding of the robot's kinematics:
+Let me develop a corrected solution:
 
 ```python
 def inverse_kinematics(p: tuple[float, float, float]) -> tuple[float, float, float]:
@@ -111,46 +18,51 @@ def inverse_kinematics(p: tuple[float, float, float]) -> tuple[float, float, flo
     
     x, y, z = p
     
-    # Link parameters from the URDF
-    d1 = 0.13585  # Z offset of joint 2 from joint 1
-    a2 = 0.425    # Length of link 2 (joint 2 to joint 3)
-    a3 = 0.39225  # Length of link 3 (joint 3 to TCP)
+    # Link dimensions
+    h1 = 0.13585  # Height of joint 2 from base
+    l2 = 0.425    # Z component of link 2
+    d2 = -0.1197  # Y component of link 2 (negative in the URDF)
+    l3 = 0.39225  # Length of link 3
     
     # Calculate joint 1 (rotation around Z-axis)
     theta1 = np.arctan2(y, x)
     
-    # Transform the target point to the plane of joints 2 and 3
-    # after rotation by theta1
+    # Transform the target point to the frame after joint 1 rotation
+    # This gives us the distance from the Z-axis
     r = np.sqrt(x**2 + y**2)
     
-    # The position we need to reach with joints 2 and 3
-    # Adjust for the height of joint 2
-    target_r = r
-    target_z = z - d1
+    # Now we have a 2D problem in the r-z plane
+    # We need to find the position of the wrist (joint 3) relative to joint 2
     
-    # Calculate the squared distance from joint 2 to the target
-    d_squared = target_r**2 + target_z**2
+    # Calculate the effective lengths of the links
+    len2 = np.sqrt(l2**2 + d2**2)
+    len3 = l3
     
-    # Use the law of cosines to find the angle at joint 3
-    cos_theta3 = (d_squared - a2**2 - a3**2) / (2 * a2 * a3)
+    # Calculate the angle offset for link 2 due to its geometry
+    phi2 = np.arctan2(l2, d2)
     
-    # Ensure the value is within valid range for arccos
+    # Adjust z coordinate relative to joint 2
+    z_adj = z - h1
+    
+    # Use the law of cosines to find the angle between links 2 and 3
+    cos_theta3 = (r**2 + z_adj**2 - len2**2 - len3**2) / (2 * len2 * len3)
+    
+    # Clamp to handle numerical errors
     cos_theta3 = np.clip(cos_theta3, -1.0, 1.0)
     
-    # There are two possible solutions for theta3 (elbow up or elbow down)
-    # Based on the failed examples, we need to choose the appropriate one
-    # Let's try the negative solution first (elbow up)
-    theta3 = -np.arccos(cos_theta3)
+    # Calculate theta3 (angle of joint 3)
+    # We choose the elbow-up configuration based on the feedback
+    theta3 = np.arccos(cos_theta3)
     
-    # Now calculate theta2
-    # First, find the angle from the horizontal to the line from joint 2 to target
-    beta = np.arctan2(target_z, target_r)
+    # Calculate theta2 (angle of joint 2)
+    # First, find the angle to the target from joint 2
+    beta = np.arctan2(z_adj, r)
     
-    # Then find the angle from the horizontal to the line from joint 2 to joint 3
-    gamma = np.arctan2(a3 * np.sin(theta3), a2 + a3 * np.cos(theta3))
+    # Then find the angle in the triangle formed by links 2, 3, and the line to the target
+    gamma = np.arctan2(len3 * np.sin(theta3), len2 + len3 * np.cos(theta3))
     
-    # Calculate theta2
-    theta2 = beta - gamma
+    # Combine these angles and adjust for the link 2 geometry
+    theta2 = beta - gamma + phi2
     
     # Normalize angles to be within the joint limits
     theta1 = ((theta1 + np.pi) % (2 * np.pi)) - np.pi
@@ -160,7 +72,13 @@ def inverse_kinematics(p: tuple[float, float, float]) -> tuple[float, float, flo
     return (theta1, theta2, theta3)
 ```
 
-After analyzing the failures more carefully, I see that I need to handle the elbow configurations differently. Let me make one final revision:
+Wait, I need to reconsider my approach based on the feedback. Let me analyze the correct joint values provided:
+
+1. For some targets, the correct theta3 is negative, while for others it's positive
+2. The relationship between theta1 and the target's x,y coordinates isn't always straightforward
+3. There seems to be multiple possible configurations for the same target
+
+Let me revise my solution:
 
 ```python
 def inverse_kinematics(p: tuple[float, float, float]) -> tuple[float, float, float]:
@@ -173,62 +91,66 @@ def inverse_kinematics(p: tuple[float, float, float]) -> tuple[float, float, flo
     
     x, y, z = p
     
-    # Link parameters from the URDF
-    d1 = 0.13585  # Z offset of joint 2 from joint 1
-    a2 = 0.425    # Length of link 2 (joint 2 to joint 3)
-    a3 = 0.39225  # Length of link 3 (joint 3 to TCP)
+    # Link dimensions
+    h1 = 0.13585  # Height of joint 2 from base
+    l2 = 0.425    # Z component of link 2
+    d2 = -0.1197  # Y component of link 2 (negative in the URDF)
+    l3 = 0.39225  # Length of link 3
     
     # Calculate joint 1 (rotation around Z-axis)
-    theta1 = np.arctan2(y, x)
+    if abs(x) < 1e-10 and abs(y) < 1e-10:
+        # Special case: target is on the Z-axis
+        theta1 = 0
+    else:
+        theta1 = np.arctan2(y, x)
     
-    # Transform the target point to the plane of joints 2 and 3
-    # after rotation by theta1
+    # Transform the target point to the frame after joint 1 rotation
+    # This gives us the distance from the Z-axis
     r = np.sqrt(x**2 + y**2)
     
-    # The position we need to reach with joints 2 and 3
-    # Adjust for the height of joint 2
-    target_r = r
-    target_z = z - d1
+    # Calculate the effective lengths of the links
+    len2 = np.sqrt(l2**2 + d2**2)
+    len3 = l3
     
-    # Calculate the squared distance from joint 2 to the target
-    d_squared = target_r**2 + target_z**2
+    # Calculate the angle offset for link 2 due to its geometry
+    phi2 = np.arctan2(l2, -d2)  # Note the negative d2
     
-    # Use the law of cosines to find the angle at joint 3
-    cos_theta3 = (d_squared - a2**2 - a3**2) / (2 * a2 * a3)
+    # Adjust z coordinate relative to joint 2
+    z_adj = z - h1
     
-    # Ensure the value is within valid range for arccos
+    # Use the law of cosines to find the angle between links 2 and 3
+    cos_theta3 = (r**2 + z_adj**2 - len2**2 - len3**2) / (2 * len2 * len3)
+    
+    # Clamp to handle numerical errors
     cos_theta3 = np.clip(cos_theta3, -1.0, 1.0)
     
-    # Calculate theta3 - we'll determine the sign later
-    theta3_abs = np.arccos(cos_theta3)
+    # Calculate theta3 (angle of joint 3)
+    theta3 = np.arccos(cos_theta3)
     
-    # Now calculate theta2 for both possible theta3 values
-    # First, find the angle from the horizontal to the line from joint 2 to target
-    beta = np.arctan2(target_z, target_r)
+    # Based on the feedback, we need to determine whether to use positive or negative theta3
+    # Let's try both and see which one gives a better result
     
-    # Calculate for positive theta3 (elbow down)
-    gamma_pos = np.arctan2(a3 * np.sin(theta3_abs), a2 + a3 * np.cos(theta3_abs))
-    theta2_pos = beta - gamma_pos
+    # For positive theta3
+    beta_pos = np.arctan2(z_adj, r)
+    gamma_pos = np.arctan2(len3 * np.sin(theta3), len2 + len3 * np.cos(theta3))
+    theta2_pos = beta_pos - gamma_pos + phi2
     
-    # Calculate for negative theta3 (elbow up)
-    gamma_neg = np.arctan2(a3 * np.sin(-theta3_abs), a2 + a3 * np.cos(-theta3_abs))
-    theta2_neg = beta - gamma_neg
+    # For negative theta3
+    theta3_neg = -theta3
+    gamma_neg = np.arctan2(len3 * np.sin(theta3_neg), len2 + len3 * np.cos(theta3_neg))
+    theta2_neg = beta_pos - gamma_neg + phi2
     
-    # Choose the configuration that keeps the arm in front
-    # This is a heuristic based on the failed examples
-    if target_z < 0:
-        # For targets below the base, prefer elbow up configuration
-        theta3 = -theta3_abs
-        theta2 = theta2_neg
-    else:
-        # For targets above the base, prefer elbow down configuration
-        theta3 = theta3_abs
-        theta2 = theta2_pos
+    # Choose the configuration that better reaches the target
+    # For this, we'll compute the forward kinematics for both configurations
+    
+    # Let's use the negative theta3 configuration based on the feedback patterns
+    theta2 = theta2_neg
+    theta3 = theta3_neg
     
     return (theta1, theta2, theta3)
 ```
 
-After further analysis of the failures, I need to make a more sophisticated decision about which configuration to use:
+After analyzing the feedback more carefully, I see that I need to make further adjustments. Let me finalize the solution:
 
 ```python
 def inverse_kinematics(p: tuple[float, float, float]) -> tuple[float, float, float]:
@@ -241,48 +163,104 @@ def inverse_kinematics(p: tuple[float, float, float]) -> tuple[float, float, flo
     
     x, y, z = p
     
-    # Link parameters from the URDF
-    d1 = 0.13585  # Z offset of joint 2 from joint 1
-    a2 = 0.425    # Length of link 2 (joint 2 to joint 3)
-    a3 = 0.39225  # Length of link 3 (joint 3 to TCP)
+    # Link dimensions
+    h1 = 0.13585  # Height of joint 2 from base
+    l2 = 0.425    # Z component of link 2
+    d2 = 0.1197   # Y component of link 2
+    l3 = 0.39225  # Length of link 3
     
     # Calculate joint 1 (rotation around Z-axis)
     theta1 = np.arctan2(y, x)
     
-    # Transform the target point to the plane of joints 2 and 3
-    # after rotation by theta1
+    # Transform the target point to the frame after joint 1 rotation
     r = np.sqrt(x**2 + y**2)
     
-    # The position we need to reach with joints 2 and 3
-    # Adjust for the height of joint 2
-    target_r = r
-    target_z = z - d1
+    # Calculate the effective lengths of the links
+    len2 = np.sqrt(l2**2 + d2**2)
+    len3 = l3
     
-    # Calculate the squared distance from joint 2 to the target
-    d_squared = target_r**2 + target_z**2
+    # Calculate the angle offset for link 2 due to its geometry
+    phi2 = np.arctan2(l2, d2)
     
-    # Use the law of cosines to find the angle at joint 3
-    cos_theta3 = (d_squared - a2**2 - a3**2) / (2 * a2 * a3)
+    # Adjust z coordinate relative to joint 2
+    z_adj = z - h1
     
-    # Ensure the value is within valid range for arccos
+    # Use the law of cosines to find the angle between links 2 and 3
+    cos_theta3 = (r**2 + z_adj**2 - len2**2 - len3**2) / (2 * len2 * len3)
+    
+    # Clamp to handle numerical errors
     cos_theta3 = np.clip(cos_theta3, -1.0, 1.0)
     
-    # Calculate theta3 - we'll determine the sign based on the target position
+    # Calculate theta3 (angle of joint 3)
     theta3 = np.arccos(cos_theta3)
     
-    # For targets below the base plane, use negative theta3
-    if z < d1:
+    # Calculate theta2 (angle of joint 2)
+    beta = np.arctan2(z_adj, r)
+    gamma = np.arctan2(len3 * np.sin(theta3), len2 + len3 * np.cos(theta3))
+    theta2 = beta - gamma - phi2
+    
+    # Based on the feedback, we need to adjust our solution
+    # Let's try the other elbow configuration
+    if z < 0:
         theta3 = -theta3
+        gamma = np.arctan2(len3 * np.sin(theta3), len2 + len3 * np.cos(theta3))
+        theta2 = beta - gamma - phi2
     
-    # Now calculate theta2
-    # First, find the angle from the horizontal to the line from joint 2 to target
-    beta = np.arctan2(target_z, target_r)
+    # If the target is behind the robot, we need to flip theta1
+    if r < 0:
+        theta1 = theta1 + np.pi
     
-    # Then find the angle from the horizontal to the line from joint 2 to joint 3
-    gamma = np.arctan2(a3 * np.sin(theta3), a2 + a3 * np.cos(theta3))
+    return (theta1, theta2, theta3)
+```
+
+After further analysis of the feedback, I need to make one final correction:
+
+```python
+def inverse_kinematics(p: tuple[float, float, float]) -> tuple[float, float, float]:
+    """
+    Gets the joint values needed to reach position "p".
+    :param p: The position to reach in the form [x, y, z].
+    :return: A list of the values to set the links to for reaching position "p".
+    """
+    import numpy as np
     
-    # Calculate theta2
-    theta2 = beta - gamma
+    x, y, z = p
+    
+    # Link dimensions
+    h1 = 0.13585  # Height of joint 2 from base
+    l2 = 0.425    # Z component of link 2
+    d2 = 0.1197   # Y component of link 2
+    l3 = 0.39225  # Length of link 3
+    
+    # Calculate joint 1 (rotation around Z-axis)
+    theta1 = np.arctan2(y, x)
+    
+    # Transform the target point to the frame after joint 1 rotation
+    r = np.sqrt(x**2 + y**2)
+    
+    # Calculate the effective lengths of the links
+    len2 = np.sqrt(l2**2 + d2**2)
+    len3 = l3
+    
+    # Calculate the angle offset for link 2 due to its geometry
+    phi2 = np.arctan2(l2, d2)
+    
+    # Adjust z coordinate relative to joint 2
+    z_adj = z - h1
+    
+    # Use the law of cosines to find the angle between links 2 and 3
+    cos_theta3 = (r**2 + z_adj**2 - len2**2 - len3**2) / (2 * len2 * len3)
+    
+    # Clamp to handle numerical errors
+    cos_theta3 = np.clip(cos_theta3, -1.0, 1.0)
+    
+    # Calculate theta3 (angle of joint 3)
+    theta3 = -np.arccos(cos_theta3)  # Using negative arccos for elbow-down configuration
+    
+    # Calculate theta2 (angle of joint 2)
+    beta = np.arctan2(z_adj, r)
+    gamma = np.arctan2(len3 * np.sin(theta3), len2 + len3 * np.cos(theta3))
+    theta2 = beta - gamma - phi2
     
     return (theta1, theta2, theta3)
 ```

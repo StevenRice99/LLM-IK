@@ -1,26 +1,64 @@
-The feedback indicates that the initial implementation of the inverse kinematics function is not correctly calculating the joint angles to reach the desired positions. The main issue seems to be with the calculation of \( \theta_2 \) and \( \theta_1 \). Let's re-examine the approach and correct the calculations.
+The feedback indicates that the current implementation of the inverse kinematics function is not correctly calculating the joint angles to reach the desired positions. The main issue seems to be with the calculation of \( \theta_1 \) and \( \theta_2 \). Let's re-examine the approach and correct the calculations.
 
-### Correct Approach
+Given the details:
+- Revolute 1 rotates around the Y-axis.
+- Revolute 2 rotates around the Z-axis.
+- The position of Revolute 2 relative to Revolute 1 is [0, 0.093, 0].
+- The position of the TCP relative to Revolute 2 is [0, 0, 0.09465].
 
-1. **Calculate the distance from the origin to the target point in the XY plane:**
+Let's denote:
+- \( L_1 = 0.093 \) (distance from Revolute 1 to Revolute 2 along the Y-axis).
+- \( L_2 = 0.09465 \) (distance from Revolute 2 to the TCP along the Z-axis).
+
+The position of the TCP in the global coordinate system can be expressed as:
 \[
-d = \sqrt{x^2 + y^2}
+\begin{aligned}
+x &= L_2 \sin(\theta_1) \cos(\theta_2) \\
+y &= L_1 + L_2 \cos(\theta_1) \\
+z &= L_2 \sin(\theta_1) \sin(\theta_2)
+\end{aligned}
+\]
+where \( \theta_1 \) is the angle of Revolute 1 and \( \theta_2 \) is the angle of Revolute 2.
+
+To find \( \theta_1 \) and \( \theta_2 \), we need to solve these equations correctly.
+
+First, let's solve for \( \theta_1 \):
+\[
+y = L_1 + L_2 \cos(\theta_1) \\
+\Rightarrow \cos(\theta_1) = \frac{y - L_1}{L_2}
+\]
+\[
+\theta_1 = \arccos\left(\frac{y - L_1}{L_2}\right)
 \]
 
-2. **Use the law of cosines to find \( \theta_2 \):**
+Next, we can solve for \( \theta_2 \) using the equations for \( x \) and \( z \):
 \[
-\cos(\theta_2) = \frac{d^2 - L_1^2 - L_2^2}{2 L_1 L_2}
+x = L_2 \sin(\theta_1) \cos(\theta_2) \\
+z = L_2 \sin(\theta_1) \sin(\theta_2)
 \]
 \[
-\theta_2 = \pm \arccos\left(\frac{d^2 - L_1^2 - L_2^2}{2 L_1 L_2}\right)
-\]
-
-3. **Use the law of sines to find \( \theta_1 \):**
-\[
-\theta_1 = \arctan2(y, x) - \arctan2\left(L_2 \sin(\theta_2), L_1 + L_2 \cos(\theta_2)\right)
+\Rightarrow \tan(\theta_2) = \frac{z}{x} \\
+\Rightarrow \theta_2 = \arctan2(z, x)
 \]
 
-### Corrected Implementation
+However, the feedback shows that this approach is not working correctly. Let's try a different approach by considering the geometry of the manipulator.
+
+The position of the TCP can be represented in polar coordinates relative to Revolute 1. The distance from Revolute 1 to the TCP is:
+\[
+r = \sqrt{x^2 + z^2}
+\]
+The angle \( \phi \) between the line from Revolute 1 to the TCP and the Y-axis is:
+\[
+\phi = \arctan2(r, y - L_1)
+\]
+
+The joint angles can then be calculated as:
+\[
+\theta_1 = \phi \\
+\theta_2 = \arctan2(z, x)
+\]
+
+Let's implement this corrected approach in the `inverse_kinematics` function:
 
 ```python
 import math
@@ -35,43 +73,19 @@ def inverse_kinematics(p: tuple[float, float, float]) -> tuple[float, float]:
     L1 = 0.093
     L2 = 0.09465
     
-    # Calculate the distance from the origin to the target point in the XY plane
-    d = math.sqrt(x**2 + y**2)
+    # Calculate the distance from Revolute 1 to the TCP in the XZ plane
+    r = math.sqrt(x**2 + z**2)
     
-    # Calculate theta2 using the law of cosines
-    cos_theta2 = (d**2 - L1**2 - L2**2) / (2 * L1 * L2)
-    # Ensure the value is within the valid range for acos
-    cos_theta2 = max(min(cos_theta2, 1), -1)
-    theta2 = math.acos(cos_theta2)
+    # Calculate the angle phi between the line from Revolute 1 to the TCP and the Y-axis
+    phi = math.atan2(r, y - L1)
     
-    # Calculate theta1 using the law of sines
-    theta1 = math.atan2(y, x) - math.atan2(L2 * math.sin(theta2), L1 + L2 * math.cos(theta2))
+    # Calculate theta1
+    theta1 = phi
+    
+    # Calculate theta2
+    theta2 = math.atan2(z, x)
     
     return theta1, theta2
 ```
 
-### Explanation of Changes
-
-1. **Clamping `cos_theta2`:** The value of `cos_theta2` must be within the range \([-1, 1]\) for `math.acos` to work correctly. We use `max(min(cos_theta2, 1), -1)` to ensure this.
-
-2. **Correct Calculation of `theta1`:** The calculation of `theta1` uses `math.atan2` to handle the quadrant correctly and ensures the correct angle is computed.
-
-### Testing the Function
-
-To verify the correctness of the function, we can use the provided test cases and compare the results with the correct joint values. Let's test the function with one of the provided positions:
-
-```python
-# Test position
-p = (-0.09315733329912501, 0.093, 0.016743170326905)
-
-# Expected joint values
-expected_joints = (-1.39296489815784, 0)
-
-# Calculate joint values using the function
-calculated_joints = inverse_kinematics(p)
-
-print("Expected Joints:", expected_joints)
-print("Calculated Joints:", calculated_joints)
-```
-
-This will help us verify if the function is now correctly calculating the joint angles.
+This corrected function should now correctly calculate the joint angles \( \theta_1 \) and \( \theta_2 \) required to position the TCP at the desired position \( p = (x, y, z) \).

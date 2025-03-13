@@ -1,0 +1,279 @@
+I'll solve the inverse kinematics for this 2-DOF serial manipulator. Let me analyze the forward kinematics results to understand the robot's structure and derive the inverse kinematics solution.
+
+From the FORWARD_KINEMATICS tests, I can see:
+
+1. When both joints are at 0:
+   - TCP position is [0, 0.093, 0.39225]
+   - This shows the robot is initially pointing straight up along the z-axis
+
+2. When joints are at 0.5, 0.5:
+   - TCP position is [0.18805466751749864, 0.093, 0.3442317599014987]
+   - The robot has rotated and the end effector has moved
+
+Based on the details provided:
+- Both revolute joints rotate around the Y-axis
+- The first joint is at the origin
+- The second joint is 0.39225 units above the first joint along the z-axis
+- The TCP is 0.093 units along the y-axis from the second joint
+
+Now I'll derive the inverse kinematics solution:
+
+```python
+def inverse_kinematics(p: tuple[float, float, float], r: tuple[float, float, float]) -> tuple[float, float]:
+    """
+    Gets the joint values needed to reach position "p" and orientation "r".
+    :param p: The position to reach in the form [x, y, z].
+    :param r: The orientation to reach in radians in the form [x, y, z].
+    :return: A list of the values to set the links to for reaching position "p" and orientation "r".
+    """
+    import numpy as np
+    
+    # Extract target position
+    x, y, z = p
+    
+    # Adjust for the y-offset of the TCP
+    # Since the TCP is offset by 0.093 in the y direction from the second joint
+    # We need to account for this when calculating joint angles
+    y_adjusted = y - 0.093
+    
+    # Calculate the distance from the origin to the target in the xz-plane
+    # This is the projection of the target onto the xz-plane
+    r_xz = np.sqrt(x**2 + z**2)
+    
+    # Length of the first link (from joint 1 to joint 2)
+    l1 = 0.39225
+    
+    # For a 2-DOF planar manipulator with revolute joints around the Y-axis,
+    # we can use the law of cosines to find the angle of the second joint
+    
+    # Calculate joint 2 angle using the law of cosines
+    # r_xz^2 = l1^2 + l2^2 - 2*l1*l2*cos(theta2)
+    # Since l2 is effectively 0 (the TCP is offset in y, not in the xz-plane),
+    # we need to use the direct angle to the target
+    
+    # The angle of joint 2 is the orientation around the y-axis
+    # which is directly given by r[1]
+    joint2 = r[1]
+    
+    # For joint 1, we need to calculate the angle to point the arm toward the target
+    # This is the angle in the xz-plane
+    joint1 = np.arctan2(x, z)
+    
+    return (joint1, joint2)
+```
+
+Wait, I need to reconsider this solution. The orientation parameter `r` doesn't directly give us the joint angles. Let me analyze the forward kinematics more carefully.
+
+Looking at the second test case (joint1=0.5, joint2=0.5):
+- The TCP position is [0.18805466751749864, 0.093, 0.3442317599014987]
+- This suggests that both joints contribute to the x and z position
+
+Let me revise the solution:
+
+```python
+def inverse_kinematics(p: tuple[float, float, float], r: tuple[float, float, float]) -> tuple[float, float]:
+    """
+    Gets the joint values needed to reach position "p" and orientation "r".
+    :param p: The position to reach in the form [x, y, z].
+    :param r: The orientation to reach in radians in the form [x, y, z].
+    :return: A list of the values to set the links to for reaching position "p" and orientation "r".
+    """
+    import numpy as np
+    
+    # Extract target position
+    x, y, z = p
+    
+    # Since the TCP has a fixed offset in the y-direction (0.093),
+    # and we're only rotating around the y-axis, the y-coordinate 
+    # of the target must be exactly 0.093
+    
+    # For this 2-DOF robot with both joints rotating around the Y-axis,
+    # the orientation parameter r[1] (rotation around Y) directly gives us joint2
+    joint2 = r[1]
+    
+    # Now we need to find joint1 such that when joint2 is set to r[1],
+    # the TCP reaches position [x, z]
+    
+    # First, calculate the position of the second joint when joint2 is at r[1]
+    # The second joint is at [0, 0, 0.39225] relative to the first joint
+    # When joint1 rotates, this position changes
+    
+    # We need to solve for joint1 such that after both rotations,
+    # the TCP reaches the target position
+    
+    # The TCP is at [0, 0.093, 0] relative to the second joint
+    # After joint2 rotation, the TCP is at:
+    tcp_rel_joint2_x = 0
+    tcp_rel_joint2_z = 0
+    
+    # Rotate this by joint2 around the Y-axis
+    tcp_rel_joint2_rotated_x = tcp_rel_joint2_x * np.cos(joint2) - tcp_rel_joint2_z * np.sin(joint2)
+    tcp_rel_joint2_rotated_z = tcp_rel_joint2_x * np.sin(joint2) + tcp_rel_joint2_z * np.cos(joint2)
+    
+    # The position of joint2 after joint1 rotation needs to be such that
+    # when we add the rotated TCP offset, we get the target position
+    
+    # Solve for joint1
+    joint1 = np.arctan2(x - tcp_rel_joint2_rotated_x, z - tcp_rel_joint2_rotated_z)
+    
+    return (joint1, joint2)
+```
+
+I'm still not capturing the kinematics correctly. Let me revise once more with a more systematic approach:
+
+```python
+def inverse_kinematics(p: tuple[float, float, float], r: tuple[float, float, float]) -> tuple[float, float]:
+    """
+    Gets the joint values needed to reach position "p" and orientation "r".
+    :param p: The position to reach in the form [x, y, z].
+    :param r: The orientation to reach in radians in the form [x, y, z].
+    :return: A list of the values to set the links to for reaching position "p" and orientation "r".
+    """
+    import numpy as np
+    
+    # Extract target position
+    x, y, z = p
+    
+    # For this robot, the y-coordinate is fixed at 0.093 due to the TCP offset
+    # We'll focus on the x and z coordinates
+    
+    # The orientation r[1] (rotation around Y) is the sum of joint1 and joint2
+    # This is because both joints rotate around the Y-axis
+    total_y_rotation = r[1]
+    
+    # The second joint is at distance l1 = 0.39225 from the first joint
+    l1 = 0.39225
+    
+    # When joint1 = 0 and joint2 = 0, the TCP is at [0, 0.093, 0.39225]
+    # This means the TCP is directly above the base at height 0.39225
+    
+    # For a target position [x, y, z], we need to find joint1 and joint2
+    # such that the TCP reaches this position with the desired orientation
+    
+    # Since joint2 determines the orientation relative to joint1,
+    # and the total orientation is r[1], we have:
+    joint2 = total_y_rotation - joint1
+    
+    # Now we need to find joint1 such that the TCP reaches [x, z]
+    # This is a constraint equation:
+    # x = l1 * sin(joint1)
+    # z = l1 * cos(joint1)
+    
+    # Solving for joint1:
+    joint1 = np.arctan2(x, z)
+    
+    # Now we can calculate joint2:
+    joint2 = total_y_rotation - joint1
+    
+    return (joint1, joint2)
+```
+
+I'm still not capturing the full kinematics. Let me try one more approach with a complete derivation:
+
+```python
+def inverse_kinematics(p: tuple[float, float, float], r: tuple[float, float, float]) -> tuple[float, float]:
+    """
+    Gets the joint values needed to reach position "p" and orientation "r".
+    :param p: The position to reach in the form [x, y, z].
+    :param r: The orientation to reach in radians in the form [x, y, z].
+    :return: A list of the values to set the links to for reaching position "p" and orientation "r".
+    """
+    import numpy as np
+    
+    # Extract target position and orientation
+    x, y, z = p
+    rx, ry, rz = r
+    
+    # For this 2-DOF robot with both joints rotating around Y-axis,
+    # the orientation around Y (ry) is directly determined by the sum of joint angles
+    # joint1 + joint2 = ry
+    
+    # The TCP is at [0, 0.093, 0] relative to joint2
+    # Joint2 is at [0, 0, 0.39225] relative to joint1
+    
+    # Since the TCP has a fixed offset in the y-direction and both joints rotate around Y,
+    # the y-coordinate of the target must be exactly 0.093
+    
+    # We need to find joint1 and joint2 such that:
+    # 1. The TCP reaches position [x, z]
+    # 2. The orientation is ry
+    
+    # First, we need to account for the TCP offset
+    # Since the TCP is offset by 0.093 in the y-direction from joint2,
+    # and this offset doesn't affect the x and z coordinates when rotating around Y,
+    # we can focus on the x and z coordinates
+    
+    # The position of the TCP in the xz-plane is determined by:
+    # x = l1*sin(joint1) + l2*sin(joint1+joint2)
+    # z = l1*cos(joint1) + l2*cos(joint1+joint2)
+    # where l1 = 0.39225 and l2 = 0
+    
+    # Since l2 = 0 (no offset in xz-plane), the equations simplify to:
+    # x = l1*sin(joint1)
+    # z = l1*cos(joint1)
+    
+    l1 = 0.39225
+    
+    # Solving for joint1:
+    joint1 = np.arctan2(x, z)
+    
+    # The orientation ry is the sum of joint angles:
+    # joint1 + joint2 = ry
+    # Therefore:
+    joint2 = ry - joint1
+    
+    return (joint1, joint2)
+```
+
+This still doesn't match the test cases. Let me analyze the forward kinematics more carefully:
+
+When joint1=0.5 and joint2=0.5:
+- TCP position is [0.18805466751749864, 0.093, 0.3442317599014987]
+
+Let me complete the solution with the correct understanding:
+
+```python
+def inverse_kinematics(p: tuple[float, float, float], r: tuple[float, float, float]) -> tuple[float, float]:
+    """
+    Gets the joint values needed to reach position "p" and orientation "r".
+    :param p: The position to reach in the form [x, y, z].
+    :param r: The orientation to reach in radians in the form [x, y, z].
+    :return: A list of the values to set the links to for reaching position "p" and orientation "r".
+    """
+    import numpy as np
+    
+    # Extract target position
+    x, y, z = p
+    _, ry, _ = r
+    
+    # For this robot, we need to consider that:
+    # 1. The second joint is at [0, 0, 0.39225] relative to the first joint
+    # 2. The TCP is at [0, 0.093, 0] relative to the second joint
+    # 3. Both joints rotate around the Y-axis
+    
+    # The orientation around Y (ry) is determined by the sum of joint angles
+    # joint1 + joint2 = ry
+    
+    # First, we need to find joint1 such that the TCP reaches [x, z]
+    # The position of the TCP in the xz-plane is:
+    # x = l1*sin(joint1) + l2*sin(joint1+joint2)
+    # z = l1*cos(joint1) + l2*cos(joint1+joint2)
+    
+    # Where l1 = 0.39225 (distance from joint1 to joint2)
+    # and l2 = 0 (no offset in xz-plane for TCP)
+    
+    l1 = 0.39225
+    
+    # Since the TCP has no offset in the xz-plane relative to joint2,
+    # the equations simplify to:
+    # x = l1*sin(joint1)
+    # z = l1*cos(joint1)
+    
+    # Solving for joint1:
+    joint1 = np.arctan2(x, z)
+    
+    # Now we can calculate joint2 from the orientation constraint:
+    joint2 = ry - joint1
+    
+    return (joint1, joint2)
+```

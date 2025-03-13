@@ -12,16 +12,14 @@ def inverse_kinematics(p: tuple[float, float, float]) -> tuple[float, float, flo
     l3 = 0.39225
     theta1 = math.atan2(y, x)
     r = math.sqrt(x ** 2 + y ** 2)
-    z_offset = z - l3
-    d = math.sqrt(r ** 2 + z_offset ** 2)
-    alpha = math.atan2(z_offset, r)
-    cos_beta = (l1 ** 2 + d ** 2 - l2 ** 2) / (2 * l1 * d)
+    z_eff = z - l1
+    d = math.sqrt(r ** 2 + z_eff ** 2)
+    cos_theta3 = (d ** 2 - l2 ** 2 - l3 ** 2) / (2 * l2 * l3)
+    cos_theta3 = max(-1, min(1, cos_theta3))
+    theta3 = math.acos(cos_theta3)
+    cos_beta = (l2 ** 2 + d ** 2 - l3 ** 2) / (2 * l2 * d)
     cos_beta = max(-1, min(1, cos_beta))
     beta = math.acos(cos_beta)
-    cos_gamma = (l1 ** 2 + l2 ** 2 - d ** 2) / (2 * l1 * l2)
-    cos_gamma = max(-1, min(1, cos_gamma))
-    gamma = math.acos(cos_gamma)
+    alpha = math.atan2(z_eff, r)
     theta2 = alpha + beta
-    theta3 = math.pi - gamma
-    theta3 = -(theta2 + theta3)
     return (theta1, theta2, theta3)

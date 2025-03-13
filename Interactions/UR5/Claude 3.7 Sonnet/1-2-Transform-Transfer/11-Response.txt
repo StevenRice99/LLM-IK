@@ -1,0 +1,265 @@
+I see the issue now. Looking at the correct joint values and comparing them with my solution, I notice that the orientation [π, y, π] requires a specific approach to handle correctly. Let me analyze the patterns in the correct solutions more carefully:
+
+1. When the orientation is [π, y, π], the robot needs to reach the target from a different configuration
+2. The relationship between joint angles and orientation is more complex than I initially thought
+
+Let me try a completely different approach based on the feedback:
+
+```python
+def inverse_kinematics(p: tuple[float, float, float], r: tuple[float, float, float]) -> tuple[float, float]:
+    """
+    Gets the joint values needed to reach position "p" and orientation "r".
+    :param p: The position to reach in the form [x, y, z].
+    :param r: The orientation to reach in radians in the form [x, y, z].
+    :return: A list of the values to set the links to for reaching position "p" and orientation "r".
+    """
+    import numpy as np
+    x, y, z = p
+    rx, ry, rz = r
+    
+    # Constants from the robot description
+    y_offset = -0.1197
+    l1 = 0.425
+    l2 = 0.39225
+    
+    # Check if we have the special orientation case [π, y, π]
+    flipped = (abs(rx - np.pi) < 1e-10) and (abs(rz - np.pi) < 1e-10)
+    
+    # Using the position constraint
+    r_xz = np.sqrt(x**2 + z**2)
+    
+    # Using the law of cosines to find theta2
+    cos_theta2 = (r_xz**2 - l1**2 - l2**2) / (2 * l1 * l2)
+    cos_theta2 = np.clip(cos_theta2, -1.0, 1.0)
+    
+    # Calculate theta2
+    theta2 = np.arccos(cos_theta2)
+    
+    # Calculate the angle from the z-axis to the line to the target
+    alpha = np.arctan2(x, z)
+    
+    # Calculate the angle between the first link and the line to the target
+    beta = np.arctan2(l2 * np.sin(theta2), l1 + l2 * np.cos(theta2))
+    
+    # Calculate theta1
+    theta1 = alpha - beta
+    
+    # For the flipped orientation case [π, y, π]
+    if flipped:
+        # Looking at the correct solutions, we need to handle this case differently
+        # First, check if the current solution is close to the desired orientation
+        if abs((theta1 + theta2) - ry) > 0.1:
+            # If not, we need to try different configurations
+            
+            # Try the negative theta2 solution
+            theta2_neg = -np.arccos(cos_theta2)
+            beta_neg = np.arctan2(l2 * np.sin(theta2_neg), l1 + l2 * np.cos(theta2_neg))
+            theta1_neg = alpha - beta_neg
+            
+            # Check if this solution is closer to the desired orientation
+            if abs((theta1_neg + theta2_neg) - ry) < abs((theta1 + theta2) - ry):
+                theta1, theta2 = theta1_neg, theta2_neg
+            
+            # If still not close, we might need to add π to theta1
+            if abs((theta1 + theta2) - ry) > 0.1:
+                theta1 = theta1 + np.pi
+                
+                # Check if this solution is better
+                if abs((theta1 + theta2) - ry) > 0.1:
+                    # If still not good, try the other theta2 with adjusted theta1
+                    theta1 = alpha - beta_neg + np.pi
+                    theta2 = theta2_neg
+        
+        # Normalize angles to be within [-π, π]
+        while theta1 > np.pi:
+            theta1 = theta1 - 2 * np.pi
+        while theta1 < -np.pi:
+            theta1 = theta1 + 2 * np.pi
+            
+        while theta2 > np.pi:
+            theta2 = theta2 - 2 * np.pi
+        while theta2 < -np.pi:
+            theta2 = theta2 + 2 * np.pi
+    
+    return (theta1, theta2)
+```
+
+After analyzing the feedback more carefully, I see that my approach still isn't capturing the correct relationship. Let me try a more systematic approach:
+
+```python
+def inverse_kinematics(p: tuple[float, float, float], r: tuple[float, float, float]) -> tuple[float, float]:
+    """
+    Gets the joint values needed to reach position "p" and orientation "r".
+    :param p: The position to reach in the form [x, y, z].
+    :param r: The orientation to reach in radians in the form [x, y, z].
+    :return: A list of the values to set the links to for reaching position "p" and orientation "r".
+    """
+    import numpy as np
+    x, y, z = p
+    rx, ry, rz = r
+    
+    # Constants from the robot description
+    y_offset = -0.1197
+    l1 = 0.425
+    l2 = 0.39225
+    
+    # Check if we have the special orientation case [π, y, π]
+    flipped = (abs(rx - np.pi) < 1e-10) and (abs(rz - np.pi) < 1e-10)
+    
+    # Using the position constraint
+    r_xz = np.sqrt(x**2 + z**2)
+    
+    # Using the law of cosines to find theta2
+    cos_theta2 = (r_xz**2 - l1**2 - l2**2) / (2 * l1 * l2)
+    cos_theta2 = np.clip(cos_theta2, -1.0, 1.0)
+    
+    # Calculate theta2 (two possible solutions)
+    theta2_pos = np.arccos(cos_theta2)
+    theta2_neg = -np.arccos(cos_theta2)
+    
+    # Calculate the angle from the z-axis to the line to the target
+    alpha = np.arctan2(x, z)
+    
+    # Calculate the angle between the first link and the line to the target
+    beta_pos = np.arctan2(l2 * np.sin(theta2_pos), l1 + l2 * np.cos(theta2_pos))
+    beta_neg = np.arctan2(l2 * np.sin(theta2_neg), l1 + l2 * np.cos(theta2_neg))
+    
+    # Calculate theta1 for both solutions
+    theta1_pos = alpha - beta_pos
+    theta1_neg = alpha - beta_neg
+    
+    # Generate all possible solutions
+    solutions = [
+        (theta1_pos, theta2_pos),
+        (theta1_neg, theta2_neg),
+        (theta1_pos + np.pi, theta2_pos),
+        (theta1_neg + np.pi, theta2_neg)
+    ]
+    
+    # Normalize all solutions to be within [-π, π]
+    normalized_solutions = []
+    for theta1, theta2 in solutions:
+        while theta1 > np.pi:
+            theta1 = theta1 - 2 * np.pi
+        while theta1 < -np.pi:
+            theta1 = theta1 + 2 * np.pi
+            
+        while theta2 > np.pi:
+            theta2 = theta2 - 2 * np.pi
+        while theta2 < -np.pi:
+            theta2 = theta2 + 2 * np.pi
+            
+        normalized_solutions.append((theta1, theta2))
+    
+    # Find the solution that best matches the orientation
+    best_solution = None
+    min_error = float('inf')
+    
+    for theta1, theta2 in normalized_solutions:
+        # Calculate the orientation error
+        if flipped:
+            # For the flipped case, we need to consider the orientation differently
+            error = abs((theta1 + theta2) - ry)
+        else:
+            error = abs((theta1 + theta2) - ry)
+        
+        if error < min_error:
+            min_error = error
+            best_solution = (theta1, theta2)
+    
+    return best_solution
+```
+
+Let me make one final revision to ensure the solution is correct:
+
+```python
+def inverse_kinematics(p: tuple[float, float, float], r: tuple[float, float, float]) -> tuple[float, float]:
+    """
+    Gets the joint values needed to reach position "p" and orientation "r".
+    :param p: The position to reach in the form [x, y, z].
+    :param r: The orientation to reach in radians in the form [x, y, z].
+    :return: A list of the values to set the links to for reaching position "p" and orientation "r".
+    """
+    import numpy as np
+    x, y, z = p
+    rx, ry, rz = r
+    
+    # Constants from the robot description
+    y_offset = -0.1197
+    l1 = 0.425
+    l2 = 0.39225
+    
+    # Check if we have the special orientation case [π, y, π]
+    flipped = (abs(rx - np.pi) < 1e-10) and (abs(rz - np.pi) < 1e-10)
+    
+    # Using the position constraint
+    r_xz = np.sqrt(x**2 + z**2)
+    
+    # Using the law of cosines to find theta2
+    cos_theta2 = (r_xz**2 - l1**2 - l2**2) / (2 * l1 * l2)
+    cos_theta2 = np.clip(cos_theta2, -1.0, 1.0)
+    
+    # Calculate theta2 (two possible solutions)
+    theta2_pos = np.arccos(cos_theta2)
+    theta2_neg = -np.arccos(cos_theta2)
+    
+    # Calculate the angle from the z-axis to the line to the target
+    alpha = np.arctan2(x, z)
+    
+    # Calculate the angle between the first link and the line to the target
+    beta_pos = np.arctan2(l2 * np.sin(theta2_pos), l1 + l2 * np.cos(theta2_pos))
+    beta_neg = np.arctan2(l2 * np.sin(theta2_neg), l1 + l2 * np.cos(theta2_neg))
+    
+    # Calculate theta1 for both solutions
+    theta1_pos = alpha - beta_pos
+    theta1_neg = alpha - beta_neg
+    
+    # For the flipped orientation case [π, y, π]
+    if flipped:
+        # Based on the correct solutions, when flipped, we need to use the elbow-up configuration
+        # and adjust theta1 to match the orientation
+        
+        # Try both elbow configurations
+        solutions = [
+            (theta1_pos, theta2_pos),
+            (theta1_neg, theta2_neg),
+            (theta1_pos + np.pi, theta2_pos),
+            (theta1_neg + np.pi, theta2_neg)
+        ]
+        
+        # Find the solution that best matches the orientation
+        best_solution = None
+        min_error = float('inf')
+        
+        for theta1, theta2 in solutions:
+            # Normalize angles
+            while theta1 > np.pi:
+                theta1 = theta1 - 2 * np.pi
+            while theta1 < -np.pi:
+                theta1 = theta1 + 2 * np.pi
+                
+            while theta2 > np.pi:
+                theta2 = theta2 - 2 * np.pi
+            while theta2 < -np.pi:
+                theta2 = theta2 + 2 * np.pi
+            
+            # Calculate the orientation error
+            error = abs((theta1 + theta2) - ry)
+            if error > np.pi:
+                error = 2 * np.pi - error
+            
+            if error < min_error:
+                min_error = error
+                best_solution = (theta1, theta2)
+        
+        return best_solution
+    else:
+        # For the normal case, choose the solution that better satisfies the orientation
+        err_pos = abs((theta1_pos + theta2_pos) - ry)
+        err_neg = abs((theta1_neg + theta2_neg) - ry)
+        
+        if err_pos <= err_neg:
+            return (theta1_pos, theta2_pos)
+        else:
+            return (theta1_neg, theta2_neg)
+```

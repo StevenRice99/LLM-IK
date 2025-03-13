@@ -8,12 +8,8 @@ def inverse_kinematics(p: tuple[float, float, float]) -> tuple[float, float, flo
     """
     x, y, z = p
     theta1 = math.atan2(x, z)
-    d = math.sqrt(y ** 2 + z ** 2)
-    l1 = 0.093
-    l2 = 0.09465
-    cos_theta3 = (d ** 2 - l1 ** 2 - l2 ** 2) / (2 * l1 * l2)
-    theta3 = math.acos(cos_theta3)
-    alpha = math.atan2(y, z)
-    beta = math.asin(l2 * math.sin(theta3) / d)
-    theta2 = alpha - beta
+    y_adjusted = y - 0.093
+    z_adjusted = z - 0.09465
+    theta2 = math.atan2(y_adjusted, z_adjusted)
+    theta3 = 0
     return (theta1, theta2, theta3)

@@ -1,14 +1,18 @@
-Given the persistent issues with the inverse kinematics solution, it's clear that a more robust and accurate method is required. The current approach using the law of cosines and sines is not sufficient to handle all target positions correctly. To address this, we need to consider a more comprehensive geometric approach that accounts for the full configuration of the manipulator.
+The forward kinematics results show that the current implementation of the inverse kinematics function is not correctly calculating the joint angles to reach the target positions. The errors suggest that the transformation and calculations for θ2 and θ3 are incorrect. Let's re-examine the approach and correct the calculations.
 
 ### Revised Approach
 
-1. **Solve for θ1**: The first joint angle (θ1) can be determined by the position of the target in the x-y plane. This can be calculated using the `atan2` function.
+1. **Solve for Joint 1 (θ1):**
+   - The first joint rotates around the Z-axis. The position of the TCP in the XY plane is influenced by this rotation.
+   - We can use the existing code 1 to solve for θ1.
 
-2. **Solve for θ2 and θ3**: The second and third joint angles (θ2 and θ3) can be determined by considering the geometry of the manipulator in the plane defined by the first joint. This involves using the law of cosines and the law of sines to solve for the angles, but with more careful consideration of the manipulator's configuration.
+2. **Transform the Target Position:**
+   - After determining θ1, we need to transform the target position into the coordinate system of the second joint.
 
-### Updated Function
+3. **Solve for Joint 2 (θ2) and Joint 3 (θ3):**
+   - Use geometric relationships and the lengths of the links to solve for θ2 and θ3.
 
-Here is the updated function that incorporates these considerations:
+### Revised Implementation
 
 ```python
 import math
@@ -21,44 +25,65 @@ def inverse_kinematics(p: tuple[float, float, float]) -> tuple[float, float, flo
     """
     x, y, z = p
     
-    # Lengths of the links
-    l1 = 0.13585
-    l2 = 0.425
-    l3 = 0.39225
-    
-    # Solve for θ1
+    # Solve for joint1 (θ1)
     theta1 = math.atan2(y, x)
     
-    # Project the target position onto the x-z plane relative to the first joint
-    x_proj = math.sqrt(x**2 + y**2) - l1
-    z_proj = z
+    # Transform the target position to the coordinate system of joint2
+    # The position of joint2 is [0, 0.13585, 0]
+    # The position of joint3 is [0, -0.1197, 0.425]
+    # The position of TCP is [0, 0, 0.39225]
     
-    # Distance from the second joint to the target in the x-z plane
-    d = math.sqrt(x_proj**2 + z_proj**2)
+    # Calculate the position of the TCP relative to joint2
+    # The vector from joint2 to TCP is [0, -0.1197, 0.425] + [0, 0, 0.39225] = [0, -0.1197, 0.81725]
+    # We need to rotate this vector by -θ1 around the Z-axis to get it into the joint2 coordinate system
+    # The rotation matrix around Z-axis is:
+    # [cos(θ1), -sin(θ1), 0]
+    # [sin(θ1), cos(θ1), 0]
+    # [0, 0, 1]
     
-    # Using the law of cosines to find θ3
-    cos_theta3 = (l2**2 + l3**2 - d**2) / (2 * l2 * l3)
-    cos_theta3 = max(min(cos_theta3, 1), -1)  # Ensure within valid range
+    cos_theta1 = math.cos(theta1)
+    sin_theta1 = math.sin(theta1)
+    
+    # Rotate the vector [x, y, z] by -θ1
+    x_rot = x * cos_theta1 + y * sin_theta1
+    y_rot = -x * sin_theta1 + y * cos_theta1
+    z_rot = z - 0.13585  # Adjust for the position of joint2
+    
+    # Now, we have the position of the TCP relative to joint2 in the joint2 coordinate system
+    # We can now solve for θ2 and θ3 using the lengths of the links
+    # The length from joint2 to joint3 is 0.425
+    # The length from joint3 to TCP is 0.39225
+    
+    # The distance from joint2 to TCP is sqrt(x_rot^2 + y_rot^2 + z_rot^2)
+    distance = math.sqrt(x_rot**2 + y_rot**2 + z_rot**2)
+    
+    # Using the law of cosines to solve for θ3
+    a = 0.425
+    b = 0.39225
+    c = distance
+    
+    # Ensure the argument to acos is within the valid range [-1, 1]
+    cos_theta3 = (a**2 + b**2 - c**2) / (2 * a * b)
+    cos_theta3 = max(min(cos_theta3, 1), -1)  # Clamp to valid range
+    
     theta3 = math.acos(cos_theta3)
     
-    # Using the law of sines to find θ2
-    alpha = math.atan2(z_proj, x_proj)
-    beta = math.asin((l3 * math.sin(theta3)) / d)
-    theta2 = alpha - beta
+    # Using the law of sines to solve for θ2
+    sin_theta3 = math.sin(theta3)
+    theta2 = math.asin((b * sin_theta3) / c)
     
-    return (theta1, theta2, theta3)
+    return theta1, theta2, theta3
 ```
 
 ### Explanation
 
-1. **θ1 Calculation**: The angle θ1 is calculated using `math.atan2(y, x)`, which gives the angle between the x-axis and the line from the origin to the point (x, y).
+1. **θ1 Calculation:**
+   - We use `atan2(y, x)` to determine the angle of rotation around the Z-axis to align the TCP with the target position in the XY plane.
 
-2. **Projection**: The target position is projected onto the x-z plane relative to the first joint. This gives us the coordinates (x_proj, z_proj).
+2. **Transformation to Joint2 Coordinate System:**
+   - We rotate the vector from joint2 to TCP by -θ1 to get the position in the joint2 coordinate system.
 
-3. **Distance Calculation**: The distance `d` from the second joint to the target in the x-z plane is calculated using the Pythagorean theorem.
+3. **θ2 and θ3 Calculation:**
+   - We use the law of cosines and the law of sines to solve for θ2 and θ3 based on the lengths of the links and the distance from joint2 to the TCP.
 
-4. **θ3 Calculation**: The angle θ3 is calculated using the law of cosines. The value of `cos_theta3` is clamped to the range [-1, 1] to ensure it is within the valid range for the `acos` function.
-
-5. **θ2 Calculation**: The angle θ2 is calculated using the law of sines. The angle `alpha` is the angle between the x-axis and the line from the second joint to the target. The angle `beta` is the angle between the line from the second joint to the target and the line from the second joint to the third joint.
-
-This updated function should provide a more accurate solution for the inverse kinematics problem. However, further testing and refinement may be necessary to ensure it works correctly for all target positions.
+This revised implementation should correctly calculate the joint angles to reach the target positions.

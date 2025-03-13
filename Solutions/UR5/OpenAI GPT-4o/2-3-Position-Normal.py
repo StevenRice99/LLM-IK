@@ -7,10 +7,7 @@ def inverse_kinematics(p: tuple[float, float, float]) -> tuple[float, float]:
     :return: A list of the values to set the links to for reaching position "p".
     """
     x, y, z = p
-    l2 = 0.39225
-    offset_y = 0.093
-    y_adjusted = y - offset_y
-    theta2 = math.atan2(-z, y_adjusted)
-    r = math.sqrt(x ** 2 + z ** 2)
-    theta1 = math.atan2(x, -z)
+    L = 0.39225 + 0.093
+    theta1 = math.atan2(y, z)
+    theta2 = 0
     return (theta1, theta2)

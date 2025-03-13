@@ -2,15 +2,10 @@ import math
 
 def inverse_kinematics(p: tuple[float, float, float]) -> float:
     """
-    Computes the joint angle needed to reach the given position.
-    
-    Args:
-        p: A tuple containing the target position [x, y, z].
-        
-    Returns:
-        The joint angle in radians needed to reach the target position.
+    Gets the joint values needed to reach position "p".
+    :param p: The position to reach in the form [x, y, z].
+    :return: The value to set the link to for reaching position "p".
     """
-    x_target, y_target, _ = p
-    theta = math.atan2(x_target, y_target)
-    theta = -theta
+    px, py, pz = p
+    theta = math.atan2(-px, py)
     return theta

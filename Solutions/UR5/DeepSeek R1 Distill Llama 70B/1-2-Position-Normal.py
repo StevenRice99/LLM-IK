@@ -2,14 +2,33 @@ import math
 
 def inverse_kinematics(p: tuple[float, float, float]) -> tuple[float, float]:
     """
-    Gets the joint values needed to reach position "p".
+    Gets the joint values needed to reach position "p" using the Newton-Raphson method.
     :param p: The position to reach in the form [x, y, z].
-    :return: A tuple of the values to set the links to for reaching position "p".
+    :return: A tuple of the values to set the joints to for reaching position "p".
     """
-    px, py, pz = p
-    cos_theta2 = (pz - 0.425) / 0.39225
-    cos_theta2 = max(min(cos_theta2, 1.0), -1.0)
-    theta2 = math.acos(cos_theta2)
-    sin_theta2 = math.sqrt(1 - cos_theta2 ** 2)
-    theta1 = math.atan2(-0.39225 * sin_theta2, -0.1197)
+    x_target, y_target, z_target = p
+    L1 = 0.425
+    L2 = 0.39225
+    theta1 = 0.0
+    theta2 = 0.0
+    tolerance = 1e-06
+    max_iterations = 1000
+    for _ in range(max_iterations):
+        x_current = L1 * math.cos(theta1) + L2 * math.cos(theta1 + theta2)
+        z_current = L1 * math.sin(theta1) + L2 * math.sin(theta1 + theta2)
+        error_x = x_current - x_target
+        error_z = z_current - z_target
+        J11 = -L1 * math.sin(theta1) - L2 * math.sin(theta1 + theta2)
+        J12 = -L2 * math.sin(theta1 + theta2)
+        J21 = L1 * math.cos(theta1) + L2 * math.cos(theta1 + theta2)
+        J22 = L2 * math.cos(theta1 + theta2)
+        det_J = J11 * J22 - J12 * J21
+        if abs(det_J) < 1e-12:
+            break
+        delta_theta1 = (J22 * error_x - J12 * error_z) / det_J
+        delta_theta2 = (-J21 * error_x + J11 * error_z) / det_J
+        theta1 += delta_theta1
+        theta2 += delta_theta2
+        if abs(error_x) < tolerance and abs(error_z) < tolerance:
+            break
     return (theta1, theta2)

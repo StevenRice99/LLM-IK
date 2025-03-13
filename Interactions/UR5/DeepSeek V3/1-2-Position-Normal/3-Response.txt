@@ -1,53 +1,11 @@
-The error indicates that the argument to `math.asin` is outside the valid range \([-1, 1]\), which can happen if the target position is not reachable. However, according to the instructions, we can assume that all targets given as inputs to the method will be reachable. Therefore, the issue might be due to numerical inaccuracies or incorrect handling of the offsets.
+The feedback indicates that the initial inverse kinematics solution is not correctly calculating the joint angles for some target positions. The main issue seems to be with the calculation of \( \theta_1 \) and \( \theta_2 \). Let's re-examine the approach and correct the calculations.
 
-Let's re-examine the forward kinematics and inverse kinematics equations to ensure they are correctly implemented.
+Given the feedback, it's clear that the initial approach does not account for all possible configurations of the robot arm, leading to incorrect joint angles. We need to ensure that the solution considers both possible configurations (elbow-up and elbow-down) for each target position.
 
-Given the details:
-- Revolute 1 is at the origin with its axis of rotation along the Y-axis.
-- Revolute 2 is offset from Revolute 1 by [0, -0.1197, 0.425] and also rotates around the Y-axis.
-- The TCP is offset from Revolute 2 by [0, 0, 0.39225].
-
-The forward kinematics can be represented as:
-\[
-\begin{align*}
-x &= (l_1 \cos(\theta_1) + l_2 \cos(\theta_1 + \theta_2) \\
-y &= (l_1 \sin(\theta_1)) + l_2 \sin(\theta_1 + \theta_2) \\
-z &= d_1 + l_2 \sin(\theta_2)
-\end{align*}
-\]
-where:
-- \( l_1 = 0.425 \) (length of the first link)
-- \( l_2 = 0.39225 \) (length of the second link)
-- \( d_1 = -0.1197 \) (offset along the Y-axis)
-- \( \theta_1 \) and \( \theta_2 \) are the joint angles for Revolute 1 and Revolute 2, respectively.
-
-To find the inverse kinematics, we need to solve for \( \theta_1 \) and \( \theta_2 \) given \( x, y, z \).
-
-1. **Solve for \( \theta_2 \):**
-   From the z equation:
-   \[
-   z = d_1 + l_2 \sin(\theta_2)
-   \]
-   We can solve for \( \theta_2 \):
-   \[
-   \theta_2 = \arcsin\left(\frac{z - d_1}{l_2}\right)
-   \]
-
-2. **Solve for \( \theta_1 \):**
-   From the x and y equations:
-   \[
-   x = l_1 \cos(\theta_1) + l_2 \cos(\theta_1 + \theta_2) \\
-   y = l_1 \sin(\theta_1) + l_2 \sin(\theta_1 + \theta_2)
-   \]
-   We can solve for \( \theta_1 \) using the atan2 function:
-   \[
-   \theta_1 = \arctan2(y, x) - \arctan2(l_2 \sin(\theta_2), l_1 + l_2 \cos(\theta_2))
-   \]
-
-Let's implement this corrected version in the `inverse_kinematics` function:
+Let's revise the inverse kinematics function:
 
 ```python
-import math
+import numpy as np
 
 def inverse_kinematics(p: tuple[float, float, float]) -> tuple[float, float]:
     """
@@ -56,20 +14,28 @@ def inverse_kinematics(p: tuple[float, float, float]) -> tuple[float, float]:
     :return: A list of the values to set the links to for reaching position "p".
     """
     x, y, z = p
-    l1 = 0.425
-    l2 = 0.39225
-    d1 = -0.1197
+    L1 = 0.425
+    L2 = 0.39225
     
-    # Solve for theta2
-    sin_theta2 = (z - d1) / l2
-    if sin_theta2 < -1 or sin_theta2 > 1:
-        raise ValueError("Target position is not reachable")
-    theta2 = math.asin(sin_theta2)
+    # Calculate the distance from the base to the target position in the XZ plane
+    r = np.sqrt(x**2 + z**2)
     
-    # Solve for theta1
-    theta1 = math.atan2(y, x) - math.atan2(l2 * math.sin(theta2), l1 + l2 * math.cos(theta2))
+    # Calculate theta2 using the law of cosines
+    D = (r**2 - L1**2 - L2**2) / (2 * L1 * L2)
+    theta2 = np.arctan2(np.sqrt(1 - D**2), D)
     
-    return theta1, theta2
+    # Calculate theta1
+    theta1 = np.arctan2(z, x) - np.arctan2(L2 * np.sin(theta2), L1 + L2 * np.cos(theta2))
+    
+    # Consider the elbow-down configuration
+    theta2_alt = -theta2
+    theta1_alt = np.arctan2(z, x) - np.arctan2(L2 * np.sin(theta2_alt), L1 + L2 * np.cos(theta2_alt))
+    
+    # Choose the configuration that is within the joint limits
+    if -6.2831853 <= theta1 <= 6.2831853 and -6.2831853 <= theta2 <= 6.2831853:
+        return theta1, theta2
+    else:
+        return theta1_alt, theta2_alt
 ```
 
-This function calculates the joint angles \( \theta_1 \) and \( \theta_2 \) required to position the TCP at the desired coordinates \( (x, y, z) \). It also includes a check to ensure the target position is reachable.
+This revised function calculates both possible configurations (elbow-up and elbow-down) and selects the one that is within the joint limits. This should help in reaching the target positions more accurately.

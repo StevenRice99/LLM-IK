@@ -1,83 +1,75 @@
-To solve the inverse kinematicsproblem for the 2-DOF serial manipulator, we need to determine the joint angles theta1 and theta2 that position the TCP at the desired coordinates p = (px, py, pz). Here's a detailed step-by-step approach:
+To solve the inverse kinematicsproblem for the 2-DOF robot, we'll use the Newton-Raphson method to iteratively find the joint angles θ1 and θ2 that position the TCP at the desired coordinates p = [x, y, z]. This approach effectively handles the nonlinear nature of the kinematic equations.
 
-### Step-by-Step Explanation
-
-1. **Understand the Robot Structure:**
-   - **Joint 1**: Located at the origin [0, 0, 0], rotates about the Y-axis.
-   - **Joint 2**: Positioned at [0, -0.1197, 0.425], rotates about the Y-axis.
-   - **TCP**: Located at [0, 0, 0.39225] relative to Joint 2.
-
-2. **Forward Kinematics:**
-   - The position of the TCP relative to Joint 2 after rotating by theta2 is:
-     ```
-     x_tcp_rel = -0.39225 * sin(theta2)
-     z_tcp_rel = 0.39225 * cos(theta2)
-     ```
-   - Adding the position of Joint 2 relative to Joint 1:
-     ```
-     x = x_tcp_rel
-     y = -0.1197
-     z = 0.425 + z_tcp_rel
-     ```
-   - Rotating the TCP's position by theta1 about the Y-axis:
-     ```
-     x_global = x * cos(theta1) - y * sin(theta1)
-     y_global = x * sin(theta1) + y * cos(theta1)
-     z_global = z
-     ```
-
-3. **Inverse Kinematics:**
-   - Given a desired position p = (px, py, pz), set up the equations:
-     ```
-     px = (-0.39225 * sin(theta2)) * cos(theta1) - (-0.1197) * sin(theta1)
-     pz = 0.425 + 0.39225 * cos(theta2)
-     ```
-   - Solve for theta2 using the z-equation:
-     ```
-     cos(theta2) = (pz - 0.425) / 0.39225
-     theta2 = arccos((pz - 0.425) / 0.39225)
-     ```
-   - Solve for theta1 using the x-equation:
-     ```
-     theta1 = atan2((-0.39225 * sin(theta2)), (-0.1197))
-     ```
+### Approach
+1. **Forward Kinematics Equations**: Define the TCP's position in terms of θ1 and θ2.
+2. **Jacobian Matrix**: Compute the partial derivatives of the TCP's position with respect to each joint angle.
+3. **Newton-Raphson Iteration**: Use the Jacobian matrix to iteratively update the joint angles until the TCP reaches the desired position within a specified tolerance.
+4. **Convergence Check**: Stop the iteration when the position error is within the tolerance.
 
 ### Solution Code
-
 ```python
 import math
 
 def inverse_kinematics(p: tuple[float, float, float]) -> tuple[float, float]:
     """
-    Gets the joint values needed to reach position "p".
+    Gets the joint values needed to reach position "p" using the Newton-Raphson method.
     :param p: The position to reach in the form [x, y, z].
-    :return: A tuple of the values to set the links to for reaching position "p".
+    :return: A tuple of the values to set the joints to for reaching position "p".
     """
-    # Extract the desired position components
-    px, py, pz = p
-    
-    # Calculate theta2 using the z-coordinate
-    cos_theta2 = (pz - 0.425) / 0.39225
-    # Clamp cos_theta2 to the range [-1, 1] to avoid domain errors
-    cos_theta2 = max(min(cos_theta2, 1.0), -1.0)
-    theta2 = math.acos(cos_theta2)
-    
-    # Calculate sin(theta2)
-    sin_theta2 = math.sqrt(1 - cos_theta2 ** 2)
-    
-    # Calculate theta1 using the x and y components
-    # We know that y should be -0.1197, so we use the x component to find theta1
-    theta1 = math.atan2(-0.39225 * sin_theta2, -0.1197)
-    
+    x_target, y_target, z_target = p
+    L1 = 0.425  # Length of the first link
+    L2 = 0.39225  # Length of the second link
+
+    # Initial guess for joint angles
+    theta1 = 0.0
+    theta2 = 0.0
+
+    # Tolerance for convergence
+    tolerance = 1e-6
+    max_iterations = 1000
+
+    for _ in range(max_iterations):
+        # Compute forward kinematics
+        x_current = L1 * math.cos(theta1) + L2 * math.cos(theta1 + theta2)
+        z_current = L1 * math.sin(theta1) + L2 * math.sin(theta1 + theta2)
+
+        # Compute the error
+        error_x = x_current - x_target
+        error_z = z_current - z_target
+
+        # Compute the Jacobian matrix
+        J11 = -L1 * math.sin(theta1) - L2 * math.sin(theta1 + theta2)
+        J12 = -L2 * math.sin(theta1 + theta2)
+        J21 = L1 * math.cos(theta1) + L2 * math.cos(theta1 + theta2)
+        J22 = L2 * math.cos(theta1 + theta2)
+
+        # Compute the Jacobian determinant
+        det_J = J11 * J22 - J12 * J21
+
+        if abs(det_J) < 1e-12:
+            # Jacobian is singular, cannot solve
+            break
+
+        # Update joint angles using Newton-Raphson
+        delta_theta1 = (J22 * error_x - J12 * error_z) / det_J
+        delta_theta2 = (-J21 * error_x + J11 * error_z) / det_J
+
+        theta1 += delta_theta1
+        theta2 += delta_theta2
+
+        # Check for convergence
+        if abs(error_x) < tolerance and abs(error_z) < tolerance:
+            break
+
     return (theta1, theta2)
 ```
 
 ### Explanation
+1. **Initialization**: Start with initial guesses for the joint angles θ1 and θ2.
+2. **Forward Kinematics**: Compute the current TCP position using the forward kinematics equations.
+3. **Error Calculation**: Determine the difference between the current and target positions.
+4. **Jacobian Matrix**: Compute the Jacobian matrix to relate joint rates to Cartesian velocities.
+5. **Newton-Raphson Update**: Update the joint angles using the inverse of the Jacobian matrix multiplied by the error vector.
+6. **Convergence Check**: Stop iterating when the position error is within the specified tolerance.
 
-1. **Calculate theta2:**
-   - Using the z-coordinate of the desired position, compute cos(theta2) and solve for theta2 using the arccos function. Clamping ensures the argument is within the valid range.
-
-2. **Calculate theta1:**
-   - Using the x and y components, compute theta1 using the arctangent function, ensuring the correct quadrant is considered.
-
-This approach efficiently solves the inverse kinematics problem by breaking it down into manageable steps, ensuring the TCP reaches the desired position accurately.
+This method effectively handles the nonlinearities in the kinematic equations and provides a robust solution to the inverse kinematics problem for the 2-DOF robot.

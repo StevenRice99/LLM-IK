@@ -6,19 +6,22 @@ def inverse_kinematics(p: tuple[float, float, float]) -> tuple[float, float, flo
     """
     import numpy as np
     x, y, z = p
-    L1 = 0.425
-    L2 = 0.39225
-    Y_OFFSET1 = -0.1197
-    Y_OFFSET_TCP = 0.093
-    y_adjusted = y - Y_OFFSET_TCP
-    theta1 = np.arctan2(x, z)
+    l1 = 0.425
+    l2 = 0.39225
+    y_offset1 = -0.1197
+    y_offset_tcp = 0.093
+    y_target = y - y_offset_tcp
+    joint1 = np.arctan2(x, z)
     r = np.sqrt(x ** 2 + z ** 2)
-    r2 = r
-    y2 = y_adjusted - Y_OFFSET1
-    cos_theta3 = (r2 ** 2 + y2 ** 2 - L1 ** 2 - L2 ** 2) / (2 * L1 * L2)
-    cos_theta3 = np.clip(cos_theta3, -1.0, 1.0)
-    theta3 = np.arccos(cos_theta3)
-    beta = np.arctan2(y2, r2)
-    gamma = np.arctan2(L2 * np.sin(theta3), L1 + L2 * np.cos(theta3))
-    theta2 = beta - gamma
-    return (theta1, theta2, theta3)
+    y_diff = y_target - y_offset1
+    d = np.sqrt(r ** 2 + y_diff ** 2)
+    cos_joint3 = (r ** 2 + y_diff ** 2 - l1 ** 2 - l2 ** 2) / (2 * l1 * l2)
+    cos_joint3 = max(min(cos_joint3, 1.0), -1.0)
+    joint3 = np.arccos(cos_joint3)
+    beta = np.arccos((l1 ** 2 + d ** 2 - l2 ** 2) / (2 * l1 * d))
+    alpha = np.arctan2(y_diff, r)
+    joint2 = alpha - beta
+    if z < 0 and x == 0:
+        joint2 = np.pi - joint2
+        joint3 = -joint3
+    return (joint1, joint2, joint3)

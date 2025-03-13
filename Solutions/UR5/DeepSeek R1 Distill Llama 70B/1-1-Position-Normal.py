@@ -2,10 +2,10 @@ import math
 
 def inverse_kinematics(p: tuple[float, float, float]) -> float:
     """
-    Calculates the joint angle needed to reach the given TCP position.
-    :param p: The target position [x, y, z].
-    :return: The joint angle θ in radians.
+    Gets the joint values needed to reach position "p".
+    :param p: The position to reach in the form [x, y, z].
+    :return: The value to set the link to for reaching position "p".
     """
-    px, py, pz = p
-    theta = math.atan2(px, pz)
+    x, y, z = p
+    theta = math.atan2(x, z)
     return theta

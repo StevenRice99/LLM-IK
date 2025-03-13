@@ -1,33 +1,33 @@
 import math
-import numpy as np
-import sympy as sp
+from sympy import symbols, cos, sin, atan2, acos, sqrt, Matrix
+from sympy import Euler2RotationMatrix as e2rm
 
 def inverse_kinematics(p: tuple[float, float, float], r: tuple[float, float, float]) -> tuple[float, float]:
     """
-    Computes the joint angles theta1 and theta2 to reach the given position p and orientation r.
-    
-    Args:
-        p: A tuple (x, y, z) representing the target position.
-        r: A tuple (x, y, z) representing the target orientation in Euler angles (radians).
-    
-    Returns:
-        A tuple (theta1, theta2) in radians.
+    Gets the joint values needed to reach position "p" and orientation "r".
+    :param p: The position to reach in the form [x, y, z].
+    :param r: The orientation to reach in radians in the form [x, y, z].
+    :return: A list of the values to set the links to for reaching position "p" and orientation "r".
     """
-    theta1, theta2 = sp.symbols('theta1 theta2')
-    Rz = sp.Matrix([[sp.cos(theta1), -sp.sin(theta1), 0], [sp.sin(theta1), sp.cos(theta1), 0], [0, 0, 1]])
-    Ry = sp.Matrix([[sp.cos(theta2), 0, sp.sin(theta2)], [0, 1, 0], [-sp.sin(theta2), 0, sp.cos(theta2)]])
+    x, y, z = p
+    rx, ry, rz = r
+    theta1, theta2 = symbols('theta1 theta2')
+    Rz = Matrix([[cos(theta1), -sin(theta1), 0], [sin(theta1), cos(theta1), 0], [0, 0, 1]])
+    Ry = Matrix([[cos(theta2), 0, sin(theta2)], [0, 1, 0], [-sin(theta2), 0, cos(theta2)]])
     R_total = Rz * Ry
-    roll, pitch, yaw = r
-    R_target = sp.Matrix([[sp.cos(yaw) * sp.cos(pitch), sp.sin(yaw) * sp.cos(pitch), -sp.sin(pitch)], [sp.sin(yaw) * sp.cos(pitch), sp.cos(yaw) * sp.cos(pitch), sp.sin(yaw) * sp.sin(pitch)], [sp.sin(yaw) * sp.sin(pitch), sp.cos(yaw) * sp.sin(pitch), sp.cos(pitch)]])
+    R_desired = Matrix(e2rm(rx, ry, rz, 'rzyx'))
     equations = []
     for i in range(3):
         for j in range(3):
-            equations.append(sp.Eq(R_total[i, j], R_target[i, j]))
-    solution = sp.solve(equations, (theta1, theta2))
-    if solution:
-        theta1_val = float(solution[0][0])
-        theta2_val = float(solution[0][1])
-    else:
-        theta1_val = 0.0
-        theta2_val = 0.0
-    return (theta1_val, theta2_val)
+            equations.append(R_total[i, j] - R_desired[i, j])
+    solution = {}
+    theta2_sol = acos(z / 0.425)
+    sin_theta2 = sin(theta2_sol)
+    cos_theta2 = cos(theta2_sol)
+    K = 0.425 * sin_theta2
+    L = 0.01615
+    denominator = K ** 2 + L ** 2
+    cos_theta1 = (K * x + L * y) / denominator
+    sin_theta1 = (-L * x + K * y) / denominator
+    theta1_sol = atan2(sin_theta1, cos_theta1)
+    return (float(theta1_sol), float(theta2_sol))

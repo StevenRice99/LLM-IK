@@ -7,5 +7,5 @@ def inverse_kinematics(p: tuple[float, float, float]) -> float:
     :return: The value to set the link to for reaching position "p".
     """
     x, y, z = p
-    theta = math.atan2(y, x)
+    theta = math.atan2(x, y)
     return theta

@@ -1,0 +1,146 @@
+I can now see how the forward kinematics works for this 2-DOF manipulator. Let me analyze the results and develop the inverse kinematics solution that accounts for both position and orientation.
+
+Based on the forward kinematics tests, I observe:
+1. The robot has two revolute joints that rotate around the Y-axis
+2. The first link is at the origin, and the second link is positioned at [0, 0, 0.39225]
+3. The TCP has an offset of [0, 0.093, 0] from the second joint
+4. The orientation is represented as [roll, pitch, yaw] in radians
+
+Let me complete the inverse kinematics function:
+
+```python
+def inverse_kinematics(p: tuple[float, float, float], r: tuple[float, float, float]) -> tuple[float, float]:
+    """
+    Gets the joint values needed to reach position "p" and orientation "r".
+    :param p: The position to reach in the form [x, y, z].
+    :param r: The orientation to reach in radians in the form [x, y, z].
+    :return: A list of the values to set the links to for reaching position "p" and orientation "r".
+    """
+    import numpy as np
+    
+    x, y, z = p
+    roll, pitch, yaw = r
+    
+    # Constants from the robot description
+    l1 = 0.39225  # Length of the first link
+    y_offset = 0.093  # Y offset of the TCP from the second joint
+    
+    # First, we need to account for the TCP offset in our calculations
+    # Since the TCP has a y-offset, we need to adjust the target position
+    y_target = y - y_offset
+    
+    # For a 2-DOF robot with revolute joints around Y-axis:
+    # joint1 controls the rotation in the XZ plane
+    # joint2 controls the elevation angle
+    
+    # Calculate joint1 (rotation in XZ plane)
+    joint1 = np.arctan2(x, z)
+    
+    # For orientation, since both joints rotate around Y-axis,
+    # the pitch (rotation around Y) is the sum of joint1 and joint2
+    # We know the desired pitch from the orientation parameter
+    
+    # Calculate joint2 based on the desired pitch
+    # pitch = joint1 + joint2 (for Y-axis rotations)
+    joint2 = pitch - joint1
+    
+    # Normalize angles to be within the limits
+    joint1 = ((joint1 + np.pi) % (2 * np.pi)) - np.pi
+    joint2 = ((joint2 + np.pi) % (2 * np.pi)) - np.pi
+    
+    return (joint1, joint2)
+```
+
+Wait, I need to reconsider this solution. The forward kinematics tests show that the orientation is affected by both joints, but my solution doesn't properly account for the position constraints.
+
+Let me revise:
+
+```python
+def inverse_kinematics(p: tuple[float, float, float], r: tuple[float, float, float]) -> tuple[float, float]:
+    """
+    Gets the joint values needed to reach position "p" and orientation "r".
+    :param p: The position to reach in the form [x, y, z].
+    :param r: The orientation to reach in radians in the form [x, y, z].
+    :return: A list of the values to set the links to for reaching position "p" and orientation "r".
+    """
+    import numpy as np
+    
+    x, y, z = p
+    roll, pitch, yaw = r
+    
+    # Constants from the robot description
+    l1 = 0.39225  # Length of the first link
+    y_offset = 0.093  # Y offset of the TCP from the second joint
+    
+    # For this 2-DOF robot with Y-axis rotations, the pitch component 
+    # of the orientation is what we can control
+    
+    # First, determine joint1 from the position
+    joint1 = np.arctan2(x, z)
+    
+    # For joint2, we need to consider both position and orientation
+    # Since both joints rotate around Y-axis, the final orientation (pitch)
+    # is the sum of the two joint angles
+    
+    # Calculate the distance in the XZ plane
+    r_xz = np.sqrt(x**2 + z**2)
+    
+    # Calculate joint2 based on the desired pitch and position constraints
+    # For a 2-DOF robot with revolute joints around Y-axis, the pitch is joint1 + joint2
+    joint2 = pitch - joint1
+    
+    # Verify that this joint2 value satisfies the position constraint
+    # The end effector position should be at distance r_xz from the origin in XZ plane
+    expected_r_xz = l1 * np.sin(joint2)
+    
+    # If the calculated joint2 doesn't satisfy the position constraint,
+    # we need to prioritize position over orientation
+    if not np.isclose(expected_r_xz, r_xz):
+        # Calculate joint2 based on position only
+        joint2 = np.arcsin(r_xz / l1) if r_xz <= l1 else 0
+        if z < 0 and x == 0:
+            joint2 = np.pi - joint2
+    
+    return (joint1, joint2)
+```
+
+After further analysis, I realize that for a 2-DOF robot with both joints rotating around the Y-axis, we cannot independently control both position and orientation. We have to prioritize one over the other.
+
+Here's my final solution:
+
+```python
+def inverse_kinematics(p: tuple[float, float, float], r: tuple[float, float, float]) -> tuple[float, float]:
+    """
+    Gets the joint values needed to reach position "p" and orientation "r".
+    :param p: The position to reach in the form [x, y, z].
+    :param r: The orientation to reach in radians in the form [x, y, z].
+    :return: A list of the values to set the links to for reaching position "p" and orientation "r".
+    """
+    import numpy as np
+    
+    x, y, z = p
+    _, pitch, _ = r  # We can only control pitch (rotation around Y-axis)
+    
+    # Constants from the robot description
+    l1 = 0.39225  # Length of the first link
+    y_offset = 0.093  # Y offset of the TCP from the second joint
+    
+    # Adjust y for the TCP offset
+    y_target = y - y_offset
+    
+    # Calculate joint1 (rotation in XZ plane)
+    joint1 = np.arctan2(x, z)
+    
+    # Calculate distance in XZ plane
+    r_xz = np.sqrt(x**2 + z**2)
+    
+    # Calculate joint2 based on the desired pitch
+    # For a 2-DOF robot with Y-axis rotations, pitch = joint1 + joint2
+    joint2 = pitch - joint1
+    
+    # Normalize angles to be within the limits
+    joint1 = ((joint1 + np.pi) % (2 * np.pi)) - np.pi
+    joint2 = ((joint2 + np.pi) % (2 * np.pi)) - np.pi
+    
+    return (joint1, joint2)
+```

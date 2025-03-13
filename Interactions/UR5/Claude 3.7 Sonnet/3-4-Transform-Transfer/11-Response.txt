@@ -1,0 +1,238 @@
+I see the issue now. My approach to calculating the joint angles from the target orientation is still not correct. Let me reconsider the problem more carefully.
+
+For a 2-DOF robot with:
+- Joint 1 rotating around the Y-axis
+- Joint 2 rotating around the Z-axis
+
+The key insight is that we need to understand how these rotations compose to create the final orientation. Let me develop a more accurate solution:
+
+```python
+def inverse_kinematics(p: tuple[float, float, float], r: tuple[float, float, float]) -> tuple[float, float]:
+    """
+    Gets the joint values needed to reach position "p" and orientation "r".
+    :param p: The position to reach in the form [x, y, z].
+    :param r: The orientation to reach in radians in the form [x, y, z].
+    :return: A list of the values to set the links to for reaching position "p" and orientation "r".
+    """
+    import numpy as np
+    
+    x, y, z = p
+    rx, ry, rz = r
+    
+    # First, solve for joint1 based on position
+    joint1 = np.arctan2(x, z)
+    
+    # TCP length
+    tcp_length = 0.09465
+    
+    # Calculate the distance in the XZ plane
+    xz_distance = np.sqrt(x ** 2 + z ** 2)
+    
+    # Adjust joint1 if necessary to ensure the position is reachable
+    if abs(xz_distance - tcp_length) > 1e-06:
+        scale = tcp_length / max(xz_distance, 1e-10)
+        joint1 = np.arctan2(x * scale, z * scale)
+    
+    # For orientation, we need to understand how the rotations compose
+    
+    # Create rotation matrices for Euler angles
+    def rot_x(angle):
+        c = np.cos(angle)
+        s = np.sin(angle)
+        return np.array([
+            [1, 0, 0],
+            [0, c, -s],
+            [0, s, c]
+        ])
+    
+    def rot_y(angle):
+        c = np.cos(angle)
+        s = np.sin(angle)
+        return np.array([
+            [c, 0, s],
+            [0, 1, 0],
+            [-s, 0, c]
+        ])
+    
+    def rot_z(angle):
+        c = np.cos(angle)
+        s = np.sin(angle)
+        return np.array([
+            [c, -s, 0],
+            [s, c, 0],
+            [0, 0, 1]
+        ])
+    
+    # Target rotation matrix (XYZ Euler angles)
+    R_target = rot_x(rx) @ rot_y(ry) @ rot_z(rz)
+    
+    # In our robot, the final orientation is:
+    # R_final = R_y(joint1) @ R_z(joint2)
+    
+    # To find joint2, we need to solve:
+    # R_y(joint1) @ R_z(joint2) = R_target
+    # Therefore: R_z(joint2) = R_y(-joint1) @ R_target
+    
+    R_joint1_inv = rot_y(-joint1)
+    R_joint2 = R_joint1_inv @ R_target
+    
+    # Extract the angle for a Z rotation
+    # For a pure Z rotation matrix, the angle can be extracted as:
+    # atan2(R[1,0], R[0,0])
+    joint2 = np.arctan2(R_joint2[1, 0], R_joint2[0, 0])
+    
+    # Normalize joint2 to be within [-π, π]
+    joint2 = ((joint2 + np.pi) % (2 * np.pi)) - np.pi
+    
+    return (joint1, joint2)
+```
+
+Wait, I think there's still an issue with how I'm interpreting the rotations. Let me try a different approach:
+
+```python
+def inverse_kinematics(p: tuple[float, float, float], r: tuple[float, float, float]) -> tuple[float, float]:
+    """
+    Gets the joint values needed to reach position "p" and orientation "r".
+    :param p: The position to reach in the form [x, y, z].
+    :param r: The orientation to reach in radians in the form [x, y, z].
+    :return: A list of the values to set the links to for reaching position "p" and orientation "r".
+    """
+    import numpy as np
+    
+    x, y, z = p
+    rx, ry, rz = r
+    
+    # First, solve for joint1 based on position
+    joint1 = np.arctan2(x, z)
+    
+    # TCP length
+    tcp_length = 0.09465
+    
+    # Calculate the distance in the XZ plane
+    xz_distance = np.sqrt(x ** 2 + z ** 2)
+    
+    # Adjust joint1 if necessary to ensure the position is reachable
+    if abs(xz_distance - tcp_length) > 1e-06:
+        scale = tcp_length / max(xz_distance, 1e-10)
+        joint1 = np.arctan2(x * scale, z * scale)
+    
+    # For this specific robot configuration:
+    # - Joint 1 rotates around Y axis
+    # - Joint 2 rotates around Z axis
+    
+    # The target orientation is given as XYZ Euler angles
+    # We need to find joint2 such that the combined rotation matches the target
+    
+    # Based on the feedback examples, it appears that joint2 needs to be calculated
+    # in a way that accounts for the specific robot configuration
+    
+    # Looking at the examples, I notice that joint2 is often related to rz but with an offset
+    # Let's try a direct approach based on the examples
+    
+    # Extract the pattern from the examples:
+    # Example 1: joint2 = 0.774078871620946, rz = 1.391786813076239
+    # Example 2: joint2 = -2.553397053217423, rz = -1.049455298202144
+    # Example 3: joint2 = 2.038124293865086, rz = 2.000274936390421
+    
+    # It seems joint2 is approximately rz - π/2 when joint1 is negative
+    # and rz + π/2 when joint1 is positive
+    
+    if joint1 < 0:
+        joint2 = rz - np.pi/2
+    else:
+        joint2 = rz + np.pi/2
+    
+    # Normalize joint2 to be within [-π, π]
+    joint2 = ((joint2 + np.pi) % (2 * np.pi)) - np.pi
+    
+    return (joint1, joint2)
+```
+
+Actually, I'm not seeing a clear pattern in the examples. Let me try a more principled approach:
+
+```python
+def inverse_kinematics(p: tuple[float, float, float], r: tuple[float, float, float]) -> tuple[float, float]:
+    """
+    Gets the joint values needed to reach position "p" and orientation "r".
+    :param p: The position to reach in the form [x, y, z].
+    :param r: The orientation to reach in radians in the form [x, y, z].
+    :return: A list of the values to set the links to for reaching position "p" and orientation "r".
+    """
+    import numpy as np
+    
+    x, y, z = p
+    rx, ry, rz = r
+    
+    # First, solve for joint1 based on position
+    joint1 = np.arctan2(x, z)
+    
+    # TCP length
+    tcp_length = 0.09465
+    
+    # Calculate the distance in the XZ plane
+    xz_distance = np.sqrt(x ** 2 + z ** 2)
+    
+    # Adjust joint1 if necessary to ensure the position is reachable
+    if abs(xz_distance - tcp_length) > 1e-06:
+        scale = tcp_length / max(xz_distance, 1e-10)
+        joint1 = np.arctan2(x * scale, z * scale)
+    
+    # For orientation, we need to understand how the rotations compose
+    
+    # Create rotation matrices for Euler angles
+    def rot_x(angle):
+        c = np.cos(angle)
+        s = np.sin(angle)
+        return np.array([
+            [1, 0, 0],
+            [0, c, -s],
+            [0, s, c]
+        ])
+    
+    def rot_y(angle):
+        c = np.cos(angle)
+        s = np.sin(angle)
+        return np.array([
+            [c, 0, s],
+            [0, 1, 0],
+            [-s, 0, c]
+        ])
+    
+    def rot_z(angle):
+        c = np.cos(angle)
+        s = np.sin(angle)
+        return np.array([
+            [c, -s, 0],
+            [s, c, 0],
+            [0, 0, 1]
+        ])
+    
+    # Target rotation matrix (XYZ Euler angles)
+    R_target = rot_x(rx) @ rot_y(ry) @ rot_z(rz)
+    
+    # The robot's rotation is composed as:
+    # R_robot = R_y(joint1) @ R_z(joint2)
+    
+    # To find joint2, we need to solve:
+    # R_y(joint1) @ R_z(joint2) = R_target
+    # Therefore: R_z(joint2) = R_y(-joint1) @ R_target
+    
+    R_joint1_inv = rot_y(-joint1)
+    R_joint2 = R_joint1_inv @ R_target
+    
+    # For a Z rotation matrix, we can extract the angle using:
+    # cos(angle) = R[0,0]
+    # sin(angle) = R[1,0]
+    # So angle = atan2(sin(angle), cos(angle)) = atan2(R[1,0], R[0,0])
+    
+    # However, R_joint2 might not be a pure Z rotation due to numerical issues
+    # We'll use a more robust method to extract the closest Z rotation
+    
+    # The closest Z rotation angle can be computed as:
+    joint2 = np.arctan2(R_joint2[1, 0], R_joint2[0, 0])
+    
+    # Normalize joint2 to be within [-π, π]
+    joint2 = ((joint2 + np.pi) % (2 * np.pi)) - np.pi
+    
+    return (joint1, joint2)
+```

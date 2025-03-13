@@ -30,68 +30,53 @@ def inverse_kinematics(p: tuple[float, float, float]) -> tuple[float, float, flo
     # Calculate the projection of the target point onto the X-Z plane
     r_xz = np.sqrt(x**2 + z**2)
     
-    # If the target is directly above/below the base, we can set joint 1 to 0
-    if abs(r_xz) < 1e-10:
+    # If the target is directly above/below the base, we can set joint 1 to any value
+    # (singularity case)
+    if np.isclose(r_xz, 0):
         theta1 = 0
     else:
-        # Otherwise, calculate the angle
         theta1 = np.arctan2(x, z)
     
     # Now we need to find joint 2 and 3 angles
     # We'll work in the plane defined by joint 1 rotation
     
-    # Calculate the distance from joint 2 to the target in the Y direction
-    y_from_j2 = y - l1
+    # Calculate the distance from joint 1 to the target in the Y direction
+    y_from_base = y - l1
     
-    # Calculate the distance from joint 2 to the target in the X-Z plane
-    # We need to account for joint 1 rotation
-    xz_from_j2 = r_xz
-    
-    # Now we have a 2D problem in the plane defined by joint 1
-    # We need to find joint 2 and 3 angles to reach the target
+    # Calculate the distance from joint 1 to the target in the X-Z plane
+    # after accounting for joint 1 rotation
+    x_from_base = r_xz
     
     # Calculate the distance from joint 2 to the target
-    r = np.sqrt(y_from_j2**2 + xz_from_j2**2)
+    r = np.sqrt(x_from_base**2 + y_from_base**2)
     
-    # Check if the target is reachable
-    # (We're told all targets will be reachable, but this is a sanity check)
-    max_reach = l2 + l3
-    if r > max_reach:
-        # Target is too far, but we're told all targets are reachable
-        # So this shouldn't happen
-        pass
-    
-    # Use the law of cosines to find the angle between the links
+    # Using the law of cosines to find joint 3 angle
     cos_theta3 = (r**2 - l2**2 - l3**2) / (2 * l2 * l3)
-    # Clamp to handle floating point errors
+    # Clamp to valid range to handle numerical errors
     cos_theta3 = np.clip(cos_theta3, -1.0, 1.0)
     
-    # Joint 3 angle (internal angle between links)
+    # Joint 3 rotates around Y-axis
     theta3 = np.arccos(cos_theta3)
     
-    # For joint 2, we need to find the angle to the target and the angle in the linkage
-    gamma = np.arctan2(y_from_j2, xz_from_j2)
+    # Now find joint 2 angle using the law of sines
+    # Calculate the angle between the l2 link and the line to the target
+    beta = np.arctan2(y_from_base, x_from_base)
     
-    # Use the law of sines to find the angle in the linkage
-    sin_alpha = l3 * np.sin(theta3) / r
-    # Clamp to handle floating point errors
-    sin_alpha = np.clip(sin_alpha, -1.0, 1.0)
-    alpha = np.arcsin(sin_alpha)
+    # Calculate the angle between l2 and the line connecting joint 2 to the target
+    gamma = np.arccos((l2**2 + r**2 - l3**2) / (2 * l2 * r))
     
-    # Joint 2 angle
-    theta2 = gamma - alpha
+    # Joint 2 rotates around Z-axis
+    theta2 = beta - gamma
     
-    # Adjust joint 3 angle to be relative to joint 2
-    theta3 = np.pi - theta3
-    
+    # Return the joint angles
     return (theta1, theta2, theta3)
 ```
 
-Wait, I need to reconsider this solution. Let me analyze the robot structure more carefully:
+Wait, I need to reconsider this solution. Let me analyze the forward kinematics results more carefully:
 
-1. Joint 1 rotates around Y-axis
-2. Joint 2 rotates around Z-axis
-3. Joint 3 rotates around Y-axis
+1. When joint 1 = 1.57 (90 degrees around Y), the TCP moves primarily in the X direction
+2. When joint 2 = 1.57 (90 degrees around Z), the TCP moves in the X-Y plane
+3. When joint 3 = 1.57 (90 degrees around Y), the TCP orientation changes but position is affected
 
 Let me revise the solution:
 
@@ -107,70 +92,51 @@ def inverse_kinematics(p: tuple[float, float, float]) -> tuple[float, float, flo
     x, y, z = p
     
     # Constants from the robot description
-    l1 = 0.093    # Distance from joint 1 to joint 2 (Y direction)
-    l2 = 0.09465  # Distance from joint 2 to joint 3 (Z direction)
-    l3 = 0.0823   # Distance from joint 3 to TCP (Y direction)
+    l1 = 0.093  # Distance from joint 1 to joint 2
+    l2 = 0.09465  # Distance from joint 2 to joint 3
+    l3 = 0.0823  # Distance from joint 3 to TCP
     
-    # First, determine joint 1 (rotation around Y-axis)
-    # This affects the X and Z coordinates
-    if abs(x) < 1e-10 and abs(z) < 1e-10:
-        # Target is along the Y-axis, can set joint 1 to 0
-        theta1 = 0
-    else:
-        theta1 = np.arctan2(x, z)
+    # First, determine joint 1 angle (rotation around Y-axis)
+    # This affects the position in the X-Z plane
+    theta1 = np.arctan2(x, z)
     
-    # Now we need to work in the plane defined by joint 1 rotation
-    # Calculate the distance in the X-Z plane
+    # Calculate the projection of the target in the plane after joint 1 rotation
+    # This is the distance in the X-Z plane
     r_xz = np.sqrt(x**2 + z**2)
     
-    # We now have a 2D problem in the Y-XZ plane
-    # Joint 2 rotates around Z, and Joint 3 rotates around Y
+    # The remaining problem is to solve for joint 2 and 3 in the plane
+    # defined by the joint 1 rotation
     
-    # For joint 3, we need to determine how much it needs to rotate to align with the target
-    # When joint 3 is at 0, the TCP is offset by l3 in the Y direction from joint 3
+    # Distance from joint 2 to target in Y direction
+    dy = y - l1
     
-    # For joint 2, we need to determine how much it needs to rotate to position joint 3
-    # such that the TCP can reach the target
-    
-    # This is a 2-link planar manipulator problem in the Y-XZ plane
-    # Link 1 length is l2 (Z direction when joint 2 is 0)
-    # Link 2 length is l3 (Y direction when joint 3 is 0)
-    
-    # Target coordinates in the Y-XZ plane, relative to joint 2
-    y_rel = y - l1
-    xz_rel = r_xz
+    # Distance from joint 2 to target in X-Z plane
+    dx = r_xz
     
     # Distance from joint 2 to target
-    r = np.sqrt(y_rel**2 + xz_rel**2)
+    r = np.sqrt(dx**2 + dy**2)
     
-    # Use the law of cosines to find joint 3 angle
+    # Using the law of cosines to find joint 3 angle
     cos_theta3 = (r**2 - l2**2 - l3**2) / (2 * l2 * l3)
-    # Clamp to handle floating point errors
+    # Clamp to valid range to handle numerical errors
     cos_theta3 = np.clip(cos_theta3, -1.0, 1.0)
     
-    # Joint 3 is around Y-axis, so it affects the angle between l2 and l3
+    # Joint 3 rotates around Y-axis
     theta3 = np.arccos(cos_theta3)
     
-    # For joint 2, we need the angle to the target and the angle in the linkage
-    gamma = np.arctan2(y_rel, xz_rel)
+    # Find angle between l2 and the line to the target
+    alpha = np.arctan2(dy, dx)
     
-    # Use the law of sines to find the angle in the linkage
-    sin_beta = l3 * np.sin(theta3) / r
-    # Clamp to handle floating point errors
-    sin_beta = np.clip(sin_beta, -1.0, 1.0)
-    beta = np.arcsin(sin_beta)
+    # Find angle between l2 and the line from joint 2 to joint 3
+    beta = np.arccos((l2**2 + r**2 - l3**2) / (2 * l2 * r))
     
-    # Joint 2 angle
-    theta2 = gamma - beta
-    
-    # Adjust joint 3 angle to be relative to joint 2
-    # When joint 3 is 0, the TCP extends in the Y direction
-    theta3 = np.pi - theta3
+    # Joint 2 rotates around Z-axis
+    theta2 = alpha - beta
     
     return (theta1, theta2, theta3)
 ```
 
-I need to reconsider this solution again. Let me analyze the robot structure more carefully based on the forward kinematics tests:
+Let me refine this solution one more time to ensure it's correct:
 
 ```python
 def inverse_kinematics(p: tuple[float, float, float]) -> tuple[float, float, float]:
@@ -184,106 +150,44 @@ def inverse_kinematics(p: tuple[float, float, float]) -> tuple[float, float, flo
     x, y, z = p
     
     # Constants from the robot description
-    l1 = 0.093    # Distance from joint 1 to joint 2 (Y direction)
-    l2 = 0.09465  # Distance from joint 2 to joint 3 (Z direction)
-    l3 = 0.0823   # Distance from joint 3 to TCP (Y direction)
+    l1 = 0.093  # Distance from joint 1 to joint 2
+    l2 = 0.09465  # Distance from joint 2 to joint 3
+    l3 = 0.0823  # Distance from joint 3 to TCP
     
-    # First, determine joint 1 (rotation around Y-axis)
-    # This affects the X and Z coordinates
-    if abs(x) < 1e-10 and abs(z) < 1e-10:
-        # Target is along the Y-axis, can set joint 1 to 0
-        theta1 = 0
-    else:
-        theta1 = np.arctan2(x, z)
-    
-    # Now we need to work in the plane defined by joint 1 rotation
-    # Calculate the distance in the X-Z plane
+    # Calculate the projection of the target in the X-Z plane
     r_xz = np.sqrt(x**2 + z**2)
     
-    # We now have a 2D problem in the Y-XZ plane
-    # Joint 2 rotates around Z, and Joint 3 rotates around Y
+    # Joint 1 angle (rotation around Y-axis)
+    theta1 = np.arctan2(x, z)
     
-    # Target coordinates in the Y-XZ plane, relative to joint 2
-    y_rel = y - l1
-    xz_rel = r_xz
+    # The remaining problem is to solve for joint 2 and 3 in the plane
+    # defined by the joint 1 rotation
     
-    # Distance from joint 2 to target
-    r = np.sqrt(y_rel**2 + xz_rel**2)
+    # Distance from joint 2 to target in Y direction
+    dy = y - l1
     
-    # Use the law of cosines to find joint 3 angle
-    cos_theta3 = (r**2 - l2**2 - l3**2) / (2 * l2 * l3)
-    # Clamp to handle floating point errors
-    cos_theta3 = np.clip(cos_theta3, -1.0, 1.0)
-    
-    # Joint 3 angle
-    theta3 = np.arccos(cos_theta3)
-    
-    # For joint 2, we need the angle to the target and the angle in the linkage
-    gamma = np.arctan2(y_rel, xz_rel)
-    
-    # Use the law of sines to find the angle in the linkage
-    sin_beta = l3 * np.sin(theta3) / r
-    # Clamp to handle floating point errors
-    sin_beta = np.clip(sin_beta, -1.0, 1.0)
-    beta = np.arcsin(sin_beta)
-    
-    # Joint 2 angle
-    theta2 = gamma - beta
-    
-    return (theta1, theta2, theta3)
-```
-
-Let me finalize the solution:
-
-```python
-def inverse_kinematics(p: tuple[float, float, float]) -> tuple[float, float, float]:
-    """
-    Gets the joint values needed to reach position "p".
-    :param p: The position to reach in the form [x, y, z].
-    :return: A list of the values to set the links to for reaching position "p".
-    """
-    import numpy as np
-    
-    x, y, z = p
-    
-    # Constants from the robot description
-    l1 = 0.093    # Distance from joint 1 to joint 2 (Y direction)
-    l2 = 0.09465  # Distance from joint 2 to joint 3 (Z direction)
-    l3 = 0.0823   # Distance from joint 3 to TCP (Y direction)
-    
-    # First, determine joint 1 (rotation around Y-axis)
-    if abs(x) < 1e-10 and abs(z) < 1e-10:
-        # Target is along the Y-axis, can set joint 1 to 0
-        theta1 = 0
-    else:
-        theta1 = np.arctan2(x, z)
-    
-    # Calculate the distance in the X-Z plane
-    r_xz = np.sqrt(x**2 + z**2)
-    
-    # Target coordinates in the Y-XZ plane, relative to joint 2
-    y_rel = y - l1
-    xz_rel = r_xz
+    # Distance from joint 2 to target in X-Z plane
+    dx = r_xz
     
     # Distance from joint 2 to target
-    r = np.sqrt(y_rel**2 + xz_rel**2)
+    r = np.sqrt(dx**2 + dy**2)
     
-    # Use the law of cosines to find joint 3 angle
+    # Using the law of cosines to find joint 3 angle
     cos_theta3 = (r**2 - l2**2 - l3**2) / (2 * l2 * l3)
-    # Clamp to handle floating point errors
+    # Clamp to valid range to handle numerical errors
     cos_theta3 = np.clip(cos_theta3, -1.0, 1.0)
     
-    # Joint 3 angle
+    # Joint 3 rotates around Y-axis
     theta3 = np.arccos(cos_theta3)
     
-    # For joint 2, we need the angle to the target and the angle in the linkage
-    gamma = np.arctan2(y_rel, xz_rel)
+    # Find angle between horizontal and the line to the target
+    alpha = np.arctan2(dy, dx)
     
-    # Use the law of sines to find the angle in the linkage
-    alpha = np.arccos((l2**2 + r**2 - l3**2) / (2 * l2 * r))
+    # Find angle between l2 and the line from joint 2 to joint 3
+    beta = np.arccos((l2**2 + r**2 - l3**2) / (2 * l2 * r))
     
-    # Joint 2 angle
-    theta2 = gamma - alpha
+    # Joint 2 rotates around Z-axis
+    theta2 = alpha - beta
     
     return (theta1, theta2, theta3)
 ```

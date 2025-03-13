@@ -1,6 +1,6 @@
-I see the issue with my solution. Looking at the correct joint values from the working inverse kinematics solver, I notice that in all cases, the third joint (theta3) is 0. This suggests that the robot is designed to be used with only the first two joints for positioning, with the third joint potentially reserved for orientation or other purposes.
+Based on the feedback, I can see that my inverse kinematics solution has significant issues. Looking at the correct joint values, I notice a pattern: the third joint (joint3) is always 0 in the correct solutions. This suggests that the robot might be using only 2 joints to reach the target positions, with the third joint kept at 0.
 
-Let me revise my solution based on this insight:
+Let me revise my solution with this insight:
 
 ```python
 def inverse_kinematics(p: tuple[float, float, float]) -> tuple[float, float, float]:
@@ -20,61 +20,107 @@ def inverse_kinematics(p: tuple[float, float, float]) -> tuple[float, float, flo
     z_offset_link3 = 0.39225
     y_offset_tcp = 0.093
     
-    # The TCP is offset by y_offset_tcp in the y direction from the last joint
-    # We need to account for this when calculating the target position for the last joint
-    
-    # Based on the correct solutions, we know that theta3 = 0
+    # Since the third joint is always 0 in the correct solutions,
+    # we'll set it to 0 and solve for the first two joints
     theta3 = 0.0
     
-    # With theta3 = 0, the last link is straight, so the total arm length in the direction
-    # of the arm is z_offset_link2 + z_offset_link3
-    total_arm_length = z_offset_link2 + z_offset_link3
+    # Adjust the target position to account for the TCP offset
+    # When theta3 = 0, the TCP is offset by y_offset_tcp in the y direction
+    y_adj = y - y_offset_tcp
     
-    # First, determine joint 1 angle (rotation around Y-axis)
-    # This is the angle in the XZ plane
+    # Calculate joint 1 (rotation in the XZ plane)
     theta1 = np.arctan2(x, z)
     
-    # Calculate the distance from the origin to the target in the XZ plane
+    # The robot arm lies in a plane rotated by theta1 around the Y-axis
+    # We need to find the distance from the origin to the target in this plane
     r_xz = np.sqrt(x**2 + z**2)
     
-    # The y-coordinate needs to account for the TCP offset and link2 offset
-    y_target = y - y_offset_tcp
-    y_from_base = y_target - y_offset_link2
+    # The total length of the arm when extended (with theta3 = 0)
+    L_total = z_offset_link2 + z_offset_link3
     
-    # Calculate theta2 using inverse kinematics for a 2-link planar arm
-    # We need to find the angle that positions the end of the arm at (r_xz, y_from_base)
+    # Calculate the angle needed for joint 2
+    # We need to find the angle between the vertical and the line to the target
     
-    # Using the law of cosines to find the angle between the links
-    # We have a right triangle with:
-    # - Hypotenuse = total_arm_length
-    # - Adjacent side = r_xz
-    # - Opposite side = y_from_base
+    # First, adjust for the y-offset of link 2
+    y_from_link2 = y_adj - y_offset_link2
     
-    # Calculate the angle between the horizontal and the line to the target
-    alpha = np.arctan2(y_from_base, r_xz)
+    # Calculate theta2 using arctan
+    # This is the angle between the vertical (z-axis) and the line to the target
+    theta2 = np.arctan2(y_from_link2, r_xz) - np.arcsin(r_xz / L_total)
     
-    # Calculate the angle between the first link and the line to the target
-    # using the law of cosines
-    d = np.sqrt(r_xz**2 + y_from_base**2)
+    return (theta1, theta2, theta3)
+```
+
+Wait, I think I'm still not getting the geometry right. Let me reconsider the problem:
+
+```python
+def inverse_kinematics(p: tuple[float, float, float]) -> tuple[float, float, float]:
+    """
+    Gets the joint values needed to reach position "p".
+    :param p: The position to reach in the form [x, y, z].
+    :return: A list of the values to set the links to for reaching position "p".
+    """
+    import numpy as np
     
-    # If the target is beyond reach, we need to handle it
-    # Since we're told all targets are reachable, this shouldn't happen,
-    # but we'll add a check just to be safe
-    if d > total_arm_length:
-        # Target is at maximum reach, point the arm directly at the target
-        theta2 = alpha
+    # Extract target position coordinates
+    x, y, z = p
+    
+    # Constants from the robot description
+    y_offset_link2 = -0.1197
+    z_offset_link2 = 0.425
+    z_offset_link3 = 0.39225
+    y_offset_tcp = 0.093
+    
+    # Since the third joint is always 0 in the correct solutions,
+    # we'll set it to 0
+    theta3 = 0.0
+    
+    # Adjust the target position to account for the TCP offset
+    # When theta3 = 0, the TCP is offset by y_offset_tcp in the y direction
+    y_adj = y - y_offset_tcp
+    
+    # Calculate joint 1 (rotation in the XZ plane)
+    theta1 = np.arctan2(x, z)
+    
+    # Rotate the target point back to the YZ plane
+    # This simplifies the problem to a 2D inverse kinematics in the YZ plane
+    x_rot = x * np.cos(-theta1) + z * np.sin(-theta1)
+    y_rot = y_adj
+    z_rot = -x * np.sin(-theta1) + z * np.cos(-theta1)
+    
+    # Now we have a 2D problem in the YZ plane
+    # The target point is at (y_rot, z_rot)
+    
+    # The total length of the arm when extended (with theta3 = 0)
+    L_total = z_offset_link2 + z_offset_link3
+    
+    # Distance from origin to target in the YZ plane
+    D = np.sqrt(y_rot**2 + z_rot**2)
+    
+    # Check if the target is reachable
+    if D > L_total:
+        # Target is too far, set the arm to reach as far as possible
+        theta2 = np.arctan2(y_rot, z_rot)
     else:
-        # Calculate the angle using the law of cosines
-        cos_beta = r_xz / d
-        beta = np.arccos(cos_beta)
+        # Calculate theta2 using the law of cosines
+        # We need to find the angle between the vertical and link 2
         
-        # Theta2 is the angle needed to position the arm
-        theta2 = alpha - beta
+        # First, adjust for the y-offset of link 2
+        y_from_link2 = y_rot - y_offset_link2
+        
+        # Recalculate the distance with the adjusted y
+        D_adj = np.sqrt(y_from_link2**2 + z_rot**2)
+        
+        # Calculate the angle between the vertical and the line to the target
+        phi = np.arctan2(y_from_link2, z_rot)
+        
+        # Calculate theta2
+        theta2 = phi
     
     return (theta1, theta2, theta3)
 ```
 
-Wait, I think I'm still not approaching this correctly. Let me reconsider the problem:
+I'm still not getting the geometry right. Let me try a different approach:
 
 ```python
 def inverse_kinematics(p: tuple[float, float, float]) -> tuple[float, float, float]:
@@ -94,89 +140,41 @@ def inverse_kinematics(p: tuple[float, float, float]) -> tuple[float, float, flo
     z_offset_link3 = 0.39225
     y_offset_tcp = 0.093
     
-    # Based on the correct solutions, we know that theta3 = 0
-    theta3 = 0.0
-    
-    # With theta3 = 0, the last link extends straight from link2
-    # The TCP is offset by y_offset_tcp in the y direction
-    
-    # Adjust the target position to account for the TCP offset
-    # Since the TCP is offset in the y direction and theta3 = 0,
-    # we need to adjust the y coordinate
-    y_adjusted = y - y_offset_tcp
-    
-    # First, determine joint 1 angle (rotation around Y-axis)
-    theta1 = np.arctan2(x, z)
-    
-    # The distance from the origin to the target in the XZ plane
-    r_xz = np.sqrt(x**2 + z**2)
-    
-    # The total length of links 2 and 3 when theta3 = 0
-    total_arm_length = z_offset_link2 + z_offset_link3
-    
-    # The y-coordinate from the base to the target
-    y_from_base = y_adjusted - y_offset_link2
-    
-    # The distance from the base of link 2 to the target
-    d = np.sqrt(r_xz**2 + y_from_base**2)
-    
-    # Calculate theta2 using the angle between the horizontal and the line to the target
-    theta2 = np.arctan2(y_from_base, r_xz)
-    
-    return (theta1, theta2, theta3)
-```
-
-I'm still not getting this right. Let me try a different approach by working backwards from the target position:
-
-```python
-def inverse_kinematics(p: tuple[float, float, float]) -> tuple[float, float, float]:
-    """
-    Gets the joint values needed to reach position "p".
-    :param p: The position to reach in the form [x, y, z].
-    :return: A list of the values to set the links to for reaching position "p".
-    """
-    import numpy as np
-    
-    # Extract target position coordinates
-    x, y, z = p
-    
-    # Constants from the robot description
-    y_offset_link2 = -0.1197
-    z_offset_link2 = 0.425
-    z_offset_link3 = 0.39225
-    y_offset_tcp = 0.093
-    
-    # Based on the correct solutions, we know that theta3 = 0
+    # Since the third joint is always 0 in the correct solutions,
+    # we'll set it to 0
     theta3 = 0.0
     
     # Adjust the target position to account for the TCP offset
-    # Since the TCP is offset in the y direction when theta3 = 0
-    y_adjusted = y - y_offset_tcp
+    # When theta3 = 0, the TCP is offset by y_offset_tcp in the y direction
+    y_adj = y - y_offset_tcp
     
-    # Calculate theta1 (rotation around Y-axis)
+    # Calculate joint 1 (rotation in the XZ plane)
     theta1 = np.arctan2(x, z)
     
-    # Calculate the distance from the origin to the target in the XZ plane
+    # Project the target point onto the YZ plane by rotating around the Y axis
+    # by -theta1
     r_xz = np.sqrt(x**2 + z**2)
     
+    # The total arm length when extended (with theta3 = 0)
+    L_arm = z_offset_link2 + z_offset_link3
+    
     # Calculate theta2
-    # When theta3 = 0, the arm forms a straight line from joint 2 to the end effector
-    # We need to find the angle that positions this line to reach the target
+    # We need to find the angle that places the end of the arm at the target
     
-    # The y-coordinate from the base to the target
-    y_from_base = y_adjusted - y_offset_link2
+    # First, adjust for the y-offset of link 2
+    y_from_origin = y_adj
     
-    # Calculate theta2 as the angle needed to reach the target
-    theta2 = np.arctan2(y_from_base, r_xz)
+    # Calculate the angle between the vertical (z-axis) and the line to the target
+    phi = np.arctan2(y_from_origin, r_xz)
+    
+    # Calculate the angle needed to reach the target
+    # This is the angle between the vertical and link 2
+    theta2 = phi
     
     return (theta1, theta2, theta3)
 ```
 
-I'm still not capturing the correct relationship. Let me analyze the examples more carefully:
-
-For example, for the target [0.675428066073634, -0.0267, -0.1728790745438], the correct joint values were [2.34621795706818, -1.098752488034753, 0].
-
-Let me try a completely different approach based on the examples:
+I'm still not getting it right. Let me try one more approach with a clearer understanding of the robot's geometry:
 
 ```python
 def inverse_kinematics(p: tuple[float, float, float]) -> tuple[float, float, float]:
@@ -196,53 +194,50 @@ def inverse_kinematics(p: tuple[float, float, float]) -> tuple[float, float, flo
     z_offset_link3 = 0.39225
     y_offset_tcp = 0.093
     
-    # The third joint is always 0 based on the examples
+    # Since the third joint is always 0 in the correct solutions,
+    # we'll set it to 0
     theta3 = 0.0
     
-    # Calculate the position of the wrist (joint 3) by removing the TCP offset
-    # Since theta3 = 0, the TCP is offset by y_offset_tcp in the local y direction
-    # We need to transform this to the global frame
+    # Adjust the target position to account for the TCP offset
+    y_target = y - y_offset_tcp
     
-    # First, calculate theta1 (rotation around Y-axis)
+    # Calculate joint 1 (rotation in the XZ plane)
     theta1 = np.arctan2(x, z)
     
-    # The TCP offset is along the local y-axis of the end effector
-    # When theta3 = 0, this is perpendicular to the arm direction in the XZ plane
-    # So we need to subtract this offset in the direction perpendicular to the arm
+    # Project the target point onto the YZ plane by rotating around the Y axis
+    # This gives us the distance from the origin to the target in the XZ plane
+    r_xz = np.sqrt(x**2 + z**2)
     
-    # Calculate the unit vector in the direction of the arm in the XZ plane
-    if np.sqrt(x**2 + z**2) > 0:
-        arm_dir_x = x / np.sqrt(x**2 + z**2)
-        arm_dir_z = z / np.sqrt(x**2 + z**2)
+    # The effective length of the arm when extended (with theta3 = 0)
+    L_arm = z_offset_link2 + z_offset_link3
+    
+    # Calculate theta2
+    # We need to find the angle that places the end of the arm at the target
+    
+    # The y-coordinate of the target relative to the base of link 2
+    y_rel = y_target - y_offset_link2
+    
+    # Calculate theta2 using the law of cosines
+    # In this case, we have a right triangle with:
+    # - Hypotenuse: L_arm
+    # - Adjacent side: r_xz
+    # - Opposite side: y_rel
+    
+    # First, calculate the angle between the arm and the XZ plane
+    if r_xz == 0:
+        # Special case: target is directly above/below the origin
+        if y_rel >= 0:
+            theta2 = np.pi/2  # Point straight up
+        else:
+            theta2 = -np.pi/2  # Point straight down
     else:
-        arm_dir_x = 0
-        arm_dir_z = 1
-    
-    # The perpendicular direction is (-arm_dir_z, arm_dir_x)
-    perp_dir_x = -arm_dir_z
-    perp_dir_z = arm_dir_x
-    
-    # Adjust the target position by removing the TCP offset
-    wrist_x = x - y_offset_tcp * perp_dir_x
-    wrist_z = z - y_offset_tcp * perp_dir_z
-    wrist_y = y
-    
-    # Calculate the distance from the origin to the wrist in the XZ plane
-    r_xz = np.sqrt(wrist_x**2 + wrist_z**2)
-    
-    # Calculate the height difference from the base of link 2 to the wrist
-    height_diff = wrist_y - y_offset_link2
-    
-    # Calculate the total length of the arm (link 2 + link 3)
-    total_arm_length = z_offset_link2 + z_offset_link3
-    
-    # Calculate theta2 using the angle between the horizontal and the line to the wrist
-    theta2 = np.arctan2(height_diff, r_xz)
+        # Normal case
+        theta2 = np.arctan2(y_rel, r_xz)
     
     return (theta1, theta2, theta3)
 ```
 
-I'm still not getting the correct solution. Let me try one more approach:
+I'm still not capturing the correct geometry. Let me make one final attempt with a clearer understanding of the robot's structure:
 
 ```python
 def inverse_kinematics(p: tuple[float, float, float]) -> tuple[float, float, float]:
@@ -262,142 +257,36 @@ def inverse_kinematics(p: tuple[float, float, float]) -> tuple[float, float, flo
     z_offset_link3 = 0.39225
     y_offset_tcp = 0.093
     
-    # The third joint is always 0 based on the examples
-    theta3 = 0.0
+    # Adjust the target position to account for the TCP offset
+    y_target = y - y_offset_tcp
     
-    # Calculate theta1 (rotation around Y-axis)
+    # Calculate joint 1 (rotation in the XZ plane)
     theta1 = np.arctan2(x, z)
     
-    # When theta3 = 0, the arm is fully extended in the direction determined by theta1 and theta2
-    # The total reach in the XZ plane is determined by theta2
+    # Project the target point onto the YZ plane by rotating around the Y axis
+    # by -theta1
+    x_rot = x * np.cos(-theta1) + z * np.sin(-theta1)
+    z_rot = -x * np.sin(-theta1) + z * np.cos(-theta1)
     
-    # Calculate the distance from the origin to the target in the XZ plane
-    r_xz = np.sqrt(x**2 + z**2)
+    # The target is now at (x_rot, y_target, z_rot) in the original coordinate system
+    # Since we've rotated around the Y axis, x_rot should be close to 0
+    # and the target is effectively at (0, y_target, z_rot)
     
-    # The y-coordinate needs to account for the TCP offset
-    # Since the TCP is offset in the y direction when theta3 = 0
-    y_target = y
-    
-    # Calculate theta2
-    # This is the angle between the horizontal plane and the line to the target
-    theta2 = np.arcsin((y_target - y_offset_link2) / (z_offset_link2 + z_offset_link3 + y_offset_tcp))
-    
-    # Adjust for the quadrant
-    if z < 0:
-        theta2 = np.pi - theta2
-    
-    return (theta1, theta2, theta3)
-```
-
-I'm still not getting it right. Let me try a completely different approach based on the examples:
-
-```python
-def inverse_kinematics(p: tuple[float, float, float]) -> tuple[float, float, float]:
-    """
-    Gets the joint values needed to reach position "p".
-    :param p: The position to reach in the form [x, y, z].
-    :return: A list of the values to set the links to for reaching position "p".
-    """
-    import numpy as np
-    
-    # Extract target position coordinates
-    x, y, z = p
-    
-    # Constants from the robot description
-    y_offset_link2 = -0.1197
-    z_offset_link2 = 0.425
-    z_offset_link3 = 0.39225
-    y_offset_tcp = 0.093
-    
-    # The third joint is always 0 based on the examples
+    # The third joint is always 0 in the correct solutions
     theta3 = 0.0
     
-    # Calculate theta1 (rotation around Y-axis)
-    theta1 = np.arctan2(x, z)
-    
-    # Calculate the distance from the origin to the target in the XZ plane
-    r_xz = np.sqrt(x**2 + z**2)
+    # With theta3 = 0, the arm forms a straight line from joint 2 to the end effector
+    # The total length of this line is the sum of link 3 length and link 2 length
+    L_arm = z_offset_link2 + z_offset_link3
     
     # Calculate theta2
-    # We need to find the angle that positions the end of the arm at the target
-    # The arm length is z_offset_link2 + z_offset_link3
-    # The TCP is offset by y_offset_tcp in the y direction
+    # This is the angle between the vertical (z-axis) and the arm
     
-    # The target position for the end of link 3 (before the TCP offset)
-    # is different from the target position p
-    
-    # Since the TCP is offset in the y direction when theta3 = 0,
-    # we need to adjust the target position
-    
-    # The TCP offset is perpendicular to the arm direction in the XZ plane
-    # Calculate the unit vector in the direction of the arm in the XZ plane
-    if r_xz > 0:
-        arm_dir_x = x / r_xz
-        arm_dir_z = z / r_xz
-    else:
-        arm_dir_x = 0
-        arm_dir_z = 1
-    
-    # The perpendicular direction is (-arm_dir_z, arm_dir_x)
-    perp_dir_x = -arm_dir_z
-    perp_dir_z = arm_dir_x
-    
-    # Adjust the target position by removing the TCP offset
-    link3_end_x = x - y_offset_tcp * perp_dir_x
-    link3_end_z = z - y_offset_tcp * perp_dir_z
-    
-    # Recalculate the distance in the XZ plane
-    r_xz_adjusted = np.sqrt(link3_end_x**2 + link3_end_z**2)
+    # The y-coordinate of the target relative to the base of link 2
+    y_rel = y_target - y_offset_link2
     
     # Calculate theta2
-    # This is the angle between the horizontal plane and the line to the target
-    theta2 = np.arcsin((y - y_offset_link2) / (z_offset_link2 + z_offset_link3))
-    
-    # Adjust for the quadrant
-    if z < 0:
-        theta2 = np.pi - theta2
-    
-    return (theta1, theta2, theta3)
-```
-
-I'm still not getting the correct solution. Let me try one more approach based on the examples:
-
-```python
-def inverse_kinematics(p: tuple[float, float, float]) -> tuple[float, float, float]:
-    """
-    Gets the joint values needed to reach position "p".
-    :param p: The position to reach in the form [x, y, z].
-    :return: A list of the values to set the links to for reaching position "p".
-    """
-    import numpy as np
-    
-    # Extract target position coordinates
-    x, y, z = p
-    
-    # Constants from the robot description
-    y_offset_link2 = -0.1197
-    z_offset_link2 = 0.425
-    z_offset_link3 = 0.39225
-    y_offset_tcp = 0.093
-    
-    # The third joint is always 0 based on the examples
-    theta3 = 0.0
-    
-    # Calculate theta1 (rotation around Y-axis)
-    theta1 = np.arctan2(x, z)
-    
-    # When theta3 = 0, the arm is fully extended in the direction determined by theta1 and theta2
-    
-    # Calculate the distance from the origin to the target in the XZ plane
-    r_xz = np.sqrt(x**2 + z**2)
-    
-    # The y-coordinate needs to account for the TCP offset
-    # Since the TCP is offset in the y direction when theta3 = 0
-    y_target = y
-    
-    # Calculate theta2
-    # This is the angle between the horizontal plane and the line to the target
-    theta2 = -np.arctan2(y_target - y_offset_link2, r_xz)
+    theta2 = np.arctan2(y_rel, z_rot)
     
     return (theta1, theta2, theta3)
 ```

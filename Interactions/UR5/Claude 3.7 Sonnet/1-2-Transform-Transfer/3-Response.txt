@@ -1,0 +1,223 @@
+I'll analyze the forward kinematics results to understand how the robot's joint angles relate to the TCP position and orientation. This will help me develop the inverse kinematics solution.
+
+From the forward kinematics test with joint1 = 0.5 and joint2 = 0.7, I can observe:
+
+1. The orientation of each link is represented as [0, θ, 0], confirming rotation around the Y-axis
+2. Joint angles directly affect the orientation values (joint1 = 0.5 → orientation of first link is [0, 0.5, 0])
+3. The second joint's orientation is cumulative (joint1 + joint2 = 0.5 + 0.7 = 1.2)
+
+Now I'll develop the inverse kinematics solution that handles both position and orientation:
+
+```python
+def inverse_kinematics(p: tuple[float, float, float], r: tuple[float, float, float]) -> tuple[float, float]:
+    """
+    Gets the joint values needed to reach position "p" and orientation "r".
+    :param p: The position to reach in the form [x, y, z].
+    :param r: The orientation to reach in radians in the form [x, y, z].
+    :return: A list of the values to set the links to for reaching position "p" and orientation "r".
+    """
+    import numpy as np
+    x, y, z = p
+    rx, ry, rz = r
+    
+    # Constants from the robot description
+    y_offset = -0.1197
+    l1 = 0.425
+    l2 = 0.39225
+    
+    # For this robot, only the y-component of orientation matters (rotation around Y-axis)
+    # The second joint's orientation is the sum of both joint angles
+    # So joint2 = ry - joint1
+    
+    # First solve for position using the existing solution
+    y_target = y - y_offset
+    r_xz = np.sqrt(x ** 2 + z ** 2)
+    cos_theta2 = (r_xz ** 2 - l1 ** 2 - l2 ** 2) / (2 * l1 * l2)
+    cos_theta2 = np.clip(cos_theta2, -1.0, 1.0)
+    theta2 = np.arccos(cos_theta2)
+    phi = np.arctan2(x, z)
+    psi = np.arctan2(l2 * np.sin(theta2), l1 + l2 * np.cos(theta2))
+    theta1 = phi - psi
+    
+    # Check if the orientation constraint is satisfied
+    # If not, we need to find an alternative solution
+    if abs(theta1 + theta2 - ry) > 1e-10:
+        # We need the negative solution for theta2
+        theta2 = -np.arccos(cos_theta2)
+        psi = np.arctan2(l2 * np.sin(theta2), l1 + l2 * np.cos(theta2))
+        theta1 = phi - psi
+        
+        # If orientation still doesn't match, we need to use orientation as the primary constraint
+        if abs(theta1 + theta2 - ry) > 1e-10:
+            # Set theta1 based on orientation constraint
+            theta1 = ry - theta2
+    
+    return (theta1, theta2)
+```
+
+Wait, I need to reconsider this approach. The orientation constraint is more complex than I initially thought. Let me revise:
+
+```python
+def inverse_kinematics(p: tuple[float, float, float], r: tuple[float, float, float]) -> tuple[float, float]:
+    """
+    Gets the joint values needed to reach position "p" and orientation "r".
+    :param p: The position to reach in the form [x, y, z].
+    :param r: The orientation to reach in radians in the form [x, y, z].
+    :return: A list of the values to set the links to for reaching position "p" and orientation "r".
+    """
+    import numpy as np
+    x, y, z = p
+    rx, ry, rz = r
+    
+    # Constants from the robot description
+    y_offset = -0.1197
+    l1 = 0.425
+    l2 = 0.39225
+    
+    # For this robot, only the y-component of orientation matters (rotation around Y-axis)
+    # The orientation at the TCP is the sum of both joint angles
+    # So theta1 + theta2 = ry
+    
+    # We need to solve for position and orientation simultaneously
+    # From the orientation constraint: theta1 + theta2 = ry
+    # So theta1 = ry - theta2
+    
+    # Substitute this into the position equations
+    y_target = y - y_offset
+    r_xz = np.sqrt(x ** 2 + z ** 2)
+    
+    # Using the law of cosines to find theta2
+    cos_theta2 = (r_xz ** 2 - l1 ** 2 - l2 ** 2) / (2 * l1 * l2)
+    cos_theta2 = np.clip(cos_theta2, -1.0, 1.0)
+    
+    # There are two possible solutions for theta2
+    theta2_pos = np.arccos(cos_theta2)
+    theta2_neg = -np.arccos(cos_theta2)
+    
+    # Calculate corresponding theta1 values
+    theta1_pos = ry - theta2_pos
+    theta1_neg = ry - theta2_neg
+    
+    # Check which solution satisfies the position constraint
+    # For theta1_pos, theta2_pos
+    x_pos = l1 * np.sin(theta1_pos) + l2 * np.sin(theta1_pos + theta2_pos)
+    z_pos = l1 * np.cos(theta1_pos) + l2 * np.cos(theta1_pos + theta2_pos)
+    
+    # For theta1_neg, theta2_neg
+    x_neg = l1 * np.sin(theta1_neg) + l2 * np.sin(theta1_neg + theta2_neg)
+    z_neg = l1 * np.cos(theta1_neg) + l2 * np.cos(theta1_neg + theta2_neg)
+    
+    # Choose the solution that best matches the target position
+    err_pos = (x - x_pos)**2 + (z - z_pos)**2
+    err_neg = (x - x_neg)**2 + (z - z_neg)**2
+    
+    if err_pos <= err_neg:
+        return (theta1_pos, theta2_pos)
+    else:
+        return (theta1_neg, theta2_neg)
+```
+
+Actually, I need to be more careful with the forward kinematics equations. Let me finalize the solution:
+
+```python
+def inverse_kinematics(p: tuple[float, float, float], r: tuple[float, float, float]) -> tuple[float, float]:
+    """
+    Gets the joint values needed to reach position "p" and orientation "r".
+    :param p: The position to reach in the form [x, y, z].
+    :param r: The orientation to reach in radians in the form [x, y, z].
+    :return: A list of the values to set the links to for reaching position "p" and orientation "r".
+    """
+    import numpy as np
+    x, y, z = p
+    rx, ry, rz = r
+    
+    # Constants from the robot description
+    y_offset = -0.1197
+    l1 = 0.425
+    l2 = 0.39225
+    
+    # For this robot, the orientation at the TCP is the sum of both joint angles
+    # So theta1 + theta2 = ry
+    
+    # Using the position constraint
+    r_xz = np.sqrt(x**2 + z**2)
+    
+    # Using the law of cosines to find theta2
+    cos_theta2 = (r_xz**2 - l1**2 - l2**2) / (2 * l1 * l2)
+    cos_theta2 = np.clip(cos_theta2, -1.0, 1.0)
+    
+    # There are two possible solutions for theta2
+    theta2 = np.arccos(cos_theta2)
+    
+    # Calculate the angle between the first link and the line to the target
+    beta = np.arctan2(l2 * np.sin(theta2), l1 + l2 * np.cos(theta2))
+    
+    # Calculate the angle from the z-axis to the line to the target
+    alpha = np.arctan2(x, z)
+    
+    # Calculate theta1
+    theta1 = alpha - beta
+    
+    # Check if the orientation constraint is satisfied
+    if abs((theta1 + theta2) - ry) > 1e-10:
+        # Try the other solution for theta2
+        theta2 = -np.arccos(cos_theta2)
+        beta = np.arctan2(l2 * np.sin(theta2), l1 + l2 * np.cos(theta2))
+        theta1 = alpha - beta
+        
+        # If orientation still doesn't match, prioritize orientation
+        if abs((theta1 + theta2) - ry) > 1e-10:
+            theta1 = ry - theta2
+    
+    return (theta1, theta2)
+```
+
+Let me finalize the solution:
+
+```python
+def inverse_kinematics(p: tuple[float, float, float], r: tuple[float, float, float]) -> tuple[float, float]:
+    """
+    Gets the joint values needed to reach position "p" and orientation "r".
+    :param p: The position to reach in the form [x, y, z].
+    :param r: The orientation to reach in radians in the form [x, y, z].
+    :return: A list of the values to set the links to for reaching position "p" and orientation "r".
+    """
+    import numpy as np
+    x, y, z = p
+    rx, ry, rz = r
+    
+    # Constants from the robot description
+    y_offset = -0.1197
+    l1 = 0.425
+    l2 = 0.39225
+    
+    # For this robot, only the y-component of orientation matters (rotation around Y-axis)
+    # The orientation at the TCP is the sum of both joint angles: theta1 + theta2 = ry
+    
+    # Using the position constraint
+    r_xz = np.sqrt(x**2 + z**2)
+    
+    # Using the law of cosines to find theta2
+    cos_theta2 = (r_xz**2 - l1**2 - l2**2) / (2 * l1 * l2)
+    cos_theta2 = np.clip(cos_theta2, -1.0, 1.0)
+    
+    # Calculate theta2
+    theta2 = np.arccos(cos_theta2)
+    
+    # From the orientation constraint
+    theta1 = ry - theta2
+    
+    # Verify if this solution works for the position
+    x_calc = l1 * np.sin(theta1) + l2 * np.sin(ry)
+    z_calc = l1 * np.cos(theta1) + l2 * np.cos(ry)
+    
+    # If the calculated position is close enough to the target, return this solution
+    if np.sqrt((x - x_calc)**2 + (z - z_calc)**2) < 1e-10:
+        return (theta1, theta2)
+    
+    # Otherwise, try the other solution for theta2
+    theta2 = -np.arccos(cos_theta2)
+    theta1 = ry - theta2
+    
+    return (theta1, theta2)
+```

@@ -1,13 +1,12 @@
-I see the issue with my solution. Looking at the correct joint values from the feedback, I notice that joint3 is consistently 0 in all the correct solutions, which I didn't account for in my approach. Let me revise my solution based on this insight.
+I see the issue with my solution. Looking at the correct joint values from the feedback, I notice that joint 3 is consistently set to 0 in the working solution, which I didn't account for in my approach. Let me revise my solution based on this insight.
 
-Let me analyze the robot structure again:
+Looking at the robot structure more carefully:
 1. Joint 1 rotates around Y-axis
 2. Joint 2 rotates around Z-axis
 3. Joint 3 rotates around Y-axis
+4. The TCP has a fixed offset from joint 3
 
-The feedback shows that a working solution keeps joint3 at 0, which means the robot is using only 2 joints to reach the targets. This makes sense given the robot's structure - with joint3 at 0, the TCP extends in the Y direction from joint3.
-
-Here's my revised solution:
+Let me develop a new solution:
 
 ```python
 def inverse_kinematics(p: tuple[float, float, float]) -> tuple[float, float, float]:
@@ -25,43 +24,63 @@ def inverse_kinematics(p: tuple[float, float, float]) -> tuple[float, float, flo
     l2 = 0.09465  # Distance from joint 2 to joint 3 (Z direction)
     l3 = 0.0823   # Distance from joint 3 to TCP (Y direction)
     
-    # Based on the feedback, we'll set joint3 to 0
-    theta3 = 0
+    # Based on the feedback, it appears joint 3 is consistently set to 0
+    # This means we're only using joints 1 and 2 for positioning
+    theta3 = 0.0
     
-    # With joint3 = 0, the TCP is offset from joint3 by l3 in the Y direction
-    # We need to work backwards to find where joint3 should be
+    # With joint 3 = 0, the TCP is offset from joint 2 by:
+    # - l2 in the Z direction
+    # - l3 in the Y direction
     
-    # First, determine joint 1 (rotation around Y-axis)
-    # This affects the X and Z coordinates
+    # Calculate the position of joint 2 given the target TCP position
+    # When all joints are 0, the TCP is at [0, l1+l3, l2]
+    # Joint 1 rotates around Y, so it affects X and Z
+    # Joint 2 rotates around Z, so it affects X and Y
+    
+    # First, we need to find the position of joint 2
+    # This requires working backwards from the target position
+    
+    # Calculate the angle of joint 1 (rotation around Y-axis)
+    # This determines the orientation in the X-Z plane
     theta1 = np.arctan2(x, z)
     
-    # Calculate the distance in the X-Z plane
+    # Calculate the distance in the X-Z plane from the origin to the target
     r_xz = np.sqrt(x**2 + z**2)
     
-    # With joint3 = 0, we need to position joint3 such that:
-    # 1. It's at the correct height (y - l3)
-    # 2. It's at the correct distance in the X-Z plane
+    # The position of joint 2 in the Y direction is fixed at l1
+    # The position of joint 2 in the X-Z plane depends on joint 1
     
-    # Target position for joint3
+    # Now we need to find joint 2 angle to position the TCP correctly
+    # Joint 2 rotates around Z-axis, affecting the position in the X-Y plane
+    
+    # Calculate the required position of joint 3
+    # Joint 3 is l2 away from joint 2 in the direction determined by joint 1
+    j3_x = l2 * np.sin(theta1)
+    j3_z = l2 * np.cos(theta1)
+    
+    # The TCP is l3 away from joint 3 in the Y direction when joint 3 = 0
+    # So the position of joint 3 should be:
     j3_y = y - l3
-    j3_xz = r_xz
     
-    # Now we need to find joint2 angle to position joint3 correctly
-    # Joint2 rotates around Z-axis, which affects the position of joint3
+    # Now we need to find the angle of joint 2 to position joint 3 correctly
+    # Joint 2 rotates around Z, so it affects the position in the X-Y plane
     
-    # When joint2 = 0, joint3 is at (0, l1, l2) relative to the base
-    # We need to rotate joint2 to move joint3 to (j3_xz, j3_y, 0) in the rotated frame
+    # Calculate the angle from joint 2 to joint 3 in the X-Y plane
+    # The X position of joint 2 is determined by joint 1
+    j2_x = 0  # When joint 2 = 0
+    j2_y = l1
     
-    # Calculate the angle needed
-    # The angle is between the Z-axis and the line from joint2 to joint3
-    theta2 = np.arctan2(j3_xz, j3_y - l1)
+    # Calculate the angle of joint 2
+    dx = j3_x - j2_x
+    dy = j3_y - j2_y
+    
+    # The angle of joint 2 is the angle in the X-Y plane
+    theta2 = np.arctan2(dx, dy)
     
     return (theta1, theta2, theta3)
 ```
 
-Wait, I need to reconsider this. If joint3 is always 0, then the TCP is always offset from joint3 by l3 in the Y direction in the local frame. But I need to account for the rotation of joint2.
-
-Let me revise:
+Wait, I think I'm still not fully understanding the robot's kinematics. Let me revise again:
 
 ```python
 def inverse_kinematics(p: tuple[float, float, float]) -> tuple[float, float, float]:
@@ -79,84 +98,57 @@ def inverse_kinematics(p: tuple[float, float, float]) -> tuple[float, float, flo
     l2 = 0.09465  # Distance from joint 2 to joint 3 (Z direction)
     l3 = 0.0823   # Distance from joint 3 to TCP (Y direction)
     
-    # Based on the feedback, we'll set joint3 to 0
-    theta3 = 0
+    # Based on the feedback, joint 3 is consistently set to 0
+    theta3 = 0.0
     
-    # First, determine joint 1 (rotation around Y-axis)
+    # With joint 3 = 0, we need to solve for joint 1 and joint 2
+    
+    # First, determine the position of joint 2
+    j2_y = l1
+    j2_x = 0
+    j2_z = 0
+    
+    # When joint 3 = 0, the TCP is offset from joint 2 by:
+    # - l2 in the Z direction
+    # - l3 in the Y direction
+    # But this offset is affected by joint 1 and joint 2 rotations
+    
+    # Joint 1 rotates around Y-axis, affecting X and Z
+    # Joint 2 rotates around Z-axis, affecting X and Y
+    
+    # Calculate the angle of joint 1 (rotation around Y-axis)
     theta1 = np.arctan2(x, z)
     
-    # Calculate the distance in the X-Z plane
-    r_xz = np.sqrt(x**2 + z**2)
+    # After joint 1 rotation, the offset from joint 2 to TCP is:
+    # - l2*cos(theta1) in Z direction
+    # - l2*sin(theta1) in X direction
+    # - l3 in Y direction (not affected by joint 1)
     
-    # With joint3 = 0, the TCP is offset from joint3 by l3 in the Y direction in the local frame
-    # When joint2 rotates, this offset rotates in the global frame
+    # Calculate the required position of joint 2 to reach the target
+    # The target is at [x, y, z]
+    # Joint 2 needs to be positioned so that after applying the offset,
+    # we reach the target
     
-    # We need to find joint2 angle such that the TCP reaches the target
-    # This is a geometric problem where we have:
-    # - Joint2 at (0, l1, 0)
-    # - Joint3 at a distance l2 from Joint2 (direction depends on joint2 angle)
-    # - TCP at a distance l3 from Joint3 (direction depends on joint2 angle)
+    # Calculate the vector from joint 2 to target
+    vec_j2_to_target = [
+        x,                  # X coordinate of target
+        y - j2_y,           # Y coordinate of target - Y coordinate of joint 2
+        z                   # Z coordinate of target
+    ]
     
-    # We can solve this by finding the angle that positions the TCP at the target
+    # Calculate the length of this vector
+    length = np.sqrt(vec_j2_to_target[0]**2 + vec_j2_to_target[1]**2 + vec_j2_to_target[2]**2)
     
-    # The position of the TCP relative to joint2 is:
-    # x_tcp = l2 * sin(theta2) + l3 * cos(theta2)
-    # y_tcp = l2 * cos(theta2) - l3 * sin(theta2)
+    # The angle of joint 2 is determined by the position in the X-Y plane
+    # after accounting for joint 1 rotation
     
-    # We want:
-    # x_tcp = r_xz
-    # y_tcp = y - l1
-    
-    # This gives us:
-    # r_xz = l2 * sin(theta2) + l3 * cos(theta2)
-    # y - l1 = l2 * cos(theta2) - l3 * sin(theta2)
-    
-    # Rearranging:
-    # r_xz = l2 * sin(theta2) + l3 * cos(theta2)
-    # y - l1 = l2 * cos(theta2) - l3 * sin(theta2)
-    
-    # Multiply the first equation by cos(theta2) and the second by sin(theta2):
-    # r_xz * cos(theta2) = l2 * sin(theta2) * cos(theta2) + l3 * cos^2(theta2)
-    # (y - l1) * sin(theta2) = l2 * cos(theta2) * sin(theta2) - l3 * sin^2(theta2)
-    
-    # Add these equations:
-    # r_xz * cos(theta2) + (y - l1) * sin(theta2) = l2 * sin(theta2) * cos(theta2) + l3 * cos^2(theta2) + l2 * cos(theta2) * sin(theta2) - l3 * sin^2(theta2)
-    # r_xz * cos(theta2) + (y - l1) * sin(theta2) = 2 * l2 * sin(theta2) * cos(theta2) + l3 * (cos^2(theta2) - sin^2(theta2))
-    # r_xz * cos(theta2) + (y - l1) * sin(theta2) = l2 * sin(2*theta2) + l3 * cos(2*theta2)
-    
-    # This is getting complex. Let me try a different approach.
-    
-    # Let's use the fact that the TCP is at a fixed distance from joint2:
-    # distance = sqrt(l2^2 + l3^2)
-    
-    # And the angle between the line from joint2 to TCP and the Z-axis is:
-    # alpha = atan2(l3, l2)
-    
-    # So the position of the TCP relative to joint2 is:
-    # x_tcp = distance * sin(theta2 - alpha)
-    # y_tcp = distance * cos(theta2 - alpha)
-    
-    # We want:
-    # x_tcp = r_xz
-    # y_tcp = y - l1
-    
-    # This gives us:
-    # r_xz = distance * sin(theta2 - alpha)
-    # y - l1 = distance * cos(theta2 - alpha)
-    
-    # Therefore:
-    # theta2 - alpha = atan2(r_xz, y - l1)
-    # theta2 = atan2(r_xz, y - l1) + alpha
-    
-    distance = np.sqrt(l2**2 + l3**2)
-    alpha = np.arctan2(l3, l2)
-    
-    theta2 = np.arctan2(r_xz, y - l1) + alpha
+    # Calculate the angle in the X-Y plane
+    theta2 = np.arctan2(x / np.cos(theta1) - l2 * np.tan(theta1), y - l1 - l3)
     
     return (theta1, theta2, theta3)
 ```
 
-Wait, I need to reconsider the geometry again. Let me think about this more carefully:
+I'm still not getting it right. Let me try a different approach:
 
 ```python
 def inverse_kinematics(p: tuple[float, float, float]) -> tuple[float, float, float]:
@@ -174,86 +166,46 @@ def inverse_kinematics(p: tuple[float, float, float]) -> tuple[float, float, flo
     l2 = 0.09465  # Distance from joint 2 to joint 3 (Z direction)
     l3 = 0.0823   # Distance from joint 3 to TCP (Y direction)
     
-    # Based on the feedback, we'll set joint3 to 0
-    theta3 = 0
+    # Based on the feedback, joint 3 is consistently set to 0
+    theta3 = 0.0
     
-    # First, determine joint 1 (rotation around Y-axis)
-    theta1 = np.arctan2(x, z)
+    # When joint 3 = 0, the end effector is offset from joint 2 by:
+    # - l2 in the direction determined by joint 1 (in the X-Z plane)
+    # - l3 in the Y direction
     
-    # Calculate the distance in the X-Z plane
+    # Calculate the position of joint 2 that would place the end effector at the target
+    # First, account for the offset in the Y direction
+    j2_y = y - l3
+    
+    # Calculate the projection of the target in the X-Z plane
     r_xz = np.sqrt(x**2 + z**2)
     
-    # With joint3 = 0, we need to find joint2 angle
-    # When joint2 = 0, joint3 is at (0, l1, l2) and TCP is at (0, l1+l3, l2)
-    # When joint2 rotates, it rotates the position of joint3 and TCP around the Z-axis
+    # Calculate the angle of joint 1 (rotation around Y-axis)
+    theta1 = np.arctan2(x, z)
     
-    # The position of the TCP relative to joint2 when joint2 = 0 is (0, l3, l2)
-    # When joint2 rotates by theta2, the TCP position becomes:
-    # x_tcp = l2 * sin(theta2) + l3 * cos(theta2)
-    # y_tcp = l1 + l2 * cos(theta2) - l3 * sin(theta2)
-    # z_tcp = 0
+    # Calculate the required distance in the X-Z plane from joint 1 to joint 2
+    # This is affected by joint 2 rotation
+    # When joint 2 = 0, joint 3 is l2 away from joint 2 in the Z direction
+    # When joint 2 ≠ 0, this offset is rotated in the X-Z plane
     
-    # We want:
-    # x_tcp = r_xz
-    # y_tcp = y
-    # z_tcp = 0
+    # Calculate the angle of joint 2 (rotation around Z-axis)
+    # This is the angle between the Y axis and the line from joint 2 to the target
+    # in the Y-(X-Z) plane
     
-    # This gives us:
-    # r_xz = l2 * sin(theta2) + l3 * cos(theta2)
-    # y = l1 + l2 * cos(theta2) - l3 * sin(theta2)
+    # The position of joint 2 in the Y direction is l1
+    # The difference in Y between joint 2 and the target is:
+    dy = j2_y - l1
     
-    # From the second equation:
-    # y - l1 = l2 * cos(theta2) - l3 * sin(theta2)
+    # The difference in the X-Z plane is:
+    dxz = r_xz - l2
     
-    # We have two equations:
-    # r_xz = l2 * sin(theta2) + l3 * cos(theta2)
-    # y - l1 = l2 * cos(theta2) - l3 * sin(theta2)
-    
-    # Let's solve for theta2
-    # Square and add the equations:
-    # r_xz^2 + (y - l1)^2 = (l2 * sin(theta2) + l3 * cos(theta2))^2 + (l2 * cos(theta2) - l3 * sin(theta2))^2
-    # r_xz^2 + (y - l1)^2 = l2^2 * sin^2(theta2) + 2 * l2 * l3 * sin(theta2) * cos(theta2) + l3^2 * cos^2(theta2) + l2^2 * cos^2(theta2) - 2 * l2 * l3 * sin(theta2) * cos(theta2) + l3^2 * sin^2(theta2)
-    # r_xz^2 + (y - l1)^2 = l2^2 * (sin^2(theta2) + cos^2(theta2)) + l3^2 * (sin^2(theta2) + cos^2(theta2))
-    # r_xz^2 + (y - l1)^2 = l2^2 + l3^2
-    
-    # This is a check that the target is at the correct distance from joint2
-    # Let's use the original equations to solve for theta2
-    
-    # r_xz = l2 * sin(theta2) + l3 * cos(theta2)
-    # y - l1 = l2 * cos(theta2) - l3 * sin(theta2)
-    
-    # Multiply the first by cos(theta2) and the second by sin(theta2):
-    # r_xz * cos(theta2) = l2 * sin(theta2) * cos(theta2) + l3 * cos^2(theta2)
-    # (y - l1) * sin(theta2) = l2 * cos(theta2) * sin(theta2) - l3 * sin^2(theta2)
-    
-    # Subtract the second from the first:
-    # r_xz * cos(theta2) - (y - l1) * sin(theta2) = l3 * (cos^2(theta2) + sin^2(theta2))
-    # r_xz * cos(theta2) - (y - l1) * sin(theta2) = l3
-    
-    # Similarly, multiply the first by sin(theta2) and the second by cos(theta2):
-    # r_xz * sin(theta2) = l2 * sin^2(theta2) + l3 * cos(theta2) * sin(theta2)
-    # (y - l1) * cos(theta2) = l2 * cos^2(theta2) - l3 * sin(theta2) * cos(theta2)
-    
-    # Add these:
-    # r_xz * sin(theta2) + (y - l1) * cos(theta2) = l2 * (sin^2(theta2) + cos^2(theta2))
-    # r_xz * sin(theta2) + (y - l1) * cos(theta2) = l2
-    
-    # So we have:
-    # r_xz * cos(theta2) - (y - l1) * sin(theta2) = l3
-    # r_xz * sin(theta2) + (y - l1) * cos(theta2) = l2
-    
-    # From these, we can derive:
-    # tan(theta2) = (l2 * (y - l1) - l3 * r_xz) / (l2 * r_xz + l3 * (y - l1))
-    
-    numerator = l2 * (y - l1) - l3 * r_xz
-    denominator = l2 * r_xz + l3 * (y - l1)
-    
-    theta2 = np.arctan2(numerator, denominator)
+    # Calculate the angle of joint 2
+    theta2 = np.arctan2(dxz, dy)
     
     return (theta1, theta2, theta3)
 ```
 
-Let me double-check this solution:
+I'm still not getting the correct solution. Let me try one more approach with a clearer understanding of the robot's kinematics:
 
 ```python
 def inverse_kinematics(p: tuple[float, float, float]) -> tuple[float, float, float]:
@@ -271,43 +223,47 @@ def inverse_kinematics(p: tuple[float, float, float]) -> tuple[float, float, flo
     l2 = 0.09465  # Distance from joint 2 to joint 3 (Z direction)
     l3 = 0.0823   # Distance from joint 3 to TCP (Y direction)
     
-    # Based on the feedback, we'll set joint3 to 0
-    theta3 = 0
+    # Based on the feedback, joint 3 is consistently set to 0
+    theta3 = 0.0
     
-    # First, determine joint 1 (rotation around Y-axis)
+    # Calculate the angle of joint 1 (rotation around Y-axis)
     theta1 = np.arctan2(x, z)
     
-    # Calculate the distance in the X-Z plane
-    r_xz = np.sqrt(x**2 + z**2)
+    # When joint 3 = 0, the TCP is at a fixed distance from joint 2
+    # We need to find the angle of joint 2 that places the TCP at the target
     
-    # With joint3 = 0, the TCP is offset from joint3 by l3 in the Y direction in the local frame
-    # When joint2 rotates, this offset rotates in the global frame
+    # Calculate the position of joint 2 in the robot's base frame
+    j2_x = 0
+    j2_y = l1
+    j2_z = 0
     
-    # The position of the TCP relative to joint2 when joint2 = 0 is (0, l3, l2)
-    # When joint2 rotates by theta2, the TCP position becomes:
-    # x_tcp = l2 * sin(theta2) + l3 * cos(theta2)
-    # y_tcp = l2 * cos(theta2) - l3 * sin(theta2)
+    # Calculate the position of joint 3 when joint 1 is rotated but joint 2 = 0
+    j3_x = l2 * np.sin(theta1)
+    j3_y = l1
+    j3_z = l2 * np.cos(theta1)
     
-    # We want:
-    # x_tcp = r_xz
-    # y_tcp = y - l1
+    # Calculate the position of the TCP when joint 1 is rotated but joint 2 = 0
+    tcp_x = j3_x
+    tcp_y = j3_y + l3
+    tcp_z = j3_z
     
-    # This gives us:
-    # r_xz = l2 * sin(theta2) + l3 * cos(theta2)
-    # y - l1 = l2 * cos(theta2) - l3 * sin(theta2)
+    # Calculate the vector from this initial TCP position to the target
+    dx = x - tcp_x
+    dy = y - tcp_y
+    dz = z - tcp_z
     
-    # From these, we can derive:
-    # tan(theta2) = (l2 * (y - l1) - l3 * r_xz) / (l2 * r_xz + l3 * (y - l1))
+    # Project this vector onto the plane perpendicular to the joint 2 axis (Z-axis)
+    # This is the X-Y plane
+    dxy = np.sqrt(dx**2 + dy**2)
     
-    numerator = l2 * (y - l1) - l3 * r_xz
-    denominator = l2 * r_xz + l3 * (y - l1)
-    
-    theta2 = np.arctan2(numerator, denominator)
+    # Calculate the angle of joint 2 needed to rotate the TCP to the target
+    # This is the angle in the X-Y plane
+    theta2 = np.arctan2(dx, dy)
     
     return (theta1, theta2, theta3)
 ```
 
-I believe this solution is correct. Let me finalize it:
+Let me make one final attempt with a clearer understanding of the robot's kinematics:
 
 ```python
 def inverse_kinematics(p: tuple[float, float, float]) -> tuple[float, float, float]:
@@ -325,29 +281,34 @@ def inverse_kinematics(p: tuple[float, float, float]) -> tuple[float, float, flo
     l2 = 0.09465  # Distance from joint 2 to joint 3 (Z direction)
     l3 = 0.0823   # Distance from joint 3 to TCP (Y direction)
     
-    # First, determine joint 1 (rotation around Y-axis)
-    theta1 = np.arctan2(x, z)
+    # Based on the feedback, joint 3 is consistently set to 0
+    theta3 = 0.0
     
-    # Calculate the distance in the X-Z plane
+    # Calculate the projection of the target in the X-Z plane
     r_xz = np.sqrt(x**2 + z**2)
     
-    # With joint3 = 0, we need to find joint2 angle
-    # The position of the TCP relative to joint2 when joint2 rotates is:
-    # x_tcp = l2 * sin(theta2) + l3 * cos(theta2)
-    # y_tcp = l2 * cos(theta2) - l3 * sin(theta2)
+    # Calculate the angle of joint 1 (rotation around Y-axis)
+    theta1 = np.arctan2(x, z)
     
-    # We want:
-    # x_tcp = r_xz
-    # y_tcp = y - l1
+    # When joint 3 = 0, the TCP is offset from joint 2 by:
+    # - l2 in the direction determined by joint 1 (in the X-Z plane)
+    # - l3 in the Y direction
     
-    # From these, we can derive:
-    numerator = l2 * (y - l1) - l3 * r_xz
-    denominator = l2 * r_xz + l3 * (y - l1)
+    # Calculate the position of joint 2 that would place the end effector at the target
+    # We need to find the angle of joint 2 that places the TCP at the target
     
-    theta2 = np.arctan2(numerator, denominator)
+    # The distance from joint 1 to the target in the X-Z plane is:
+    d_xz = r_xz
     
-    # Based on the feedback, joint3 is always 0
-    theta3 = 0
+    # The distance from joint 1 to the target in the Y direction is:
+    d_y = y
+    
+    # Calculate the angle of joint 2 (rotation around Z-axis)
+    # This is the angle between the Y axis and the line from joint 1 to the target
+    # in the Y-(X-Z) plane
+    
+    # Calculate the angle of joint 2
+    theta2 = np.arctan2(d_xz, d_y - l1)
     
     return (theta1, theta2, theta3)
 ```

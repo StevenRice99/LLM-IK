@@ -1,4 +1,4 @@
-import numpy as np
+import math
 
 def inverse_kinematics(p: tuple[float, float, float]) -> tuple[float, float]:
     """
@@ -9,9 +9,9 @@ def inverse_kinematics(p: tuple[float, float, float]) -> tuple[float, float]:
     x, y, z = p
     L1 = 0.39225
     L2 = 0.093
-    theta1 = np.arctan2(y, z)
-    sin_theta1_plus_theta2 = x / L2
-    cos_theta1_plus_theta2 = np.sqrt(1 - sin_theta1_plus_theta2 ** 2)
-    theta1_plus_theta2 = np.arctan2(sin_theta1_plus_theta2, cos_theta1_plus_theta2)
-    theta2 = theta1_plus_theta2 - theta1
+    if abs(z / L2) > 1:
+        raise ValueError('The target position is not reachable.')
+    theta2 = math.asin(z / L2)
+    denominator = L1 + L2 * math.cos(theta2)
+    theta1 = math.atan2(y / denominator, x / denominator)
     return (theta1, theta2)

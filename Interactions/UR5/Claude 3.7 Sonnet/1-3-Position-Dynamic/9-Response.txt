@@ -1,80 +1,11 @@
-I'll now develop the inverse kinematics solution for this 3-DOF serial manipulator. Let me analyze the robot structure and forward kinematics results to derive the solution.
+Based on the forward kinematics tests, I can now develop the inverse kinematics solution for this 3-DOF serial manipulator. Let me analyze the robot structure and develop the solution step by step.
 
-Based on the provided information and forward kinematics tests, I can see that:
+From the DETAILS and forward kinematics tests, I can observe:
 1. All three joints rotate around the Y-axis (revolute joints)
-2. The TCP position changes based on the joint angles
-3. The robot has a specific link structure with offsets
+2. The robot has a specific link structure with offsets
+3. The TCP has an offset in the y-direction
 
-Let me solve this step by step:
-
-```python
-def inverse_kinematics(p: tuple[float, float, float]) -> tuple[float, float, float]:
-    """
-    Gets the joint values needed to reach position "p".
-    :param p: The position to reach in the form [x, y, z].
-    :return: A list of the values to set the links to for reaching position "p".
-    """
-    import numpy as np
-    
-    # Extract target position
-    x, y, z = p
-    
-    # Robot parameters from the DETAILS table
-    # Link 1 position: [0, 0, 0]
-    # Link 2 position: [0, -0.1197, 0.425]
-    # Link 3 position: [0, 0, 0.39225]
-    # TCP offset: [0, 0.093, 0]
-    
-    L1 = 0.425  # Z-offset from joint 1 to joint 2
-    L2 = 0.39225  # Z-offset from joint 2 to joint 3
-    Y_OFFSET1 = -0.1197  # Y-offset of joint 2
-    Y_OFFSET_TCP = 0.093  # Y-offset of TCP from joint 3
-    
-    # Adjust target position to account for TCP offset
-    y_adjusted = y - Y_OFFSET_TCP
-    
-    # Since all joints rotate around Y-axis, the X-Z plane is affected
-    # Joint 1 determines the orientation in X-Z plane
-    theta1 = np.arctan2(x, z)
-    
-    # Calculate the distance in X-Z plane
-    r = np.sqrt(x**2 + z**2)
-    
-    # For joints 2 and 3, we need to solve the 2-link planar manipulator problem
-    # in the plane defined by the X-Z projection and Y
-    
-    # The Y coordinate is handled by the offsets and joint 2 and 3 angles
-    # We need to solve for joint angles that position the end effector at (r, y_adjusted)
-    # from the base of joint 2
-    
-    # Calculate the coordinates relative to joint 2
-    r2 = r
-    y2 = y_adjusted - Y_OFFSET1
-    
-    # Using the law of cosines to find theta3
-    cos_theta3 = (r2**2 + y2**2 - L1**2 - L2**2) / (2 * L1 * L2)
-    # Clamp to valid range to handle floating-point errors
-    cos_theta3 = np.clip(cos_theta3, -1.0, 1.0)
-    theta3 = np.arccos(cos_theta3)
-    
-    # Now find theta2 using the law of sines
-    beta = np.arctan2(y2, r2)
-    gamma = np.arctan2(L2 * np.sin(theta3), L1 + L2 * np.cos(theta3))
-    theta2 = beta - gamma
-    
-    return (theta1, theta2, theta3)
-```
-
-Wait, I need to double-check my solution. Let me reconsider the geometry:
-
-The robot has 3 revolute joints all rotating around the Y-axis, which means the robot moves in a plane that can rotate around the Z-axis. The first joint (theta1) determines this plane's orientation.
-
-Looking at the forward kinematics results, I notice that:
-1. When theta1 changes, the TCP rotates around the Z-axis
-2. When theta2 changes, the second link rotates
-3. When theta3 changes, the third link rotates
-
-Let me revise my solution:
+Let me complete the inverse kinematics function:
 
 ```python
 def inverse_kinematics(p: tuple[float, float, float]) -> tuple[float, float, float]:
@@ -85,45 +16,56 @@ def inverse_kinematics(p: tuple[float, float, float]) -> tuple[float, float, flo
     """
     import numpy as np
     
-    # Extract target position
     x, y, z = p
     
-    # Robot parameters
-    L1 = 0.425  # Z-offset from joint 1 to joint 2
-    L2 = 0.39225  # Z-offset from joint 2 to joint 3
-    Y_OFFSET1 = -0.1197  # Y-offset of joint 2
-    Y_OFFSET_TCP = 0.093  # Y-offset of TCP from joint 3
-    
-    # Joint 1 determines the orientation in X-Z plane
-    theta1 = np.arctan2(x, z)
-    
-    # Calculate the distance in X-Z plane
-    r = np.sqrt(x**2 + z**2)
+    # Link dimensions from the DETAILS
+    l1 = 0.425       # Length of link 1 (z-direction)
+    l2 = 0.39225     # Length of link 2 (z-direction)
+    y_offset1 = -0.1197  # Y-offset of link 2
+    y_offset_tcp = 0.093  # Y-offset of TCP from link 3
     
     # Adjust target position to account for TCP offset
-    y_adjusted = y - Y_OFFSET_TCP
+    y_target = y - y_offset_tcp
+    
+    # Joint 1 calculation (rotation around Y-axis in the XZ plane)
+    joint1 = np.arctan2(x, z)
+    
+    # Calculate the distance in the XZ plane
+    r = np.sqrt(x**2 + z**2)
     
     # For joints 2 and 3, we need to solve the 2-link planar manipulator problem
-    # We're solving for a 2-link planar robot with link lengths L1 and L2
-    # The target position is (r, y_adjusted + 0.1197) relative to joint 1
+    # in the plane defined by the XZ distance and the Y height
     
-    # Target position relative to joint 1
-    r_target = r
-    y_target = y_adjusted - Y_OFFSET1
+    # Calculate the vertical distance from joint 1 to target
+    y_diff = y_target - y_offset1
     
-    # Using the law of cosines to find theta3
-    D = (r_target**2 + y_target**2 - L1**2 - L2**2) / (2 * L1 * L2)
-    # Clamp to valid range to handle floating-point errors
-    D = np.clip(D, -1.0, 1.0)
-    theta3 = np.arccos(D)
+    # Use the law of cosines to find joint angles
+    # Distance from joint 2 to target point
+    d = np.sqrt(r**2 + y_diff**2)
     
-    # Now find theta2
-    theta2 = np.arctan2(y_target, r_target) - np.arctan2(L2 * np.sin(theta3), L1 + L2 * np.cos(theta3))
+    # Calculate joint 3 using law of cosines
+    cos_joint3 = (r**2 + y_diff**2 - l1**2 - l2**2) / (2 * l1 * l2)
+    # Clamp to valid range to handle floating point errors
+    cos_joint3 = max(min(cos_joint3, 1.0), -1.0)
+    joint3 = np.arccos(cos_joint3)
     
-    return (theta1, theta2, theta3)
+    # Calculate joint 2 using law of cosines and atan2
+    beta = np.arccos((l1**2 + d**2 - l2**2) / (2 * l1 * d))
+    alpha = np.arctan2(y_diff, r)
+    joint2 = alpha - beta
+    
+    # Handle the case where the target is behind the robot
+    if z < 0 and x == 0:
+        joint2 = np.pi - joint2
+        joint3 = -joint3
+    
+    return (joint1, joint2, joint3)
 ```
 
-This solution should correctly calculate the joint angles needed to reach the target position. The approach:
-1. Calculate theta1 based on the X-Z plane orientation
-2. Transform the target to a 2D problem in the plane defined by theta1
-3. Use the law of cosines and trigonometry to solve for theta2 and theta3
+This solution:
+1. Calculates joint 1 angle using arctan2 to determine the rotation in the XZ plane
+2. Adjusts for the TCP offset in the y-direction
+3. Uses the law of cosines to solve the 2-link planar manipulator problem for joints 2 and 3
+4. Handles special cases where the target is behind the robot
+
+The solution accounts for all the link offsets and provides the joint angles in radians as required.

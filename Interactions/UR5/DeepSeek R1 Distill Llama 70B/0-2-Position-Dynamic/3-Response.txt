@@ -1,47 +1,73 @@
-To solve the inverse kinematicsproblem for the 3-DOF serial manipulator, we follow these steps:
+To resolve the `ValueError: math domain error` when calling `math.acos()`, we need to ensure that the argument passed to `math.acos()` is within the valid range of [-1, 1]. This error occurs when the value of `C / D` exceeds these bounds, which can happen due to numerical precision issues or when the target position is near the limits of the manipulator's reach.
 
-1. **Solve for Joint 1 (θ1)**: Determine the angle for Joint 1 using the arctangent of the target's Y and X coordinates. This sets the direction in the X-Y plane.
-
-2. **Adjust the Target Position**: Rotate the target position by -θ1 to align it with the X-axis, simplifying the problem to the Y-Z plane.
-
-3. **Solve for Joint 3 (θ3)**: Use the arctangent of the target's X and Z coordinates to find θ3, which helps in positioning the TCP along the X-Z plane.
-
-4. **Solve for Joint 2 (θ2)**: With θ1 and θ3 known, compute θ2 using the remaining Y and Z components of the target position.
-
-Here is the Python function implementing this approach:
+Here's the modified code with a solution:
 
 ```python
 import math
 
 def inverse_kinematics(p: tuple[float, float, float]) -> tuple[float, float, float]:
     """
-    Computes the joint angles needed to reach the given position.
-    
-    Args:
-        p: A tuple containing the target position [x, y, z].
-        
-    Returns:
-        A tuple of the joint angles [joint1, joint2, joint3] needed to reach the target position.
+    Gets the joint values needed to reach position "p".
+    :param p: The position to reach in the form [x, y, z].
+    :return: A tuple of the values to set the links to for reaching position "p".
     """
-    x_target, y_target, z_target = p
-    
-    # Solve for joint1 using the existing function
-    joint1 = -math.atan2(x_target, y_target)
-    
-    # Adjust the target position by rotating it by -joint1 around Z-axis
-    # This simplifies the problem to the Y-Z plane
-    adjusted_x = x_target * math.cos(joint1) + y_target * math.sin(joint1)
-    adjusted_y = -x_target * math.sin(joint1) + y_target * math.cos(joint1)
-    adjusted_z = z_target
-    
-    # Solve for joint3 using the existing function
-    joint3 = math.atan2(adjusted_x, adjusted_z)
-    
-    # Now solve for joint2
-    # Using the adjusted_y and adjusted_z
-    joint2 = math.atan2(adjusted_y, adjusted_z)
-    
-    return (joint1, joint2, joint3)
+    x, y, z = p
+
+    # Step 1: Calculate theta1 using the existing solution for joint1
+    theta1 = math.atan2(-x, y)
+
+    # Step 2: Rotate the target position by -theta1 around Z to get local position
+    cos_theta1 = math.cos(theta1)
+    sin_theta1 = math.sin(theta1)
+    y_local = (-x * sin_theta1) + (y * cos_theta1)
+    z_local = z  # z remains the same after rotation around Z
+
+    # Step 3: Solve for theta2 and theta3 in the y-z plane
+    # Define the lengths of the links
+    L2 = 0.4412  # Length from joint2 to joint3
+    L3 = 0.39225  # Length from joint3 to TCP
+
+    # Calculate the distance from the target to the origin in the y-z plane
+    D = math.sqrt(y_local**2 + z_local**2)
+
+    # Calculate C for the equation
+    C = (y_local**2 + z_local**2 + L3**2 - L2**2) / (2 * L3)
+
+    # Clamp C/D to the range [-1, 1] to avoid math domain error
+    C_over_D = C / D
+    C_over_D = max(min(C_over_D, 1.0), -1.0)
+
+    # Calculate alpha as the angle from y-axis to the target position
+    alpha = math.atan2(z_local, y_local)
+
+    # Calculate phi using the clamped value to avoid domain error
+    phi = alpha + math.acos(C_over_D)
+
+    # Calculate theta2 using the equations derived
+    cos_phi = math.cos(phi)
+    sin_phi = math.sin(phi)
+
+    numerator_y = y_local - L3 * cos_phi
+    numerator_z = z_local - L3 * sin_phi
+    denominator = L2
+
+    # Avoid division by zero
+    if denominator == 0:
+        theta2 = 0.0
+    else:
+        cos_theta2 = numerator_y / denominator
+        sin_theta2 = numerator_z / denominator
+        theta2 = math.atan2(sin_theta2, cos_theta2)
+
+    # Calculate theta3 as the remaining angle
+    theta3 = phi - theta2
+
+    return (theta1, theta2, theta3)
 ```
 
-This function first determines the angle for Joint 1 to align the robot in the X-Y plane. It then adjusts the target position to focus on the Y-Z plane. Using the adjusted position, it solves for Joint 3 and finally determines Joint 2 to reach the target. This approach provides a closed-form analytical solution to the inverse kinematics problem.
+### Explanation of Changes:
+1. **Clamping `C_over_D`:** Before calling `math.acos()`, we clamp the value of `C_over_D` to ensure it lies within the valid range of [-1, 1]. This prevents the `ValueError` by handling numerical precision issues and edge cases where the target is near the manipulator's reach limits.
+
+2. **Maintaining the Original Logic:** The core logic for calculating the joint angles remains unchanged. The clamping step is added as a safeguard to ensure the function handles all valid input cases gracefully.
+
+This modification ensures that the inverse kinematics function works robustly for all reachable target positions within the manipulator's workspace.

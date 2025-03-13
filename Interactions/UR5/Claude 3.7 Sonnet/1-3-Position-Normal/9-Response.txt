@@ -64,32 +64,236 @@ def inverse_kinematics(p: tuple[float, float, float]) -> tuple[float, float, flo
     
     # Using the law of cosines to find theta3
     # We have a triangle with sides: z_offset_link3, d, and z_offset_link2
-    cos_theta3 = (d**2 - z_offset_link2**2 - z_offset_link3**2) / (2 * z_offset_link2 * z_offset_link3)
-    # Clamp to valid range to handle floating-point errors
+    cos_theta3 = (r_xz**2 + y_from_link2**2 - z_offset_link2**2 - z_offset_link3**2) / (2 * z_offset_link2 * z_offset_link3)
+    
+    # Ensure the value is within valid range for arccos
     cos_theta3 = np.clip(cos_theta3, -1.0, 1.0)
     
-    # Theta3 is the supplement of the angle in the triangle
-    theta3 = np.pi - np.arccos(cos_theta3)
+    # Calculate theta3 (internal angle of the elbow)
+    # We need to negate this because the joint rotates in the opposite direction
+    theta3 = -np.arccos(cos_theta3)
     
-    # Now find theta2 using the law of sines
-    # First, find the angle between d and z_offset_link2 in the triangle
-    beta = np.arccos((z_offset_link2**2 + d**2 - z_offset_link3**2) / (2 * z_offset_link2 * d))
+    # Now calculate theta2 using the law of sines
+    # First, find the angle between the link 2 and the line to the target
+    beta = np.arctan2(y_from_link2, r_xz)
     
-    # Then find the angle between d and the horizontal plane
-    alpha = np.arctan2(y_from_link2, r_xz)
+    # Then find the angle in the triangle using the law of sines
+    sin_alpha = z_offset_link3 * np.sin(-theta3) / d
+    sin_alpha = np.clip(sin_alpha, -1.0, 1.0)
+    alpha = np.arcsin(sin_alpha)
     
-    # Theta2 is the difference between these angles
-    theta2 = alpha - beta
+    # Theta2 is the combination of these angles
+    theta2 = beta - alpha
     
     return (theta1, theta2, theta3)
 ```
 
-This solution works by:
+Wait, I need to reconsider my approach. Let me analyze the forward kinematics tests more carefully:
 
-1. First calculating theta1, which is the rotation around the Y-axis that determines the plane in which the arm lies
-2. Projecting the problem into 2D by finding the distance in the XZ plane
-3. Accounting for the Y-offsets of the links and TCP
-4. Using the law of cosines to find theta3
-5. Using the law of sines and angles to determine theta2
+1. When all joints are at 0, the TCP is at [0, -0.0267, 0.81725]
+2. When joint 1 is at 1.57 (90°), the TCP moves to [0.8172, -0.0267, 0.0006], showing rotation around Y
+3. When joint 2 is at 1.57, the TCP is at [0.3922, -0.0267, 0.4253]
+4. When joint 3 is at 1.57, the TCP remains at [0, -0.0267, 0.81725]
 
-The solution handles the kinematic chain properly and accounts for all the offsets in the robot structure.
+Let me revise my solution:
+
+```python
+def inverse_kinematics(p: tuple[float, float, float]) -> tuple[float, float, float]:
+    """
+    Gets the joint values needed to reach position "p".
+    :param p: The position to reach in the form [x, y, z].
+    :return: A list of the values to set the links to for reaching position "p".
+    """
+    import numpy as np
+    
+    # Extract target position coordinates
+    x, y, z = p
+    
+    # Constants from the robot description
+    y_offset_link2 = -0.1197
+    z_offset_link2 = 0.425
+    z_offset_link3 = 0.39225
+    y_offset_tcp = 0.093
+    
+    # Adjust the target position to account for the TCP offset
+    # Since all joints rotate around Y, the TCP offset is always in the local y direction
+    y_adj = y - y_offset_tcp
+    
+    # Calculate joint 1 (rotation in the XZ plane)
+    theta1 = np.arctan2(x, z)
+    
+    # Distance from origin to target in the XZ plane
+    r_xz = np.sqrt(x**2 + z**2)
+    
+    # Now we have a 2D problem in the plane defined by the arm
+    # with distances r_xz and y_adj
+    
+    # Calculate the distance from the base of link 2 to the target point
+    # (accounting for the y-offset of link 2)
+    y_from_link2 = y_adj - y_offset_link2
+    
+    # For joints 2 and 3, we need to solve the 2D inverse kinematics
+    # in the plane defined by r_xz and y_from_link2
+    
+    # Length of link 2 and link 3
+    L2 = z_offset_link2
+    L3 = z_offset_link3
+    
+    # Distance from link 2 base to target
+    D = np.sqrt(r_xz**2 + y_from_link2**2)
+    
+    # Using the law of cosines to find theta3
+    cos_theta3 = (D**2 - L2**2 - L3**2) / (2 * L2 * L3)
+    
+    # Ensure the value is within valid range for arccos
+    cos_theta3 = np.clip(cos_theta3, -1.0, 1.0)
+    
+    # Calculate theta3
+    theta3 = np.arccos(cos_theta3)
+    
+    # Calculate theta2
+    # First, find the angle between the horizontal and the line to the target
+    phi = np.arctan2(y_from_link2, r_xz)
+    
+    # Then find the angle between link 2 and the line to the target using the law of cosines
+    cos_alpha = (L2**2 + D**2 - L3**2) / (2 * L2 * D)
+    cos_alpha = np.clip(cos_alpha, -1.0, 1.0)
+    alpha = np.arccos(cos_alpha)
+    
+    # Theta2 is the combination of these angles
+    theta2 = phi - alpha
+    
+    return (theta1, theta2, theta3)
+```
+
+I need to make one more correction. Based on the forward kinematics tests, I notice that the joint angles work differently than I initially thought. Let me revise the solution:
+
+```python
+def inverse_kinematics(p: tuple[float, float, float]) -> tuple[float, float, float]:
+    """
+    Gets the joint values needed to reach position "p".
+    :param p: The position to reach in the form [x, y, z].
+    :return: A list of the values to set the links to for reaching position "p".
+    """
+    import numpy as np
+    
+    # Extract target position coordinates
+    x, y, z = p
+    
+    # Constants from the robot description
+    y_offset_link2 = -0.1197
+    z_offset_link2 = 0.425
+    z_offset_link3 = 0.39225
+    y_offset_tcp = 0.093
+    
+    # Adjust the target position to account for the TCP offset
+    y_adj = y + y_offset_link2 - y_offset_tcp
+    
+    # Calculate joint 1 (rotation in the XZ plane)
+    theta1 = np.arctan2(x, z)
+    
+    # Distance from origin to target in the XZ plane
+    r_xz = np.sqrt(x**2 + z**2)
+    
+    # For joints 2 and 3, we need to solve the 2D inverse kinematics
+    # in the plane defined by r_xz and y_adj
+    
+    # Length of link 2 and link 3
+    L2 = z_offset_link2
+    L3 = z_offset_link3
+    
+    # Distance from origin to target in the plane
+    D = np.sqrt(r_xz**2 + y_adj**2)
+    
+    # Using the law of cosines to find theta3
+    cos_theta3 = (D**2 - L2**2 - L3**2) / (2 * L2 * L3)
+    
+    # Ensure the value is within valid range for arccos
+    cos_theta3 = np.clip(cos_theta3, -1.0, 1.0)
+    
+    # Calculate theta3
+    theta3 = np.arccos(cos_theta3)
+    
+    # Calculate theta2
+    # First, find the angle between the horizontal and the line to the target
+    phi = np.arctan2(y_adj, r_xz)
+    
+    # Then find the angle between link 2 and the line to the target using the law of cosines
+    cos_alpha = (L2**2 + D**2 - L3**2) / (2 * L2 * D)
+    cos_alpha = np.clip(cos_alpha, -1.0, 1.0)
+    alpha = np.arccos(cos_alpha)
+    
+    # Theta2 is the combination of these angles
+    theta2 = phi - alpha
+    
+    return (theta1, theta2, theta3)
+```
+
+After further analysis of the forward kinematics tests, I need to make one final correction to my solution:
+
+```python
+def inverse_kinematics(p: tuple[float, float, float]) -> tuple[float, float, float]:
+    """
+    Gets the joint values needed to reach position "p".
+    :param p: The position to reach in the form [x, y, z].
+    :return: A list of the values to set the links to for reaching position "p".
+    """
+    import numpy as np
+    
+    # Extract target position coordinates
+    x, y, z = p
+    
+    # Constants from the robot description
+    y_offset_link2 = -0.1197
+    z_offset_link2 = 0.425
+    z_offset_link3 = 0.39225
+    y_offset_tcp = 0.093
+    
+    # Calculate joint 1 (rotation in the XZ plane)
+    theta1 = np.arctan2(x, z)
+    
+    # Rotate the target point back to the YZ plane
+    # This simplifies the problem to a 2D inverse kinematics in the YZ plane
+    x_rot = x * np.cos(-theta1) - z * np.sin(-theta1)
+    y_rot = y
+    z_rot = x * np.sin(-theta1) + z * np.cos(-theta1)
+    
+    # Adjust for the TCP offset
+    y_rot = y_rot - y_offset_tcp
+    
+    # Now we have a 2D problem in the YZ plane
+    # The target point is at (y_rot, z_rot)
+    
+    # Adjust for the offset of link 2
+    y_rot = y_rot - y_offset_link2
+    
+    # Length of link 2 and link 3
+    L2 = z_offset_link2
+    L3 = z_offset_link3
+    
+    # Distance from link 2 base to target
+    D = np.sqrt(y_rot**2 + z_rot**2)
+    
+    # Using the law of cosines to find theta3
+    cos_theta3 = (D**2 - L2**2 - L3**2) / (2 * L2 * L3)
+    
+    # Ensure the value is within valid range for arccos
+    cos_theta3 = np.clip(cos_theta3, -1.0, 1.0)
+    
+    # Calculate theta3
+    theta3 = np.arccos(cos_theta3)
+    
+    # Calculate theta2
+    # First, find the angle between the vertical and the line to the target
+    phi = np.arctan2(y_rot, z_rot)
+    
+    # Then find the angle between link 2 and the line to the target using the law of cosines
+    cos_alpha = (L2**2 + D**2 - L3**2) / (2 * L2 * D)
+    cos_alpha = np.clip(cos_alpha, -1.0, 1.0)
+    alpha = np.arccos(cos_alpha)
+    
+    # Theta2 is the combination of these angles
+    theta2 = phi - alpha
+    
+    return (theta1, theta2, theta3)
+```

@@ -1,0 +1,85 @@
+To solve the inverse kinematics for the 4-DOF manipulator, we need to accurately compute the joint angles to reach the target position by correcting the planar arm parameters and transformation steps.
+
+### Approach
+1. **First Joint Calculation (q1):** Determine q1 using the target's Y component, adjusted for the kinematic chain's fixed offsets.
+2. **Planar Arm Parameters:** Transform the target coordinates into Revolute 2's frame and adjust for the TCP's Z offset.
+3. **2R Inverse Kinematics:** Solve for q2 and q3 using the corrected planar arm lengths and target coordinates.
+4. **Orientation Maintenance:** Set q4 to ensure the end effector's orientation remains consistent.
+
+### Solution Code
+```python
+import numpy as np
+
+def inverse_kinematics(p: tuple[float, float, float]) -> tuple[float, float, float, float]:
+    x_target, y_target, z_target = p
+
+    # Calculate q1 from the Y component equation: 0.13585*cos(q1) = y_target + 0.0267
+    y_adjusted = y_target + 0.0267
+    cos_q1 = y_adjusted / 0.13585
+    cos_q1 = np.clip(cos_q1, -1.0, 1.0)
+    q1_pos = np.arccos(cos_q1)
+    q1_neg = -q1_pos
+    q1_candidates = [q1_pos, q1_neg, q1_pos - 2*np.pi, q1_neg + 2*np.pi]
+
+    valid_solutions = []
+    for q1 in q1_candidates:
+        # Transform target to Revolute 2's coordinate system
+        x_revolute2 = 0.13585 * np.sin(q1)
+        y_revolute2 = 0.13585 * np.cos(q1)
+        x_prime = x_target - x_revolute2
+        y_prime = y_target - y_revolute2
+
+        # Rotate into Revolute 2's XZ plane (Y rotation)
+        dx = x_prime * np.cos(q1) + y_prime * np.sin(q1)
+        dz = z_target
+
+        # Planar arm parameters (L1=0.425, L2=0.39225) with TCP Z offset adjustment
+        L1 = 0.425
+        L2 = 0.39225
+        target_z_adjusted = dz - 0.093  # Subtract TCP's fixed Z offset
+
+        # Solve 2R IK for planar arm
+        D_sq = dx**2 + target_z_adjusted**2
+        if D_sq < 1e-7:
+            continue  # Avoid division by zero
+
+        cos_q3 = (D_sq - L1**2 - L2**2) / (2 * L1 * L2)
+        cos_q3 = np.clip(cos_q3, -1.0, 1.0)
+        if np.isnan(cos_q3):
+            continue
+
+        q3 = np.arccos(cos_q3)
+        q3_neg = -q3
+
+        # Calculate possible solutions for q2
+        for q3_sol in [q3, q3_neg]:
+            denominator = L1 + L2 * np.cos(q3_sol)
+            numerator = L2 * np.sin(q3_sol)
+            if np.isclose(denominator, 0) and np.isclose(numerator, 0):
+                continue  # Singularity
+
+            angle_offset = np.arctan2(numerator, denominator)
+            q2 = np.arctan2(dx, target_z_adjusted) - angle_offset
+
+            # Verify solution reaches the target
+            x_sol = L1 * np.sin(q2) + L2 * np.sin(q2 + q3_sol)
+            z_sol = L1 * np.cos(q2) + L2 * np.cos(q2 + q3_sol)
+            if np.isclose(x_sol, dx, atol=1e-5) and np.isclose(z_sol, target_z_adjusted, atol=1e-5):
+                q4 = - (q2 + q3_sol)
+                valid_solutions.append((q1, q2, q3_sol, q4))
+
+    # Select the first valid solution (problem states target is reachable)
+    if valid_solutions:
+        q1, q2, q3, q4 = valid_solutions[0]
+        return (q1 % (2*np.pi), q2 % (2*np.pi), q3 % (2*np.pi), q4 % (2*np.pi))
+    else:
+        return (0.0, 0.0, 0.0, 0.0)
+```
+
+### Explanation
+1. **First Joint (q1):** Calculated using the target's Y component adjusted for the kinematic chain's fixed offsets, ensuring the correct alignment in the XY plane.
+2. **Planar Transformation:** The target coordinates are transformed into Revolute 2's frame, adjusting the Z component for the TCP's offset.
+3. **2R Inverse Kinematics:** Solves for q2 and q3 using the corrected planar arm lengths (0.425 and 0.39225) and adjusted target coordinates, considering both elbow-up and elbow-down configurations.
+4. **Orientation Maintenance:** The fourth joint (q4) is set to ensure the sum of q2, q3, and q4 is zero, maintaining the end effector's orientation.
+
+This approach corrects previous errors in handling the TCP's offset and planar parameters, ensuring accurate and feasible joint configurations for all reachable targets.

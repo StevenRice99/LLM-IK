@@ -1,0 +1,82 @@
+To solve this problem, we need to determine the joint angles for a 4-DOF robotic arm to reach a specified target position. The key corrections involve accurately computing the first joint angle and ensuring the planar arm parameters are correctly handled.
+
+### Approach
+1. **First Joint Calculation (q1):** The first joint angle is derived from the target's Y component, considering the fixed offsets in the kinematic chain.
+2. **Planar Arm Parameters:** The problem is simplified to a 2R inverse kinematics problem by adjusting the target coordinates to account for the end effector's offset.
+3. **Multiple Solutions Handling:** Both possible solutions for the third joint (elbow-up and elbow-down) are considered, and the correct one is selected based on geometric feasibility.
+4. **Orientation Maintenance:** The fourth joint angle is set to maintain the end effector's orientation by ensuring the sum of the joint angles (q2 + q3 + q4) is zero.
+
+### Solution Code
+```python
+import numpy as np
+
+def inverse_kinematics(p: tuple[float, float, float]) -> tuple[float, float, float, float]:
+    x_target, y_target, z_target = p
+
+    # Correct equation for q1 derived from the Y component constraint
+    y_adjusted = y_target + 0.0267  # 0.13585*cos(q1) = y_target + 0.0267
+    cos_q1 = y_adjusted / 0.13585
+    cos_q1 = np.clip(cos_q1, -1.0, 1.0)
+    q1_pos = np.arccos(cos_q1)
+    q1_neg = -q1_pos
+    q1_candidates = [q1_pos, q1_neg, q1_pos - 2*np.pi, q1_neg + 2*np.pi]
+
+    valid_solutions = []
+    for q1 in q1_candidates:
+        # Transform target into Revolute 2's coordinate system
+        x_revolute2 = 0.13585 * np.sin(q1)
+        y_revolute2 = 0.13585 * np.cos(q1)
+        x_prime = x_target - x_revolute2
+        y_prime = y_target - y_revolute2
+
+        # Rotate into Revolute 2's XZ plane (Y rotation)
+        dx = x_prime * np.cos(q1) + y_prime * np.sin(q1)
+        dz = z_target
+
+        # Planar arm parameters (L1=0.425, L2=0.39225, L3=0.093 TCP offset)
+        L1 = 0.425
+        L2_eff = 0.39225 + 0.093  # Combine L2 and TCP's Z offset
+
+        # Solve 2R IK for adjusted target (account for TCP's Z)
+        target_x = dx
+        target_z = dz - 0.093  # Subtract TCP's fixed Z offset
+
+        D_sq = target_x**2 + target_z**2
+        if D_sq < 1e-7:
+            continue  # Avoid division by zero
+
+        # Calculate possible q3 solutions
+        cos_q3 = (D_sq - L1**2 - L2_eff**2) / (2 * L1 * L2_eff)
+        cos_q3 = np.clip(cos_q3, -1.0, 1.0)
+        q3 = np.arccos(cos_q3)
+        q3_neg = -q3
+
+        # Calculate corresponding q2 for both q3 solutions
+        for q3_sol in [q3, q3_neg]:
+            denominator = L1 + L2_eff * np.cos(q3_sol)
+            numerator = L2_eff * np.sin(q3_sol)
+            angle_offset = np.arctan2(numerator, denominator)
+            q2 = np.arctan2(target_x, target_z) - angle_offset
+
+            # Check if this solution reaches the target
+            x_sol = L1 * np.sin(q2) + L2_eff * np.sin(q2 + q3_sol)
+            z_sol = L1 * np.cos(q2) + L2_eff * np.cos(q2 + q3_sol) + 0.093
+            if np.isclose(x_sol, dx, atol=1e-5) and np.isclose(z_sol, dz, atol=1e-5):
+                q4 = - (q2 + q3_sol)
+                valid_solutions.append((q1, q2, q3_sol, q4))
+
+    # Select the first valid solution (problem states target is reachable)
+    if valid_solutions:
+        q1, q2, q3, q4 = valid_solutions[0]
+        return (q1 % (2*np.pi), q2 % (2*np.pi), q3 % (2*np.pi), q4 % (2*np.pi))
+    else:
+        return (0.0, 0.0, 0.0, 0.0)
+```
+
+### Explanation
+1. **First Joint (q1):** The angle is calculated using the target's Y component, adjusted for fixed offsets. Multiple candidates for q1 are considered to ensure the correct quadrant is selected.
+2. **Planar Arm Calculation:** The target coordinates are transformed into Revolute 2's frame, adjusting for the end effector's offset. The problem is treated as a 2R planar arm, solving for q2 and q3 using geometric methods.
+3. **Multiple Solutions Handling:** Both elbow-up and elbow-down configurations are considered, and the solution that accurately reaches the target is selected.
+4. **Orientation Maintenance:** The fourth joint angle is set to ensure the end effector's orientation remains consistent by balancing the sum of the joint angles.
+
+This approach ensures accurate and feasible joint configurations by correctly handling transformations and considering all possible solutions.

@@ -2535,13 +2535,13 @@ class Solver:
             spec.loader.exec_module(module)
             # If the method is not in the file, return.
             if not hasattr(module, "inverse_kinematics"):
-                logging.error(f"{self.model} | {lower + 1} to {upper + 1} | Load Code | {solving} | {mode} | Solver "
-                              f"'{path}' does not have the method 'inverse_kinematics'.")
+                logging.info(f"{self.model} | {lower + 1} to {upper + 1} | Load Code | {solving} | {mode} | Solver "
+                             f"'{path}' does not have the method 'inverse_kinematics'.")
                 return False
             method = getattr(module, "inverse_kinematics")
         except Exception as e:
-            logging.error(f"{self.model} | {lower + 1} to {upper + 1} | Load Code | {solving} | {mode} | Failed to load"
-                          f" '{path}': {e}")
+            logging.info(f"{self.model} | {lower + 1} to {upper + 1} | Load Code | {solving} | {mode} | Failed to load "
+                         f"'{path}': {e}")
             return False
         # Cache the method.
         if self.code is None:

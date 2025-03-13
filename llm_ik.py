@@ -3870,7 +3870,8 @@ def llm_ik(robots: str or list[str] or None = None, max_length: int = 0, orienta
         run_instance = run and solver.robot.name in robots and solver.model in models
         if not solver.perform(orientation, types, max_length, run_instance, wait):
             logging.error("Not performing any more API calls as there were errors.")
-            run = False
+            if run_instance:
+                break
     # Get per-robot results for all solvers.
     totals = None
     for robot in created_robots:

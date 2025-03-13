@@ -1540,20 +1540,22 @@ class Solver:
                 logging.info(f"{self.model} | {self.robot.name} | Set Inherited | Non-reasoning models cannot inherit "
                              "reasoning models.")
                 continue
-            # Check that they have a valid cost.
-            if solver.input_cost < 0 or solver.output_cost < 0:
-                logging.info(f"{self.model} | {self.robot.name} | Set Inherited | Can only inherit API methods which "
-                             "have costs.")
-                continue
-            # Can only inherit models with better costs.
-            if self.input_cost < solver.input_cost:
-                logging.info(f"{self.model} | {self.robot.name} | Set Inherited | Can only inherit API methods with "
-                             "better input costs.")
-                continue
-            if self.output_cost < solver.output_cost:
-                logging.info(f"{self.model} | {self.robot.name} | Set Inherited | Can only inherit API methods with "
-                             "better output costs.")
-                continue
+            # If this is a reasoning and checking a non-reasoning, we are good, otherwise more checks.
+            if not self.reasoning or solver.reasoning:
+                # Check that they have a valid cost.
+                if solver.input_cost < 0 or solver.output_cost < 0:
+                    logging.info(f"{self.model} | {self.robot.name} | Set Inherited | Can only inherit API methods "
+                                 "which have costs.")
+                    continue
+                # Can only inherit models with better costs.
+                if self.input_cost < solver.input_cost:
+                    logging.info(f"{self.model} | {self.robot.name} | Set Inherited | Can only inherit API methods with"
+                                 " better input costs.")
+                    continue
+                if self.output_cost < solver.output_cost:
+                    logging.info(f"{self.model} | {self.robot.name} | Set Inherited | Can only inherit API methods with"
+                                 " better output costs.")
+                    continue
             # Make sure this is for the proper robot.
             if self.robot.name != solver.robot.name:
                 logging.info(f"{self.model} | {self.robot.name} | Set Inherited | Can only inherit the same robot.")
@@ -2483,8 +2485,7 @@ class Solver:
             return f"{s}Chat | Reasoning = {self.reasoning}"
         s += (f"API | Reasoning = {self.reasoning} | Input = "
               f"{'None' if self.input_cost < 0 else f'${self.input_cost}'} | Output = "
-              f"{'None' if self.output_cost < 0 else f'${self.output_cost}'} | URL = {self.url} | Inherited "
-              f"= ")
+              f"{'None' if self.output_cost < 0 else f'${self.output_cost}'} | URL = {self.url} | Inherited = ")
         # Add the names of all inherited models.
         names = []
         for inherited in self.options:
@@ -3797,9 +3798,16 @@ def llm_ik(robots: str or list[str] or None = None, max_length: int = 0, orienta
         options = []
         # Get the inheriting options.
         for option in api_models:
-            # Do some checks to see if this can be inherited.
-            if (solver == option or solver.robot != option.robot or solver.input_cost < option.input_cost or
-                    solver.output_cost < option.output_cost or (not solver.reasoning and option.reasoning)):
+            # Check basic matches.
+            if solver == option or solver.robot != option.robot:
+                continue
+            # Reasoning models can inherit all non-reasoning models.
+            if solver.reasoning and not option.reasoning:
+                options.append(option)
+                continue
+            # Otherwise, only inherit cheaper models.
+            if (solver.input_cost < option.input_cost or solver.output_cost < option.output_cost or
+                    (not solver.reasoning and option.reasoning)):
                 continue
             options.append(option)
         # No point in calling if there is nothing to inherit.

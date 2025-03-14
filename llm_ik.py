@@ -3107,7 +3107,7 @@ class Solver:
             # Get the best possible dynamic option.
             logging.info(f"{self.model} | {self.robot.name} | {lower + 1} to {upper + 1} | Prepare LLM | Beginning best"
                          " dynamic chain search.")
-            best, feedbacks, forwards, tests, cost = self.get_dynamic(lower, upper, orientation)
+            best = self.get_dynamic(lower, upper, orientation)
             if best is None:
                 logging.info(f"{self.model} | {self.robot.name} | {lower + 1} to {upper + 1} | Prepare LLM | Not "
                              "performing a dynamic prompt as no options.")

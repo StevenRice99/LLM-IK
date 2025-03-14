@@ -1843,30 +1843,38 @@ class Solver:
         # Build the API client.
         client = OpenAI(api_key=self.key, base_url=self.url)
         # Try to call the API.
-        try:
-            start_time = time.perf_counter()
-            # Use the API-specific name if one exists.
-            completion = client.chat.completions.create(model=self.model if self.api_name is None else self.api_name,
-                                                        messages=messages, tools=tools, tool_choice=tool_choice,
-                                                        seed=SEED, temperature=0, n=1,
-                                                        reasoning_effort="high" if self.reasoning else NOT_GIVEN)
-            elapsed = time.perf_counter() - start_time
-        except Exception as e:
-            logging.error(f"{self.model} | {self.robot.name} | {lower + 1} to {upper + 1} | {solving} | {mode} | Run "
-                          f"API | Error calling the API: {e}")
-            return False
-        # Log the raw response.
-        logging.info(f"{self.model} | {self.robot.name} | {lower + 1} to {upper + 1} | {solving} | {mode} | Run API | "
-                     f"Response | {completion}")
-        # See if there is an error directly indicated.
-        if hasattr(completion, "error") and completion.error is not None:
-            s = f"{self.model} | {self.robot.name} | {lower + 1} to {upper + 1} | {solving} | {mode} | Run API"
-            if "code" in completion.error:
-                s += f" | Code: {completion.error['code']}"
-            if "message" in completion.error:
-                s += f" | Message: {completion.error['message']}"
-            logging.error(s)
-            return False
+        while True:
+            try:
+                start_time = time.perf_counter()
+                # Use the API-specific name if one exists.
+                completion = client.chat.completions.create(
+                    model=self.model if self.api_name is None else self.api_name, messages=messages, tools=tools,
+                    tool_choice=tool_choice, seed=SEED, temperature=0, n=1,
+                    reasoning_effort="high" if self.reasoning else NOT_GIVEN
+                )
+                elapsed = time.perf_counter() - start_time
+            except Exception as e:
+                logging.error(f"{self.model} | {self.robot.name} | {lower + 1} to {upper + 1} | {solving} | {mode} | "
+                              f"Run API | Error calling the API: {e}")
+                return False
+            # Log the raw response.
+            logging.info(f"{self.model} | {self.robot.name} | {lower + 1} to {upper + 1} | {solving} | {mode} | Run API"
+                         f" | Response | {completion}")
+            # See if there is an error directly indicated.
+            if hasattr(completion, "error") and completion.error is not None:
+                s = f"{self.model} | {self.robot.name} | {lower + 1} to {upper + 1} | {solving} | {mode} | Run API"
+                if "code" in completion.error:
+                    s += f" | Code: {completion.error['code']}"
+                if "message" in completion.error:
+                    s += f" | Message: {completion.error['message']}"
+                # If the error did not result in any tokens being used, we can freely try again.
+                if hasattr(completion, "usage") and completion.usage is None:
+                    logging.warning(f"{s} | No usage so will attempt again.")
+                    continue
+                # Otherwise, stop.
+                logging.error(s)
+                return False
+            break
         # Get the response message.
         if completion.choices is None or len(completion.choices) < 1:
             logging.error(f"{self.model} | {self.robot.name} | {lower + 1} to {upper + 1} | {solving} | {mode} | Run "
@@ -2596,7 +2604,7 @@ class Solver:
         if orientation is None:
             start_time = time.perf_counter()
             try:
-                joints = func_timeout(MAX_TIME, self.code[lower][upper][solving][mode](position))
+                joints = func_timeout(MAX_TIME, self.code[lower][upper][solving][mode], args=[position])
                 elapsed = time.perf_counter() - start_time
             except FunctionTimedOut:
                 elapsed = MAX_TIME
@@ -2611,7 +2619,7 @@ class Solver:
             orientation = tuple(orientation)
             start_time = time.perf_counter()
             try:
-                joints = func_timeout(MAX_TIME, self.code[lower][upper][solving][mode](position, orientation))
+                joints = func_timeout(MAX_TIME, self.code[lower][upper][solving][mode], args=(position, orientation))
                 elapsed = time.perf_counter() - start_time
             except FunctionTimedOut:
                 elapsed = MAX_TIME
@@ -3177,10 +3185,10 @@ class Solver:
             return ""
         # Lastly, do cumulative prompts, collecting all solutions to sub-chains.
         sequences = []
-        last_lower = upper - 1
         inherited = ""
-        for sub_lower in range(lower, last_lower):
-            for sub_upper in range(sub_lower, upper):
+        sequence_upper = upper + 1
+        for sub_lower in range(lower, sequence_upper):
+            for sub_upper in range(sub_lower, sequence_upper):
                 sub_orientation = False if sub_lower == sub_upper else orientation
                 best, best_mode, best_cost = self.get_best(sub_lower, sub_upper, sub_orientation)
                 if best is None:
@@ -3215,22 +3223,20 @@ class Solver:
         covered = []
         for i in range(lower, upper):
             covered.append(0)
-        is_cumulative = False
+        has_overlap = False
         for sequence in sequences:
             sequence_lower = lower - sequence["Lower"]
             sequence_upper = upper - sequence["Upper"]
             for i in range(sequence_lower, sequence_upper):
                 covered[i] += 1
                 if covered[i] > 1:
-                    is_cumulative = True
-                    break
-        if not is_cumulative:
-            links = len(covered)
-            for i in range(links):
-                if covered[i] != 1:
-                    is_cumulative = True
-                    break
-        if not is_cumulative:
+                    has_overlap = True
+        for c in covered:
+            if c == 0:
+                logging.info(f"{self.model} | {self.robot.name} | {lower + 1} to {upper + 1} | Prepare LLM | Not "
+                             "performing a cumulative prompt as not all links are covered by a solution.")
+                return ""
+        if not has_overlap:
             logging.info(f"{self.model} | {self.robot.name} | {lower + 1} to {upper + 1} | Prepare LLM | Not "
                          "performing a cumulative prompt as this is the same as a dynamic prompt.")
             return ""
@@ -3896,11 +3902,12 @@ def llm_ik(robots: str or list[str] or None = None, max_length: int = 0, orienta
         logging.info(f"Waiting for {wait} second {'' if wait == 1 else 's'} between API calls.")
     # Run the solvers, making API calls only on those that should be.
     for solver in created_models:
-        run_instance = run and solver.robot.name in robots and solver.model in models
+        if solver.url != "" and not run:
+            continue
+        run_instance = solver.robot.name in robots and solver.model in models
         if not solver.perform(orientation, types, max_length, run_instance, wait):
             logging.error("Not performing any more API calls as there were errors.")
-            if run_instance:
-                break
+            run = False
     # Get per-robot results for all solvers.
     totals = None
     for robot in created_robots:

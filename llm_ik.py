@@ -18,6 +18,7 @@ import ikpy.chain
 import ikpy.utils.plot as plot_utils
 import numpy as np
 import pandas as pd
+from func_timeout import func_timeout, FunctionTimedOut
 from ikpy.link import URDFLink
 from matplotlib import pyplot as plt
 from openai import NOT_GIVEN, OpenAI
@@ -71,6 +72,10 @@ WAIT = 1
 
 # Default bounding value.
 BOUND = 2 * np.pi
+
+# Handle timing out.
+MAX_TIME = 30
+ERROR_TIMED_OUT = "ERROR_TIMED_OUT"
 
 # All fields for evaluations.
 FIELDS = ["Success Rate (%)", "Failure Rate (%)", "Error Rate (%)", "Average Failure Distance",
@@ -2366,13 +2371,18 @@ class Solver:
                             joints, e, error = self.run_code(lower, upper, mode, target_position, target_orientation)
                             # Indicate if there was an error.
                             expected = upper - lower + 1
-                            if joints is None:
+                            if error is not None:
+                                if error == ERROR_TIMED_OUT:
+                                    s = ("<ERROR>Code timed out after taking too long. Ensure your solution is "
+                                         "analytical without iterative or numeric solvers with potentially infinite "
+                                         "loops.</ERROR>")
+                                else:
+                                    s = f"<ERROR>{error}</ERROR>"
+                            elif joints is None:
                                 s = f"<ERROR>\nReturned no joints - expected {expected}.\n</ERROR>"
                             elif len(joints) != expected:
                                 s = (f"<ERROR>\nReturned the wrong number of joints - expected {expected} but got "
                                      f"{len(joints)}.\n</ERROR>")
-                            elif error is not None:
-                                s = f"<ERROR>{error}</ERROR>"
                             else:
                                 # Test the result otherwise and format it.
                                 positions, orientations = self.robot.forward_kinematics(lower, upper, joints)
@@ -2586,8 +2596,13 @@ class Solver:
         if orientation is None:
             start_time = time.perf_counter()
             try:
-                joints = self.code[lower][upper][solving][mode](position)
+                joints = func_timeout(MAX_TIME, self.code[lower][upper][solving][mode](position))
                 elapsed = time.perf_counter() - start_time
+            except FunctionTimedOut:
+                elapsed = MAX_TIME
+                message = ERROR_TIMED_OUT
+                logging.info(f"{self.model} | {lower + 1} to {upper + 1} | Run Code | {solving} | {mode} | Error: Code "
+                             f"timed out after {MAX_TIME} seconds.")
             except Exception as e:
                 elapsed = time.perf_counter() - start_time
                 message = traceback.format_exc()
@@ -2596,8 +2611,13 @@ class Solver:
             orientation = tuple(orientation)
             start_time = time.perf_counter()
             try:
-                joints = self.code[lower][upper][solving][mode](position, orientation)
+                joints = func_timeout(MAX_TIME, self.code[lower][upper][solving][mode](position, orientation))
                 elapsed = time.perf_counter() - start_time
+            except FunctionTimedOut:
+                elapsed = MAX_TIME
+                message = ERROR_TIMED_OUT
+                logging.info(f"{self.model} | {lower + 1} to {upper + 1} | Run Code | {solving} | {mode} | Error: Code "
+                             f"timed out after {MAX_TIME} seconds.")
             except Exception as e:
                 elapsed = time.perf_counter() - start_time
                 message = traceback.format_exc()
@@ -2668,6 +2688,14 @@ class Solver:
             total_time += generation_time
             # Store if there was an error.
             if error is not None or joints is None or len(joints) != number:
+                # Stop due to any timeout, as these are clearly infinite loops.
+                if error == ERROR_TIMED_OUT:
+                    successes = 0
+                    errors = total
+                    total_time = MAX_TIME * total
+                    total_distance = 0
+                    total_angle = 0
+                    break
                 errors += 1
                 continue
             # See if the move was successful.
@@ -2816,6 +2844,11 @@ class Solver:
             joints, elapsed, error = self.run_code(lower, upper, mode, target_position, target_orientation)
             # If we got an error, save it.
             if error is not None:
+                # Stop immediately if there was a timeout.
+                if error == ERROR_TIMED_OUT:
+                    errors = ["Code timed out after taking too long. Ensure your solution is analytical without "
+                              "iterative or numeric solvers with potentially infinite loops."]
+                    break
                 if error not in errors:
                     errors.append(error)
                 if len(errors) >= EXAMPLES:

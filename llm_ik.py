@@ -3266,18 +3266,18 @@ class Solver:
         return f"{prompt}{post}"
 
     def get_dynamic(self, lower: int = 0, upper: int = -1,
-                    orientation: bool = False) -> (list[dict[str, int or str]] or None, int, int, int, float):
+                    orientation: bool = False) -> list[dict[str, int or str]] or None:
         """
         Get the best dynamic chain.
         :param lower: The starting joint.
         :param upper: The ending joint.
         :param orientation: If we want to solve for orientation.
-        :return: The best dynamic chain or none if none were found and inherited messages and cost.
+        :return: The best dynamic chain or none if none were found.
         """
         # Nothing to do if the solver is not valid.
         if not self.is_valid():
             logging.error(f"{self.model} | Get Dynamic | Solver is not valid.")
-            return None, 0, 0, 0, 0
+            return None
         # Ensure valid values.
         lower, upper = self.robot.validate_lower_upper(lower, upper)
         # Cannot do orientation if just a single joint, and we can only run in the normal mode.
@@ -3288,40 +3288,30 @@ class Solver:
             logging.info(f"{self.model} | {self.robot.name} | {lower + 1} to {upper + 1} | Get Dynamic | Found a "
                          f"successful solver solving for '{TRANSFORM if current_orientation else POSITION}' in mode "
                          f"'{best_mode}'.")
-            costs, feedbacks, forwards, tests = best.get_cost(lower, upper, current_orientation, best_mode)
             return ([{"Solver": best, "Lower": lower, "Upper": upper,
-                      "Solving": TRANSFORM if current_orientation else POSITION, "Mode": best_mode}], feedbacks,
-                    forwards, tests, costs)
+                      "Solving": TRANSFORM if current_orientation else POSITION, "Mode": best_mode}])
         # If this was a base case, there are no valid options.
         if lower == upper:
             logging.info(f"{self.model} | {self.robot.name} | {lower + 1} to {upper + 1} | Get Dynamic | No successful "
                          "base cases.")
-            return None, 0, 0, 0, 0
+            return None
         # Otherwise, let us try to get the best possible sub-chain and use it.
         best = None
         best_size = 0
         best_bottom = 0
-        feedbacks = 0
-        forwards = 0
-        tests = 0
-        best_cost = 0
         for split in range(lower, upper):
             # Try to get the bottom dynamic portion.
-            bottom, n_feedbacks, n_forwards, n_tests, n_cost = self.get_dynamic(lower, split, orientation)
+            bottom = self.get_dynamic(lower, split, orientation)
             if bottom is None:
                 logging.info(f"{self.model} | {self.robot.name} | {lower + 1} to {upper + 1} | Get Dynamic | No bottom "
                              f"found from {lower + 1} to {split + 1}.")
                 continue
             # Try to get the top dynamic portion.
-            top, t_feedbacks, t_forwards, t_tests, t_cost = self.get_dynamic(split + 1, upper, orientation)
+            top = self.get_dynamic(split + 1, upper, orientation)
             if top is None:
                 logging.info(f"{self.model} | {self.robot.name} | {lower + 1} to {upper + 1} | Get Dynamic | No top "
                              f"found from {split + 2} to {upper + 1}.")
                 continue
-            n_feedbacks += t_feedbacks
-            n_forwards += t_forwards
-            n_tests += t_tests
-            n_cost += t_cost
             bottom_size = len(bottom)
             top_size = len(top)
             total_size = bottom_size + top_size
@@ -3330,11 +3320,6 @@ class Solver:
                          f"({bottom_size} + {top_size}).")
             # Check if this is a better dynamic chain which has been found.
             if best is not None:
-                # If the existing cost is better than the new cost, don't do anything.
-                if best_cost < n_cost:
-                    logging.info(f"{self.model} | {self.robot.name} | {lower + 1} to {upper + 1} | Get Dynamic | Best "
-                                 f"cost of ${best_cost} is better than the new cost of ${n_cost}.")
-                    continue
                 # If the existing number of sub-chains is less, don't do anything.
                 if best_size <= total_size:
                     logging.info(f"{self.model} | {self.robot.name} | {lower + 1} to {upper + 1} | Get Dynamic | Best "
@@ -3347,25 +3332,9 @@ class Solver:
                                  f"and best solution have the same size of {best_size} but the best has a larger lower "
                                  f"chain of {best_bottom} compared to the new {bottom_size}.")
                     continue
-                # If the same overall size and bottom size, compare with the minimum inherited messages.
-                total_existing = feedbacks + forwards + tests
-                total_new = n_feedbacks + n_forwards + n_tests
-                if best_size == total_size and best_bottom == bottom_size and total_existing < total_new:
-                    logging.info(f"{self.model} | {self.robot.name} | {lower + 1} to {upper + 1} | Get Dynamic | New "
-                                 f"and best solution have the same size of {best_size} and same lower size of "
-                                 f"{best_bottom} but the existing has less inherited messages of {total_existing} "
-                                 f"compared to {total_new}.")
-                    continue
-                # Otherwise, this is a new best, so log why.
-                if best_bottom > bottom_size:
-                    logging.info(f"{self.model} | {self.robot.name} | {lower + 1} to {upper + 1} | Get Dynamic | New "
-                                 f"and best solution have the same size of {best_size} but the new has a larger lower "
-                                 f"chain of {bottom_size} compared to the current of {best_bottom}.")
-                else:
-                    logging.info(f"{self.model} | {self.robot.name} | {lower + 1} to {upper + 1} | Get Dynamic | New "
-                                 f"and best solution have the same size of {best_size} and same lower size of "
-                                 f"{best_bottom} but the new has less inherited messages of {total_new} compared to "
-                                 f"{total_existing}.")
+                logging.info(f"{self.model} | {self.robot.name} | {lower + 1} to {upper + 1} | Get Dynamic | New and "
+                             f"best solution have the same size of {best_size} but the new has a larger lower chain of "
+                             f"{bottom_size} compared to the current of {best_bottom}.")
             else:
                 logging.info(f"{self.model} | {self.robot.name} | {lower + 1} to {upper + 1} | Get Dynamic | First "
                              "successful chain found.")
@@ -3383,7 +3352,7 @@ class Solver:
         else:
             logging.info(f"{self.model} | {self.robot.name} | {lower + 1} to {upper + 1} | Get Dynamic | Successful "
                          "option found.")
-        return best, feedbacks, forwards, tests, best_cost
+        return best
 
     def is_valid(self) -> bool:
         """

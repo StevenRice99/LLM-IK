@@ -1621,7 +1621,6 @@ class Solver:
         if max_length < 1:
             max_length = self.robot.joints
         # Loop all possible combinations.
-        successful = True
         for current_orientation in [False, True]:
             # Solve smaller chains first so their solutions can be extended.
             for length in range(self.robot.joints):
@@ -1651,8 +1650,7 @@ class Solver:
                                 logging.error(f"{self.model} | {self.robot.name} | {lower + 1} to {upper + 1} | "
                                               f"{TRANSFORM if current_orientation else POSITION} | {current_mode} | "
                                               "Stopping API calls as there was an error.")
-                                run = False
-                                successful = False
+                                return False
                             # On a success or a continue error, wait for the next API call if needed.
                             if run and wait > 1:
                                 logging.info(f"{self.model} | {self.robot.name} | {lower + 1} to {upper + 1} | "
@@ -1661,7 +1659,7 @@ class Solver:
                                              f"call.")
                                 time.sleep(wait)
         # Return if everything was successful or not.
-        return successful
+        return True
 
     def run_api(self, lower: int = 0, upper: int = -1, orientation: bool = False, mode: str = NORMAL,
                 messages: list[dict[str, str or bool]] or None = None) -> bool:
@@ -2100,15 +2098,12 @@ class Solver:
                              "Should Attempt | Cannot attempt a transfer mode for position only solving.")
                 return False
             # We can transfer any mode.
-            attempt = self.code_successful(lower, upper, False, NORMAL)
-            if not attempt:
-                attempt = self.code_successful(lower, upper, False, EXTEND)
-                if not attempt:
-                    attempt = self.code_successful(lower, upper, False, DYNAMIC)
-                    if not attempt:
-                        logging.info(f"{self.model} | {self.robot.name} | {lower + 1} to {upper + 1} | {solving} | "
-                                     f"{mode} | Should Attempt | No options to transfer.")
-            return attempt
+            best, best_mode, best_cost = self.get_best(lower, upper - 1, False)
+            if best is None:
+                logging.info(f"{self.model} | {self.robot.name} | {lower + 1} to {upper + 1} | {solving} | {mode} | "
+                             "Should Attempt | No options to transfer.")
+                return False
+            return True
         # Can only extend if there is something to extend.
         if mode == EXTEND:
             previous = upper - 1

@@ -2363,7 +2363,6 @@ class Solver:
                             else:
                                 target_orientation = None
                             # Run the code.
-                            self.load_code(lower, upper, orientation, mode, True)
                             joints, e, error = self.run_code(lower, upper, mode, target_position, target_orientation)
                             # Indicate if there was an error.
                             expected = upper - lower + 1
@@ -2432,7 +2431,6 @@ class Solver:
         with open(code_path, "w", encoding="utf-8", errors="ignore") as file:
             file.write(code)
         # Evaluate the code.
-        self.load_code(lower, upper, orientation, mode)
         self.evaluate(lower, upper, orientation, mode)
         s = self.prepare_feedback(lower, upper, orientation, mode)
         # If the code performed perfectly, we are done.
@@ -2494,7 +2492,7 @@ class Solver:
         return s
 
     def load_code(self, lower: int = 0, upper: int = -1, orientation: bool = False, mode: str = NORMAL,
-                  suppress: bool = False) -> bool:
+                  suppress: bool = False) -> (bool, str or None):
         """
         Load the code for a solver.
         :param lower: The starting joint.
@@ -2502,12 +2500,12 @@ class Solver:
         :param orientation: If this data cares about the orientation or not.
         :param mode: The mode by which the code was achieved.
         :param suppress: If the error for the code not existing should be suppressed.
-        :return: If the code was loaded or not.
+        :return: If the code was loaded or not along with a reason why it was not loaded.
         """
         # Nothing to do if the solver is not valid.
         if not self.is_valid():
             logging.error(f"{self.model} | Load Code | Solver is not valid.")
-            return False
+            return False, None
         # Ensure valid values.
         lower, upper = self.robot.validate_lower_upper(lower, upper)
         if mode not in [NORMAL, EXTEND, DYNAMIC, CUMULATIVE, TRANSFER]:
@@ -2523,7 +2521,7 @@ class Solver:
             if not suppress:
                 logging.error(f"{self.model} | {lower + 1} to {upper + 1} | Load Code | {solving} | {mode} | Solver "
                               f"'{path}' does not exist.")
-            return False
+            return False, None
         # Try to load the inverse kinematics method from the Python file.
         try:
             spec = importlib.util.spec_from_file_location(name, path)
@@ -2533,12 +2531,12 @@ class Solver:
             if not hasattr(module, "inverse_kinematics"):
                 logging.info(f"{self.model} | {lower + 1} to {upper + 1} | Load Code | {solving} | {mode} | Solver "
                              f"'{path}' does not have the method 'inverse_kinematics'.")
-                return False
+                return False, "Solver does not have the method 'inverse_kinematics'."
             method = getattr(module, "inverse_kinematics")
         except Exception as e:
             logging.info(f"{self.model} | {lower + 1} to {upper + 1} | Load Code | {solving} | {mode} | Failed to load "
                          f"'{path}': {e}")
-            return False
+            return False, f"Failed to load the solver: {e}"
         # Cache the method.
         if self.code is None:
             self.code = {}
@@ -2549,7 +2547,7 @@ class Solver:
         if solving not in self.code[lower][upper]:
             self.code[lower][upper][solving] = {}
         self.code[lower][upper][solving][mode] = method
-        return True
+        return True, None
 
     def run_code(self, lower: int = 0, upper: int = -1, mode: str = NORMAL, position: list[float] or None = None,
                  orientation: list[float] or None = None) -> (list[float] or None, float, str or None):
@@ -2569,9 +2567,12 @@ class Solver:
         # Ensure valid values.
         lower, upper = self.robot.validate_lower_upper(lower, upper)
         # See if there is valid code.
-        if (lower == upper and (orientation or mode != NORMAL)) or not self.load_code(lower, upper, orientation, mode,
-                                                                                      True):
+        if lower == upper and (orientation or mode != NORMAL):
             return None, 0, None
+        # See if the code can be loaded.
+        loaded, message = self.load_code(lower, upper, orientation, mode, True)
+        if not loaded:
+            return None, 0, message
         # Ensure a position.
         solving = TRANSFORM if orientation else POSITION
         if position is None:

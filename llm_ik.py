@@ -3123,11 +3123,6 @@ class Solver:
                 logging.info(f"{self.model} | {self.robot.name} | {lower + 1} to {upper + 1} | Prepare LLM | Not "
                              "performing a dynamic prompt as just a single chain.")
                 return ""
-            # If this is just the same as an extending prompt, lets not waste resources running it.
-            if total == 2 and best[0] != DYNAMIC and best[1]["Upper"] == best[1]["Lower"]:
-                logging.info(f"{self.model} | {self.robot.name} | {lower + 1} to {upper + 1} | Prepare LLM | Not "
-                             "performing a dynamic prompt as this was just an extended chain that was returned.")
-                return ""
             # Load the codes.
             codes = []
             inherit = ""

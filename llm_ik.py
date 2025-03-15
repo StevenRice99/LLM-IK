@@ -2122,8 +2122,8 @@ class Solver:
             previous = upper - 1
             best, best_mode, best_cost = self.get_best(lower, previous, False if lower == previous else orientation)
             if best is None:
-                logging.info(f"{self.model} | {self.robot.name} | {lower + 1} to {upper + 1} | {solving} | "
-                             f"{mode} | Should Attempt | No options to extend.")
+                logging.info(f"{self.model} | {self.robot.name} | {lower + 1} to {upper} | {solving} | {mode} | "
+                             "Should Attempt | No options to extend.")
                 return False
         return True
 
@@ -3030,10 +3030,10 @@ class Solver:
                 logging.info(f"{self.model} | {self.robot.name} | {lower + 1} to {upper + 1} | Prepare LLM | No chain "
                              "to transfer.")
                 return ""
-            path = os.path.join(self.solutions, f"{lower}-{upper}-{POSITION}-{best_mode}.py")
+            path = os.path.join(best.solutions, f"{lower}-{upper}-{POSITION}-{best_mode}.py")
             if not os.path.exists(path):
-                logging.error(f"{self.model} | {self.robot.name} | {lower + 1} to {upper + 1} | Prepare LLM | Best "
-                              f"chain does not exist at '{path}'.")
+                logging.error(f"{best.model} | {self.robot.name} | {lower + 1} to {upper + 1} | Prepare LLM | Best "
+                              f"chain to transfer does not exist at '{path}'.")
                 return ""
             # Save the inherited information.
             s = f"{best.model}|{lower}|{upper}|{POSITION}|{best_mode}"
@@ -3064,10 +3064,10 @@ class Solver:
                              "to extend.")
                 return ""
             previous_solving = TRANSFORM if previous_orientation else POSITION
-            path = os.path.join(self.solutions, f"{lower}-{previous}-{previous_solving}-{previous_mode}.py")
+            path = os.path.join(best.solutions, f"{lower}-{previous}-{previous_solving}-{previous_mode}.py")
             if not os.path.exists(path):
                 logging.error(f"{self.model} | {self.robot.name} | {lower + 1} to {upper + 1} | Prepare LLM | Best "
-                              f"chain does not exist at '{path}'.")
+                              f"chain to extend does not exist at '{path}'.")
                 return ""
             # Save the inherited information.
             s = f"{best.model}|{lower}|{previous}|{previous_solving}|{previous_mode}"

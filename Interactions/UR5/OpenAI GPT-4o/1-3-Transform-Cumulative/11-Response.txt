@@ -1,0 +1,111 @@
+The feedback indicates that the inverse kinematics function is not producing the correct joint angles for the given target positions and orientations. The primary issues seem to be:
+
+1. **Incorrect Joint Angle Calculations**:
+   - The computed joint angles do not match the correct values provided in the feedback.
+   - This suggests that the geometric relationships and trigonometric calculations in the function are not correctly capturing the manipulator's kinematics.
+
+2. **Orientation Handling**:
+   - The function does not properly account for the target orientation, which is critical for achieving the correct TCP pose.
+
+3. **Sequential Dependencies**:
+   - The joint angles are interdependent, and errors in one calculation can propagate to others.
+
+### Plan to Fix the Issues:
+1. **Revisit the Kinematic Chain**:
+   - Carefully analyze the manipulator's geometry and the relationships between joint angles and the TCP pose.
+
+2. **Incorporate Orientation**:
+   - Ensure that the target orientation is used to compute the joint angles, especially for joints that affect the TCP's orientation.
+
+3. **Refactor the Function**:
+   - Break the problem into smaller, manageable steps, solving for each joint angle sequentially while considering the dependencies.
+
+4. **Validate Against Feedback**:
+   - Use the correct joint values provided in the feedback to verify the calculations.
+
+### Updated Approach:
+We will compute the joint angles step by step, considering both position and orientation.
+
+#### Step 1: Solve for \( \theta_1 \)
+- The first joint rotates the arm around the \( Y \)-axis.
+- The projection of the target position onto the \( XZ \)-plane determines \( \theta_1 \):
+  \[
+  \theta_1 = \arctan2(x, z)
+  \]
+
+#### Step 2: Solve for \( \theta_2 \) and \( \theta_3 \)
+- Adjust the target position to account for the TCP offset and the rotation caused by \( \theta_1 \).
+- Use the law of cosines to compute \( \theta_2 \) and \( \theta_3 \), ensuring that the calculations respect the manipulator's geometry.
+
+#### Step 3: Incorporate Orientation
+- Use the target orientation to refine the calculations for \( \theta_2 \) and \( \theta_3 \), ensuring that the TCP achieves the desired orientation.
+
+### Updated Code:
+Here is the revised inverse kinematics function:
+
+```python
+import math
+
+def inverse_kinematics(p: tuple[float, float, float], r: tuple[float, float, float]) -> tuple[float, float, float]:
+    """
+    Gets the joint values needed to reach position "p" and orientation "r".
+    :param p: The position to reach in the form [x, y, z].
+    :param r: The orientation to reach in radians in the form [roll, pitch, yaw].
+    :return: A list of the values to set the links to for reaching position "p" and orientation "r".
+    """
+    x, y, z = p
+    roll, pitch, yaw = r
+
+    # Link lengths
+    l1 = 0.425  # Length of link 1
+    l2 = 0.39225  # Length of link 2
+    d_tcp = 0.093  # Offset of TCP along Z-axis
+
+    # Step 1: Solve for theta_1
+    theta_1 = math.atan2(x, z)
+
+    # Step 2: Adjust target position for TCP offset
+    z_adjusted = z - d_tcp * math.cos(pitch)
+    x_adjusted = x - d_tcp * math.sin(pitch)
+
+    # Compute the distance from the base to the target in the XZ plane
+    r = math.sqrt(x_adjusted**2 + z_adjusted**2)
+
+    # Step 3: Solve for theta_2 using the law of cosines
+    cos_theta_2 = (r**2 - l1**2 - l2**2) / (2 * l1 * l2)
+    cos_theta_2 = max(-1, min(1, cos_theta_2))  # Clamp to avoid math domain errors
+    theta_2 = math.atan2(math.sqrt(1 - cos_theta_2**2), cos_theta_2)
+
+    # Step 4: Solve for theta_3
+    # Use the law of cosines to compute the angle between link 1 and the target
+    cos_alpha = (l1**2 + r**2 - l2**2) / (2 * l1 * r)
+    cos_alpha = max(-1, min(1, cos_alpha))  # Clamp to avoid math domain errors
+    alpha = math.atan2(math.sqrt(1 - cos_alpha**2), cos_alpha)
+
+    # Compute the angle of the target relative to the base
+    beta = math.atan2(z_adjusted, x_adjusted)
+
+    # Compute theta_3
+    theta_3 = beta - alpha
+
+    # Step 5: Incorporate orientation
+    # Adjust theta_2 and theta_3 to account for the target orientation
+    theta_2 += pitch
+    theta_3 += yaw
+
+    return theta_1, theta_2, theta_3
+```
+
+### Key Changes:
+1. **Orientation Handling**:
+   - The target orientation (\( \text{pitch} \) and \( \text{yaw} \)) is incorporated into the calculations for \( \theta_2 \) and \( \theta_3 \).
+
+2. **Clamping**:
+   - The values of `cos_theta_2` and `cos_alpha` are clamped to the range \([-1, 1]\) to avoid math domain errors.
+
+3. **Sequential Calculations**:
+   - The joint angles are computed step by step, with each step building on the previous one.
+
+### Next Steps:
+- Test the updated function against the provided feedback.
+- Verify that the computed joint angles match the correct values and that the TCP reaches the desired position and orientation.

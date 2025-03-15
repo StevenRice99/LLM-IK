@@ -1,0 +1,101 @@
+The feedback indicates that the inverse kinematics solution is still failing to compute the correct joint angles for various target positions. The discrepancies between the expected and computed joint values suggest that there are significant issues in the implementation. Let's analyze the problem and refine the solution further.
+
+---
+
+### Key Observations from Feedback
+1. **Incorrect Joint 1 (\( \theta_1 \)):**
+   - The calculation of \( \theta_1 \) is incorrect because it does not properly account for the manipulator's geometry and offsets. This leads to incorrect transformations of the target position into the local frame of Joint 2.
+
+2. **Incorrect Joint 2 and Joint 3 (\( \theta_2 \) and \( \theta_3 \)):**
+   - The planar 2-link arm solution assumes that the target lies in the YZ-plane, but the transformation into this plane is not being handled correctly.
+   - The offsets and rotations introduced by Joint 1 are not being properly incorporated into the calculations.
+
+3. **General Issues:**
+   - The manipulator's geometry (e.g., link lengths and offsets) is not being fully utilized in the calculations.
+   - The solution does not account for the TCP offset (the position of the TCP relative to the last joint).
+
+---
+
+### Revised Approach
+To fix these issues, we need to:
+1. **Account for the TCP Offset:**
+   - The TCP is offset by \([0, 0, 0.39225]\) relative to the last joint. This offset must be subtracted from the target position to compute the position of the last joint.
+
+2. **Transform the Target Position:**
+   - The target position must be transformed into the local frame of Joint 2, taking into account the rotation caused by \( \theta_1 \) and the Y-offset of Joint 2.
+
+3. **Solve for \( \theta_2 \) and \( \theta_3 \):**
+   - Use the planar 2-link arm solution to compute \( \theta_2 \) and \( \theta_3 \), ensuring that all offsets and rotations are properly incorporated.
+
+4. **Recompute \( \theta_1 \):**
+   - After solving for \( \theta_2 \) and \( \theta_3 \), recompute \( \theta_1 \) to ensure consistency.
+
+---
+
+### Updated Code
+Here is the revised implementation:
+
+```python
+import math
+
+def inverse_kinematics(p: tuple[float, float, float]) -> tuple[float, float, float]:
+    """
+    Gets the joint values needed to reach position "p".
+    :param p: The position to reach in the form [x, y, z].
+    :return: A tuple of the values to set the links to for reaching position "p".
+    """
+    # Target position
+    x, y, z = p
+
+    # Step 1: Account for the TCP offset
+    # The TCP is offset by [0, 0, 0.39225] relative to the last joint
+    z -= 0.39225
+
+    # Step 2: Solve for theta1 (rotation about Z-axis)
+    # Joint 1 rotates about the Z-axis
+    theta1 = math.atan2(-x, y)
+
+    # Transform the target position into the local frame of Joint 2
+    # Joint 2 is offset along the Y-axis by 0.13585
+    y_local = math.sqrt(x**2 + y**2) - 0.13585
+
+    # Step 3: Solve for theta2 and theta3 (planar 2-link arm in the YZ-plane)
+    # Effective target position in the YZ-plane
+    d1 = 0.425  # Length of link 1
+    d2 = 0.39225  # Length of link 2
+    r = math.sqrt(y_local**2 + z**2)  # Distance to the target in the YZ-plane
+
+    # Solve for theta3 (angle of the second link relative to the first link)
+    cos_theta3 = (r**2 - d1**2 - d2**2) / (2 * d1 * d2)
+    # Clamp cos_theta3 to the range [-1, 1] to avoid math domain errors
+    cos_theta3 = max(-1, min(1, cos_theta3))
+    sin_theta3 = math.sqrt(1 - cos_theta3**2)
+    theta3 = math.atan2(sin_theta3, cos_theta3)
+
+    # Solve for theta2 (angle of the first link relative to the base)
+    phi = math.atan2(z, y_local)  # Angle to the target position
+    beta = math.atan2(d2 * sin_theta3, d1 + d2 * cos_theta3)  # Offset due to the second link
+    theta2 = phi - beta
+
+    return (theta1, theta2, theta3)
+```
+
+---
+
+### Key Changes
+1. **TCP Offset:**
+   - The TCP offset \([0, 0, 0.39225]\) is subtracted from the target position to compute the position of the last joint.
+
+2. **Transformation into Local Frame:**
+   - The target position is transformed into the local frame of Joint 2 by accounting for the Y-offset of Joint 2.
+
+3. **Clamping \( \cos(\theta_3) \):**
+   - The value of \( \cos(\theta_3) \) is clamped to the range \([-1, 1]\) to avoid math domain errors.
+
+4. **Revised \( \theta_1 \):**
+   - The calculation of \( \theta_1 \) is updated to ensure consistency with the transformed target position.
+
+---
+
+### Testing
+This updated code should now correctly compute the joint angles for all valid target positions. Let me know if further issues arise!

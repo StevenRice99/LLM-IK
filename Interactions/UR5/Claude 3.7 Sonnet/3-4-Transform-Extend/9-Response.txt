@@ -1,0 +1,275 @@
+I see the issue with my solution. The inverse kinematics is more complex than I initially thought. Let me analyze the feedback and develop a correct solution.
+
+Looking at the failed test cases, I notice that my approach of directly using the orientation's Z component (rz) as joint2 is incorrect. The orientation of the end effector is influenced by both joint angles in a more complex way.
+
+Let me develop a proper solution:
+
+```python
+def inverse_kinematics(p: tuple[float, float, float], r: tuple[float, float, float]) -> tuple[float, float]:
+    """
+    Gets the joint values needed to reach position "p" and orientation "r".
+    :param p: The position to reach in the form [x, y, z].
+    :param r: The orientation to reach in radians in the form [x, y, z].
+    :return: A list of the values to set the links to for reaching position "p" and orientation "r".
+    """
+    import math
+    import numpy as np
+    from scipy.spatial.transform import Rotation
+    
+    px, py, pz = p
+    rx, ry, rz = r
+    
+    # First, calculate joint1 based on the position
+    joint1 = math.atan2(px, pz)
+    
+    # Create rotation matrix from the target orientation
+    target_rotation = Rotation.from_euler('xyz', [rx, ry, rz])
+    target_matrix = target_rotation.as_matrix()
+    
+    # Create rotation matrix for joint1
+    joint1_rotation = Rotation.from_euler('y', joint1)
+    joint1_matrix = joint1_rotation.as_matrix()
+    
+    # Calculate the rotation needed for joint2
+    # We need to find the rotation that, when combined with joint1's rotation,
+    # gives us the target rotation
+    joint1_inv = np.transpose(joint1_matrix)  # Inverse of rotation matrix is its transpose
+    joint2_matrix = np.matmul(joint1_inv, target_matrix)
+    
+    # Extract joint2 angle from this matrix
+    joint2_rotation = Rotation.from_matrix(joint2_matrix)
+    joint2_euler = joint2_rotation.as_euler('xyz')
+    joint2 = joint2_euler[2]  # Z-axis rotation
+    
+    return (joint1, joint2)
+```
+
+Wait, I see an issue with my approach. The scipy.spatial.transform module might not be available in the testing environment. Let me rewrite the solution using only math and numpy:
+
+```python
+def inverse_kinematics(p: tuple[float, float, float], r: tuple[float, float, float]) -> tuple[float, float]:
+    """
+    Gets the joint values needed to reach position "p" and orientation "r".
+    :param p: The position to reach in the form [x, y, z].
+    :param r: The orientation to reach in radians in the form [x, y, z].
+    :return: A list of the values to set the links to for reaching position "p" and orientation "r".
+    """
+    import math
+    import numpy as np
+    
+    px, py, pz = p
+    rx, ry, rz = r
+    
+    # Calculate joint1 based on the position in the XZ plane
+    joint1 = math.atan2(px, pz)
+    
+    # For joint2, we need to consider how it affects the orientation
+    # The final orientation is a combination of joint1 and joint2 rotations
+    
+    # Convert Euler angles to rotation matrix
+    def euler_to_rotation_matrix(euler_angles):
+        x, y, z = euler_angles
+        # Rotation matrix for X-axis
+        Rx = np.array([
+            [1, 0, 0],
+            [0, math.cos(x), -math.sin(x)],
+            [0, math.sin(x), math.cos(x)]
+        ])
+        # Rotation matrix for Y-axis
+        Ry = np.array([
+            [math.cos(y), 0, math.sin(y)],
+            [0, 1, 0],
+            [-math.sin(y), 0, math.cos(y)]
+        ])
+        # Rotation matrix for Z-axis
+        Rz = np.array([
+            [math.cos(z), -math.sin(z), 0],
+            [math.sin(z), math.cos(z), 0],
+            [0, 0, 1]
+        ])
+        # Combined rotation matrix
+        return np.matmul(np.matmul(Rz, Ry), Rx)
+    
+    # Target rotation matrix
+    target_matrix = euler_to_rotation_matrix([rx, ry, rz])
+    
+    # Joint1 rotation matrix (around Y-axis)
+    joint1_matrix = np.array([
+        [math.cos(joint1), 0, math.sin(joint1)],
+        [0, 1, 0],
+        [-math.sin(joint1), 0, math.cos(joint1)]
+    ])
+    
+    # Calculate joint2 rotation matrix
+    joint1_inv = np.transpose(joint1_matrix)  # Inverse of rotation matrix
+    joint2_matrix = np.matmul(joint1_inv, target_matrix)
+    
+    # Extract joint2 angle from the rotation matrix
+    # For a rotation around Z-axis, we can extract the angle from the matrix elements
+    joint2 = math.atan2(joint2_matrix[1, 0], joint2_matrix[0, 0])
+    
+    return (joint1, joint2)
+```
+
+Actually, I think I'm overcomplicating this. Let me simplify and focus on the specific robot configuration:
+
+```python
+def inverse_kinematics(p: tuple[float, float, float], r: tuple[float, float, float]) -> tuple[float, float]:
+    """
+    Gets the joint values needed to reach position "p" and orientation "r".
+    :param p: The position to reach in the form [x, y, z].
+    :param r: The orientation to reach in radians in the form [x, y, z].
+    :return: A list of the values to set the links to for reaching position "p" and orientation "r".
+    """
+    import math
+    
+    px, py, pz = p
+    rx, ry, rz = r
+    
+    # Joint 1 rotates around Y-axis
+    joint1 = math.atan2(px, pz)
+    
+    # Joint 2 is the difference between the target orientation and joint1's contribution
+    # Since joint1 rotates around Y and joint2 around Z, we need to consider how they combine
+    # The final orientation's Z component is influenced by both joints
+    
+    # Convert Euler angles to a more usable form
+    # For this specific robot, joint2 needs to be calculated based on the target orientation
+    # and the effect of joint1
+    
+    # Since joint1 rotates around Y and joint2 around Z, the final orientation is a composition
+    # of these rotations. We need to "undo" the effect of joint1 to find joint2.
+    
+    # For this specific robot configuration:
+    joint2 = rz - joint1
+    
+    # Normalize joint2 to be within [-π, π]
+    joint2 = (joint2 + math.pi) % (2 * math.pi) - math.pi
+    
+    return (joint1, joint2)
+```
+
+Wait, that's still not right. Let me think about this more carefully...
+
+Based on the robot description and the failed test cases, I need to understand how the joint angles relate to the final orientation. Let me try a different approach:
+
+```python
+def inverse_kinematics(p: tuple[float, float, float], r: tuple[float, float, float]) -> tuple[float, float]:
+    """
+    Gets the joint values needed to reach position "p" and orientation "r".
+    :param p: The position to reach in the form [x, y, z].
+    :param r: The orientation to reach in radians in the form [x, y, z].
+    :return: A list of the values to set the links to for reaching position "p" and orientation "r".
+    """
+    import math
+    import numpy as np
+    
+    px, py, pz = p
+    rx, ry, rz = r
+    
+    # Calculate joint1 based on the position
+    joint1 = math.atan2(px, pz)
+    
+    # For this robot, the orientation is determined by both joints
+    # We need to extract joint2 from the target orientation
+    
+    # Convert the target orientation to a rotation matrix
+    def euler_to_matrix(roll, pitch, yaw):
+        # Roll (X), Pitch (Y), Yaw (Z)
+        Rx = np.array([
+            [1, 0, 0],
+            [0, np.cos(roll), -np.sin(roll)],
+            [0, np.sin(roll), np.cos(roll)]
+        ])
+        Ry = np.array([
+            [np.cos(pitch), 0, np.sin(pitch)],
+            [0, 1, 0],
+            [-np.sin(pitch), 0, np.cos(pitch)]
+        ])
+        Rz = np.array([
+            [np.cos(yaw), -np.sin(yaw), 0],
+            [np.sin(yaw), np.cos(yaw), 0],
+            [0, 0, 1]
+        ])
+        return np.dot(Rz, np.dot(Ry, Rx))
+    
+    # Target rotation matrix
+    R_target = euler_to_matrix(rx, ry, rz)
+    
+    # Joint1 rotation matrix (around Y-axis)
+    R_joint1 = np.array([
+        [np.cos(joint1), 0, np.sin(joint1)],
+        [0, 1, 0],
+        [-np.sin(joint1), 0, np.cos(joint1)]
+    ])
+    
+    # The rotation caused by joint2 is R_joint2 = R_joint1^-1 * R_target
+    R_joint2 = np.dot(R_joint1.T, R_target)
+    
+    # Extract the angle for joint2 (rotation around Z)
+    joint2 = np.arctan2(R_joint2[1, 0], R_joint2[0, 0])
+    
+    return (joint1, joint2)
+```
+
+Let me simplify this further based on the specific robot configuration:
+
+```python
+def inverse_kinematics(p: tuple[float, float, float], r: tuple[float, float, float]) -> tuple[float, float]:
+    """
+    Gets the joint values needed to reach position "p" and orientation "r".
+    :param p: The position to reach in the form [x, y, z].
+    :param r: The orientation to reach in radians in the form [x, y, z].
+    :return: A list of the values to set the links to for reaching position "p" and orientation "r".
+    """
+    import math
+    import numpy as np
+    
+    px, py, pz = p
+    rx, ry, rz = r
+    
+    # Joint 1 rotates around Y-axis
+    joint1 = math.atan2(px, pz)
+    
+    # For this specific robot configuration, we need to calculate joint2
+    # based on the target orientation and joint1's effect
+    
+    # Convert Euler angles to rotation matrices
+    def rotation_matrix_x(angle):
+        return np.array([
+            [1, 0, 0],
+            [0, np.cos(angle), -np.sin(angle)],
+            [0, np.sin(angle), np.cos(angle)]
+        ])
+    
+    def rotation_matrix_y(angle):
+        return np.array([
+            [np.cos(angle), 0, np.sin(angle)],
+            [0, 1, 0],
+            [-np.sin(angle), 0, np.cos(angle)]
+        ])
+    
+    def rotation_matrix_z(angle):
+        return np.array([
+            [np.cos(angle), -np.sin(angle), 0],
+            [np.sin(angle), np.cos(angle), 0],
+            [0, 0, 1]
+        ])
+    
+    # Target orientation as rotation matrix
+    Rx = rotation_matrix_x(rx)
+    Ry = rotation_matrix_y(ry)
+    Rz = rotation_matrix_z(rz)
+    R_target = np.dot(Rz, np.dot(Ry, Rx))
+    
+    # Joint1 rotation
+    R_joint1 = rotation_matrix_y(joint1)
+    
+    # Calculate joint2 rotation
+    R_joint2 = np.dot(R_joint1.T, R_target)
+    
+    # Extract joint2 angle (rotation around Z)
+    joint2 = np.arctan2(R_joint2[1, 0], R_joint2[0, 0])
+    
+    return (joint1, joint2)
+```

@@ -1,0 +1,378 @@
+Based on the feedback, I can see that my inverse kinematics solution has issues with correctly calculating joint 3 and sometimes joint 1. The main problem appears to be related to handling the orientation correctly, particularly with the multiple possible solutions for a given orientation (angle wrapping issues).
+
+Let me revise my solution to address these issues:
+
+```python
+def inverse_kinematics(p: tuple[float, float, float], r: tuple[float, float, float]) -> tuple[float, float, float]:
+    """
+    Gets the joint values needed to reach position "p" and orientation "r".
+    :param p: The position to reach in the form [x, y, z].
+    :param r: The orientation to reach in radians in the form [x, y, z].
+    :return: A list of the values to set the links to for reaching position "p" and orientation "r".
+    """
+    import math
+    import numpy as np
+    
+    x, y, z = p
+    rx, ry, rz = r
+    
+    # Constants from the robot description
+    A = 0.09465  # Length of link 3
+    B = 0.0823   # Length of TCP
+    L2 = 0.093   # Y offset of link 2
+    
+    # Create rotation matrices
+    def rot_x(angle):
+        return np.array([
+            [1, 0, 0],
+            [0, math.cos(angle), -math.sin(angle)],
+            [0, math.sin(angle), math.cos(angle)]
+        ])
+    
+    def rot_y(angle):
+        return np.array([
+            [math.cos(angle), 0, math.sin(angle)],
+            [0, 1, 0],
+            [-math.sin(angle), 0, math.cos(angle)]
+        ])
+    
+    def rot_z(angle):
+        return np.array([
+            [math.cos(angle), -math.sin(angle), 0],
+            [math.sin(angle), math.cos(angle), 0],
+            [0, 0, 1]
+        ])
+    
+    # Target orientation matrix
+    R_target = rot_z(rz) @ rot_y(ry) @ rot_x(rx)
+    
+    # TCP offset orientation (fixed rotation around Z)
+    R_tcp_offset = rot_z(1.570796325)
+    
+    # Calculate the required orientation for link 3
+    # We need to remove the TCP offset from the target orientation
+    R_link3 = R_target @ np.linalg.inv(R_tcp_offset)
+    
+    # First solve for joint 2 (around Z axis)
+    cosθ2 = (y - L2) / B
+    # Clamp to valid range
+    cosθ2 = max(min(cosθ2, 1.0), -1.0)
+    θ2 = math.acos(cosθ2)
+    sinθ2 = math.sin(θ2)
+    
+    # Now solve for joint 1 (around Y axis) using position
+    M = [[A, -B * sinθ2], [B * sinθ2, A]]
+    det_M = M[0][0] * M[1][1] - M[0][1] * M[1][0]
+    
+    inv_det_M = 1.0 / det_M
+    inv_M = [[inv_det_M * M[1][1], -inv_det_M * M[0][1]], 
+             [-inv_det_M * M[1][0], inv_det_M * M[0][0]]]
+    
+    sinθ1 = inv_M[0][0] * x + inv_M[0][1] * z
+    cosθ1 = inv_M[1][0] * x + inv_M[1][1] * z
+    
+    # Clamp to valid range
+    sinθ1 = max(min(sinθ1, 1.0), -1.0)
+    cosθ1 = max(min(cosθ1, 1.0), -1.0)
+    
+    θ1 = math.atan2(sinθ1, cosθ1)
+    
+    # Calculate the orientation contribution from joints 1 and 2
+    R1 = rot_y(θ1)
+    R2 = rot_z(θ2)
+    R12 = R1 @ R2
+    
+    # Calculate what R3 should be
+    R3_required = np.linalg.inv(R12) @ R_link3
+    
+    # Extract θ3 from R3_required (rotation around Y axis)
+    # For a rotation around Y axis, we can use elements [0,0], [0,2], [2,0], and [2,2]
+    # θ3 = math.atan2(R3_required[0, 2], R3_required[0, 0])
+    
+    # A more robust way to extract the angle:
+    cosθ3 = R3_required[0, 0]
+    sinθ3 = R3_required[0, 2]
+    θ3 = math.atan2(sinθ3, cosθ3)
+    
+    # Check if we need to flip joint 1 and joint 3 to match the target orientation better
+    # This is to handle the multiple solutions issue
+    
+    # Try the alternative solution (θ1 + π, -θ2, θ3 + π)
+    alt_θ1 = θ1 + math.pi if θ1 < 0 else θ1 - math.pi
+    alt_θ2 = -θ2
+    alt_θ3 = θ3 + math.pi if θ3 < 0 else θ3 - math.pi
+    
+    # Calculate the resulting orientation for both solutions
+    R1_orig = rot_y(θ1)
+    R2_orig = rot_z(θ2)
+    R3_orig = rot_y(θ3)
+    R_orig = R1_orig @ R2_orig @ R3_orig @ R_tcp_offset
+    
+    R1_alt = rot_y(alt_θ1)
+    R2_alt = rot_z(alt_θ2)
+    R3_alt = rot_y(alt_θ3)
+    R_alt = R1_alt @ R2_alt @ R3_alt @ R_tcp_offset
+    
+    # Calculate the orientation error for both solutions
+    error_orig = np.sum(np.abs(R_orig - R_target))
+    error_alt = np.sum(np.abs(R_alt - R_target))
+    
+    # Choose the solution with the smaller error
+    if error_alt < error_orig:
+        θ1, θ2, θ3 = alt_θ1, alt_θ2, alt_θ3
+    
+    # Normalize angles to be within [-π, π]
+    θ1 = ((θ1 + math.pi) % (2 * math.pi)) - math.pi
+    θ2 = ((θ2 + math.pi) % (2 * math.pi)) - math.pi
+    θ3 = ((θ3 + math.pi) % (2 * math.pi)) - math.pi
+    
+    return (θ1, θ2, θ3)
+```
+
+Wait, I need to refine this solution further. The alternative solution approach isn't quite right. Let me correct it:
+
+```python
+def inverse_kinematics(p: tuple[float, float, float], r: tuple[float, float, float]) -> tuple[float, float, float]:
+    """
+    Gets the joint values needed to reach position "p" and orientation "r".
+    :param p: The position to reach in the form [x, y, z].
+    :param r: The orientation to reach in radians in the form [x, y, z].
+    :return: A list of the values to set the links to for reaching position "p" and orientation "r".
+    """
+    import math
+    import numpy as np
+    
+    x, y, z = p
+    rx, ry, rz = r
+    
+    # Constants from the robot description
+    A = 0.09465  # Length of link 3
+    B = 0.0823   # Length of TCP
+    L2 = 0.093   # Y offset of link 2
+    
+    # Create rotation matrices
+    def rot_x(angle):
+        return np.array([
+            [1, 0, 0],
+            [0, math.cos(angle), -math.sin(angle)],
+            [0, math.sin(angle), math.cos(angle)]
+        ])
+    
+    def rot_y(angle):
+        return np.array([
+            [math.cos(angle), 0, math.sin(angle)],
+            [0, 1, 0],
+            [-math.sin(angle), 0, math.cos(angle)]
+        ])
+    
+    def rot_z(angle):
+        return np.array([
+            [math.cos(angle), -math.sin(angle), 0],
+            [math.sin(angle), math.cos(angle), 0],
+            [0, 0, 1]
+        ])
+    
+    # Target orientation matrix
+    R_target = rot_z(rz) @ rot_y(ry) @ rot_x(rx)
+    
+    # TCP offset orientation (fixed rotation around Z)
+    R_tcp_offset = rot_z(1.570796325)
+    
+    # Calculate the required orientation for link 3
+    # We need to remove the TCP offset from the target orientation
+    R_link3 = R_target @ np.linalg.inv(R_tcp_offset)
+    
+    # First solve for joint 2 (around Z axis)
+    cosθ2 = (y - L2) / B
+    # Clamp to valid range
+    cosθ2 = max(min(cosθ2, 1.0), -1.0)
+    
+    # There are two possible solutions for θ2
+    θ2_sol1 = math.acos(cosθ2)
+    θ2_sol2 = -θ2_sol1
+    
+    # We'll try both solutions and pick the one that gives the best orientation match
+    solutions = []
+    
+    for θ2 in [θ2_sol1, θ2_sol2]:
+        sinθ2 = math.sin(θ2)
+        
+        # Now solve for joint 1 (around Y axis) using position
+        M = [[A, -B * sinθ2], [B * sinθ2, A]]
+        det_M = M[0][0] * M[1][1] - M[0][1] * M[1][0]
+        
+        inv_det_M = 1.0 / det_M
+        inv_M = [[inv_det_M * M[1][1], -inv_det_M * M[0][1]], 
+                 [-inv_det_M * M[1][0], inv_det_M * M[0][0]]]
+        
+        sinθ1 = inv_M[0][0] * x + inv_M[0][1] * z
+        cosθ1 = inv_M[1][0] * x + inv_M[1][1] * z
+        
+        # Clamp to valid range
+        sinθ1 = max(min(sinθ1, 1.0), -1.0)
+        cosθ1 = max(min(cosθ1, 1.0), -1.0)
+        
+        θ1 = math.atan2(sinθ1, cosθ1)
+        
+        # Calculate the orientation contribution from joints 1 and 2
+        R1 = rot_y(θ1)
+        R2 = rot_z(θ2)
+        R12 = R1 @ R2
+        
+        # Calculate what R3 should be
+        R3_required = np.linalg.inv(R12) @ R_link3
+        
+        # Extract θ3 from R3_required (rotation around Y axis)
+        cosθ3 = R3_required[0, 0]
+        sinθ3 = R3_required[0, 2]
+        
+        # Clamp to valid range
+        cosθ3 = max(min(cosθ3, 1.0), -1.0)
+        sinθ3 = max(min(sinθ3, 1.0), -1.0)
+        
+        θ3 = math.atan2(sinθ3, cosθ3)
+        
+        # Calculate the resulting orientation
+        R3 = rot_y(θ3)
+        R_result = R1 @ R2 @ R3 @ R_tcp_offset
+        
+        # Calculate the orientation error
+        error = np.sum(np.abs(R_result - R_target))
+        
+        solutions.append((θ1, θ2, θ3, error))
+    
+    # Choose the solution with the smallest error
+    solutions.sort(key=lambda s: s[3])
+    θ1, θ2, θ3, _ = solutions[0]
+    
+    return (θ1, θ2, θ3)
+```
+
+Let me refine this solution one more time to ensure it's correct:
+
+```python
+def inverse_kinematics(p: tuple[float, float, float], r: tuple[float, float, float]) -> tuple[float, float, float]:
+    """
+    Gets the joint values needed to reach position "p" and orientation "r".
+    :param p: The position to reach in the form [x, y, z].
+    :param r: The orientation to reach in radians in the form [x, y, z].
+    :return: A list of the values to set the links to for reaching position "p" and orientation "r".
+    """
+    import math
+    import numpy as np
+    
+    x, y, z = p
+    rx, ry, rz = r
+    
+    # Constants from the robot description
+    A = 0.09465  # Length of link 3
+    B = 0.0823   # Length of TCP
+    L2 = 0.093   # Y offset of link 2
+    
+    # Create rotation matrices
+    def rot_x(angle):
+        return np.array([
+            [1, 0, 0],
+            [0, math.cos(angle), -math.sin(angle)],
+            [0, math.sin(angle), math.cos(angle)]
+        ])
+    
+    def rot_y(angle):
+        return np.array([
+            [math.cos(angle), 0, math.sin(angle)],
+            [0, 1, 0],
+            [-math.sin(angle), 0, math.cos(angle)]
+        ])
+    
+    def rot_z(angle):
+        return np.array([
+            [math.cos(angle), -math.sin(angle), 0],
+            [math.sin(angle), math.cos(angle), 0],
+            [0, 0, 1]
+        ])
+    
+    # Target orientation matrix
+    R_target = rot_z(rz) @ rot_y(ry) @ rot_x(rx)
+    
+    # TCP offset orientation (fixed rotation around Z)
+    R_tcp_offset = rot_z(1.570796325)
+    
+    # Calculate the required orientation for link 3
+    # We need to remove the TCP offset from the target orientation
+    R_link3 = R_target @ np.linalg.inv(R_tcp_offset)
+    
+    # First solve for joint 2 (around Z axis)
+    cosθ2 = (y - L2) / B
+    # Clamp to valid range
+    cosθ2 = max(min(cosθ2, 1.0), -1.0)
+    
+    # There are two possible solutions for θ2
+    θ2_sol1 = math.acos(cosθ2)
+    θ2_sol2 = -θ2_sol1
+    
+    # We'll try both solutions for θ2 and also try flipping θ1 and θ3
+    best_solution = None
+    min_error = float('inf')
+    
+    for θ2 in [θ2_sol1, θ2_sol2]:
+        sinθ2 = math.sin(θ2)
+        
+        # Now solve for joint 1 (around Y axis) using position
+        M = [[A, -B * sinθ2], [B * sinθ2, A]]
+        det_M = M[0][0] * M[1][1] - M[0][1] * M[1][0]
+        
+        inv_det_M = 1.0 / det_M
+        inv_M = [[inv_det_M * M[1][1], -inv_det_M * M[0][1]], 
+                 [-inv_det_M * M[1][0], inv_det_M * M[0][0]]]
+        
+        sinθ1 = inv_M[0][0] * x + inv_M[0][1] * z
+        cosθ1 = inv_M[1][0] * x + inv_M[1][1] * z
+        
+        # Clamp to valid range
+        sinθ1 = max(min(sinθ1, 1.0), -1.0)
+        cosθ1 = max(min(cosθ1, 1.0), -1.0)
+        
+        θ1 = math.atan2(sinθ1, cosθ1)
+        
+        # Calculate the orientation contribution from joints 1 and 2
+        R1 = rot_y(θ1)
+        R2 = rot_z(θ2)
+        R12 = R1 @ R2
+        
+        # Calculate what R3 should be
+        R3_required = np.linalg.inv(R12) @ R_link3
+        
+        # Extract θ3 from R3_required (rotation around Y axis)
+        # For a rotation around Y, we can use elements [0,0], [0,2], [2,0], and [2,2]
+        cosθ3 = R3_required[0, 0]
+        sinθ3 = R3_required[0, 2]
+        
+        # Clamp to valid range
+        cosθ3 = max(min(cosθ3, 1.0), -1.0)
+        sinθ3 = max(min(sinθ3, 1.0), -1.0)
+        
+        θ3 = math.atan2(sinθ3, cosθ3)
+        
+        # Try both the original θ3 and θ3 + π
+        for θ3_offset in [0, math.pi]:
+            θ3_test = θ3 + θ3_offset
+            
+            # Normalize to [-π, π]
+            if θ3_test > math.pi:
+                θ3_test -= 2 * math.pi
+            elif θ3_test < -math.pi:
+                θ3_test += 2 * math.pi
+            
+            # Calculate the resulting orientation
+            R3 = rot_y(θ3_test)
+            R_result = R1 @ R2 @ R3 @ R_tcp_offset
+            
+            # Calculate the orientation error
+            error = np.sum(np.abs(R_result - R_target))
+            
+            if error < min_error:
+                min_error = error
+                best_solution = (θ1, θ2, θ3_test)
+    
+    return best_solution
+```

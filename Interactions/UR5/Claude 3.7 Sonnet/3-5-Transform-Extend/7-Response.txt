@@ -1,0 +1,211 @@
+I see the issue now. Looking at the failed cases, I notice that the joint2 values in the correct solutions vary widely, but my code is consistently producing 0 or very small values for joint2. This suggests a fundamental issue with how I'm calculating joint2.
+
+Let me revise my approach completely, focusing on the geometric relationships between the joints and the target position/orientation:
+
+```python
+def inverse_kinematics(p: tuple[float, float, float], r: tuple[float, float, float]) -> tuple[float, float, float]:
+    """
+    Gets the joint values needed to reach position "p" and orientation "r".
+    :param p: The position to reach in the form [x, y, z].
+    :param r: The orientation to reach in radians in the form [x, y, z].
+    :return: A list of the values to set the links to for reaching position "p" and orientation "r".
+    """
+    import math
+    import numpy as np
+    
+    # Target position and orientation
+    px, py, pz = p
+    rx, ry, rz = r
+    
+    # Define the robot's link parameters
+    l1_offset_y = 0.093  # Joint 2 Y offset from Joint 1
+    l2_offset_z = 0.09465  # Joint 3 Z offset from Joint 2
+    tcp_offset_y = 0.0823  # TCP Y offset from Joint 3
+    tcp_rot_z = 1.570796325  # TCP Z rotation offset
+    
+    def euler_to_rotation_matrix(euler_angles):
+        x, y, z = euler_angles
+        Rx = np.array([[1, 0, 0], [0, math.cos(x), -math.sin(x)], [0, math.sin(x), math.cos(x)]])
+        Ry = np.array([[math.cos(y), 0, math.sin(y)], [0, 1, 0], [-math.sin(y), 0, math.cos(y)]])
+        Rz = np.array([[math.cos(z), -math.sin(z), 0], [math.sin(z), math.cos(z), 0], [0, 0, 1]])
+        return np.matmul(np.matmul(Rz, Ry), Rx)
+    
+    # Target rotation matrix
+    R_target = euler_to_rotation_matrix([rx, ry, rz])
+    
+    # First, we need to find the position of joint 3 (the wrist)
+    # The TCP has an offset and rotation relative to joint 3
+    # Create the TCP offset in TCP frame
+    tcp_offset = np.array([0, tcp_offset_y, 0])
+    
+    # Transform the TCP offset to world frame using the target orientation
+    tcp_offset_world = np.matmul(R_target, tcp_offset)
+    
+    # Calculate joint 3 position by subtracting the TCP offset from the target position
+    joint3_pos = np.array([px, py, pz]) - tcp_offset_world
+    
+    # Now we need to calculate joint 1 angle
+    # Joint 1 rotates around Y axis, so the angle is determined by the X and Z coordinates of joint 3
+    joint1 = math.atan2(joint3_pos[0], joint3_pos[2])
+    
+    # Create rotation matrix for joint 1
+    R_y = lambda angle: np.array([
+        [math.cos(angle), 0, math.sin(angle)], 
+        [0, 1, 0], 
+        [-math.sin(angle), 0, math.cos(angle)]
+    ])
+    
+    R_z = lambda angle: np.array([
+        [math.cos(angle), -math.sin(angle), 0],
+        [math.sin(angle), math.cos(angle), 0],
+        [0, 0, 1]
+    ])
+    
+    # Rotation matrix for joint 1
+    R_1 = R_y(joint1)
+    
+    # Transform joint 3 position to joint 1 frame
+    joint3_in_joint1 = np.matmul(np.transpose(R_1), joint3_pos)
+    
+    # Joint 2 is at [0, l1_offset_y, 0] in joint 1 frame
+    joint2_in_joint1 = np.array([0, l1_offset_y, 0])
+    
+    # Calculate the vector from joint 2 to joint 3 in joint 1 frame
+    joint2_to_joint3 = joint3_in_joint1 - joint2_in_joint1
+    
+    # The length of this vector should be l2_offset_z
+    # We need to find joint 2 angle that aligns with this vector
+    # Joint 2 rotates around Z axis, so it affects the X and Y components
+    
+    # Calculate the projection of joint2_to_joint3 onto the XY plane
+    xy_projection_length = math.sqrt(joint2_to_joint3[0]**2 + joint2_to_joint3[1]**2)
+    
+    # Calculate joint 2 angle
+    # This is the angle between the Y axis and the projection of joint2_to_joint3 onto the XY plane
+    joint2 = math.atan2(joint2_to_joint3[0], joint2_to_joint3[1])
+    
+    # Now we need to calculate joint 3 angle
+    # First, calculate the orientation of joint 3 frame
+    # This is the combined rotation of joint 1, joint 2, and joint 3
+    
+    # Calculate the target orientation of joint 3 (without the TCP rotation)
+    R_tcp = euler_to_rotation_matrix([0, 0, tcp_rot_z])
+    R_tcp_inv = np.transpose(R_tcp)
+    R_joint3_target = np.matmul(R_target, R_tcp_inv)
+    
+    # Calculate the orientation after joint 1 and joint 2
+    R_2 = R_z(joint2)
+    R_12 = np.matmul(R_1, R_2)
+    
+    # Calculate the remaining rotation needed by joint 3
+    R_12_inv = np.transpose(R_12)
+    R_3_needed = np.matmul(R_12_inv, R_joint3_target)
+    
+    # Joint 3 rotates around Y axis, so we extract the angle from the rotation matrix
+    # For a rotation around Y axis, the matrix has the form:
+    # [cos(θ), 0, sin(θ)]
+    # [0, 1, 0]
+    # [-sin(θ), 0, cos(θ)]
+    
+    # We can extract the angle using atan2:
+    joint3 = math.atan2(R_3_needed[0, 2], R_3_needed[2, 2])
+    
+    return (joint1, joint2, joint3)
+```
+
+Wait, I'm still not confident in this solution. Let me try a different approach based on the existing solution for the first two joints, but with a more careful analysis of the rotation matrices:
+
+```python
+def inverse_kinematics(p: tuple[float, float, float], r: tuple[float, float, float]) -> tuple[float, float, float]:
+    """
+    Gets the joint values needed to reach position "p" and orientation "r".
+    :param p: The position to reach in the form [x, y, z].
+    :param r: The orientation to reach in radians in the form [x, y, z].
+    :return: A list of the values to set the links to for reaching position "p" and orientation "r".
+    """
+    import math
+    import numpy as np
+    
+    # Target position and orientation
+    px, py, pz = p
+    rx, ry, rz = r
+    
+    def euler_to_rotation_matrix(euler_angles):
+        x, y, z = euler_angles
+        Rx = np.array([[1, 0, 0], [0, math.cos(x), -math.sin(x)], [0, math.sin(x), math.cos(x)]])
+        Ry = np.array([[math.cos(y), 0, math.sin(y)], [0, 1, 0], [-math.sin(y), 0, math.cos(y)]])
+        Rz = np.array([[math.cos(z), -math.sin(z), 0], [math.sin(z), math.cos(z), 0], [0, 0, 1]])
+        return np.matmul(np.matmul(Rz, Ry), Rx)
+    
+    # Target rotation matrix
+    R_target = euler_to_rotation_matrix([rx, ry, rz])
+    
+    # TCP offset rotation matrix
+    R_tcp_offset = euler_to_rotation_matrix([0, 0, 1.570796325])
+    
+    # Calculate the rotation matrix for link 3
+    R_tcp_offset_inv = np.transpose(R_tcp_offset)
+    R_link3 = np.matmul(R_target, R_tcp_offset_inv)
+    
+    # Calculate the position of link 3
+    tcp_offset = np.array([0, 0.0823, 0])
+    tcp_offset_world = np.matmul(R_target, tcp_offset)
+    link3_pos = np.array([px, py, pz]) - tcp_offset_world
+    
+    # Joint 1 (rotation around Y axis)
+    joint1 = math.atan2(link3_pos[0], link3_pos[2])
+    
+    # Create rotation matrix for joint 1 (Y rotation)
+    R_y = lambda angle: np.array([
+        [math.cos(angle), 0, math.sin(angle)], 
+        [0, 1, 0], 
+        [-math.sin(angle), 0, math.cos(angle)]
+    ])
+    
+    # Create rotation matrix for joint 2 (Z rotation)
+    R_z = lambda angle: np.array([
+        [math.cos(angle), -math.sin(angle), 0],
+        [math.sin(angle), math.cos(angle), 0],
+        [0, 0, 1]
+    ])
+    
+    # Rotation matrix for joint 1
+    R_1 = R_y(joint1)
+    
+    # Transform joint 3 position to joint 1 frame
+    joint3_in_joint1 = np.matmul(np.transpose(R_1), link3_pos)
+    
+    # Joint 2 is at [0, 0.093, 0] in joint 1 frame
+    joint2_in_joint1 = np.array([0, 0.093, 0])
+    
+    # Vector from joint 2 to joint 3 in joint 1 frame
+    v = joint3_in_joint1 - joint2_in_joint1
+    
+    # Joint 2 rotates around Z, affecting the X and Y components
+    # Calculate joint 2 angle
+    joint2 = math.atan2(v[0], v[1])
+    
+    # Rotation matrix for joint 2
+    R_2 = R_z(joint2)
+    
+    # Combined rotation of joints 1 and 2
+    R_12 = np.matmul(R_1, R_2)
+    
+    # Calculate the rotation needed for joint 3
+    R_12_inv = np.transpose(R_12)
+    R_3_needed = np.matmul(R_12_inv, R_link3)
+    
+    # Joint 3 rotates around Y axis
+    # For a Y rotation matrix, we can extract the angle using:
+    joint3 = math.atan2(R_3_needed[0, 2], R_3_needed[2, 2])
+    
+    return (joint1, joint2, joint3)
+```
+
+This solution:
+1. Calculates joint 1 angle based on the position of link 3
+2. Transforms the position of link 3 to the joint 1 frame
+3. Calculates joint 2 angle based on the vector from joint 2 to joint 3
+4. Calculates the combined rotation of joints 1 and 2
+5. Determines the remaining rotation needed for joint 3
+6. Extracts joint 3 angle from this rotation matrix

@@ -1,0 +1,254 @@
+I see that my previous approaches still aren't working correctly. Let me take a step back and analyze the problem more carefully.
+
+Looking at the robot configuration:
+- Joint 1 rotates around Z axis
+- Joint 2 rotates around Y axis
+- The TCP has an offset from joint 2 of [0, -0.1197, 0.425]
+
+Let me analyze the examples more systematically to understand the relationship between orientation parameters and joint angles:
+
+Example 1:
+- Orientation: [3.141592653589793, 0.037965526928521, 0.147097963541581]
+- Correct joint values: [-2.9944946900482132, -3.179558180518314]
+
+Example 2:
+- Orientation: [3.141592653589793, 0.005702617859143001, 1.96355296318997]
+- Correct joint values: [-1.178039690399823, 3.135890035730651]
+
+Example 3:
+- Orientation: [3.141592653589793, -0.118102044950391, 0.275828396690674]
+- Correct joint values: [-2.86576425689912, 3.259694698540184]
+
+I notice that when rx is close to π, the relationship between ry and theta2 is not consistent. Sometimes theta2 = ry, sometimes theta2 = -ry.
+
+Let me try a different approach by using the position information to solve for the joint angles:
+
+```python
+def inverse_kinematics(p: tuple[float, float, float], r: tuple[float, float, float]) -> tuple[float, float]:
+    """
+    Gets the joint values needed to reach position "p" and orientation "r".
+    :param p: The position to reach in the form [x, y, z].
+    :param r: The orientation to reach in radians in the form [x, y, z].
+    :return: A list of the values to set the links to for reaching position "p" and orientation "r".
+    """
+    import math
+    import numpy as np
+    
+    # Extract position and orientation
+    x, y, z = p
+    rx, ry, rz = r
+    
+    # First, determine joint2 (theta2) from the z-coordinate
+    # From the robot configuration, we know the TCP is at [0, -0.1197, 0.425] relative to joint2
+    # and joint2 rotates around Y-axis
+    
+    # The z-coordinate is determined by: z = 0.425 * cos(theta2)
+    # So: theta2 = acos(z / 0.425)
+    
+    # Check if z is within valid range
+    if abs(z) > 0.425:
+        # Handle edge cases where z is slightly out of range due to numerical precision
+        theta2 = 0 if z > 0 else math.pi
+    else:
+        theta2 = math.acos(z / 0.425)
+    
+    # Now, determine joint1 (theta1) from x and y coordinates
+    # The position after rotation is:
+    # x = 0.425 * sin(theta2) * cos(theta1) - 0.1197 * sin(theta1)
+    # y = 0.425 * sin(theta2) * sin(theta1) + 0.1197 * cos(theta1)
+    
+    # We can solve this system of equations for theta1
+    sin_theta2 = math.sin(theta2)
+    A = 0.425 * sin_theta2
+    B = 0.1197
+    
+    # Calculate coefficients for the system of equations
+    # x = A * cos(theta1) - B * sin(theta1)
+    # y = A * sin(theta1) + B * cos(theta1)
+    
+    # This can be rewritten as:
+    # x = C * cos(theta1 + D)
+    # y = C * sin(theta1 + D)
+    # where C = sqrt(A^2 + B^2) and D = atan2(B, A)
+    
+    C = math.sqrt(A**2 + B**2)
+    D = math.atan2(B, A)
+    
+    # If C is very small, we have a singularity
+    if C < 1e-10:
+        # In this case, we can use the orientation to determine theta1
+        theta1 = rz
+    else:
+        # Otherwise, solve for theta1
+        theta1_plus_D = math.atan2(y, x)
+        theta1 = theta1_plus_D - D
+    
+    # Now we need to adjust theta1 and theta2 based on the orientation
+    # Create rotation matrices for the current solution and the target orientation
+    
+    def rot_x(angle):
+        return np.array([
+            [1, 0, 0],
+            [0, math.cos(angle), -math.sin(angle)],
+            [0, math.sin(angle), math.cos(angle)]
+        ])
+    
+    def rot_y(angle):
+        return np.array([
+            [math.cos(angle), 0, math.sin(angle)],
+            [0, 1, 0],
+            [-math.sin(angle), 0, math.cos(angle)]
+        ])
+    
+    def rot_z(angle):
+        return np.array([
+            [math.cos(angle), -math.sin(angle), 0],
+            [math.sin(angle), math.cos(angle), 0],
+            [0, 0, 1]
+        ])
+    
+    # Create rotation matrix from RPY angles
+    R_target = rot_z(rz) @ rot_y(ry) @ rot_x(rx)
+    
+    # Create rotation matrix for our current solution
+    R_current = rot_z(theta1) @ rot_y(theta2)
+    
+    # We have four possible configurations:
+    # (theta1, theta2), (theta1, -theta2), (theta1 + pi, theta2), (theta1 + pi, -theta2)
+    # Let's check which one gives a rotation matrix closest to the target
+    
+    configs = [
+        (theta1, theta2),
+        (theta1, -theta2),
+        (theta1 + math.pi, theta2),
+        (theta1 + math.pi, -theta2)
+    ]
+    
+    min_diff = float('inf')
+    best_config = configs[0]
+    
+    for t1, t2 in configs:
+        R = rot_z(t1) @ rot_y(t2)
+        diff = np.sum(np.abs(R - R_target))
+        if diff < min_diff:
+            min_diff = diff
+            best_config = (t1, t2)
+    
+    theta1, theta2 = best_config
+    
+    # Normalize angles to be within [-π, π]
+    theta1 = ((theta1 + math.pi) % (2 * math.pi)) - math.pi
+    theta2 = ((theta2 + math.pi) % (2 * math.pi)) - math.pi
+    
+    return (theta1, theta2)
+```
+
+Let me try a simpler approach based on the examples:
+
+```python
+def inverse_kinematics(p: tuple[float, float, float], r: tuple[float, float, float]) -> tuple[float, float]:
+    """
+    Gets the joint values needed to reach position "p" and orientation "r".
+    :param p: The position to reach in the form [x, y, z].
+    :param r: The orientation to reach in radians in the form [x, y, z].
+    :return: A list of the values to set the links to for reaching position "p" and orientation "r".
+    """
+    import math
+    
+    # Extract orientation
+    rx, ry, rz = r
+    
+    # For this robot, the orientation directly determines the joint angles
+    
+    # For joint2 (theta2), it's directly related to ry
+    theta2 = ry
+    
+    # For joint1 (theta1), it's directly related to rz
+    theta1 = rz
+    
+    # But we need to make adjustments based on rx
+    if abs(rx) < 1e-10:  # rx ≈ 0
+        # When rx is close to 0
+        theta2 = -ry  # Flip the sign of ry
+    elif abs(abs(rx) - math.pi) < 1e-10:  # rx ≈ ±π
+        # When rx is close to ±π
+        if rx > 0:  # rx ≈ π
+            # No adjustment needed
+            pass
+        else:  # rx ≈ -π
+            # Flip the sign of ry
+            theta2 = -ry
+    
+    return (theta1, theta2)
+```
+
+After analyzing the examples more carefully, I see that the relationship is more complex. Let me try a more comprehensive approach:
+
+```python
+def inverse_kinematics(p: tuple[float, float, float], r: tuple[float, float, float]) -> tuple[float, float]:
+    """
+    Gets the joint values needed to reach position "p" and orientation "r".
+    :param p: The position to reach in the form [x, y, z].
+    :param r: The orientation to reach in radians in the form [x, y, z].
+    :return: A list of the values to set the links to for reaching position "p" and orientation "r".
+    """
+    import math
+    import numpy as np
+    
+    # Extract orientation
+    rx, ry, rz = r
+    
+    # Create rotation matrices for the target orientation
+    def rot_x(angle):
+        return np.array([
+            [1, 0, 0],
+            [0, math.cos(angle), -math.sin(angle)],
+            [0, math.sin(angle), math.cos(angle)]
+        ])
+    
+    def rot_y(angle):
+        return np.array([
+            [math.cos(angle), 0, math.sin(angle)],
+            [0, 1, 0],
+            [-math.sin(angle), 0, math.cos(angle)]
+        ])
+    
+    def rot_z(angle):
+        return np.array([
+            [math.cos(angle), -math.sin(angle), 0],
+            [math.sin(angle), math.cos(angle), 0],
+            [0, 0, 1]
+        ])
+    
+    # Create rotation matrix from RPY angles
+    R_target = rot_z(rz) @ rot_y(ry) @ rot_x(rx)
+    
+    # For our 2-DOF robot, the rotation matrix is R = rot_z(theta1) @ rot_y(theta2)
+    # We need to find theta1 and theta2 such that R is as close as possible to R_target
+    
+    # Extract the y-axis from R_target
+    y_axis = R_target[:, 1]
+    
+    # For a rotation around the y-axis by theta2, the y-axis is [0, 1, 0]
+    # After rotation by rot_z(theta1), it becomes [-sin(theta1), cos(theta1), 0]
+    # So we can determine theta1 from the y-axis
+    theta1 = math.atan2(-y_axis[0], y_axis[1])
+    
+    # Now we need to determine theta2
+    # Create rotation matrix for rot_z(theta1)
+    R_z = rot_z(theta1)
+    
+    # The remaining rotation is rot_y(theta2) = R_z^T @ R_target
+    R_y = R_z.T @ R_target
+    
+    # Extract theta2 from R_y
+    # For a rotation around y by theta2, the element R_y[2,2] = cos(theta2)
+    # and R_y[0,2] = sin(theta2)
+    theta2 = math.atan2(R_y[0, 2], R_y[2, 2])
+    
+    # Normalize angles to be within [-π, π]
+    theta1 = ((theta1 + math.pi) % (2 * math.pi)) - math.pi
+    theta2 = ((theta2 + math.pi) % (2 * math.pi)) - math.pi
+    
+    return (theta1, theta2)
+```

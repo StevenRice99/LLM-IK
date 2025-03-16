@@ -1,0 +1,252 @@
+Based on the forward kinematics tests, I can now develop the inverse kinematics solution for this 3-DOF serial manipulator. Let me analyze the robot structure and develop the solution step by step.
+
+From the provided information and forward kinematics tests, I can see that:
+1. All three joints rotate around the Y-axis (revolute joints)
+2. The robot has a planar structure in the XZ plane when joint 1 is at 0
+3. When joint 1 rotates, it rotates the entire arm around the Y-axis
+
+Let me develop the inverse kinematics solution:
+
+```python
+import math
+import numpy as np
+
+def inverse_kinematics(p: tuple[float, float, float]) -> tuple[float, float, float]:
+    """
+    Gets the joint values needed to reach position "p".
+    :param p: The position to reach in the form [x, y, z].
+    :return: A list of the values to set the links to for reaching position "p".
+    """
+    x_target, y_target, z_target = p
+    
+    # First, determine joint 1 angle (rotation around Y-axis)
+    # This rotates the entire arm to align with the target in the XZ plane
+    if x_target == 0 and z_target == 0:
+        theta1 = 0  # Default value when directly above origin
+    else:
+        theta1 = math.atan2(x_target, z_target)
+    
+    # Adjust target position to account for TCP offset in Y direction
+    y_adj = y_target + 0.093  # TCP has Y offset of 0.093
+    
+    # Transform the target point to the plane of the manipulator after joint 1 rotation
+    # We need to find the distance in the XZ plane
+    r_target = math.sqrt(x_target**2 + z_target**2)
+    
+    # Now we have a 2D problem in the rotated plane (r, y)
+    # Link lengths
+    l1 = 0.425  # Distance from joint 1 to joint 2
+    l2 = 0.39225  # Distance from joint 2 to joint 3
+    
+    # Y offset of joint 2 from joint 1
+    y_offset = -0.1197
+    
+    # Adjust the target position to account for the Y offset of joint 2
+    y_adj = y_adj - y_offset
+    
+    # Use the law of cosines to find joint 3 angle
+    # We need to find the distance from joint 2 to the target
+    d = math.sqrt(r_target**2 + y_adj**2)
+    
+    # Use law of cosines to find the angle of joint 3
+    cos_theta3 = (d**2 - l1**2 - l2**2) / (2 * l1 * l2)
+    # Clamp to handle floating point errors
+    cos_theta3 = max(min(cos_theta3, 1.0), -1.0)
+    theta3 = math.acos(cos_theta3)
+    
+    # Now find joint 2 angle
+    # First find the angle between the first link and the horizontal
+    beta = math.atan2(y_adj, r_target)
+    
+    # Then find the angle between the first link and the line to the target
+    cos_alpha = (l1**2 + d**2 - l2**2) / (2 * l1 * d)
+    # Clamp to handle floating point errors
+    cos_alpha = max(min(cos_alpha, 1.0), -1.0)
+    alpha = math.acos(cos_alpha)
+    
+    # Joint 2 angle is the sum of these angles
+    theta2 = beta - alpha
+    
+    # The solution above gives the "elbow up" configuration
+    # For the "elbow down" configuration, we would use:
+    # theta2 = beta + alpha
+    # theta3 = -theta3
+    
+    return (theta1, theta2, theta3)
+```
+
+Wait, I need to check my solution. Looking at the forward kinematics tests, I notice that:
+
+1. When all joints are at 0, the TCP is at [0, -0.0267, 0.81725]
+2. When joint 1 is at 1.0, the TCP rotates around the Y-axis
+3. When joint 2 is at 1.0, the arm bends and the TCP moves to [0.3300669937908974, -0.0267, 0.6369335794767779]
+4. When joint 3 is at 1.0, the TCP position doesn't change in Y, but changes in X and Z
+
+Let me revise my solution:
+
+```python
+import math
+
+def inverse_kinematics(p: tuple[float, float, float]) -> tuple[float, float, float]:
+    """
+    Gets the joint values needed to reach position "p".
+    :param p: The position to reach in the form [x, y, z].
+    :return: A list of the values to set the links to for reaching position "p".
+    """
+    x_target, y_target, z_target = p
+    
+    # First, determine joint 1 angle (rotation around Y-axis)
+    if x_target == 0 and z_target == 0:
+        theta1 = 0  # Default value when directly above origin
+    else:
+        theta1 = math.atan2(x_target, z_target)
+    
+    # Adjust target position to account for TCP offset in Y direction
+    y_adj = y_target - (-0.0267)  # TCP has Y offset of -0.0267 from joint 3
+    
+    # Transform the target point to the plane of the manipulator after joint 1 rotation
+    # We need to find the distance in the XZ plane
+    r_target = math.sqrt(x_target**2 + z_target**2)
+    
+    # Link lengths and offsets
+    l1 = 0.425  # Distance from joint 1 to joint 2 in Z
+    l2 = 0.39225  # Distance from joint 2 to joint 3 in Z
+    y_offset = -0.1197  # Y offset of joint 2 from joint 1
+    
+    # Adjust the target position to account for the Y offset of joint 2
+    y_adj = y_adj - y_offset
+    
+    # Use the law of cosines to find joint angles
+    d = math.sqrt(r_target**2 + y_adj**2)
+    
+    # Use law of cosines to find the angle of joint 3
+    cos_theta3 = (d**2 - l1**2 - l2**2) / (2 * l1 * l2)
+    # Clamp to handle floating point errors
+    cos_theta3 = max(min(cos_theta3, 1.0), -1.0)
+    theta3 = math.acos(cos_theta3)
+    
+    # Now find joint 2 angle
+    beta = math.atan2(y_adj, r_target)
+    cos_alpha = (l1**2 + d**2 - l2**2) / (2 * l1 * d)
+    # Clamp to handle floating point errors
+    cos_alpha = max(min(cos_alpha, 1.0), -1.0)
+    alpha = math.acos(cos_alpha)
+    
+    # Joint 2 angle is the difference of these angles
+    theta2 = beta - alpha
+    
+    return (theta1, theta2, theta3)
+```
+
+Let me check this solution again. I notice that I need to be careful about the signs and directions:
+
+```python
+import math
+
+def inverse_kinematics(p: tuple[float, float, float]) -> tuple[float, float, float]:
+    """
+    Gets the joint values needed to reach position "p".
+    :param p: The position to reach in the form [x, y, z].
+    :return: A list of the values to set the links to for reaching position "p".
+    """
+    x_target, y_target, z_target = p
+    
+    # First, determine joint 1 angle (rotation around Y-axis)
+    if x_target == 0 and z_target == 0:
+        theta1 = 0  # Default value when directly above origin
+    else:
+        theta1 = math.atan2(x_target, z_target)
+    
+    # Transform the target point to the plane of the manipulator after joint 1 rotation
+    # We need to find the distance in the XZ plane
+    r_target = math.sqrt(x_target**2 + z_target**2)
+    
+    # Adjust target position to account for TCP offset in Y direction
+    # The TCP is offset by 0.093 in the Y direction from joint 3
+    y_adj = y_target - (-0.0267)
+    
+    # Link lengths and offsets
+    l1 = 0.425  # Distance from joint 1 to joint 2 in Z
+    l2 = 0.39225  # Distance from joint 2 to joint 3 in Z
+    y_offset = -0.1197  # Y offset of joint 2 from joint 1
+    
+    # Adjust the target position to account for the Y offset of joint 2
+    y_adj = y_adj - y_offset
+    
+    # Use the law of cosines to find joint angles
+    d = math.sqrt(r_target**2 + y_adj**2)
+    
+    # Use law of cosines to find the angle of joint 3
+    cos_theta3 = (d**2 - l1**2 - l2**2) / (2 * l1 * l2)
+    # Clamp to handle floating point errors
+    cos_theta3 = max(min(cos_theta3, 1.0), -1.0)
+    # We use negative theta3 because the joint bends in the opposite direction
+    theta3 = -math.acos(cos_theta3)
+    
+    # Now find joint 2 angle
+    beta = math.atan2(y_adj, r_target)
+    cos_alpha = (l1**2 + d**2 - l2**2) / (2 * l1 * d)
+    # Clamp to handle floating point errors
+    cos_alpha = max(min(cos_alpha, 1.0), -1.0)
+    alpha = math.acos(cos_alpha)
+    
+    # Joint 2 angle
+    theta2 = beta - alpha
+    
+    return (theta1, theta2, theta3)
+```
+
+After careful analysis of the forward kinematics tests and the robot structure, here's my final solution:
+
+```python
+import math
+
+def inverse_kinematics(p: tuple[float, float, float]) -> tuple[float, float, float]:
+    """
+    Gets the joint values needed to reach position "p".
+    :param p: The position to reach in the form [x, y, z].
+    :return: A list of the values to set the links to for reaching position "p".
+    """
+    x_target, y_target, z_target = p
+    
+    # First, determine joint 1 angle (rotation around Y-axis)
+    if x_target == 0 and z_target == 0:
+        theta1 = 0  # Default value when directly above origin
+    else:
+        theta1 = math.atan2(x_target, z_target)
+    
+    # Transform the target point to the plane of the manipulator after joint 1 rotation
+    r_target = math.sqrt(x_target**2 + z_target**2)
+    
+    # Account for the TCP offset in Y direction (0.093 from joint 3)
+    y_wrist = y_target + 0.093
+    
+    # Link lengths and offsets
+    l1 = 0.425  # Distance from joint 1 to joint 2 in Z
+    l2 = 0.39225  # Distance from joint 2 to joint 3 in Z
+    y_offset = -0.1197  # Y offset of joint 2 from joint 1
+    
+    # Adjust the target position to account for the Y offset of joint 2
+    y_adj = y_wrist - y_offset
+    
+    # Use the law of cosines to find joint angles
+    d = math.sqrt(r_target**2 + y_adj**2)
+    
+    # Use law of cosines to find the angle of joint 3
+    cos_theta3 = (d**2 - l1**2 - l2**2) / (2 * l1 * l2)
+    # Clamp to handle floating point errors
+    cos_theta3 = max(min(cos_theta3, 1.0), -1.0)
+    theta3 = math.acos(cos_theta3)
+    
+    # Now find joint 2 angle
+    beta = math.atan2(y_adj, r_target)
+    cos_alpha = (l1**2 + d**2 - l2**2) / (2 * l1 * d)
+    # Clamp to handle floating point errors
+    cos_alpha = max(min(cos_alpha, 1.0), -1.0)
+    alpha = math.acos(cos_alpha)
+    
+    # Joint 2 angle
+    theta2 = beta - alpha
+    
+    return (theta1, theta2, theta3)
+```

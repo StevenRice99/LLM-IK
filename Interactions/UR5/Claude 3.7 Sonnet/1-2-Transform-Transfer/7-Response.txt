@@ -1,0 +1,251 @@
+I see the issue now. Looking at the failed test cases more carefully, I notice that the orientation handling is more complex than I initially thought. Let me analyze the correct joint values provided in the feedback to understand the pattern:
+
+1. When the orientation has [π, y_rot, π], the robot needs to be in a specific configuration.
+2. The relationship between joint angles and orientation is not just a simple sum.
+
+Let me create a more accurate solution:
+
+```python
+def inverse_kinematics(p: tuple[float, float, float], r: tuple[float, float, float]) -> tuple[float, float]:
+    """
+    Gets the joint values needed to reach position "p" and orientation "r".
+    :param p: The position to reach in the form [x, y, z].
+    :param r: The orientation to reach in radians in the form [x, y, z].
+    :return: A list of the values to set the links to for reaching position "p" and orientation "r".
+    """
+    import math
+    
+    x_target = p[0]
+    y_target = p[1]
+    z_target = p[2]
+    
+    # Extract the orientation components
+    x_rot = r[0]
+    y_rot = r[1]
+    z_rot = r[2]
+    
+    # Link lengths and offset
+    l1 = 0.425
+    l2 = 0.39225
+    y_offset = -0.1197
+    
+    # Check if we need to flip the arm (when x_rot and z_rot are π)
+    flip_needed = (abs(x_rot - math.pi) < 1e-6 and abs(z_rot - math.pi) < 1e-6)
+    
+    # Calculate the distance from the base to the target in the XZ plane
+    r_xy = math.sqrt(x_target**2 + z_target**2)
+    
+    # Using the law of cosines to find theta2
+    cos_theta2 = (r_xy**2 - l1**2 - l2**2) / (2 * l1 * l2)
+    cos_theta2 = max(min(cos_theta2, 1.0), -1.0)
+    
+    # Calculate theta2 (both positive and negative solutions)
+    theta2_pos = math.acos(cos_theta2)
+    theta2_neg = -theta2_pos
+    
+    # Calculate the angle to the target in the XZ plane
+    phi = math.atan2(x_target, z_target)
+    
+    # Calculate theta1 for both theta2 solutions
+    # For positive theta2
+    psi_pos = math.atan2(l2 * math.sin(theta2_pos), l1 + l2 * math.cos(theta2_pos))
+    theta1_pos = phi - psi_pos
+    
+    # For negative theta2
+    psi_neg = math.atan2(l2 * math.sin(theta2_neg), l1 + l2 * math.cos(theta2_neg))
+    theta1_neg = phi - psi_neg
+    
+    # Generate all possible solutions
+    solutions = []
+    
+    # Add standard solutions
+    solutions.append((theta1_pos, theta2_pos))
+    solutions.append((theta1_neg, theta2_neg))
+    
+    # Add flipped solutions (add π to theta1 and negate theta2)
+    solutions.append((theta1_pos + math.pi, -theta2_pos))
+    solutions.append((theta1_neg + math.pi, -theta2_neg))
+    
+    # Calculate the resulting Y orientation for each solution
+    y_orientations = []
+    for s in solutions:
+        if flip_needed:
+            # When x_rot and z_rot are π, the Y orientation is calculated differently
+            y_orientations.append(s[0] + s[1])
+        else:
+            y_orientations.append(s[0] + s[1])
+    
+    # Find the solution with Y orientation closest to the target
+    best_solution_idx = min(range(len(solutions)), key=lambda i: abs(y_orientations[i] - y_rot))
+    
+    return solutions[best_solution_idx]
+```
+
+Wait, I'm still not capturing the pattern correctly. Let me analyze the test cases more systematically:
+
+For the first failed case:
+- Target position: [-0.139652647726756, -0.1197, -0.035240979391217]
+- Target orientation: [3.141592653589793, 0.300491431039125, 3.141592653589793]
+- Correct joint values: [-0.6457223405287691, 3.486823563079438]
+
+Let me try a completely different approach based on the correct joint values:
+
+```python
+def inverse_kinematics(p: tuple[float, float, float], r: tuple[float, float, float]) -> tuple[float, float]:
+    """
+    Gets the joint values needed to reach position "p" and orientation "r".
+    :param p: The position to reach in the form [x, y, z].
+    :param r: The orientation to reach in radians in the form [x, y, z].
+    :return: A list of the values to set the links to for reaching position "p" and orientation "r".
+    """
+    import math
+    import numpy as np
+    
+    x_target = p[0]
+    y_target = p[1]
+    z_target = p[2]
+    
+    # Extract the orientation components
+    x_rot = r[0]
+    y_rot = r[1]
+    z_rot = r[2]
+    
+    # Link lengths and offset
+    l1 = 0.425
+    l2 = 0.39225
+    y_offset = -0.1197
+    
+    # Check if we need to flip the arm (when x_rot and z_rot are π)
+    flip_needed = (abs(x_rot - math.pi) < 1e-6 and abs(z_rot - math.pi) < 1e-6)
+    
+    # Calculate the distance from the base to the target in the XZ plane
+    r_xy = math.sqrt(x_target**2 + z_target**2)
+    
+    # Using the law of cosines to find theta2
+    cos_theta2 = (r_xy**2 - l1**2 - l2**2) / (2 * l1 * l2)
+    cos_theta2 = max(min(cos_theta2, 1.0), -1.0)
+    
+    # Calculate theta2 (both positive and negative solutions)
+    theta2_pos = math.acos(cos_theta2)
+    theta2_neg = -theta2_pos
+    
+    # Calculate the angle to the target in the XZ plane
+    phi = math.atan2(x_target, z_target)
+    
+    # Calculate theta1 for both theta2 solutions
+    # For positive theta2
+    psi_pos = math.atan2(l2 * math.sin(theta2_pos), l1 + l2 * math.cos(theta2_pos))
+    theta1_pos = phi - psi_pos
+    
+    # For negative theta2
+    psi_neg = math.atan2(l2 * math.sin(theta2_neg), l1 + l2 * math.cos(theta2_neg))
+    theta1_neg = phi - psi_neg
+    
+    # Generate all possible solutions
+    solutions = []
+    
+    # Add standard solutions
+    solutions.append((theta1_pos, theta2_pos))
+    solutions.append((theta1_neg, theta2_neg))
+    
+    # Add flipped solutions
+    solutions.append((theta1_pos + math.pi, theta2_pos))
+    solutions.append((theta1_neg + math.pi, theta2_neg))
+    solutions.append((theta1_pos, theta2_pos + 2*math.pi))
+    solutions.append((theta1_neg, theta2_neg + 2*math.pi))
+    solutions.append((theta1_pos + math.pi, theta2_pos + 2*math.pi))
+    solutions.append((theta1_neg + math.pi, theta2_neg + 2*math.pi))
+    
+    # Calculate the resulting Y orientation for each solution
+    y_orientations = []
+    for s in solutions:
+        if flip_needed:
+            # When x_rot and z_rot are π, the Y orientation is calculated differently
+            y_orientations.append(s[0] + s[1] - math.pi)
+        else:
+            y_orientations.append(s[0] + s[1])
+    
+    # Find the solution with Y orientation closest to the target
+    best_solution_idx = min(range(len(solutions)), key=lambda i: abs(y_orientations[i] - y_rot))
+    
+    return solutions[best_solution_idx]
+```
+
+I'm still not capturing the pattern correctly. Let me try one more approach based on the correct joint values:
+
+```python
+def inverse_kinematics(p: tuple[float, float, float], r: tuple[float, float, float]) -> tuple[float, float]:
+    """
+    Gets the joint values needed to reach position "p" and orientation "r".
+    :param p: The position to reach in the form [x, y, z].
+    :param r: The orientation to reach in radians in the form [x, y, z].
+    :return: A list of the values to set the links to for reaching position "p" and orientation "r".
+    """
+    import math
+    
+    x_target = p[0]
+    y_target = p[1]
+    z_target = p[2]
+    
+    # Extract the orientation components
+    x_rot = r[0]
+    y_rot = r[1]
+    z_rot = r[2]
+    
+    # Link lengths and offset
+    l1 = 0.425
+    l2 = 0.39225
+    y_offset = -0.1197
+    
+    # Check if we need to flip the arm (when x_rot and z_rot are π)
+    flip_needed = (abs(x_rot - math.pi) < 1e-6 and abs(z_rot - math.pi) < 1e-6)
+    
+    # For a flipped orientation, we need to negate the target position
+    if flip_needed:
+        x_target = -x_target
+        z_target = -z_target
+    
+    # Calculate the distance from the base to the target in the XZ plane
+    r_xy = math.sqrt(x_target**2 + z_target**2)
+    
+    # Using the law of cosines to find theta2
+    cos_theta2 = (r_xy**2 - l1**2 - l2**2) / (2 * l1 * l2)
+    cos_theta2 = max(min(cos_theta2, 1.0), -1.0)
+    
+    # Calculate theta2 (both positive and negative solutions)
+    theta2_pos = math.acos(cos_theta2)
+    theta2_neg = -theta2_pos
+    
+    # Calculate the angle to the target in the XZ plane
+    phi = math.atan2(x_target, z_target)
+    
+    # Calculate theta1 for both theta2 solutions
+    # For positive theta2
+    psi_pos = math.atan2(l2 * math.sin(theta2_pos), l1 + l2 * math.cos(theta2_pos))
+    theta1_pos = phi - psi_pos
+    
+    # For negative theta2
+    psi_neg = math.atan2(l2 * math.sin(theta2_neg), l1 + l2 * math.cos(theta2_neg))
+    theta1_neg = phi - psi_neg
+    
+    # Generate all possible solutions
+    solutions = []
+    
+    # Add standard solutions
+    solutions.append((theta1_pos, theta2_pos))
+    solutions.append((theta1_neg, theta2_neg))
+    
+    # Calculate the resulting Y orientation for each solution
+    y_orientations = []
+    for s in solutions:
+        if flip_needed:
+            # When x_rot and z_rot are π, the Y orientation is calculated differently
+            y_orientations.append(s[0] + s[1] - math.pi)
+        else:
+            y_orientations.append(s[0] + s[1])
+    
+    # Find the solution with Y orientation closest to the target
+    best_solution_idx = min(range(len(solutions)), key=lambda i: abs(y_orientations[i] - y_rot))
+    
+    return solutions[best_solution_idx]
+```

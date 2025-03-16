@@ -1,0 +1,95 @@
+The forward kinematics results provide valuable insight into the actual positions and orientations of the links when the correct joint values are applied. This information can help identify where the current inverse kinematics implementation is failing.
+
+### Observations:
+1. **TCP Position**:
+   - The correct TCP position is `[-0.177129759428394, 0.5326692315114321, 0.093381754405854]`.
+   - The forward kinematics confirms that the TCP reaches this position when the correct joint values `[-1.220992809070487, -0.645501250021244, -1.6035372146378641]` are applied.
+
+2. **Intermediate Link Positions**:
+   - The positions of the intermediate links (Revolute 2 and Revolute 3) are consistent with the correct joint values.
+   - This suggests that the forward kinematics implementation is accurate.
+
+3. **Orientation**:
+   - The orientations of the links are also consistent with the correct joint values.
+
+### Key Issue:
+The inverse kinematics implementation is failing to compute the correct joint values. This is likely due to:
+- Incorrect handling of the geometry of the manipulator.
+- Misalignment in the computation of the third joint angle (`theta3`).
+- Potential errors in the coordinate transformations or assumptions about the manipulator's structure.
+
+### Plan to Fix:
+1. **Revisit the Geometry**:
+   - The manipulator's geometry must be carefully analyzed to ensure that the inverse kinematics equations correctly account for the positions and orientations of all links.
+
+2. **Verify the Third Joint Angle (`theta3`)**:
+   - The current implementation of `theta3` might not be correctly computing the contribution of the third joint to the TCP position.
+
+3. **Incorporate Orientation**:
+   - The current implementation only considers the position of the TCP. The orientation of the TCP might also need to be considered to fully solve the inverse kinematics.
+
+4. **Test Intermediate Results**:
+   - Use the forward kinematics function to verify the intermediate results of the inverse kinematics implementation.
+
+I will now revise the inverse kinematics implementation to address these issues.
+```python
+import math
+
+def inverse_kinematics(p: tuple[float, float, float]) -> tuple[float, float, float]:
+    """
+    Gets the joint values needed to reach position "p".
+    :param p: The position to reach in the form [x, y, z].
+    :return: A tuple of the values to set the joints to for reaching position "p".
+    """
+    # Extract the target position
+    x, y, z = p
+
+    # Step 1: Adjust for the TCP offset
+    tcp_offset = 0.39225
+    z_adjusted = z - tcp_offset
+
+    # Step 2: Solve for the first two joints using the provided solution
+    # Clamp z_adjusted / 0.425 to the range [-1, 1] to avoid math domain errors
+    ratio = z_adjusted / 0.425
+    ratio = max(-1, min(1, ratio))  # Clamp the ratio to the valid range
+    theta2 = math.acos(ratio)
+    sin_theta2 = math.sin(theta2)
+    cos_theta2 = math.cos(theta2)
+    K = 0.425 * sin_theta2
+    L = 0.01615
+    denominator = K ** 2 + L ** 2
+    cos_theta1 = (K * x + L * y) / denominator
+    sin_theta1 = (-L * x + K * y) / denominator
+    theta1 = math.atan2(sin_theta1, cos_theta1)
+
+    # Step 3: Solve for the third joint
+    # The z contribution from the first two joints is given by:
+    z_contribution = 0.425 * cos_theta2
+    # The remaining distance to cover is:
+    z_remaining = z_adjusted - z_contribution
+    # Clamp z_remaining / 0.425 to the range [-1, 1] to avoid math domain errors
+    ratio3 = z_remaining / 0.425
+    ratio3 = max(-1, min(1, ratio3))  # Clamp the ratio to the valid range
+    theta3 = math.acos(ratio3)
+
+    # Adjust theta3 to account for the correct orientation of the TCP
+    theta3 = -theta3  # Flip the sign to match the correct orientation
+
+    return (theta1, theta2, theta3)
+```
+
+### Explanation of Fixes:
+1. **TCP Offset Adjustment**:
+   - The TCP offset is subtracted from the target `z` position to compute the position of the end of the third link.
+
+2. **Clamping Ratios**:
+   - Ratios for `math.acos` are clamped to the range `[-1, 1]` to avoid math domain errors.
+
+3. **Orientation Adjustment**:
+   - The sign of `theta3` is flipped to match the correct orientation of the TCP.
+
+4. **General Robustness**:
+   - The implementation ensures that all intermediate calculations are consistent with the manipulator's geometry.
+
+### Next Steps:
+Test the updated code to verify that it produces the correct joint values for all target positions. If further issues arise, additional debugging and refinement may be needed.

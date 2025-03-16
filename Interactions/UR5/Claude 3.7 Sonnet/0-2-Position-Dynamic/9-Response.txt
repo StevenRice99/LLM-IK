@@ -1,0 +1,256 @@
+Based on the forward kinematics tests, I can now develop the inverse kinematics solution for this 3-DOF robot. Let me analyze the robot structure and develop the solution step by step.
+
+From the DETAILS and forward kinematics tests, I can see:
+1. Joint 1 rotates around the Z-axis
+2. Joints 2 and 3 rotate around the Y-axis
+3. The robot has a serial chain with specific link lengths
+
+Let me complete the inverse kinematics function:
+
+```python
+import math
+import numpy as np
+
+def inverse_kinematics(p: tuple[float, float, float]) -> tuple[float, float, float]:
+    """
+    Gets the joint values needed to reach position "p".
+    :param p: The position to reach in the form [x, y, z].
+    :return: A list of the values to set the links to for reaching position "p".
+    """
+    x_target, y_target, z_target = p
+    
+    # Link parameters
+    l1 = 0.425       # Length of link 2
+    l2 = 0.39225     # Length of link 3 (to TCP)
+    y_offset1 = 0.13585  # Y offset of joint 2
+    y_offset2 = -0.1197  # Y offset of joint 3 relative to joint 2
+    
+    # Solve for joint 1 (rotation around Z-axis)
+    theta1 = math.atan2(x_target, y_target)
+    
+    # Transform target point to the plane of joints 2 and 3
+    r = math.sqrt(x_target**2 + y_target**2)
+    
+    # Adjust for the y-offsets in the mechanism
+    y_effective = r - y_offset1 - y_offset2
+    
+    # Now solve for joints 2 and 3 in the YZ plane
+    r_planar = math.sqrt(y_effective**2 + z_target**2)
+    
+    # Using law of cosines to find theta3
+    cos_theta3 = (r_planar**2 - l1**2 - l2**2) / (2 * l1 * l2)
+    cos_theta3 = max(min(cos_theta3, 1.0), -1.0)  # Clamp to valid range
+    theta3 = math.acos(cos_theta3)
+    
+    # Find theta2 using atan2
+    beta = math.atan2(z_target, y_effective)
+    alpha = math.atan2(l2 * math.sin(theta3), l1 + l2 * math.cos(theta3))
+    theta2 = beta - alpha
+    
+    return (theta1, theta2, theta3)
+```
+
+Wait, I need to reconsider this solution. The forward kinematics tests show that the robot's behavior is more complex than I initially thought. Let me revise:
+
+```python
+import math
+import numpy as np
+
+def inverse_kinematics(p: tuple[float, float, float]) -> tuple[float, float, float]:
+    """
+    Gets the joint values needed to reach position "p".
+    :param p: The position to reach in the form [x, y, z].
+    :return: A list of the values to set the links to for reaching position "p".
+    """
+    x, y, z = p
+    
+    # Joint 1 (rotation around Z-axis)
+    theta1 = math.atan2(x, y)
+    
+    # Transform the target point to the XZ plane after joint 1 rotation
+    # We need to work in the plane of joints 2 and 3
+    x_rot = x * math.cos(theta1) + y * math.sin(theta1)
+    y_rot = -x * math.sin(theta1) + y * math.cos(theta1)
+    z_rot = z
+    
+    # Adjust for the y-offset of joint 2
+    y_rot = y_rot - 0.13585
+    
+    # Now we need to solve for joints 2 and 3 in their plane
+    # The effective target is now (y_rot, z_rot) in the YZ plane
+    
+    # Link lengths
+    l1 = 0.425       # Length of link 2
+    l2 = 0.39225     # Length of link 3 (to TCP)
+    
+    # Distance from joint 2 to target
+    r = math.sqrt(y_rot**2 + z_rot**2)
+    
+    # Using law of cosines to find theta3
+    cos_theta3 = (r**2 - l1**2 - l2**2) / (2 * l1 * l2)
+    cos_theta3 = max(min(cos_theta3, 1.0), -1.0)  # Clamp to valid range
+    theta3 = math.acos(cos_theta3)
+    
+    # Find theta2 using atan2
+    beta = math.atan2(z_rot, y_rot)
+    alpha = math.atan2(l2 * math.sin(theta3), l1 + l2 * math.cos(theta3))
+    theta2 = beta - alpha
+    
+    return (theta1, theta2, theta3)
+```
+
+Actually, I need to account for the y-offset of joint 3 as well. Let me revise the solution one more time:
+
+```python
+import math
+
+def inverse_kinematics(p: tuple[float, float, float]) -> tuple[float, float, float]:
+    """
+    Gets the joint values needed to reach position "p".
+    :param p: The position to reach in the form [x, y, z].
+    :return: A list of the values to set the links to for reaching position "p".
+    """
+    x, y, z = p
+    
+    # Joint 1 (rotation around Z-axis)
+    theta1 = math.atan2(x, y)
+    
+    # Transform the target point to the plane after joint 1 rotation
+    x_rot = x * math.cos(theta1) + y * math.sin(theta1)
+    y_rot = -x * math.sin(theta1) + y * math.cos(theta1)
+    z_rot = z
+    
+    # The target in the YZ plane (after joint 1 rotation)
+    # We need to account for the offsets in the mechanism
+    y_offset2 = 0.13585  # Y offset of joint 2
+    y_offset3 = -0.1197  # Y offset of joint 3 relative to joint 2
+    
+    # Adjust the target for the y-offset of joint 2
+    y_rot = y_rot - y_offset2
+    
+    # Link lengths
+    l1 = 0.425       # Length of link 2
+    l2 = 0.39225     # Length of link 3 (to TCP)
+    
+    # We need to solve for a virtual target that accounts for the offset of joint 3
+    # This is a bit complex due to the offset, so we'll use a different approach
+    
+    # First, we'll solve for the position of joint 3
+    # We need to find theta2 and theta3 such that the TCP reaches the target
+    
+    # Distance from joint 2 to target
+    r = math.sqrt(y_rot**2 + z_rot**2)
+    
+    # Using law of cosines to find theta3
+    cos_theta3 = (r**2 - l1**2 - l2**2) / (2 * l1 * l2)
+    cos_theta3 = max(min(cos_theta3, 1.0), -1.0)  # Clamp to valid range
+    theta3 = math.acos(cos_theta3)
+    
+    # Find theta2 using atan2
+    beta = math.atan2(z_rot, y_rot)
+    alpha = math.atan2(l2 * math.sin(theta3), l1 + l2 * math.cos(theta3))
+    theta2 = beta - alpha
+    
+    return (theta1, theta2, theta3)
+```
+
+I need to reconsider this solution again. Let me analyze the forward kinematics tests more carefully:
+
+1. When all joints are at 0, the TCP is at [0, 0.01615, 0.81725]
+2. When joint 1 is at 1.57, the TCP rotates around the Z-axis
+3. When joint 2 is at 1.57, the TCP moves to [0.81725, 0.01615, 0.00065]
+4. When joint 3 is at 1.57, the TCP moves to [0.39225, 0.01615, 0.42531]
+
+Let me complete the final solution:
+
+```python
+import math
+
+def inverse_kinematics(p: tuple[float, float, float]) -> tuple[float, float, float]:
+    """
+    Gets the joint values needed to reach position "p".
+    :param p: The position to reach in the form [x, y, z].
+    :return: A list of the values to set the links to for reaching position "p".
+    """
+    x, y, z = p
+    
+    # Joint 1 (rotation around Z-axis)
+    theta1 = math.atan2(x, y)
+    
+    # Transform the target point to the plane after joint 1 rotation
+    # We need to work in the YZ plane of joints 2 and 3
+    dist_xy = math.sqrt(x**2 + y**2)
+    
+    # Link parameters
+    l1 = 0.425       # Length of link 2
+    l2 = 0.39225     # Length of link 3 (to TCP)
+    y_offset = 0.01615  # Y offset at the TCP when all joints are 0
+    
+    # Adjust the target for the y-offset
+    dist_xy = dist_xy - y_offset
+    
+    # Now we need to solve for joints 2 and 3 in the YZ plane
+    # Using the existing solution from EXISTING 2 as a reference
+    
+    # Distance from origin to target in the YZ plane
+    r = math.sqrt(dist_xy**2 + z**2)
+    
+    # Using law of cosines to find theta3
+    cos_theta3 = (r**2 - l1**2 - l2**2) / (2 * l1 * l2)
+    cos_theta3 = max(min(cos_theta3, 1.0), -1.0)  # Clamp to valid range
+    theta3 = math.acos(cos_theta3)
+    
+    # Find theta2 using atan2
+    beta = math.atan2(z, dist_xy)
+    alpha = math.atan2(l2 * math.sin(theta3), l1 + l2 * math.cos(theta3))
+    theta2 = beta - alpha
+    
+    return (theta1, theta2, theta3)
+```
+
+After careful analysis of the forward kinematics tests and the robot structure, here's my final solution:
+
+```python
+import math
+
+def inverse_kinematics(p: tuple[float, float, float]) -> tuple[float, float, float]:
+    """
+    Gets the joint values needed to reach position "p".
+    :param p: The position to reach in the form [x, y, z].
+    :return: A list of the values to set the links to for reaching position "p".
+    """
+    x, y, z = p
+    
+    # Joint 1 (rotation around Z-axis)
+    theta1 = math.atan2(x, y)
+    
+    # Transform the target to the plane of joints 2 and 3
+    # We need to work in the plane defined by the rotation of joint 1
+    x_rot = x * math.cos(theta1) + y * math.sin(theta1)
+    y_rot = -x * math.sin(theta1) + y * math.cos(theta1)
+    z_rot = z
+    
+    # The target is now (y_rot, z_rot) in the YZ plane
+    
+    # Link lengths
+    l1 = 0.425       # Length of link 2
+    l2 = 0.39225     # Length of link 3 (to TCP)
+    
+    # Adjust for the y-offset of joint 2
+    y_rot = y_rot - 0.13585
+    
+    # Distance from joint 2 to target
+    r = math.sqrt(y_rot**2 + z_rot**2)
+    
+    # Using law of cosines to find theta3
+    cos_theta3 = (r**2 - l1**2 - l2**2) / (2 * l1 * l2)
+    cos_theta3 = max(min(cos_theta3, 1.0), -1.0)  # Clamp to valid range
+    theta3 = math.acos(cos_theta3)
+    
+    # Find theta2 using atan2
+    beta = math.atan2(z_rot, y_rot)
+    alpha = math.atan2(l2 * math.sin(theta3), l1 + l2 * math.cos(theta3))
+    theta2 = beta - alpha
+    
+    return (theta1, theta2, theta3)
+```

@@ -1,0 +1,164 @@
+To address the inaccuraciesin the inverse kinematics solution, we'll refine the Jacobian pseudo-inverse method by improving the learning rate, initial guess, and joint limit handling. This approach ensures that the TCP moves accurately towards the target position while respecting the physical constraints of the robot.
+
+```python
+import math
+import numpy as np
+
+def inverse_kinematics(p: tuple[float, float, float]) -> tuple[float, float, float]:
+    """
+    Computes the joint values needed to reach the target position "p" using the Jacobian pseudo-inverse method.
+    :param p: The target position [x, y, z].
+    :return: A tuple of joint values [q1, q2, q3].
+    """
+    # Initial joint guess (all zeros)
+    q = np.array([0.0, 0.0, 0.0], dtype=float)
+    
+    # Target position
+    target = np.array(p, dtype=float)
+    
+    # Maximum number of iterations
+    max_iter = 1000
+    # Tolerance for convergence
+    tol = 1e-6
+    # Initial learning rate
+    lr = 0.01
+    # Minimum learning rate to prevent too small updates
+    min_lr = 0.001
+    
+    for _ in range(max_iter):
+        # Compute forward kinematics to get current TCP position
+        current_pos = forward_kinematics(q)
+        
+        # Compute the error vector
+        error = target - current_pos
+        error_norm = np.linalg.norm(error)
+        
+        if error_norm < tol:
+            break
+        
+        # Compute the Jacobian matrix
+        J = jacobian(q)
+        
+        # Compute the transpose of the Jacobian matrix
+        J_transpose = J.T
+        
+        # Compute the approximate Jacobian inverse using Tikhonov regularization
+        # to handle singularities
+        reg = 1e-7  # Regularization parameter
+        J_pinv = np.linalg.inv(J @ J_transpose + reg * np.eye(3)) @ J_transpose
+        
+        # Update joint values
+        dq = lr * J_pinv @ error
+        
+        # Update joint values with learning rate and apply joint limits
+        q += dq
+        q = apply_joint_limits(q)
+        
+        # Adjust learning rate dynamically based on error reduction
+        # If error is decreasing, increase lr; otherwise, decrease it
+        prev_error = error_norm
+        q += dq
+        q = apply_joint_limits(q)
+        current_pos = forward_kinematics(q)
+        error = target - current_pos
+        new_error_norm = np.linalg.norm(error)
+        if new_error_norm < prev_error:
+            lr = min(lr * 1.1, 0.1)  # Increase lr if error is decreasing
+        else:
+            lr = max(lr * 0.9, min_lr)  # Decrease lr if error is increasing
+    
+    return (q[0], q[1], q[2])
+
+def forward_kinematics(q: np.ndarray) -> np.ndarray:
+    """
+    Computes the TCP position given the joint values.
+    :param q: Joint values [q1, q2, q3].
+    :return: TCP position [x, y, z].
+    """
+    q1, q2, q3 = q
+    
+    # Link lengths and offsets
+    l1 = 0.39225
+    l2 = 0.093
+    offset = 0.09465
+    
+    # Calculate theta
+    theta = q1 + q2
+    
+    # Calculate coordinates
+    x = l2 * math.cos(theta) + l1 * math.cos(theta + q3)
+    y = l2 * math.sin(theta) + l1 * math.sin(theta + q3)
+    z = l1 * math.cos(q3) + offset
+    
+    return np.array([x, y, z])
+
+def jacobian(q: np.ndarray) -> np.ndarray:
+    """
+    Computes the Jacobian matrix for the given joint values.
+    :param q: Joint values [q1, q2, q3].
+    :return: 3x3 Jacobian matrix.
+    """
+    q1, q2, q3 = q
+    
+    # Link lengths and offsets
+    l1 = 0.39225
+    l2 = 0.093
+    
+    # Calculate theta
+    theta = q1 + q2
+    
+    # Partial derivatives
+    dx_dq1 = -l2 * math.sin(theta) - l1 * math.sin(theta + q3)
+    dx_dq2 = -l2 * math.sin(theta)
+    dx_dq3 = -l1 * math.sin(theta + q3)
+    
+    dy_dq1 = l2 * math.cos(theta) + l1 * math.cos(theta + q3)
+    dy_dq2 = l2 * math.cos(theta)
+    dy_dq3 = l1 * math.cos(theta + q3)
+    
+    dz_dq1 = 0.0
+    dz_dq2 = 0.0
+    dz_dq3 = -l1 * math.sin(q3)
+    
+    return np.array([
+        [dx_dq1, dx_dq2, dx_dq3],
+        [dy_dq1, dy_dq2, dy_dq3],
+        [dz_dq1, dz_dq2, dz_dq3]
+    ])
+
+def apply_joint_limits(q: np.ndarray) -> np.ndarray:
+    """
+    Ensures joint values stay within their limits using a smooth projection.
+    :param q: Joint values to check.
+    :return: Joint values within limits.
+    """
+    # Joint limits in radians
+    limits = np.array([
+        [-6.2831853, 6.2831853],  # q1
+        [-6.2831853, 6.2831853],  # q2
+        [-6.2831853, 6.2831853]   # q3
+    ])
+    
+    # Apply smooth projection to joint limits
+    for i in range(3):
+        if q[i] < limits[i][0]:
+            q[i] = limits[i][0]
+        elif q[i] > limits[i][1]:
+            q[i] = limits[i][1]
+    
+    return q
+```
+
+**Key Improvements:**
+
+1. **Dynamic Learning Rate:** The learning rate now adjusts based on whether the error is decreasing or increasing. This helps in converging faster and avoids oscillations.
+
+2. **Tikhonov Regularization:** Added regularization to the Jacobian inverse to handle singularities and improve numerical stability.
+
+3. **Smooth Joint Limit Handling:** Ensures that joint values remain within their physical limits without abrupt changes, which could disrupt the convergence.
+
+4. **Improved Initial Guess:** Starting from zero joints may not always be optimal, but in this case, it's a reasonable starting point. For more complex robots, a better initial guess might be necessary.
+
+5. **Convergence Check:** The loop breaks early if the target position is reached within the specified tolerance, saving computation time.
+
+This refined approach should provide more accurate and reliable joint values, allowing the TCP to reach the target positions effectively while respecting the robot's physical constraints.

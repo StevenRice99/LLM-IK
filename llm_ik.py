@@ -2018,116 +2018,6 @@ class Solver:
                      "Response received.")
         return True
 
-    def should_attempt(self, lower: int = 0, upper: int = -1, orientation: bool = False, mode: str = NORMAL) -> bool:
-        """
-        See if it is worth attempting a solver, as if a better one exists to be inherited, we should not.
-        :param lower: The starting joint.
-        :param upper: The ending joint.
-        :param orientation: If this data cares about the orientation or not.
-        :param mode: The mode by which the code was achieved.
-        :return: True if we should attempt to solve this, false otherwise.
-        """
-        # Nothing to do if the solver is not valid.
-        if not self.is_valid():
-            logging.error(f"{self.model} | Should Attempt | Solver is not valid.")
-            return False
-        # Ensure valid values.
-        lower, upper = self.robot.validate_lower_upper(lower, upper)
-        # If a solution exists, obviously nothing to do.
-        best, best_mode, best_cost = self.get_best(lower, upper, False if lower == upper else orientation)
-        if best is not None:
-            return False
-        # Handle single chains.
-        if lower == upper:
-            # Only attempt if all cheaper methods have been run and are not successful.
-            for option in self.options:
-                # Do not check against itself.
-                if option == self:
-                    continue
-                # If each lower option does not have a folder, it has clearly not yet been run.
-                path = os.path.join(option.interactions, f"{lower}-{upper}-{POSITION}-{NORMAL}")
-                if not os.path.exists(path):
-                    logging.info(f"{self.model} | {self.robot.name} | {lower + 1} to {upper + 1} | {POSITION} | "
-                                 f"{NORMAL} | Should Attempt | Not attempting as a cheaper model has not been "
-                                 "attempted.")
-                    return False
-                # Check to see if the done file exists.
-                is_done = False
-                files = get_files(path)
-                for file in files:
-                    if MESSAGE_DONE in file:
-                        is_done = True
-                        break
-                # If it doesn't exist, this cheaper option must be finished first.
-                if not is_done:
-                    logging.info(f"{self.model} | {self.robot.name} | {lower + 1} to {upper + 1} | {POSITION} | "
-                                 f"{NORMAL} | Should Attempt | Not attempting as a cheaper model has not finished.")
-                    return False
-            # If this is the first base chain, we can always attempt it.
-            if lower == 0:
-                return True
-            # Otherwise, attempt it if the previous link has been completed (successful or otherwise).
-            previous = lower - 1
-            # If the path does not exist, the lower chain is not done.
-            path = os.path.join(self.interactions, f"{previous}-{previous}-{POSITION}-{NORMAL}")
-            if not os.path.exists(path):
-                logging.info(f"{self.model} | {self.robot.name} | {lower + 1} to {upper + 1} | {POSITION} | {NORMAL} | "
-                             "Should Attempt | Not attempting as the previous link has not been attempted.")
-                return False
-            # Look for the completed message.
-            files = get_files(path)
-            for file in files:
-                if MESSAGE_DONE in file:
-                    return True
-            logging.info(f"{self.model} | {self.robot.name} | {lower + 1} to {upper + 1} | {POSITION} | {NORMAL} | "
-                         "Should Attempt | Not attempting as the previous link has not been finished.")
-            return False
-        # Ensure the mode is valid.
-        if mode not in [NORMAL, EXTEND, DYNAMIC, CUMULATIVE, TRANSFER]:
-            logging.warning(f"{self.model} | {self.robot.name} | {lower + 1} to {upper + 1} | Should Attempt | Mode "
-                            f"'{mode}' not valid, using '{NORMAL}' instead.")
-            mode = NORMAL
-        solving = TRANSFORM if orientation else POSITION
-        # Handle normal mode cases.
-        if mode == NORMAL:
-            # If the smaller size worked, we can attempt this.
-            previous = upper - 1
-            prev_ori = False if lower == previous else orientation
-            best, best_mode, best_cost = self.get_best(lower, previous, prev_ori)
-            if best is not None:
-                return True
-            # If solving for orientation and the position was solved, we can attempt it.
-            if orientation:
-                best, best_mode, best_cost = self.get_best(lower, upper, False)
-                if best is not None:
-                    return True
-            logging.info(f"{self.model} | {self.robot.name} | {lower + 1} to {upper + 1} | {solving} | {mode} | Should "
-                         "Attempt | Not attempting a normal solution as no easier chain was solved.")
-            return False
-        # Can only transfer if the position has been solved.
-        if mode == TRANSFER:
-            if not orientation:
-                logging.info(f"{self.model} | {self.robot.name} | {lower + 1} to {upper + 1} | {solving} | {mode} | "
-                             "Should Attempt | Cannot attempt a transfer mode for position only solving.")
-                return False
-            # We can transfer any mode.
-            best, best_mode, best_cost = self.get_best(lower, upper, False)
-            if best is None:
-                logging.info(f"{self.model} | {self.robot.name} | {lower + 1} to {upper + 1} | {solving} | {mode} | "
-                             "Should Attempt | No options to transfer.")
-                return False
-            return True
-        # Can only extend if there is something to extend.
-        if mode == EXTEND:
-            previous = upper - 1
-            best, best_mode, best_cost = self.get_best(lower, previous, False if lower == previous else orientation)
-            if best is None:
-                logging.info(f"{self.model} | {self.robot.name} | {lower + 1} to {upper} | {solving} | {mode} | "
-                             "Should Attempt | No options to extend.")
-                return False
-        # Other modes are just fully handled at prompting time.
-        return True
-
     def get_best(self, lower: int = 0, upper: int = -1, orientation: bool = False) -> (Any or None, str, float):
         """
         Get the best code for a certain size.
@@ -2199,8 +2089,9 @@ class Solver:
             logging.warning(f"{self.model} | {self.robot.name} | {lower + 1} to {upper + 1} | Handle Interactions | "
                             f"Mode '{mode}' not valid, using '{NORMAL}' instead.")
             mode = NORMAL
-        # Check if this problem has been solved by a cheaper model or there is a basis to solve from.
-        if not self.should_attempt(lower, upper, orientation, mode):
+        # Check if this problem has been solved and if so do not run it.
+        best, best_mode, best_cost = self.get_best(lower, upper, orientation)
+        if best is not None:
             return None
         solving = TRANSFORM if orientation else POSITION
         # Get all interactions.
@@ -2941,10 +2832,10 @@ class Solver:
         if not orientation and mode == TRANSFER:
             return ""
         # If there is a better option, do point in performing this.
-        best, previous_mode, cost = self.get_best(lower, upper, orientation)
+        best, best_mode, best_cost = self.get_best(lower, upper, orientation)
         if best is not None:
             logging.info(f"{self.model} | {self.robot.name} | {lower + 1} to {upper + 1} | Prepare LLM | "
-                         "A cheaper solution is already successful in normal mode; not doing mode a normal prompt.")
+                         "A cheaper solution is already successful; not doing another prompt.")
             return ""
         # Do not attempt an orientation solving if the position has not been solved first.
         if orientation:
@@ -2998,25 +2889,6 @@ class Solver:
                     "</DESCRIPTION>\n\t</TEST_SOLUTION>\n</FUNCTIONS>")
         # Perform normal prompts.
         if mode == NORMAL:
-            # Do not do orientation prompts until the position-only equivalent is done.
-            if orientation:
-                if not self.code_successful(lower, upper, False, NORMAL):
-                    logging.info(f"{self.model} | {self.robot.name} | {lower + 1} to {upper + 1} | Prepare LLM | "
-                                 "Position-only not successful; not doing mode a normal prompt with orientation.")
-                    return ""
-            # Do not attempt if easier chains failed.
-            if lower != upper:
-                # Check if a smaller chain has worked.
-                previous = upper - 1
-                previous_orientation = False if lower == previous else orientation
-                best, best_mode, best_cost = self.get_best(lower, previous, previous_orientation)
-                # If solving for orientation, try if the position only has been solved.
-                if best is None and orientation:
-                    best, best_mode, best_cost = self.get_best(lower, upper, False)
-                if best is None:
-                    logging.info(f"{self.model} | {self.robot.name} | {lower + 1} to {upper + 1} | Prepare LLM | "
-                                 "Easier chain not successful; not doing mode a normal prompt.")
-                    return ""
             prompt = self.robot.prepare_llm(lower, upper, orientation, pre)
             logging.info(f"{self.model} | {self.robot.name} | {lower + 1} to {upper + 1} | Prepare LLM | Normal prompt "
                          f"prepared.")
@@ -3043,8 +2915,8 @@ class Solver:
                 file.write(s)
             # Add the transfer prompt portion.
             additional = (f" To help you, a solution for solving the chain for position only is provided in the "
-                          '"EXISTING" section. You can use this solution as a starting point to solve for the '
-                          f"position and orientation.{pre}")
+                          '"EXISTING" section. You can use this solution as a starting point to solve for the position '
+                          f"and orientation.{pre}")
             prompt = self.robot.prepare_llm(lower, upper, orientation, additional)
             prompt += "\n<EXISTING>\n"
             with open(path, "r", encoding="utf-8", errors="ignore") as file:
@@ -3090,18 +2962,7 @@ class Solver:
             logging.info(f"{self.model} | {self.robot.name} | {lower + 1} to {upper + 1} | Prepare LLM | Extended "
                          "prompt prepared.")
             return f"{prompt}\n</EXISTING>{post}"
-        # Only perform a dynamic or cumulative prompt if the immediate sub-chains were in some way successful.
-        previous = upper - 1
-        previous_orientation = orientation and lower != previous
-        # Look for a lower-portion chain first.
-        best, previous_mode, cost = self.get_best(lower, previous, previous_orientation)
-        if best is None:
-            # Look at the upper-portion chain otherwise.
-            best, previous_mode, cost = self.get_best(lower + 1, upper, previous_orientation)
-            if best is None:
-                logging.info(f"{self.model} | {self.robot.name} | {lower + 1} to {upper + 1} | Prepare LLM | Nothing "
-                             "was successful for a smaller chain; not attempting a dynamic prompt.")
-                return ""
+        # Handle dynamic mode.
         if mode == DYNAMIC:
             # Get the best possible dynamic option.
             logging.info(f"{self.model} | {self.robot.name} | {lower + 1} to {upper + 1} | Prepare LLM | Beginning best"
@@ -3242,7 +3103,7 @@ class Solver:
             ending = f"joint {c_lower + 1}" if c_lower == c_upper else f"joints {c_lower + 1} to {c_upper + 1}"
             additional += f" Existing code {i + 1} solved {ending}."
         # Build the prompt.
-        prompt = self.robot.prepare_llm(lower, upper, orientation, additional + "\n" + pre)
+        prompt = self.robot.prepare_llm(lower, upper, orientation, additional + pre)
         # Add the existing codes to the prompt.
         for i in range(total):
             prompt += f"\n<EXISTING {i + 1}>\n{sequences[i]['Code']}\n</EXISTING {i + 1}>"

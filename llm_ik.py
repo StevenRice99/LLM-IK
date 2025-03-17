@@ -2098,7 +2098,7 @@ class Solver:
                 return True
             # If solving for orientation and the position was solved, we can attempt it.
             if orientation:
-                best, best_mode, best_cost = self.get_best(lower, previous, False)
+                best, best_mode, best_cost = self.get_best(lower, upper, False)
                 if best is not None:
                     return True
             logging.info(f"{self.model} | {self.robot.name} | {lower + 1} to {upper + 1} | {solving} | {mode} | Should "

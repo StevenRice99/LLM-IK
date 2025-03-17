@@ -1,0 +1,83 @@
+To solve this problem, we need to determine the joint angles for a 5-DOF serial manipulator to reach a specified target position (x, y, z). The solution involves correctly modeling the kinematic chain up to the Tool Center Point (TCP) and adjusting the parameters to account for all relevant link lengths and offsets. The key steps include solving for the first four joints to position the TCP and setting the fifth joint to zero since it does not affect the position.
+
+### Approach
+1. **Parameter Adjustment**: Correctly calculate the parameters to include all link lengths and offsets from the base to the TCP, ensuring the geometric model accurately represents the entire kinematic chain.
+2. **Inverse Kinematics Calculation**: Use a geometric approach to solve for the first three joints (theta1, theta2, theta3) to position the fourth joint's origin, then solve for theta4 to adjust the TCP's position.
+3. **Joint Angles**: Set the fifth joint angle to zero since it does not influence the position of the TCP.
+
+### Solution Code
+```python
+import numpy as np
+
+def inverse_kinematics(p: tuple[float, float, float]) -> tuple[float, float, float, float, float]:
+    x_target, y_target, z_target = p
+    
+    # Adjusted parameters including TCP offset from joint4
+    D = 0.13585 - 0.1197 + 0.093  # Total y-offset from joint2 to joint5
+    L1 = 0.425                     # Z-axis distance from joint2 to joint3
+    a = 0.39225                    # Z-axis distance from joint3 to joint4
+    tcp_z_offset = 0.09465         # TCP offset from joint5
+    joint5_y_offset = 0.093        # Joint5 y-offset from joint4
+
+    # Target position for joint4 origin (z-coordinate)
+    z_joint4 = z_target - tcp_z_offset
+
+    # Iterate possible theta4 values to find valid solutions
+    solutions = []
+    for theta4 in np.linspace(-np.pi, np.pi, 100):
+        # Calculate required joint4 position based on theta4
+        x_joint4 = x_target - joint5_y_offset * np.sin(theta4)
+        y_joint4 = y_target - joint5_y_offset * np.cos(theta4)
+        
+        # Solve for theta1-3 to reach joint4 position
+        try:
+            numerator = x_joint4**2 + y_joint4**2 + z_joint4**2 - D**2 - L1**2 - a**2
+            denominator = 2 * L1 * a
+            if abs(denominator) < 1e-6:
+                continue
+            cos_theta3 = numerator / denominator
+            cos_theta3 = np.clip(cos_theta3, -1.0, 1.0)
+            theta3_1 = np.arccos(cos_theta3)
+            theta3_2 = -theta3_1
+
+            for theta3 in [theta3_1, theta3_2]:
+                C1 = L1 + a * np.cos(theta3)
+                C2 = a * np.sin(theta3)
+                A_squared = x_joint4**2 + y_joint4**2 - D**2
+                if A_squared < 0:
+                    continue
+                for A_sign in [1, -1]:
+                    A = A_sign * np.sqrt(A_squared)
+                    denom = C1**2 + C2**2
+                    if denom == 0:
+                        continue
+                    sin_theta2 = (C1 * A - C2 * z_joint4) / denom
+                    cos_theta2 = (C2 * A + C1 * z_joint4) / denom
+                    if abs(sin_theta2) > 1 or abs(cos_theta2) > 1:
+                        continue
+                    theta2 = np.arctan2(sin_theta2, cos_theta2)
+                    denom_theta1 = A**2 + D**2
+                    if denom_theta1 == 0:
+                        continue
+                    cos_theta1 = (A * x_joint4 + D * y_joint4) / denom_theta1
+                    sin_theta1 = (-D * x_joint4 + A * y_joint4) / denom_theta1
+                    theta1 = np.arctan2(sin_theta1, cos_theta1)
+                    solutions.append((theta1, theta2, theta3, theta4))
+        except ValueError:
+            continue
+
+    if not solutions:
+        raise ValueError('No valid solutions found')
+    
+    # Select solution with minimal joint movement
+    theta1, theta2, theta3, theta4 = min(solutions, key=lambda s: sum(abs(j) for j in s))
+    theta5 = 0.0
+    return (theta1, theta2, theta3, theta4, theta5)
+```
+
+### Explanation
+1. **Parameter Adjustment**: The parameters `D`, `L1`, and `a` are adjusted to include the cumulative offsets from Revolute2 to Revolute4. The TCP's z-offset and Revolute5's y-offset are considered in the target position calculation.
+2. **Inverse Kinematics Calculation**: The solution iterates over possible theta4 values to adjust the target position for Revolute4's origin. For each theta4, the existing geometric approach is used to solve for theta1-3, ensuring the TCP's position is reached.
+3. **Solution Selection**: The solution with minimal joint movement is selected to ensure a natural configuration, and theta5 is set to zero as it does not affect the position.
+
+This approach correctly models the kinematic chain and accounts for the effect of theta4 on the TCP's position, ensuring valid solutions are found for the target position.

@@ -1,0 +1,85 @@
+To solve the inverse kinematics for the 5-DOF manipulator, we need to accurately compute the joint angles considering the 3D geometry of the links and joints. The solution involves positioning the wrist (Revolute 4) and adjusting the end-effector (TCP) using trigonometric and matrix operations.
+
+### Approach
+1. **Position Revolute 4**: Use the first two joints (theta1 and theta2) to position Revolute 4 in the X-Z plane using geometric calculations.
+2. **Calculate Displacement**: Determine the 3D displacement vector from Revolute 4 to the target.
+3. **Solve for Theta5**: Use the Y-component of the displacement to compute theta5, ensuring it's within the reachable range.
+4. **Solve for Theta4**: Use matrix inversion to solve the system of equations derived from the X and Z components of the displacement.
+
+### Solution Code
+```python
+import math
+
+def inverse_kinematics(p: tuple[float, float, float]) -> tuple[float, float, float, float, float]:
+    x_target, y_target, z_target = p
+
+    # Link lengths and offsets
+    l1 = 0.425
+    l2 = 0.39225
+    L5 = 0.09465  # Revolute 5's Z offset
+    Ltcp = 0.0823  # TCP's X offset
+
+    # Calculate Revolute 4's position using theta1 and theta2
+    r = math.hypot(x_target, z_target)
+    cos_theta2 = (r**2 - l1**2 - l2**2) / (2 * l1 * l2)
+    cos_theta2 = max(min(cos_theta2, 1.0), -1.0)
+    theta2 = math.acos(cos_theta2)
+    beta = math.atan2(x_target, z_target)
+    alpha = math.atan2(l2 * math.sin(theta2), l1 + l2 * math.cos(theta2))
+    theta1 = beta - alpha
+
+    # Revolute 4's position in base frame
+    x_j4 = l1 * math.sin(theta1) + l2 * math.sin(theta1 + theta2)
+    z_j4 = l1 * math.cos(theta1) + l2 * math.cos(theta1 + theta2)
+    y_j4 = -0.1197 + 0.093  # Sum of Y offsets from Revolute 2 to Revolute 4
+
+    # Displacement from Revolute 4 to target
+    dx = x_target - x_j4
+    dy = y_target - y_j4
+    dz = z_target - z_j4
+
+    # Check if dy is within reachable range
+    if abs(dy) > Ltcp:
+        raise ValueError("Target y is out of reach")
+
+    # Solve for theta5 using dy
+    sin_theta5 = dy / Ltcp
+    cos_theta5 = math.sqrt(1 - sin_theta5**2)  # cos(theta5) is non-negative since theta5 ∈ [-π/2, π/2]
+    theta5 = math.asin(sin_theta5)
+
+    # Solve the system for theta4 using dx and dz
+    a = L5
+    b = Ltcp * cos_theta5
+    # System equations:
+    # dx = b * cos(theta4) + a * sin(theta4)
+    # dz = a * cos(theta4) - b * sin(theta4)
+    # Matrix form: [[b, a], [a, -b]] * [C4, S4] = [dx, dz]
+    det = -b**2 - a**2
+    if abs(det) < 1e-9:
+        raise ValueError("Singular matrix; target xz is out of reach")
+
+    inv_det = 1.0 / det
+    C4 = inv_det * (-b * dx - a * dz)
+    S4 = inv_det * (a * dx - b * dz)
+
+    # Normalize to handle numerical inaccuracies
+    norm = math.hypot(C4, S4)
+    C4 /= norm
+    S4 /= norm
+
+    theta4 = math.atan2(S4, C4)
+
+    # Theta3 is set to 0 as per the problem's existing solutions
+    theta3 = 0.0
+
+    return (theta1, theta2, theta3, theta4, theta5)
+```
+
+### Explanation
+1. **Positioning Revolute 4**: The first two joints (theta1 and theta2) are calculated using geometric principles to position Revolute 4 in the X-Z plane.
+2. **Displacement Calculation**: The 3D displacement vector from Revolute 4 to the target is computed.
+3. **Theta5 Calculation**: The Y-component of the displacement is used to determine theta5, ensuring the target is within the reachable range.
+4. **Theta4 Calculation**: Matrix inversion solves the system of equations derived from the X and Z components of the displacement, providing theta4.
+5. **Normalization**: Ensures numerical stability by normalizing the cosine and sine values of theta4.
+
+This approach accurately models the 3D geometry of the manipulator, ensuring the target position is reachable and correctly computing the joint angles.

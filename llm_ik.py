@@ -2111,7 +2111,7 @@ class Solver:
                              "Should Attempt | Cannot attempt a transfer mode for position only solving.")
                 return False
             # We can transfer any mode.
-            best, best_mode, best_cost = self.get_best(lower, upper - 1, False)
+            best, best_mode, best_cost = self.get_best(lower, upper, False)
             if best is None:
                 logging.info(f"{self.model} | {self.robot.name} | {lower + 1} to {upper + 1} | {solving} | {mode} | "
                              "Should Attempt | No options to transfer.")
@@ -3165,7 +3165,7 @@ class Solver:
                 ending = f"joint {c_lower + 1 + base}" if c_lower == c_upper else (f"joints {c_lower + 1 + base} to "
                                                                                    f"{c_upper + 1 + base}")
                 base = c_upper + 1
-                additional += f"\nExisting code {i + 1} solved {ending}."
+                additional += f" Existing code {i + 1} solved {ending}."
             # Build the prompt.
             prompt = self.robot.prepare_llm(lower, upper, orientation, additional + pre)
             # Add the existing codes to the prompt.
@@ -3244,7 +3244,7 @@ class Solver:
             c_lower = sequences[i]["Lower"]
             c_upper = sequences[i]["Upper"]
             ending = f"joint {c_lower + 1}" if c_lower == c_upper else f"joints {c_lower + 1} to {c_upper + 1}"
-            additional += f"\nExisting code {i + 1} solved {ending}."
+            additional += f" Existing code {i + 1} solved {ending}."
         # Build the prompt.
         prompt = self.robot.prepare_llm(lower, upper, orientation, additional + "\n" + pre)
         # Add the existing codes to the prompt.

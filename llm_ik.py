@@ -3157,13 +3157,10 @@ class Solver:
                           f"{' and orientation' if orientation else ''} being solved for. You can use these solutions "
                           "as a starting point to extend for the entire chain.")
             # State what sub-chain each dynamic code is for.
-            base = 0
             for i in range(total):
-                c_lower = best[i]["Lower"]
-                c_upper = best[i]["Upper"]
-                ending = f"joint {c_lower + 1 + base}" if c_lower == c_upper else (f"joints {c_lower + 1 + base} to "
-                                                                                   f"{c_upper + 1 + base}")
-                base = c_upper + 1
+                c_lower = best[i]["Lower"] - lower
+                c_upper = best[i]["Upper"] - lower
+                ending = f"joint {c_lower + 1}" if c_lower == c_upper else f"joints {c_lower + 1} to {c_upper + 1}"
                 additional += f" Existing code {i + 1} solved {ending}."
             # Build the prompt.
             prompt = self.robot.prepare_llm(lower, upper, orientation, additional + pre)
@@ -3240,8 +3237,8 @@ class Solver:
                       f" You can use these solutions as a starting point to extend for the entire chain.")
         # State what sub-chain each dynamic code is for.
         for i in range(total):
-            c_lower = sequences[i]["Lower"]
-            c_upper = sequences[i]["Upper"]
+            c_lower = sequences[i]["Lower"] - lower
+            c_upper = sequences[i]["Upper"] - lower
             ending = f"joint {c_lower + 1}" if c_lower == c_upper else f"joints {c_lower + 1} to {c_upper + 1}"
             additional += f" Existing code {i + 1} solved {ending}."
         # Build the prompt.

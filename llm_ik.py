@@ -73,8 +73,8 @@ WAIT = 1
 # Default bounding value.
 BOUND = 2 * np.pi
 
-# Handle timing out.
-MAX_TIME = 30
+# Handle timing out, as no single iteration should ever come close to reaching a second.
+MAX_TIME = 1
 ERROR_TIMED_OUT = "ERROR_TIMED_OUT"
 
 # All fields for evaluations.
@@ -2499,10 +2499,10 @@ class Solver:
                 joints = func_timeout(MAX_TIME, self.code[lower][upper][solving][mode], args=[position])
                 elapsed = time.perf_counter() - start_time
             except FunctionTimedOut:
-                elapsed = MAX_TIME
+                elapsed = np.inf
                 message = ERROR_TIMED_OUT
                 logging.info(f"{self.model} | {lower + 1} to {upper + 1} | Run Code | {solving} | {mode} | Error: Code "
-                             f"timed out after {MAX_TIME} seconds.")
+                             "timed out.")
             except Exception as e:
                 elapsed = time.perf_counter() - start_time
                 message = traceback.format_exc()
@@ -2514,10 +2514,10 @@ class Solver:
                 joints = func_timeout(MAX_TIME, self.code[lower][upper][solving][mode], args=(position, orientation))
                 elapsed = time.perf_counter() - start_time
             except FunctionTimedOut:
-                elapsed = MAX_TIME
+                elapsed = np.inf
                 message = ERROR_TIMED_OUT
                 logging.info(f"{self.model} | {lower + 1} to {upper + 1} | Run Code | {solving} | {mode} | Error: Code "
-                             f"timed out after {MAX_TIME} seconds.")
+                             f"timed out.")
             except Exception as e:
                 elapsed = time.perf_counter() - start_time
                 message = traceback.format_exc()
@@ -2592,7 +2592,7 @@ class Solver:
                 if error == ERROR_TIMED_OUT:
                     successes = 0
                     errors = total
-                    total_time = MAX_TIME * total
+                    total_time = np.inf
                     total_distance = 0
                     total_angle = 0
                     break
@@ -2837,13 +2837,6 @@ class Solver:
             logging.info(f"{self.model} | {self.robot.name} | {lower + 1} to {upper + 1} | Prepare LLM | "
                          "A cheaper solution is already successful; not doing another prompt.")
             return ""
-        # Do not attempt an orientation solving if the position has not been solved first.
-        if orientation:
-            pos, m, c = self.get_best(lower, upper, False)
-            if pos is None:
-                logging.info(f"{self.model} | {self.robot.name} | {lower + 1} to {upper + 1} | Prepare LLM | "
-                             "Position only chain has not yet been solved in dynamic mode; not solving with it.")
-                return ""
         # Explain how to use functions.
         mid = "" if self.methods else 'in the "FUNCTIONS" section '
         pre = (" You may respond by either completing the inverse kinematics method or calling either of the two "

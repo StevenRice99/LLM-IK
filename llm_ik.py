@@ -2088,22 +2088,22 @@ class Solver:
                             f"'{mode}' not valid, using '{NORMAL}' instead.")
             mode = NORMAL
         solving = TRANSFORM if orientation else POSITION
-        # If in normal mode, see if the sub-chain has been completed.
+        # Handle normal mode cases.
         if mode == NORMAL:
-            # Otherwise, see if the lower chain worked.
+            # If the smaller size worked, we can attempt this.
             previous = upper - 1
             prev_ori = False if lower == previous else orientation
-            attempt = self.code_successful(lower, previous, prev_ori, NORMAL)
-            # If an inherited model worked, we can count that too.
-            if not attempt:
-                for option in self.options:
-                    attempt = option.code_successful(lower, previous, prev_ori, NORMAL)
-                    if attempt:
-                        break
-            if not attempt:
-                logging.info(f"{self.model} | {self.robot.name} | {lower + 1} to {upper + 1} | {solving} | {mode} | "
-                             "Should Attempt | Not attempting as the smaller sub-chain was not successful.")
-            return attempt
+            best, best_mode, best_cost = self.get_best(lower, previous, prev_ori)
+            if best is not None:
+                return True
+            # If solving for orientation and the position was solved, we can attempt it.
+            if orientation:
+                best, best_mode, best_cost = self.get_best(lower, previous, False)
+                if best is not None:
+                    return True
+            logging.info(f"{self.model} | {self.robot.name} | {lower + 1} to {upper + 1} | {solving} | {mode} | Should "
+                         "Attempt | Not attempting a normal solution as no easier chain was solved.")
+            return False
         # Can only transfer if the position has been solved.
         if mode == TRANSFER:
             if not orientation:
@@ -2125,9 +2125,10 @@ class Solver:
                 logging.info(f"{self.model} | {self.robot.name} | {lower + 1} to {upper} | {solving} | {mode} | "
                              "Should Attempt | No options to extend.")
                 return False
+        # Other modes are just fully handled at prompting time.
         return True
 
-    def get_best(self, lower: int = 0, upper: int = -1, orientation: bool = False) -> (Any or None, str):
+    def get_best(self, lower: int = 0, upper: int = -1, orientation: bool = False) -> (Any or None, str, float):
         """
         Get the best code for a certain size.
         :param lower: The starting joint.
@@ -3003,20 +3004,18 @@ class Solver:
                     logging.info(f"{self.model} | {self.robot.name} | {lower + 1} to {upper + 1} | Prepare LLM | "
                                  "Position-only not successful; not doing mode a normal prompt with orientation.")
                     return ""
-            # Do not attempt if the smaller problem failed.
+            # Do not attempt if easier chains failed.
             if lower != upper:
+                # Check if a smaller chain has worked.
                 previous = upper - 1
                 previous_orientation = False if lower == previous else orientation
-                do = self.code_successful(lower, previous, previous_orientation, NORMAL)
-                # See if a cheaper model did the smaller size, because if so let us assume we should try with this.
-                if not do:
-                    for option in self.options:
-                        do = option.code_successful(lower, previous, previous_orientation, NORMAL)
-                        if do:
-                            break
-                if not do:
+                best, best_mode, best_cost = self.get_best(lower, previous, previous_orientation)
+                # If solving for orientation, try if the position only has been solved.
+                if best is None and orientation:
+                    best, best_mode, best_cost = self.get_best(lower, upper, False)
+                if best is None:
                     logging.info(f"{self.model} | {self.robot.name} | {lower + 1} to {upper + 1} | Prepare LLM | "
-                                 "Prior length not successful; not doing mode a normal prompt.")
+                                 "Easier chain not successful; not doing mode a normal prompt.")
                     return ""
             prompt = self.robot.prepare_llm(lower, upper, orientation, pre)
             logging.info(f"{self.model} | {self.robot.name} | {lower + 1} to {upper + 1} | Prepare LLM | Normal prompt "

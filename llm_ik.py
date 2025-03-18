@@ -856,7 +856,14 @@ class Robot:
                 values[i] = np.average(chain.links[i].bounds)
             controlled.append(values[i])
         # Perform forward kinematics.
-        links = chain.forward_kinematics(values, True)
+        try:
+            links = chain.forward_kinematics(values, True)
+        except Exception as e:
+            logging.info(f"{self.name} | {lower + 1} to {upper + 1} | Forward kinematics | Joints = {controlled} | "
+                         f"Forward kinematics failed; using zeros instead: {e}")
+            for i in range(total):
+                values[i] = 0
+            links = chain.forward_kinematics(values, True)
         # Get the positions and orientations of each link.
         positions = []
         orientations = []

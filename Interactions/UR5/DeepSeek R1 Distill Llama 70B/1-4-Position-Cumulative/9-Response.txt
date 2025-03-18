@@ -1,0 +1,182 @@
+To solve the inverse kinematicsproblem for the 4-DOF serial manipulator, we'll use the Jacobian inverse method. This approach involves iteratively updating the joint angles based on the error between the current and target positions, using the Jacobian matrix to relate joint velocities to end effector velocities.
+
+### Approach
+1. **Forward Kinematics:** Calculate the position of the TCP given the joint angles by applying each joint's transformation and link offset.
+2. **Jacobian Matrix:** Compute the partial derivatives of the TCP position with respect to each joint angle to form the Jacobian matrix.
+3. **Iterative Update:** Use the Jacobian inverse to update the joint angles iteratively until the error between the current and target positions is minimized.
+
+### Solution Code
+```python
+import numpy as np
+
+def inverse_kinematics(p: tuple[float, float, float]) -> tuple[float, float, float, float]:
+    """
+    Gets the joint values needed to reach position "p" using the Jacobian inverse method.
+    :param p: The position to reach in the form [x, y, z].
+    :return: A tuple of the values to set the joints to for reaching position "p".
+    """
+    # Define the current joint angles (initial guess)
+    theta = np.array([0.0, 0.0, 0.0, 0.0], dtype=float)
+    
+    # Define the target position
+    target = np.array([p[0], p[1], p[2]], dtype=float)
+    
+    # Maximum number of iterations
+    max_iter = 1000
+    
+    # Tolerance for convergence
+    tolerance = 1e-6
+    
+    # Learning rate for Jacobian inverse
+    alpha = 0.5
+    
+    for _ in range(max_iter):
+        # Calculate the current position based on joint angles
+        current = forward_kinematics(theta)
+        
+        # Compute the error
+        error = target - current
+        
+        # If the error is within tolerance, break the loop
+        if np.linalg.norm(error) < tolerance:
+            break
+        
+        # Calculate the Jacobian matrix
+        J = jacobian_matrix(theta)
+        
+        # Compute the Jacobian inverse
+        J_inv = np.linalg.pinv(J)
+        
+        # Update the joint angles
+        theta += alpha * J_inv @ error
+    
+    return tuple(theta)
+
+def forward_kinematics(theta: np.ndarray) -> np.ndarray:
+    """
+    Calculates the end effector position given the joint angles.
+    :param theta: The joint angles in radians.
+    :return: The position of the end effector as a 3D array [x, y, z].
+    """
+    # Define the link offsets in homogeneous coordinates
+    link1 = np.array([0, 0, 0, 1])  # Joint 1 to Link 1
+    link2 = np.array([0, -0.1197, 0.425, 1])  # Link 1 to Link 2
+    link3 = np.array([0, 0, 0.39225, 1])  # Link 2 to Link 3
+    link4 = np.array([0, 0.093, 0, 1])  # Link 3 to Link 4
+    tcp_offset = np.array([0, 0, 0.09465, 1])  # Link 4 to TCP
+    
+    # Initialize the cumulative transformation matrix
+    T_cumulative = np.identity(4)
+    
+    # Apply each joint's transformation
+    for i in range(4):
+        # Get the transformation matrix for the current joint
+        if i < 3:
+            axis = 'Y'
+        else:
+            axis = 'Z'
+        T_joint = transformation_matrix(theta[i], axis)
+        
+        # Update the cumulative transformation
+        T_cumulative = T_cumulative @ T_joint
+        
+        # Transform the next link's offset
+        if i < 3:
+            link = link2 if i == 0 else link3 if i == 1 else link4
+            transformed_link = T_joint @ link
+        else:
+            transformed_link = T_cumulative @ link4
+        
+    # Transform the TCP offset with the cumulative transformation
+    tcp_transformed = T_cumulative @ tcp_offset
+    
+    # Extract the position from the homogeneous coordinates
+    position = tcp_transformed[:3]
+    
+    return position
+
+def transformation_matrix(theta: float, axis: str) -> np.ndarray:
+    """
+    Creates a 4x4 transformation matrix for a rotation about the specified axis.
+    :param theta: The rotation angle in radians.
+    :param axis: The axis of rotation ('X', 'Y', 'Z').
+    :return: The 4x4 transformation matrix.
+    """
+    if axis == 'X':
+        return np.array([
+            [1, 0, 0, 0],
+            [0, np.cos(theta), -np.sin(theta), 0],
+            [0, np.sin(theta), np.cos(theta), 0],
+            [0, 0, 0, 1]
+        ])
+    elif axis == 'Y':
+        return np.array([
+            [np.cos(theta), 0, np.sin(theta), 0],
+            [0, 1, 0, 0],
+            [-np.sin(theta), 0, np.cos(theta), 0],
+            [0, 0, 0, 1]
+        ])
+    elif axis == 'Z':
+        return np.array([
+            [np.cos(theta), -np.sin(theta), 0, 0],
+            [np.sin(theta), np.cos(theta), 0, 0],
+            [0, 0, 1, 0],
+            [0, 0, 0, 1]
+        ])
+    else:
+        raise ValueError("Invalid rotation axis.")
+
+def jacobian_matrix(theta: np.ndarray) -> np.ndarray:
+    """
+    Computes the Jacobian matrix for the current joint configuration.
+    :param theta: The joint angles in radians.
+    :return: The 3x4 Jacobian matrix.
+    """
+    # Initialize the Jacobian matrix
+    J = np.zeros((3, 4))
+    
+    # Calculate the partial derivatives for each joint
+    for i in range(4):
+        # Compute the transformation matrices
+        T = forward_kinematics(theta)
+        T_i = transformation_matrix(theta[i], 'Y' if i < 3 else 'Z')
+        
+        # Compute the partial derivative for joint i
+        if i < 3:
+            axis = np.array([0, 1, 0])  # Y-axis
+        else:
+            axis = np.array([0, 0, 1])  # Z-axis
+        
+        # Calculate the derivative of the transformation matrix
+        dT_i = np.zeros((4, 4))
+        if i < 3:
+            dT_i = np.array([
+                [0, 0, 0, 0],
+                [0, -axis[1], -axis[2], 0],
+                [0, axis[0], axis[1], 0],
+                [0, 0, 0, 1]
+            ])
+        else:
+            dT_i = np.array([
+                [0, -axis[2], axis[1], 0],
+                [axis[2], 0, -axis[0], 0],
+                [-axis[1], axis[0], 0, 0],
+                [0, 0, 0, 1]
+            ])
+        
+        # Compute the partial derivative of the end effector position
+        J[:, i] = (T_i @ dT_i[:, :3, 3]).flatten()
+    
+    return J
+```
+
+### Explanation
+1. **Forward Kinematics:** The `forward_kinematics` function calculates the TCP position by applying each joint's transformation matrix and link offset in sequence. It uses homogeneous coordinates to handle both rotation and translation.
+
+2. **Transformation Matrix:** The `transformation_matrix` function generates a 4x4 matrix representing the rotation about the specified axis (Y for the first three joints and Z for the fourth joint).
+
+3. **Jacobian Matrix:** The `jacobian_matrix` function computes the partial derivatives of the TCP position with respect to each joint angle. This involves differentiating the transformation matrices and applying them to the link offsets.
+
+4. **Inverse Kinematics Loop:** The `inverse_kinematics` function iteratively updates the joint angles using the Jacobian inverse. It starts with an initial guess (all zeros) and adjusts the angles based on the error between the current and target positions until the error is minimized.
+
+This approach ensures that the TCP moves towards the target position iteratively, adjusting the joint angles to minimize the error. The use of the Jacobian inverse allows the solution to handle the full kinematic chain and joint interactions effectively.

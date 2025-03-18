@@ -1,0 +1,77 @@
+The feedback indicates that the initial inverse kinematics solution did not correctly position the TCP at the desired targets. The issue likely arises from the oversimplified approach to solving the joint angles, which does not account for the full kinematic chain or the orientation constraints. To address this, we need to incorporate the orientation `r` into the solution and ensure that the joint angles are calculated in a way that satisfies both the position and orientation requirements.
+
+### Revised Approach
+1. **Solve for Joint 1 (θ₁)**: Use the target position `p` to determine the rotation around the Z-axis.
+2. **Solve for Joint 2 (θ₂) and Joint 3 (θ₃)**: Use the target position `p` and the orientation `r` to determine the rotations around the Y-axis.
+3. **Solve for Joint 4 (θ₄), Joint 5 (θ₅), and Joint 6 (θ₆)**: Use the orientation `r` to determine the rotations around the Y and Z axes.
+
+### Revised Code
+Here is the revised inverse kinematics function:
+
+```python
+import math
+import numpy as np
+
+def inverse_kinematics(p: tuple[float, float, float], r: tuple[float, float, float]) -> tuple[float, float, float, float, float, float]:
+    x, y, z = p
+    roll, pitch, yaw = r
+    
+    # Solve for θ₁
+    theta1 = math.atan2(y, x)
+    
+    # Solve for θ₂ and θ₃
+    d1 = 0.13585
+    a2 = 0.425
+    a3 = 0.39225
+    d4 = 0.093
+    d6 = 0.09465
+    
+    # Calculate the position of the wrist center
+    x_wrist = x - d6 * math.cos(pitch) * math.cos(yaw)
+    y_wrist = y - d6 * math.cos(pitch) * math.sin(yaw)
+    z_wrist = z - d6 * math.sin(pitch)
+    
+    # Solve for θ₂
+    r = math.sqrt(x_wrist**2 + y_wrist**2)
+    D = (r**2 + (z_wrist - d1)**2 - a2**2 - a3**2) / (2 * a2 * a3)
+    theta3 = math.atan2(math.sqrt(1 - D**2), D)
+    
+    # Solve for θ₂
+    theta2 = math.atan2(z_wrist - d1, r) - math.atan2(a3 * math.sin(theta3), a2 + a3 * math.cos(theta3))
+    
+    # Solve for θ₄, θ₅, and θ₆
+    # Calculate the rotation matrix from the base to the wrist center
+    R0_3 = np.array([
+        [math.cos(theta1) * math.cos(theta2 + theta3), -math.cos(theta1) * math.sin(theta2 + theta3), math.sin(theta1)],
+        [math.sin(theta1) * math.cos(theta2 + theta3), -math.sin(theta1) * math.sin(theta2 + theta3), -math.cos(theta1)],
+        [math.sin(theta2 + theta3), math.cos(theta2 + theta3), 0]
+    ])
+    
+    # Calculate the desired rotation matrix from the base to the TCP
+    R0_6 = np.array([
+        [math.cos(yaw) * math.cos(pitch), -math.sin(yaw) * math.cos(roll) + math.cos(yaw) * math.sin(pitch) * math.sin(roll), math.sin(yaw) * math.sin(roll) + math.cos(yaw) * math.sin(pitch) * math.cos(roll)],
+        [math.sin(yaw) * math.cos(pitch), math.cos(yaw) * math.cos(roll) + math.sin(yaw) * math.sin(pitch) * math.sin(roll), -math.cos(yaw) * math.sin(roll) + math.sin(yaw) * math.sin(pitch) * math.cos(roll)],
+        [-math.sin(pitch), math.cos(pitch) * math.sin(roll), math.cos(pitch) * math.cos(roll)]
+    ])
+    
+    # Calculate the rotation matrix from the wrist center to the TCP
+    R3_6 = np.dot(np.linalg.inv(R0_3), R0_6)
+    
+    # Solve for θ₅
+    theta5 = math.atan2(math.sqrt(R3_6[0, 2]**2 + R3_6[1, 2]**2), R3_6[2, 2])
+    
+    # Solve for θ₄
+    theta4 = math.atan2(R3_6[1, 2], R3_6[0, 2])
+    
+    # Solve for θ₆
+    theta6 = math.atan2(R3_6[2, 1], -R3_6[2, 0])
+    
+    return theta1, theta2, theta3, theta4, theta5, theta6
+```
+
+### Explanation
+1. **θ₁**: Calculated based on the target position `p` to align the manipulator in the correct direction.
+2. **θ₂ and θ₃**: Calculated using the wrist center position, which is derived from the target position `p` and the orientation `r`. These angles position the wrist center correctly.
+3. **θ₄, θ₅, and θ₆**: Calculated using the rotation matrix from the wrist center to the TCP, ensuring the correct orientation of the end-effector.
+
+This approach should provide a more accurate solution for the inverse kinematics of the 6-DOF serial manipulator.

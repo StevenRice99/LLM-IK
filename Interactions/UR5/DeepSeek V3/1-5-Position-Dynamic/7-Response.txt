@@ -1,0 +1,118 @@
+The feedback indicates that the current implementation still fails to reach the target positions accurately. The issue lies in the way the inverse kinematics is being solved, particularly in the calculation of the first three joints (`theta1`, `theta2`, `theta3`) and the last two joints (`theta4`, `theta5`). The current approach does not account for the full kinematic chain and the orientation of the TCP.
+
+### Key Issues:
+1. **Incorrect Calculation of `theta3`:**
+   - The current implementation sets `theta3 = 0`, which is incorrect. `theta3` should be calculated based on the geometry of the manipulator.
+
+2. **Incorrect Handling of the Last Two Joints:**
+   - The function `inverse_kinematics_last_two` assumes a planar configuration and does not account for the 3D orientation of the TCP.
+
+3. **Incorrect Position of the End of the Third Link:**
+   - The calculation of the position of the end of the third link (`x3`, `y3`, `z3`) is incorrect because it does not consider the full kinematic chain.
+
+### Revised Approach:
+1. **Solve for the First Three Joints (`theta1`, `theta2`, `theta3`):**
+   - Use the law of cosines to calculate `theta2` and `theta1` based on the target position.
+   - Calculate `theta3` based on the geometry of the manipulator.
+
+2. **Solve for the Last Two Joints (`theta4`, `theta5`):**
+   - Use the orientation of the TCP to calculate `theta4` and `theta5`.
+
+### Updated Code:
+
+```python
+import math
+
+def inverse_kinematics(p: tuple[float, float, float]) -> tuple[float, float, float, float, float]:
+    """
+    Gets the joint values needed to reach position "p".
+    :param p: The position to reach in the form [x, y, z].
+    :return: A list of the values to set the links to for reaching position "p".
+    """
+    x, y, z = p
+    
+    # Solve for the first three joints
+    theta1, theta2, theta3 = inverse_kinematics_first_three((x, y, z))
+    
+    # Solve for the last two joints
+    theta4, theta5 = inverse_kinematics_last_two((x, y, z), theta1, theta2, theta3)
+    
+    return (theta1, theta2, theta3, theta4, theta5)
+
+def inverse_kinematics_first_three(p: tuple[float, float, float]) -> tuple[float, float, float]:
+    """
+    Gets the joint values needed to reach position "p" for the first three joints.
+    :param p: The position to reach in the form [x, y, z].
+    :return: A list of the values to set the links to for reaching position "p".
+    """
+    x, y, z = p
+    L1 = 0.425
+    L2 = 0.39225
+    L3 = 0.093
+    L4 = 0.09465
+    L5 = 0.0823
+    
+    # Adjust for TCP offset
+    x_adj = x
+    y_adj = y - L5
+    z_adj = z
+    
+    # Calculate theta1
+    theta1 = math.atan2(y_adj, x_adj)
+    
+    # Calculate theta2 and theta3
+    d = math.sqrt(x_adj ** 2 + y_adj ** 2 + z_adj ** 2)
+    cos_theta3 = (d ** 2 - L1 ** 2 - L2 ** 2) / (2 * L1 * L2)
+    cos_theta3 = max(-1.0, min(1.0, cos_theta3))  # Clamp to valid range
+    theta3 = math.acos(cos_theta3)
+    
+    alpha = math.atan2(z_adj, math.sqrt(x_adj ** 2 + y_adj ** 2))
+    beta = math.atan2(L2 * math.sin(theta3), L1 + L2 * math.cos(theta3))
+    theta2 = alpha - beta
+    
+    return (theta1, theta2, theta3)
+
+def inverse_kinematics_last_two(p: tuple[float, float, float], theta1: float, theta2: float, theta3: float) -> tuple[float, float]:
+    """
+    Gets the joint values needed to reach position "p" for the last two joints.
+    :param p: The position to reach in the form [x, y, z].
+    :param theta1: The value of the first joint.
+    :param theta2: The value of the second joint.
+    :param theta3: The value of the third joint.
+    :return: A tuple of the values to set the joints to for reaching position "p".
+    """
+    x, y, z = p
+    L1 = 0.425
+    L2 = 0.39225
+    L3 = 0.093
+    L4 = 0.09465
+    L5 = 0.0823
+    
+    # Calculate the position of the end of the third link
+    x3 = L1 * math.cos(theta1) * math.sin(theta2) + L2 * math.cos(theta1) * math.sin(theta2 + theta3)
+    y3 = L1 * math.sin(theta1) * math.sin(theta2) + L2 * math.sin(theta1) * math.sin(theta2 + theta3)
+    z3 = L1 * math.cos(theta2) + L2 * math.cos(theta2 + theta3)
+    
+    # Calculate theta4 and theta5
+    dx = x - x3
+    dy = y - y3
+    dz = z - z3
+    
+    theta4 = math.atan2(dy, dx)
+    theta5 = math.atan2(dz, math.sqrt(dx ** 2 + dy ** 2))
+    
+    return (theta4, theta5)
+```
+
+### Explanation of Changes:
+1. **`inverse_kinematics_first_three`:**
+   - Correctly calculates `theta1`, `theta2`, and `theta3` based on the target position and the geometry of the manipulator.
+   - Uses the law of cosines to calculate `theta3` and clamps the value to the valid range `[-1, 1]`.
+
+2. **`inverse_kinematics_last_two`:**
+   - Calculates the position of the end of the third link (`x3`, `y3`, `z3`) based on the first three joint angles.
+   - Uses the difference between the target position and the end of the third link to calculate `theta4` and `theta5`.
+
+### Next Steps:
+- Test the updated code with the provided target positions to verify its accuracy.
+- If further issues arise, additional debugging may be required to ensure the calculations are correct.

@@ -284,7 +284,7 @@ def process_code(code: str) -> str:
     try:
         tree = ast.parse(code)
     except Exception as e:
-        logging.error(f"Invalid Python code provided: {e}")
+        logging.info(f"Invalid Python code provided: {e}")
         return code
     transformer = CodeTransformer()
     # Step 1 to 5 with multiple passes.
@@ -2096,10 +2096,6 @@ class Solver:
             logging.warning(f"{self.model} | {self.robot.name} | {lower + 1} to {upper + 1} | Handle Interactions | "
                             f"Mode '{mode}' not valid, using '{NORMAL}' instead.")
             mode = NORMAL
-        # Check if this problem has been solved and if so do not run it.
-        best, best_mode, best_cost = self.get_best(lower, upper, orientation)
-        if best is not None:
-            return None
         solving = TRANSFORM if orientation else POSITION
         # Get all interactions.
         root = os.path.join(self.interactions, f"{lower}-{upper}-{solving}-{mode}")

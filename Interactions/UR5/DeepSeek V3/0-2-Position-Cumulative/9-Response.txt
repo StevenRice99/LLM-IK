@@ -1,0 +1,97 @@
+The feedback indicates that the current implementation is still not producing the correct joint values for the given target positions. The issue likely stems from incorrect handling of the manipulator's geometry or the transformation of the target position into the local coordinate system. Let's re-examine the problem and derive a corrected solution.
+
+---
+
+### Problem Analysis:
+1. **Joint 1 (\(\theta_1\)):**
+   - Revolute joint around the Z-axis.
+   - The correct calculation should be \(\theta_1 = \text{atan2}(y, x)\).
+
+2. **Joints 2 and 3 (\(\theta_2\) and \(\theta_3\)):**
+   - Revolute joints around the Y-axis.
+   - The existing solution assumes a planar 2-link manipulator in the XZ plane, but the problem involves a 3D manipulator with offsets in the Y-axis.
+
+3. **TCP Offset:**
+   - The TCP has an offset of \([0, 0, 0.39225]\) relative to the last link. This must be accounted for in the calculations.
+
+---
+
+### Corrected Solution:
+1. **Solve for \(\theta_1\):**
+   - Project the target position onto the XY plane and calculate \(\theta_1\) using \(\text{atan2}(y, x)\).
+
+2. **Solve for \(\theta_2\) and \(\theta_3\):**
+   - Transform the target position into the local coordinate system of the second joint.
+   - Use the law of cosines to solve for \(\theta_2\) and \(\theta_3\) in the XZ plane.
+
+---
+
+### Updated Code:
+
+```python
+import math
+
+def inverse_kinematics(p: tuple[float, float, float]) -> tuple[float, float, float]:
+    """
+    Gets the joint values needed to reach position "p".
+    :param p: The position to reach in the form [x, y, z].
+    :return: A list of the values to set the links to for reaching position "p".
+    """
+    x, y, z = p
+    
+    # Solve for theta1
+    theta1 = math.atan2(y, x)
+    
+    # Transform the target position into the local coordinate system of the second joint
+    # The second joint is offset by [0, 0.13585, 0] relative to the first joint
+    # The TCP is offset by [0, 0, 0.39225] relative to the third joint
+    # The total offset in the Y direction is 0.13585
+    y_local = y - 0.13585 * math.sin(theta1)
+    x_local = x - 0.13585 * math.cos(theta1)
+    z_local = z
+    
+    # Solve for theta2 and theta3
+    L1 = 0.425  # Length of the second link
+    L2 = 0.39225  # Length of the third link (TCP offset)
+    d = math.sqrt(x_local ** 2 + z_local ** 2)
+    
+    # Clamp cos_theta2 to the valid range [-1, 1]
+    cos_theta2 = (d ** 2 - L1 ** 2 - L2 ** 2) / (2 * L1 * L2)
+    cos_theta2 = max(min(cos_theta2, 1), -1)  # Clamp to [-1, 1]
+    
+    theta2 = math.acos(cos_theta2)
+    
+    # Check the cross product to determine the correct sign for theta2
+    cross_product = x_local * (L1 + L2 * math.cos(theta2)) - z_local * (L2 * math.sin(theta2))
+    if cross_product < 0:
+        theta2 = -theta2
+    
+    alpha = math.atan2(x_local, z_local)
+    beta = math.atan2(L2 * math.sin(theta2), L1 + L2 * math.cos(theta2))
+    theta3 = alpha - beta
+    
+    return (theta1, theta2, theta3)
+```
+
+---
+
+### Key Changes:
+1. **\(\theta_1\) Calculation:**
+   - Corrected to \(\theta_1 = \text{atan2}(y, x)\).
+
+2. **Local Coordinate Transformation:**
+   - The target position is transformed into the local coordinate system of the second joint by accounting for the Y-axis offset of the second joint.
+
+3. **\(\theta_2\) and \(\theta_3\) Calculation:**
+   - The law of cosines is applied in the XZ plane of the local coordinate system to solve for \(\theta_2\) and \(\theta_3\).
+
+4. **Clamping:**
+   - The value of \(\cos(\theta_2)\) is clamped to the range \([-1, 1]\) to avoid domain errors.
+
+---
+
+### Explanation of the Solution:
+- **\(\theta_1\):** Determines the rotation around the Z-axis to align the manipulator with the target in the XY plane.
+- **\(\theta_2\) and \(\theta_3\):** Determine the angles of the second and third joints to position the TCP at the target in the XZ plane of the local coordinate system.
+
+This solution should now correctly compute the joint angles for reachable target positions.

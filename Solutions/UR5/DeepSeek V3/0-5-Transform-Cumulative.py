@@ -1,0 +1,52 @@
+import math
+import numpy as np
+
+def inverse_kinematics(p: tuple[float, float, float], r: tuple[float, float, float]) -> tuple[float, float, float, float, float, float]:
+    x, y, z = p
+    roll, pitch, yaw = r
+    
+    # Solve for Joint 1 (θ₁)
+    theta1 = math.atan2(y, x)
+    
+    # Adjust the target position by the rotation of joint 1
+    x_prime = x * math.cos(theta1) + y * math.sin(theta1)
+    y_prime = -x * math.sin(theta1) + y * math.cos(theta1)
+    z_prime = z - 0.13585  # Adjust for the position of joint 2
+    
+    # Solve for Joint 2 (θ₂)
+    theta2 = math.atan2(z_prime, x_prime)
+    
+    # Adjust the target position by the rotations of joints 1 and 2
+    x_double_prime = x_prime * math.cos(theta2) - z_prime * math.sin(theta2)
+    z_double_prime = x_prime * math.sin(theta2) + z_prime * math.cos(theta2)
+    z_double_prime -= 0.425  # Adjust for the position of joint 3
+    
+    # Solve for Joint 3 (θ₃)
+    theta3 = math.atan2(z_double_prime, x_double_prime)
+    
+    # Adjust the target position by the rotations of joints 1, 2, and 3
+    x_triple_prime = x_double_prime * math.cos(theta3) - z_double_prime * math.sin(theta3)
+    z_triple_prime = x_double_prime * math.sin(theta3) + z_double_prime * math.cos(theta3)
+    z_triple_prime -= 0.39225  # Adjust for the position of joint 4
+    
+    # Solve for Joint 4 (θ₄)
+    theta4 = math.atan2(z_triple_prime, x_triple_prime)
+    
+    # Adjust the target position by the rotations of joints 1, 2, 3, and 4
+    x_quad_prime = x_triple_prime * math.cos(theta4) - z_triple_prime * math.sin(theta4)
+    y_quad_prime = y_prime  # No change in y since joint 4 rotates around Y-axis
+    z_quad_prime = x_triple_prime * math.sin(theta4) + z_tri triple_prime * math.cos(theta4)
+    z_quad_prime -= 0.093  # Adjust for the position of joint 5
+    
+    # Solve for Joint 5 (θ₅)
+    theta5 = math.atan2(y_quad_prime, x_quad_prime)
+    
+    # Adjust the target position by the rotations of joints 1, 2, 3, 4, and 5
+    x_penta_prime = x_quad_prime * math.cos(theta5) - y_quad_prime * math.sin(theta5)
+    z_penta_prime = z_quad_prime  # No change in z since joint 5 rotates around Z-axis
+    z_penta_prime -= 0.09465  # Adjust for the position of joint 6
+    
+    # Solve for Joint 6 (θ₆)
+    theta6 = math.atan2(x_penta_prime, z_penta_prime)
+    
+    return theta1, theta2, theta3, theta4, theta5, theta6

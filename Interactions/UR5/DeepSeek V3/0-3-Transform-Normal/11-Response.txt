@@ -1,0 +1,120 @@
+The feedback indicates that the numerical optimization approach is not converging to the correct joint angles in many cases. This is likely due to the complexity of the objective function and the presence of multiple local minima. To address this, we need to refine the approach by:
+
+1. **Improving the Objective Function**: Ensure the objective function properly accounts for both position and orientation errors.
+2. **Providing Better Initial Guesses**: Use a geometric approach to compute an initial guess for the joint angles, which can help the optimizer converge to the correct solution.
+3. **Handling Multiple Solutions**: Account for the fact that there may be multiple valid solutions for a given target position and orientation.
+
+---
+
+### Revised Approach
+1. **Geometric Initial Guess**: Use a geometric method to compute an initial guess for the joint angles.
+2. **Refined Objective Function**: Use a weighted combination of position and orientation errors in the objective function.
+3. **Numerical Optimization**: Use a robust numerical optimizer to refine the joint angles.
+
+---
+
+### Implementation
+```python
+import numpy as np
+import math
+from scipy.optimize import minimize
+
+def inverse_kinematics(p: tuple[float, float, float], r: tuple[float, float, float]) -> tuple[float, float, float, float]:
+    # Target position and orientation
+    target_position = np.array(p)
+    target_orientation = np.array(r)  # Roll, pitch, yaw in radians
+
+    # Link lengths
+    d2 = 0.13585
+    d3 = -0.1197
+    a3 = 0.425
+    d4 = 0.39225
+
+    # Step 1: Compute initial guess for theta1, theta2, theta3 using geometric approach
+    x, y, z = target_position
+    theta1 = math.atan2(y, x)
+    r_xy = math.sqrt(x**2 + y**2) - d2
+    D = (r_xy**2 + z**2 - a3**2 - d4**2) / (2 * a3 * d4)
+    if D > 1 or D < -1:
+        # Target position is unreachable, return default values
+        return (0.0, 0.0, 0.0, 0.0)
+    theta3 = math.atan2(math.sqrt(1 - D**2), D)
+    theta2 = math.atan2(z, r_xy) - math.atan2(d4 * math.sin(theta3), a3 + d4 * math.cos(theta3))
+    theta4 = target_orientation[2] - (theta1 + theta2 + theta3)  # Initial guess for theta4
+
+    # Initial guess for joint angles
+    initial_guess = [theta1, theta2, theta3, theta4]
+
+    # Step 2: Define the forward kinematics function
+    def forward_kinematics(theta):
+        theta1, theta2, theta3, theta4 = theta
+
+        # Transformation matrices
+        T01 = np.array([
+            [math.cos(theta1), -math.sin(theta1), 0, 0],
+            [math.sin(theta1), math.cos(theta1), 0, 0],
+            [0, 0, 1, 0],
+            [0, 0, 0, 1]
+        ])
+
+        T12 = np.array([
+            [math.cos(theta2), 0, math.sin(theta2), 0],
+            [0, 1, 0, d2],
+            [-math.sin(theta2), 0, math.cos(theta2), 0],
+            [0, 0, 0, 1]
+        ])
+
+        T23 = np.array([
+            [math.cos(theta3), 0, math.sin(theta3), a3],
+            [0, 1, 0, d3],
+            [-math.sin(theta3), 0, math.cos(theta3), 0],
+            [0, 0, 0, 1]
+        ])
+
+        T34 = np.array([
+            [math.cos(theta4), 0, math.sin(theta4), 0],
+            [0, 1, 0, d4],
+            [-math.sin(theta4), 0, math.cos(theta4), 0],
+            [0, 0, 0, 1]
+        ])
+
+        # Total transformation matrix
+        T04 = T01 @ T12 @ T23 @ T34
+
+        # Extract position and orientation
+        position = T04[:3, 3]
+        orientation = np.array([
+            math.atan2(T04[2, 1], T04[2, 2]),
+            math.asin(-T04[2, 0]),
+            math.atan2(T04[1, 0], T04[0, 0])
+        ])
+
+        return position, orientation
+
+    # Step 3: Define the objective function
+    def objective(theta):
+        position, orientation = forward_kinematics(theta)
+        position_error = np.linalg.norm(position - target_position)
+        orientation_error = np.linalg.norm(orientation - target_orientation)
+        return position_error + orientation_error
+
+    # Step 4: Solve for joint angles using numerical optimization
+    result = minimize(objective, initial_guess, method='SLSQP')
+
+    # Return the joint angles
+    return tuple(result.x)
+```
+
+---
+
+### Explanation of Changes:
+1. **Geometric Initial Guess**: The initial guess for the joint angles is computed using a geometric approach, which helps the optimizer converge to the correct solution.
+2. **Refined Objective Function**: The objective function now includes both position and orientation errors, ensuring that the optimizer considers both aspects.
+3. **Numerical Optimization**: The `minimize` function from `scipy.optimize` is used to refine the joint angles.
+
+---
+
+### Next Steps:
+This implementation should now work for most cases. If further refinement is needed, we can adjust the weights in the objective function or use a different optimization method.
+
+TEST_SOLUTION 0.5 0.5 0.5 0 0 0

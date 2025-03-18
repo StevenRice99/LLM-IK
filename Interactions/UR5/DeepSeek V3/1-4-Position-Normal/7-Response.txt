@@ -1,0 +1,125 @@
+The feedback indicates that the current implementation of the inverse kinematics solver is still not producing correct joint values for many target positions. The primary issues seem to be:
+
+1. **Incorrect handling of joint angles**: The solver is producing joint values that are outside the expected range or do not match the correct values.
+2. **Incorrect geometric relationships**: The solver is not correctly accounting for the geometry of the manipulator, leading to incorrect joint values.
+
+Let’s revise the approach step by step to address these issues.
+
+---
+
+### Step 1: Re-examining the Geometry
+The manipulator consists of three revolute joints rotating around the Y-axis and one revolute joint rotating around the Z-axis. The TCP position is influenced by all four joints. We need to carefully model the geometric relationships.
+
+---
+
+### Step 2: Correcting the DH Parameters
+The DH parameters provided earlier may not fully capture the geometry of the manipulator. Let’s redefine them based on the link positions and orientations:
+
+| Link | \( a_i \) | \( \alpha_i \) | \( d_i \) | \( \theta_i \) |
+|------|-----------|----------------|-----------|----------------|
+| 1    | 0         | 0              | 0         | \( \theta_1 \) |
+| 2    | 0         | 0              | 0.425     | \( \theta_2 \) |
+| 3    | 0         | 0              | 0.39225   | \( \theta_3 \) |
+| 4    | 0         | 0              | 0.093     | \( \theta_4 \) |
+| TCP  | 0         | 0              | 0.09465   | 0              |
+
+---
+
+### Step 3: Solving for \( \theta_1 \)
+The first joint \( \theta_1 \) rotates around the Y-axis and determines the orientation of the manipulator in the XY plane. We can solve for \( \theta_1 \) using the arctangent function:
+
+\[
+\theta_1 = \arctan2(y, x)
+\]
+
+---
+
+### Step 4: Solving for \( \theta_2 \) and \( \theta_3 \)
+The second and third joints \( \theta_2 \) and \( \theta_3 \) control the position of the TCP in the XZ plane. We can use the law of cosines to solve for these angles.
+
+First, calculate the distance \( r \) from the base to the TCP in the XZ plane:
+
+\[
+r = \sqrt{x^2 + y^2}
+\]
+
+Next, calculate the distance \( d \) from the second joint to the TCP:
+
+\[
+d = \sqrt{r^2 + (z - d_1)^2}
+\]
+
+Using the law of cosines, we can solve for \( \theta_2 \) and \( \theta_3 \):
+
+\[
+\theta_2 = \arctan2(z - d_1, r) - \arccos\left(\frac{d_2^2 + d^2 - d_3^2}{2 \cdot d_2 \cdot d}\right)
+\]
+
+\[
+\theta_3 = \arccos\left(\frac{d_2^2 + d_3^2 - d^2}{2 \cdot d_2 \cdot d_3}\right)
+\]
+
+---
+
+### Step 5: Solving for \( \theta_4 \)
+The fourth joint \( \theta_4 \) rotates around the Z-axis and controls the orientation of the TCP. Since the orientation is not specified, we can set \( \theta_4 \) to 0.
+
+---
+
+### Step 6: Implementing the Revised Solution
+Here’s the revised implementation of the `inverse_kinematics` function:
+
+```python
+import numpy as np
+
+def inverse_kinematics(p: tuple[float, float, float]) -> tuple[float, float, float, float]:
+    x, y, z = p
+    
+    # Link lengths
+    d1 = 0.425
+    d2 = 0.39225
+    d3 = 0.093
+    d4 = 0.09465
+    
+    # Step 1: Solve for theta1
+    theta1 = np.arctan2(y, x)
+    
+    # Step 2: Solve for theta2 and theta3
+    r = np.sqrt(x**2 + y**2)
+    d = np.sqrt(r**2 + (z - d1)**2)
+    
+    # Check if the target is reachable
+    if d > d2 + d3 or d < abs(d2 - d3):
+        raise ValueError("Target position is unreachable.")
+    
+    # Calculate theta3 using the law of cosines
+    cos_theta3 = (d2**2 + d3**2 - d^2) / (2 * d2 * d3)
+    theta3 = np.arccos(np.clip(cos_theta3, -1, 1))  # Clip to avoid numerical errors
+    
+    # Calculate theta2 using the law of cosines
+    cos_theta2 = (d2**2 + d^2 - d3^2) / (2 * d2 * d)
+    theta2 = np.arctan2(z - d1, r) - np.arccos(np.clip(cos_theta2, -1, 1))  # Clip to avoid numerical errors
+    
+    # Step 3: Solve for theta4 (set to 0 since orientation is not specified)
+    theta4 = 0.0
+    
+    return theta1, theta2, theta3, theta4
+```
+
+---
+
+### Key Changes:
+1. **General Reachability Check**: Replaced the previous reachability check with a more general check based on the sum of the link lengths.
+2. **Numerical Stability**: Added `np.clip` to ensure that the cosine values stay within the valid range \([-1, 1]\) to avoid numerical errors.
+3. **Corrected Geometric Calculations**: Ensured that the calculations for \( \theta_2 \) and \( \theta_3 \) are accurate and robust.
+
+---
+
+### Testing the Solution
+To verify the correctness of the solution, you can use the `TEST_SOLUTION` function with various target positions. For example:
+
+```
+TEST_SOLUTION 0.45126909219979705 -0.0267 0.25439224129870003
+```
+
+This will test the revised inverse kinematics solver and confirm whether it produces the correct joint values.

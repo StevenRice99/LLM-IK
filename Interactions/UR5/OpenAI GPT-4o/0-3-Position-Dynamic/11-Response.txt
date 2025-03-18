@@ -1,0 +1,83 @@
+The feedback indicates that the inverse kinematics solution is still failing to reach the target positions accurately. The primary issues seem to be related to the incorrect computation of `theta2` and `theta3`, as well as the adjustment of the target position. The errors suggest that the geometric relationships and transformations used in the calculations are not correctly accounting for the manipulator's configuration.
+
+### Observations:
+1. **Joint 1 (`theta1`)**: The computation for `theta1` appears to be working correctly, as it aligns the manipulator with the target in the XY-plane.
+2. **Joints 2 and 3 (`theta2` and `theta3`)**: The errors in reaching the target positions suggest that the calculations for `theta2` and `theta3` are incorrect. This could be due to:
+   - Incorrect adjustment of the target position to account for the TCP offset and the rotation of Joint 1.
+   - Errors in the geometric relationships used to compute `theta2` and `theta3`.
+3. **Joint 4 (`theta4`)**: The feedback does not indicate any issues with Joint 4, which is set to 0.
+
+### Plan to Fix:
+1. **Revisit the Geometry**: Carefully rederive the equations for `theta2` and `theta3` based on the manipulator's kinematics. Ensure that the target position is correctly adjusted for the TCP offset and the rotation of Joint 1.
+2. **Validate the Target Adjustment**: Ensure that the target position is transformed correctly into the coordinate frame of Joint 2.
+3. **Check the Range of Motion**: Ensure that the computed joint angles are within the valid range and correctly account for the manipulator's configuration.
+
+### Updated Code:
+Here is the revised implementation with corrections to the calculations for `theta2` and `theta3`:
+
+```python
+import math
+
+def inverse_kinematics(p: tuple[float, float, float]) -> tuple[float, float, float, float]:
+    """
+    Gets the joint values needed to reach position "p".
+    :param p: The position to reach in the form [x, y, z].
+    :return: A list of the values to set the links to for reaching position "p".
+    """
+    x, y, z = p
+
+    # Solve for Joint 1 using EXISTING 1
+    theta1 = math.atan2(-x, y)
+
+    # Adjust the target position to account for the rotation of Joint 1
+    # Rotate the target position back to the frame of Joint 2
+    x_adj = x * math.cos(theta1) + y * math.sin(theta1)
+    y_adj = -x * math.sin(theta1) + y * math.cos(theta1)
+    z_adj = z
+
+    # Adjust for the TCP offset
+    tcp_offset = 0.093
+    y_adj -= tcp_offset
+
+    # Solve for Joints 2 and 3 using corrected geometry
+    L1 = 0.425
+    L2 = 0.39225
+    d = math.sqrt(x_adj ** 2 + z_adj ** 2)
+
+    # Check if the target is within reach
+    if d > (L1 + L2):
+        raise ValueError("Target is out of reach")
+
+    # Compute theta3 (angle at the elbow)
+    cos_theta3 = (d ** 2 - L1 ** 2 - L2 ** 2) / (2 * L1 * L2)
+    cos_theta3 = max(-1, min(1, cos_theta3))  # Clamp to valid range
+    theta3 = math.acos(cos_theta3)
+
+    # Compute theta2 (angle at the shoulder)
+    alpha = math.atan2(z_adj, x_adj)
+    beta = math.atan2(L2 * math.sin(theta3), L1 + L2 * math.cos(theta3))
+    theta2 = alpha - beta
+
+    # Joint 4 is assumed to be 0 as per EXISTING 2
+    theta4 = 0
+
+    return (theta1, theta2, theta3, theta4)
+```
+
+### Key Changes:
+1. **Target Adjustment**:
+   - The target position is adjusted for the TCP offset along the Y-axis.
+   - The target position is rotated into the coordinate frame of Joint 2.
+
+2. **Theta3 Calculation**:
+   - The formula for `cos_theta3` is clamped to the range [-1, 1] to avoid domain errors in `math.acos`.
+
+3. **Theta2 Calculation**:
+   - The angle `theta2` is computed using the corrected geometric relationships, ensuring that the manipulator's configuration is properly accounted for.
+
+4. **Error Handling**:
+   - A check is added to ensure that the target position is within the manipulator's reachable workspace.
+
+### Next Steps:
+- Test the updated code on the provided test cases to verify that it produces the correct joint angles and reaches the target positions accurately.
+- If further issues arise, analyze the specific cases and refine the calculations as needed.

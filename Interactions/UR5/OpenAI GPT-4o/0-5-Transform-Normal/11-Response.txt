@@ -1,0 +1,85 @@
+It seems that the forward kinematics results are consistent and provide the positions and orientations of each link and the TCP. Now, I will proceed to derive the inverse kinematics solution based on the given details and the forward kinematics results.
+
+### Step-by-Step Plan for Inverse Kinematics:
+1. **Understand the Target**: The target position `p` and orientation `r` are given. The goal is to compute the joint angles (`θ1` to `θ6`) that achieve this target.
+
+2. **Decompose the Problem**:
+   - Use the position of the TCP to determine the first three joint angles (`θ1`, `θ2`, `θ3`) by solving for the position of the wrist center.
+   - Use the orientation of the TCP to determine the last three joint angles (`θ4`, `θ5`, `θ6`).
+
+3. **Geometric Approach**:
+   - Use the Denavit-Hartenberg (DH) parameters and the given link positions to compute the wrist center.
+   - Solve for each joint angle using trigonometric relationships.
+
+4. **Implement the Solution**:
+   - Write the Python code to compute the joint angles.
+
+Let me now proceed to implement the inverse kinematics function.
+```python
+import numpy as np
+
+def inverse_kinematics(p: tuple[float, float, float], r: tuple[float, float, float]) -> tuple[float, float, float, float, float, float]:
+    """
+    Gets the joint values needed to reach position "p" and orientation "r".
+    :param p: The position to reach in the form [x, y, z].
+    :param r: The orientation to reach in radians in the form [x, y, z].
+    :return: A list of the values to set the links to for reaching position "p" and orientation "r".
+    """
+    # Extract target position and orientation
+    px, py, pz = p
+    rx, ry, rz = r
+
+    # Link lengths and offsets (from the DETAILS section)
+    d1 = 0.13585  # Offset along Z1
+    a2 = 0.425    # Length of link 2
+    a3 = 0.39225  # Length of link 3
+    d4 = 0.093    # Offset along Z4
+    d6 = 0.09465  # Offset along Z6
+    tcp_offset = 0.0823  # TCP offset along Y6
+
+    # Step 1: Compute the wrist center position
+    # The TCP position is offset from the wrist center by d6 and tcp_offset
+    wx = px - (d6 + tcp_offset) * np.cos(rz) * np.sin(ry)
+    wy = py - (d6 + tcp_offset) * np.sin(rz) * np.sin(ry)
+    wz = pz - (d6 + tcp_offset) * np.cos(ry)
+
+    # Step 2: Solve for θ1 (Revolute 1)
+    theta1 = np.arctan2(wy, wx)
+
+    # Step 3: Solve for θ2 and θ3 (Revolute 2 and 3)
+    # Use the wrist center position to compute the planar distance
+    r = np.sqrt(wx**2 + wy**2)
+    s = wz - d1
+
+    # Compute the distance to the wrist center
+    D = (r**2 + s**2 - a2**2 - a3**2) / (2 * a2 * a3)
+    theta3 = np.arctan2(np.sqrt(1 - D**2), D)  # Elbow up solution
+
+    # Solve for θ2 using the law of cosines
+    theta2 = np.arctan2(s, r) - np.arctan2(a3 * np.sin(theta3), a2 + a3 * np.cos(theta3))
+
+    # Step 4: Solve for θ4, θ5, θ6 (Revolute 4, 5, 6)
+    # Compute the rotation matrix from the base to the wrist center
+    R0_3 = np.array([
+        [np.cos(theta1) * np.cos(theta2 + theta3), -np.sin(theta1), np.cos(theta1) * np.sin(theta2 + theta3)],
+        [np.sin(theta1) * np.cos(theta2 + theta3), np.cos(theta1), np.sin(theta1) * np.sin(theta2 + theta3)],
+        [-np.sin(theta2 + theta3), 0, np.cos(theta2 + theta3)]
+    ])
+
+    # Compute the desired rotation matrix from the wrist to the TCP
+    R3_6 = np.array([
+        [np.cos(rx) * np.cos(rz) - np.sin(rx) * np.sin(ry) * np.sin(rz), -np.cos(rx) * np.sin(rz) - np.sin(rx) * np.sin(ry) * np.cos(rz), np.sin(rx) * np.cos(ry)],
+        [np.sin(rx) * np.cos(rz) + np.cos(rx) * np.sin(ry) * np.sin(rz), -np.sin(rx) * np.sin(rz) + np.cos(rx) * np.sin(ry) * np.cos(rz), -np.cos(rx) * np.cos(ry)],
+        [np.cos(ry) * np.sin(rz), np.cos(ry) * np.cos(rz), np.sin(ry)]
+    ])
+
+    # Compute the rotation matrix for the last three joints
+    R3_6 = np.linalg.inv(R0_3).dot(R3_6)
+
+    # Extract θ4, θ5, θ6 from the rotation matrix
+    theta4 = np.arctan2(R3_6[2, 1], R3_6[2, 2])
+    theta5 = np.arctan2(np.sqrt(R3_6[2, 1]**2 + R3_6[2, 2]**2), R3_6[2, 0])
+    theta6 = np.arctan2(R3_6[1, 0], R3_6[0, 0])
+
+    return theta1, theta2, theta3, theta4, theta5, theta6
+```

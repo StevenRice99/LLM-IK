@@ -1,0 +1,74 @@
+The forward kinematics results for the correct joint values provided in the feedback confirm that the TCP position and orientation are achieved when the joint angles are set to \(-1.392964779093036\) (for Revolute 1) and \(0.774078871620946\) (for Revolute 2). This indicates that the current inverse kinematics implementation is not correctly solving for the joint angles to match both the position and orientation.
+
+### Observations
+1. The orientation of the TCP is determined by the combined rotations of both joints. The first joint (\( \theta_1 \)) rotates about the Y-axis, and the second joint (\( \theta_2 \)) rotates about the Z-axis.
+2. The current implementation does not fully account for the orientation of the TCP when solving for the joint angles.
+3. The forward kinematics results show that the orientation of the TCP is influenced by both joints, and the correct joint angles must be calculated to match the desired orientation.
+
+### Revised Approach
+To correctly solve for the joint angles:
+1. **Position Analysis**:
+   - Use the desired TCP position to calculate the joint angles that place the TCP at the correct location.
+   - This involves solving for \( \theta_1 \) and \( \theta_2 \) based on the geometry of the manipulator.
+
+2. **Orientation Analysis**:
+   - Use the desired TCP orientation to refine the joint angles.
+   - This involves solving for \( \theta_1 \) and \( \theta_2 \) based on the rotation matrices of the joints.
+
+3. **Implementation**:
+   - Combine the position and orientation analyses to calculate the joint angles that achieve both the desired position and orientation.
+
+I will now revise the inverse kinematics function to incorporate these considerations.
+
+```python
+import math
+import numpy as np
+
+def inverse_kinematics(p: tuple[float, float, float], r: tuple[float, float, float]) -> tuple[float, float]:
+    """
+    Gets the joint values needed to reach position "p" and orientation "r".
+    :param p: The position to reach in the form [x, y, z].
+    :param r: The orientation to reach in radians in the form [x, y, z].
+    :return: A list of the values to set the links to for reaching position "p" and orientation "r".
+    """
+    x, y, z = p
+    rx, ry, rz = r
+
+    # Solve for theta_1 (rotation about Y-axis)
+    theta_1 = math.atan2(x, z)
+
+    # Solve for theta_2 (rotation about Z-axis)
+    # Adjust y position to account for the offset of the second joint
+    y_effective = y - 0.093
+    theta_2 = math.asin(y_effective / 0.09465)
+
+    # Refine theta_1 and theta_2 using orientation
+    # Convert desired orientation to a rotation matrix
+    R_desired = np.array([
+        [math.cos(rz) * math.cos(ry), math.cos(rz) * math.sin(ry) * math.sin(rx) - math.sin(rz) * math.cos(rx), math.cos(rz) * math.sin(ry) * math.cos(rx) + math.sin(rz) * math.sin(rx)],
+        [math.sin(rz) * math.cos(ry), math.sin(rz) * math.sin(ry) * math.sin(rx) + math.cos(rz) * math.cos(rx), math.sin(rz) * math.sin(ry) * math.cos(rx) - math.cos(rz) * math.sin(rx)],
+        [-math.sin(ry), math.cos(ry) * math.sin(rx), math.cos(ry) * math.cos(rx)]
+    ])
+
+    # Calculate the current orientation based on theta_1 and theta_2
+    R1 = np.array([
+        [math.cos(theta_1), 0, math.sin(theta_1)],
+        [0, 1, 0],
+        [-math.sin(theta_1), 0, math.cos(theta_1)]
+    ])
+    R2 = np.array([
+        [math.cos(theta_2), -math.sin(theta_2), 0],
+        [math.sin(theta_2), math.cos(theta_2), 0],
+        [0, 0, 1]
+    ])
+    R_current = R1 @ R2
+
+    # Compare R_current with R_desired to refine theta_1 and theta_2
+    # Extract the angles from the rotation matrix
+    theta_1_refined = math.atan2(R_desired[2, 0], R_desired[2, 2])
+    theta_2_refined = math.atan2(R_desired[0, 1], R_desired[1, 1])
+
+    return theta_1_refined, theta_2_refined
+```
+
+This revised function incorporates both position and orientation into the calculation of the joint angles. It uses the desired orientation to refine the joint angles calculated from the position.

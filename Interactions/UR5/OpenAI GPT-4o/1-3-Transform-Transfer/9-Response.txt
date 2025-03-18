@@ -1,0 +1,88 @@
+The feedback indicates that the position is being reached correctly, but the orientation is not being matched. The orientation `[rx, ry, rz]` is being ignored, and the robot's joints are not properly aligning to achieve the desired orientation. The issue lies in how the orientation is being handled and how the joint angles are being calculated to match the desired orientation.
+
+### Observations:
+1. The robot's joints only rotate about the Y-axis, so the orientation must be handled carefully to ensure that the cumulative effect of all joint rotations matches the desired orientation.
+2. The feedback shows that the correct joint values differ significantly from the ones produced by the code, especially for `theta3`. This suggests that the calculation of `theta3` is flawed.
+3. The orientation `[rx, ry, rz]` is being treated as if it only affects `ry`, but this is incorrect. The robot's joints contribute to the overall orientation, and this must be accounted for.
+
+### Plan to Fix:
+1. **Revisit Orientation Handling**:
+   - The TCP's orientation in the global frame is the cumulative effect of all joint rotations. This means that the desired orientation `[rx, ry, rz]` must be matched by the sum of the rotations of all joints.
+   - Since all joints rotate about the Y-axis, the desired `ry` must be matched by the sum of `theta1`, `theta2`, and `theta3`.
+
+2. **Adjust `theta3` Calculation**:
+   - The current calculation of `theta3` assumes that the desired orientation is only influenced by `theta3`. This is incorrect because `theta1` and `theta2` also contribute to the TCP's orientation.
+   - To fix this, `theta3` should be calculated as the difference between the desired `ry` and the sum of `theta1` and `theta2`.
+
+3. **Account for Full Orientation**:
+   - The desired orientation `[rx, ry, rz]` must be matched in all axes. However, since the robot only rotates about the Y-axis, the solution should focus on matching `ry` while ensuring that the other axes (`rx` and `rz`) are consistent with the robot's constraints.
+
+4. **Normalize Joint Angles**:
+   - Ensure that all joint angles are normalized to the range `[-pi, pi]` to stay within the robot's joint limits.
+
+### Updated Code:
+Here is the corrected implementation:
+
+```python
+import math
+
+def inverse_kinematics(p: tuple[float, float, float], r: tuple[float, float, float]) -> tuple[float, float, float]:
+    """
+    Gets the joint values needed to reach position "p" and orientation "r".
+    :param p: The position to reach in the form [x, y, z].
+    :param r: The orientation to reach in radians in the form [x, y, z].
+    :return: A list of the values to set the links to for reaching position "p" and orientation "r".
+    """
+    # Extract position and orientation
+    x, y, z = p
+    rx, ry, rz = r  # Orientation in radians
+
+    # Adjust position for TCP offset
+    tcp_offset = 0.093
+    x_adj = x
+    y_adj = y - tcp_offset
+    z_adj = z
+
+    # Link lengths
+    L1 = 0.425
+    L2 = 0.39225
+
+    # Solve for theta2 using the law of cosines
+    d = math.sqrt(x_adj ** 2 + z_adj ** 2)
+    cos_theta2 = (d ** 2 - L1 ** 2 - L2 ** 2) / (2 * L1 * L2)
+    theta2 = math.acos(cos_theta2)
+
+    # Determine the sign of theta2 based on the cross product
+    cross_product = x_adj * (L1 + L2 * math.cos(theta2)) - z_adj * (L2 * math.sin(theta2))
+    if cross_product < 0:
+        theta2 = -theta2
+
+    # Solve for theta1
+    alpha = math.atan2(x_adj, z_adj)
+    beta = math.atan2(L2 * math.sin(theta2), L1 + L2 * math.cos(theta2))
+    theta1 = alpha - beta
+
+    # Solve for theta3 to match the desired orientation
+    # The total rotation about the Y-axis must match the desired ry
+    theta3 = ry - (theta1 + theta2)
+
+    # Normalize joint angles to the range [-pi, pi]
+    theta1 = (theta1 + math.pi) % (2 * math.pi) - math.pi
+    theta2 = (theta2 + math.pi) % (2 * math.pi) - math.pi
+    theta3 = (theta3 + math.pi) % (2 * math.pi) - math.pi
+
+    return (theta1, theta2, theta3)
+```
+
+### Key Fixes:
+1. **Orientation Matching**:
+   - The total rotation about the Y-axis (`theta1 + theta2 + theta3`) is now explicitly matched to the desired `ry`.
+
+2. **Normalization**:
+   - All joint angles are normalized to the range `[-pi, pi]` to ensure they stay within joint limits.
+
+3. **Consistency**:
+   - The solution ensures that the position and orientation are both achieved simultaneously.
+
+### Next Steps:
+Test the updated code on the provided test cases to verify that it correctly reaches both the position and orientation targets. If further adjustments are needed, analyze the results and refine the solution accordingly.

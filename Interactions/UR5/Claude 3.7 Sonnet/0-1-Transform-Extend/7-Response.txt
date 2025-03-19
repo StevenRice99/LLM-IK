@@ -1,0 +1,261 @@
+I'll now develop the inverse kinematics solution for this 2-DOF robot. Let me analyze the data from the forward kinematics tests to understand the robot's behavior.
+
+From the tests, I can see:
+1. When both joints are at 0, the TCP is at [0, 0.01615, 0.425]
+2. When joint1 = 1.57 (π/2) and joint2 = 0, the TCP rotates around the Z-axis
+3. When joint1 = 0 and joint2 = 1.57 (π/2), the TCP moves to [0.425, 0.01615, 0.00034]
+
+This confirms that:
+- Joint 1 rotates around the Z-axis
+- Joint 2 rotates around the Y-axis
+- The robot has a planar structure with the second link extending outward
+
+Now I'll develop the inverse kinematics solution:
+
+```python
+def inverse_kinematics(p: tuple[float, float, float], r: tuple[float, float, float]) -> tuple[float, float]:
+    """
+    Gets the joint values needed to reach position "p" and orientation "r".
+    :param p: The position to reach in the form [x, y, z].
+    :param r: The orientation to reach in radians in the form [x, y, z].
+    :return: A list of the values to set the links to for reaching position "p" and orientation "r".
+    """
+    import math
+    import numpy as np
+    
+    x, y, z = p
+    
+    # Link dimensions from the DETAILS section
+    l1 = 0.13585  # Length from joint 1 to joint 2
+    l2_x = 0      # X component of TCP in link 2 frame
+    l2_y = -0.1197  # Y component of TCP in link 2 frame
+    l2_z = 0.425   # Z component of TCP in link 2 frame
+    
+    # Calculate joint 1 (rotation around Z-axis)
+    theta1 = math.atan2(x, y)
+    
+    # Calculate joint 2 (rotation around Y-axis)
+    # First, transform the target point to the frame after joint 1 rotation
+    x_j1 = x * math.cos(theta1) + y * math.sin(theta1)
+    y_j1 = -x * math.sin(theta1) + y * math.cos(theta1)
+    z_j1 = z
+    
+    # The position after joint 1 should be reached by rotating joint 2
+    # We need to solve for theta2 such that rotating the second link by theta2
+    # will place the TCP at the target position
+    
+    # Distance from joint 2 to target in the XZ plane of joint 2's frame
+    r_target = math.sqrt((y_j1 - l1)**2 + z_j1**2)
+    
+    # Length of the second link projected onto the XZ plane
+    r_link2 = math.sqrt(l2_y**2 + l2_z**2)
+    
+    # Angle of the second link in its local frame
+    phi_link2 = math.atan2(l2_z, l2_y)
+    
+    # Angle to the target in joint 2's frame
+    phi_target = math.atan2(z_j1, y_j1 - l1)
+    
+    # Calculate theta2 using the law of cosines
+    cos_theta2 = (r_target**2 - r_link2**2) / (2 * r_link2 * r_target)
+    
+    # Ensure the value is within valid range for arccos
+    cos_theta2 = max(min(cos_theta2, 1.0), -1.0)
+    
+    # Calculate theta2
+    theta2 = phi_target - math.acos(cos_theta2) - phi_link2
+    
+    return (theta1, theta2)
+```
+
+Wait, I need to reconsider my approach. Let me analyze the robot structure more carefully:
+
+1. Joint 1 rotates around the Z-axis
+2. Joint 2 rotates around the Y-axis after being positioned by joint 1
+3. The TCP is at a fixed offset from joint 2
+
+Let me revise my solution:
+
+```python
+def inverse_kinematics(p: tuple[float, float, float], r: tuple[float, float, float]) -> tuple[float, float]:
+    """
+    Gets the joint values needed to reach position "p" and orientation "r".
+    :param p: The position to reach in the form [x, y, z].
+    :param r: The orientation to reach in radians in the form [x, y, z].
+    :return: A list of the values to set the links to for reaching position "p" and orientation "r".
+    """
+    import math
+    
+    x, y, z = p
+    
+    # Calculate joint 1 (rotation around Z-axis)
+    theta1 = math.atan2(x, y)
+    
+    # Calculate the distance from the origin to the target in the XY plane
+    r_xy = math.sqrt(x**2 + y**2)
+    
+    # The second joint needs to position the TCP at the target
+    # The TCP is offset from joint 2 by [0, -0.1197, 0.425]
+    # When rotated by theta2 around the Y-axis, this offset changes
+    
+    # Calculate theta2 (rotation around Y-axis)
+    # This is the angle needed to align the second link with the target
+    theta2 = math.atan2(z, r_xy - 0.13585)
+    
+    return (theta1, theta2)
+```
+
+I need to refine this further. Let me complete the solution:
+
+```python
+def inverse_kinematics(p: tuple[float, float, float], r: tuple[float, float, float]) -> tuple[float, float]:
+    """
+    Gets the joint values needed to reach position "p" and orientation "r".
+    :param p: The position to reach in the form [x, y, z].
+    :param r: The orientation to reach in radians in the form [x, y, z].
+    :return: A list of the values to set the links to for reaching position "p" and orientation "r".
+    """
+    import math
+    
+    x, y, z = p
+    
+    # Calculate joint 1 (rotation around Z-axis)
+    theta1 = math.atan2(x, y)
+    
+    # Transform the target point to the frame after joint 1 rotation
+    c1, s1 = math.cos(theta1), math.sin(theta1)
+    x_1 = c1*x + s1*y
+    y_1 = -s1*x + c1*y
+    z_1 = z
+    
+    # The second link parameters
+    l1 = 0.13585  # Distance from joint 1 to joint 2
+    l2_y = -0.1197  # Y component of TCP in link 2 frame
+    l2_z = 0.425   # Z component of TCP in link 2 frame
+    
+    # Calculate the angle for joint 2
+    # We need to find theta2 such that when the second link is rotated by theta2,
+    # the TCP reaches the target position
+    
+    # Distance from joint 2 to target in the YZ plane
+    d = math.sqrt((y_1 - l1)**2 + z_1**2)
+    
+    # Length of the second link
+    l2 = math.sqrt(l2_y**2 + l2_z**2)
+    
+    # Angle of the second link in its local frame
+    alpha = math.atan2(l2_z, -l2_y)  # Note the negative l2_y
+    
+    # Angle to the target in joint 2's frame
+    beta = math.atan2(z_1, y_1 - l1)
+    
+    # Calculate theta2
+    theta2 = beta - alpha
+    
+    return (theta1, theta2)
+```
+
+I need to make one more correction. The second joint rotates around the Y-axis, which means it affects both the X and Z coordinates of the TCP. Let me finalize the solution:
+
+```python
+def inverse_kinematics(p: tuple[float, float, float], r: tuple[float, float, float]) -> tuple[float, float]:
+    """
+    Gets the joint values needed to reach position "p" and orientation "r".
+    :param p: The position to reach in the form [x, y, z].
+    :param r: The orientation to reach in radians in the form [x, y, z].
+    :return: A list of the values to set the links to for reaching position "p" and orientation "r".
+    """
+    import math
+    
+    x, y, z = p
+    
+    # Calculate joint 1 (rotation around Z-axis)
+    theta1 = math.atan2(x, y)
+    
+    # Transform the target point to the frame after joint 1 rotation
+    c1, s1 = math.cos(theta1), math.sin(theta1)
+    x_1 = c1*x + s1*y
+    y_1 = -s1*x + c1*y
+    z_1 = z
+    
+    # The second link parameters
+    l1 = 0.13585  # Distance from joint 1 to joint 2
+    l2_y = -0.1197  # Y component of TCP in link 2 frame
+    l2_z = 0.425   # Z component of TCP in link 2 frame
+    
+    # For a Y-axis rotation, we need to consider the projection in the XZ plane
+    # Calculate the angle for joint 2
+    theta2 = math.atan2(z_1, x_1) - math.atan2(l2_z, l2_y)
+    
+    return (theta1, theta2)
+```
+
+Let me correct this one more time. I need to carefully consider the geometry:
+
+```python
+def inverse_kinematics(p: tuple[float, float, float], r: tuple[float, float, float]) -> tuple[float, float]:
+    """
+    Gets the joint values needed to reach position "p" and orientation "r".
+    :param p: The position to reach in the form [x, y, z].
+    :param r: The orientation to reach in radians in the form [x, y, z].
+    :return: A list of the values to set the links to for reaching position "p" and orientation "r".
+    """
+    import math
+    
+    x, y, z = p
+    
+    # Calculate joint 1 (rotation around Z-axis)
+    theta1 = math.atan2(x, y)
+    
+    # The second link parameters
+    l1 = 0.13585  # Distance from joint 1 to joint 2
+    l2_y = -0.1197  # Y component of TCP in link 2 frame
+    l2_z = 0.425   # Z component of TCP in link 2 frame
+    
+    # Calculate the distance from origin to target in XY plane
+    r_xy = math.sqrt(x**2 + y**2)
+    
+    # Calculate theta2 (rotation around Y-axis)
+    # When joint 2 rotates around Y, it affects the Z coordinate and the radial distance in XY plane
+    theta2 = math.atan2(z, r_xy - l1)
+    
+    return (theta1, theta2)
+```
+
+I need to be more precise with the geometry. Let me finalize the solution:
+
+```python
+def inverse_kinematics(p: tuple[float, float, float], r: tuple[float, float, float]) -> tuple[float, float]:
+    """
+    Gets the joint values needed to reach position "p" and orientation "r".
+    :param p: The position to reach in the form [x, y, z].
+    :param r: The orientation to reach in radians in the form [x, y, z].
+    :return: A list of the values to set the links to for reaching position "p" and orientation "r".
+    """
+    import math
+    
+    x, y, z = p
+    
+    # Calculate joint 1 (rotation around Z-axis)
+    theta1 = math.atan2(x, y)
+    
+    # Calculate the distance from origin to target in XY plane
+    r_xy = math.sqrt(x**2 + y**2)
+    
+    # The second link parameters
+    l1 = 0.13585  # Distance from joint 1 to joint 2
+    l2_y = -0.1197  # Y component of TCP in link 2 frame
+    l2_z = 0.425   # Z component of TCP in link 2 frame
+    
+    # Length of the second link
+    l2 = math.sqrt(l2_y**2 + l2_z**2)
+    
+    # Angle of the second link in its local frame
+    phi = math.atan2(l2_z, -l2_y)  # Note the negative l2_y
+    
+    # Calculate theta2 (rotation around Y-axis)
+    # We need to find the angle that places the TCP at the target
+    theta2 = math.atan2(z, r_xy - l1) - phi
+    
+    return (theta1, theta2)
+```

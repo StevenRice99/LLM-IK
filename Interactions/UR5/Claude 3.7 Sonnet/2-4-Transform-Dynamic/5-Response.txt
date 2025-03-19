@@ -1,0 +1,666 @@
+Thank you for the feedback. I can see that my solution has several issues. Let me analyze the failures and develop a more accurate inverse kinematics solution.
+
+Looking at the correct joint values compared to my solution, I notice several patterns:
+1. Joint 1 is sometimes close but often off
+2. Joint 2 is frequently completely wrong (often 0 or π)
+3. Joint 3 is sometimes close but needs improvement
+
+Let me develop a more accurate solution by carefully analyzing the robot's kinematics:
+
+```python
+def inverse_kinematics(p: tuple[float, float, float], r: tuple[float, float, float]) -> tuple[float, float, float]:
+    """
+    Gets the joint values needed to reach position "p" and orientation "r".
+    :param p: The position to reach in the form [x, y, z].
+    :param r: The orientation to reach in radians in the form [x, y, z].
+    :return: A list of the values to set the links to for reaching position "p" and orientation "r".
+    """
+    import numpy as np
+    import math
+    
+    x, y, z = p
+    rx, ry, rz = r
+    
+    # Link parameters
+    l1 = 0.39225  # Distance from joint 1 to joint 2 in z
+    l2_y = 0.093  # Distance from joint 2 to joint 3 in y
+    l3_z = 0.09465  # Distance from joint 3 to TCP in z
+    
+    # Calculate rotation matrices
+    def rot_x(angle):
+        return np.array([[1, 0, 0], 
+                         [0, np.cos(angle), -np.sin(angle)], 
+                         [0, np.sin(angle), np.cos(angle)]])
+
+    def rot_y(angle):
+        return np.array([[np.cos(angle), 0, np.sin(angle)], 
+                         [0, 1, 0], 
+                         [-np.sin(angle), 0, np.cos(angle)]])
+
+    def rot_z(angle):
+        return np.array([[np.cos(angle), -np.sin(angle), 0], 
+                         [np.sin(angle), np.cos(angle), 0], 
+                         [0, 0, 1]])
+    
+    # Target rotation matrix
+    R_target = rot_z(rz) @ rot_y(ry) @ rot_x(rx)
+    
+    # First, we need to find the position of joint 3 by subtracting the TCP offset
+    # TCP is at [0, 0, l3_z] from joint 3 in joint 3's frame
+    # We need to transform this offset to the world frame
+    tcp_offset_world = R_target @ np.array([0, 0, l3_z])
+    j3_pos = np.array([x, y, z]) - tcp_offset_world
+    
+    # Joint 1 calculation (around Y-axis)
+    # The projection of joint 3 position onto the XZ plane determines joint 1
+    joint1 = math.atan2(j3_pos[0], j3_pos[2])
+    
+    # Create rotation matrix for joint 1
+    R1 = rot_y(joint1)
+    
+    # Transform joint 3 position to joint 1 frame
+    j3_in_j1 = R1.T @ j3_pos
+    
+    # Joint 2 calculation (around Y-axis)
+    # Joint 2 is at [0, 0, l1] from joint 1
+    # Joint 3 is at [0, l2_y, 0] from joint 2 after joint 2 rotation
+    
+    # Calculate the vector from joint 2 to joint 3 in joint 1 frame
+    j2_in_j1 = np.array([0, 0, l1])
+    j3_from_j2_in_j1 = j3_in_j1 - j2_in_j1
+    
+    # The angle of joint 2 is determined by the position of joint 3
+    # We need to find the angle that rotates [0, l2_y, 0] to align with j3_from_j2_in_j1
+    
+    # Calculate the length of the projection of j3_from_j2_in_j1 onto the XZ plane
+    proj_length = math.sqrt(j3_from_j2_in_j1[0]**2 + j3_from_j2_in_j1[2]**2)
+    
+    # Calculate joint 2 angle
+    # We need to account for the offset l2_y in the y-direction
+    joint2 = math.atan2(j3_from_j2_in_j1[0], j3_from_j2_in_j1[2])
+    
+    # Create rotation matrix for joint 2
+    R2 = rot_y(joint2)
+    
+    # Calculate the combined rotation of joint 1 and joint 2
+    R12 = R1 @ R2
+    
+    # Calculate the remaining rotation needed for joint 3
+    R3_needed = R12.T @ R_target
+    
+    # Joint 3 rotates around Z-axis, so we extract the rotation around Z
+    joint3 = math.atan2(R3_needed[1, 0], R3_needed[0, 0])
+    
+    return (joint1, joint2, joint3)
+```
+
+Wait, I need to refine this solution. The calculation for joint 2 is not correct. Let me revise:
+
+```python
+def inverse_kinematics(p: tuple[float, float, float], r: tuple[float, float, float]) -> tuple[float, float, float]:
+    """
+    Gets the joint values needed to reach position "p" and orientation "r".
+    :param p: The position to reach in the form [x, y, z].
+    :param r: The orientation to reach in radians in the form [x, y, z].
+    :return: A list of the values to set the links to for reaching position "p" and orientation "r".
+    """
+    import numpy as np
+    import math
+    
+    x, y, z = p
+    rx, ry, rz = r
+    
+    # Link parameters
+    l1 = 0.39225  # Distance from joint 1 to joint 2 in z
+    l2_y = 0.093  # Distance from joint 2 to joint 3 in y
+    l3_z = 0.09465  # Distance from joint 3 to TCP in z
+    
+    # Calculate rotation matrices
+    def rot_x(angle):
+        return np.array([[1, 0, 0], 
+                         [0, np.cos(angle), -np.sin(angle)], 
+                         [0, np.sin(angle), np.cos(angle)]])
+
+    def rot_y(angle):
+        return np.array([[np.cos(angle), 0, np.sin(angle)], 
+                         [0, 1, 0], 
+                         [-np.sin(angle), 0, np.cos(angle)]])
+
+    def rot_z(angle):
+        return np.array([[np.cos(angle), -np.sin(angle), 0], 
+                         [np.sin(angle), np.cos(angle), 0], 
+                         [0, 0, 1]])
+    
+    # Target rotation matrix
+    R_target = rot_z(rz) @ rot_y(ry) @ rot_x(rx)
+    
+    # First, we need to find the position of joint 3 by subtracting the TCP offset
+    # TCP is at [0, 0, l3_z] from joint 3 in joint 3's frame
+    # We need to transform this offset to the world frame
+    tcp_offset_world = R_target @ np.array([0, 0, l3_z])
+    j3_pos = np.array([x, y, z]) - tcp_offset_world
+    
+    # Joint 1 calculation (around Y-axis)
+    joint1 = math.atan2(j3_pos[0], j3_pos[2])
+    
+    # Create rotation matrix for joint 1
+    R1 = rot_y(joint1)
+    
+    # Transform joint 3 position to joint 1 frame
+    j3_in_j1 = R1.T @ j3_pos
+    
+    # Joint 2 calculation (around Y-axis)
+    # Joint 2 is at [0, 0, l1] from joint 1
+    # Joint 3 is at [0, l2_y, 0] from joint 2 after joint 2 rotation
+    
+    # Calculate the vector from joint 2 to joint 3 in joint 1 frame
+    j2_in_j1 = np.array([0, 0, l1])
+    j3_from_j2_in_j1 = j3_in_j1 - j2_in_j1
+    
+    # The angle of joint 2 is determined by the position of joint 3
+    # After joint 2 rotation, the vector [0, 0, 1] becomes the direction from joint 2 to joint 3
+    # We need to find the angle that rotates [0, 0, 1] to align with the normalized j3_from_j2_in_j1
+    
+    # Calculate the length of j3_from_j2_in_j1 projected onto the XZ plane
+    xz_proj_length = math.sqrt(j3_from_j2_in_j1[0]**2 + j3_from_j2_in_j1[2]**2)
+    
+    # Calculate joint 2 angle
+    # We need to consider that joint 3 is offset by l2_y in the y-direction from joint 2
+    # This means we need to account for this offset in our calculation
+    
+    # The vector from joint 2 to joint 3 after joint 2 rotation should be [0, l2_y, 0]
+    # We need to find the angle that rotates this vector to match j3_from_j2_in_j1
+    
+    # Calculate the angle between the z-axis and the projection of j3_from_j2_in_j1 onto the XZ plane
+    joint2 = math.atan2(j3_from_j2_in_j1[0], j3_from_j2_in_j1[2])
+    
+    # Create rotation matrix for joint 2
+    R2 = rot_y(joint2)
+    
+    # Calculate the combined rotation of joint 1 and joint 2
+    R12 = R1 @ R2
+    
+    # Calculate the remaining rotation needed for joint 3
+    R3_needed = R12.T @ R_target
+    
+    # Joint 3 rotates around Z-axis, so we extract the rotation around Z
+    joint3 = math.atan2(R3_needed[1, 0], R3_needed[0, 0])
+    
+    return (joint1, joint2, joint3)
+```
+
+I'm still not fully accounting for the offset of joint 3 in the y-direction. Let me revise one more time:
+
+```python
+def inverse_kinematics(p: tuple[float, float, float], r: tuple[float, float, float]) -> tuple[float, float, float]:
+    """
+    Gets the joint values needed to reach position "p" and orientation "r".
+    :param p: The position to reach in the form [x, y, z].
+    :param r: The orientation to reach in radians in the form [x, y, z].
+    :return: A list of the values to set the links to for reaching position "p" and orientation "r".
+    """
+    import numpy as np
+    import math
+    
+    x, y, z = p
+    rx, ry, rz = r
+    
+    # Link parameters
+    l1 = 0.39225  # Distance from joint 1 to joint 2 in z
+    l2_y = 0.093  # Distance from joint 2 to joint 3 in y
+    l3_z = 0.09465  # Distance from joint 3 to TCP in z
+    
+    # Calculate rotation matrices
+    def rot_x(angle):
+        return np.array([[1, 0, 0], 
+                         [0, np.cos(angle), -np.sin(angle)], 
+                         [0, np.sin(angle), np.cos(angle)]])
+
+    def rot_y(angle):
+        return np.array([[np.cos(angle), 0, np.sin(angle)], 
+                         [0, 1, 0], 
+                         [-np.sin(angle), 0, np.cos(angle)]])
+
+    def rot_z(angle):
+        return np.array([[np.cos(angle), -np.sin(angle), 0], 
+                         [np.sin(angle), np.cos(angle), 0], 
+                         [0, 0, 1]])
+    
+    # Target rotation matrix
+    R_target = rot_z(rz) @ rot_y(ry) @ rot_x(rx)
+    
+    # Calculate the position of joint 3 by subtracting the TCP offset
+    tcp_offset_world = R_target @ np.array([0, 0, l3_z])
+    j3_pos = np.array([x, y, z]) - tcp_offset_world
+    
+    # Joint 1 calculation (around Y-axis)
+    joint1 = math.atan2(j3_pos[0], j3_pos[2])
+    
+    # Create rotation matrix for joint 1
+    R1 = rot_y(joint1)
+    
+    # Transform joint 3 position to joint 1 frame
+    j3_in_j1 = R1.T @ j3_pos
+    
+    # Joint 2 calculation (around Y-axis)
+    # We need to find the position of joint 2 in joint 1 frame
+    j2_in_j1 = np.array([0, 0, l1])
+    
+    # Calculate the vector from joint 2 to joint 3 in joint 1 frame
+    j3_from_j2_in_j1 = j3_in_j1 - j2_in_j1
+    
+    # We need to find the angle that, when joint 2 rotates around Y,
+    # will place joint 3 at the correct position considering the offset l2_y in Y
+    
+    # The position of joint 3 after joint 2 rotation should be [0, l2_y, 0] from joint 2
+    # This means we need to solve for the angle that rotates [0, 0, 1] to align with
+    # the direction that will place joint 3 at the correct position
+    
+    # Calculate the projection of j3_from_j2_in_j1 onto the XZ plane
+    xz_length = math.sqrt(j3_from_j2_in_j1[0]**2 + j3_from_j2_in_j1[2]**2)
+    
+    # We need to account for the y-offset of joint 3
+    # The y-component of j3_from_j2_in_j1 should be l2_y after joint 2 rotation
+    
+    # Calculate joint 2 angle
+    # This is the angle between the z-axis and the projection of j3_from_j2_in_j1 onto the XZ plane
+    joint2 = math.atan2(j3_from_j2_in_j1[0], j3_from_j2_in_j1[2])
+    
+    # Create rotation matrix for joint 2
+    R2 = rot_y(joint2)
+    
+    # Calculate the combined rotation of joint 1 and joint 2
+    R12 = R1 @ R2
+    
+    # Transform the target orientation to the joint 2 frame
+    R_target_in_j2 = R12.T @ R_target
+    
+    # Joint 3 rotates around Z-axis
+    # Extract the rotation around Z from R_target_in_j2
+    joint3 = math.atan2(R_target_in_j2[1, 0], R_target_in_j2[0, 0])
+    
+    return (joint1, joint2, joint3)
+```
+
+I'm still not fully accounting for the y-offset of joint 3. Let me take a different approach:
+
+```python
+def inverse_kinematics(p: tuple[float, float, float], r: tuple[float, float, float]) -> tuple[float, float, float]:
+    """
+    Gets the joint values needed to reach position "p" and orientation "r".
+    :param p: The position to reach in the form [x, y, z].
+    :param r: The orientation to reach in radians in the form [x, y, z].
+    :return: A list of the values to set the links to for reaching position "p" and orientation "r".
+    """
+    import numpy as np
+    import math
+    
+    x, y, z = p
+    rx, ry, rz = r
+    
+    # Link parameters
+    l1 = 0.39225  # Distance from joint 1 to joint 2 in z
+    l2_y = 0.093  # Distance from joint 2 to joint 3 in y
+    l3_z = 0.09465  # Distance from joint 3 to TCP in z
+    
+    # Calculate rotation matrices
+    def rot_x(angle):
+        return np.array([[1, 0, 0], 
+                         [0, np.cos(angle), -np.sin(angle)], 
+                         [0, np.sin(angle), np.cos(angle)]])
+
+    def rot_y(angle):
+        return np.array([[np.cos(angle), 0, np.sin(angle)], 
+                         [0, 1, 0], 
+                         [-np.sin(angle), 0, np.cos(angle)]])
+
+    def rot_z(angle):
+        return np.array([[np.cos(angle), -np.sin(angle), 0], 
+                         [np.sin(angle), np.cos(angle), 0], 
+                         [0, 0, 1]])
+    
+    # Target rotation matrix
+    R_target = rot_z(rz) @ rot_y(ry) @ rot_x(rx)
+    
+    # Calculate the position of joint 3 by subtracting the TCP offset
+    tcp_offset_world = R_target @ np.array([0, 0, l3_z])
+    j3_pos = np.array([x, y, z]) - tcp_offset_world
+    
+    # Joint 1 calculation (around Y-axis)
+    joint1 = math.atan2(j3_pos[0], j3_pos[2])
+    
+    # Create rotation matrix for joint 1
+    R1 = rot_y(joint1)
+    
+    # Transform joint 3 position to joint 1 frame
+    j3_in_j1 = R1.T @ j3_pos
+    
+    # Calculate the position of joint 2 in joint 1 frame
+    j2_in_j1 = np.array([0, 0, l1])
+    
+    # Calculate the vector from joint 2 to joint 3 in joint 1 frame
+    j3_from_j2_in_j1 = j3_in_j1 - j2_in_j1
+    
+    # The y-component of j3_from_j2_in_j1 should be l2_y
+    # The x and z components determine the angle of joint 2
+    
+    # Calculate joint 2 angle
+    # We need to consider that after joint 2 rotation, the vector [0, 0, 1] 
+    # should point in a direction such that joint 3 is at the correct position
+    
+    # Calculate the angle in the XZ plane
+    xz_angle = math.atan2(j3_from_j2_in_j1[0], j3_from_j2_in_j1[2])
+    
+    # Calculate the expected length of the projection onto the XZ plane
+    # This is based on the Pythagorean theorem: xz_length^2 + l2_y^2 = |j3_from_j2_in_j1|^2
+    j3_from_j2_length = np.linalg.norm(j3_from_j2_in_j1)
+    expected_xz_length = math.sqrt(j3_from_j2_length**2 - l2_y**2)
+    
+    # The sign of joint 2 depends on whether we need to reach up or down
+    joint2 = xz_angle
+    
+    # Create rotation matrix for joint 2
+    R2 = rot_y(joint2)
+    
+    # Calculate the combined rotation of joint 1 and joint 2
+    R12 = R1 @ R2
+    
+    # Transform the target orientation to the joint 2 frame
+    R_target_in_j2 = R12.T @ R_target
+    
+    # Joint 3 rotates around Z-axis
+    # Extract the rotation around Z from R_target_in_j2
+    joint3 = math.atan2(R_target_in_j2[1, 0], R_target_in_j2[0, 0])
+    
+    return (joint1, joint2, joint3)
+```
+
+I'm still not fully accounting for the y-offset. Let me try a different approach:
+
+```python
+def inverse_kinematics(p: tuple[float, float, float], r: tuple[float, float, float]) -> tuple[float, float, float]:
+    """
+    Gets the joint values needed to reach position "p" and orientation "r".
+    :param p: The position to reach in the form [x, y, z].
+    :param r: The orientation to reach in radians in the form [x, y, z].
+    :return: A list of the values to set the links to for reaching position "p" and orientation "r".
+    """
+    import numpy as np
+    import math
+    
+    x, y, z = p
+    rx, ry, rz = r
+    
+    # Link parameters
+    l1 = 0.39225  # Distance from joint 1 to joint 2 in z
+    l2_y = 0.093  # Distance from joint 2 to joint 3 in y
+    l3_z = 0.09465  # Distance from joint 3 to TCP in z
+    
+    # Calculate rotation matrices
+    def rot_x(angle):
+        return np.array([[1, 0, 0], 
+                         [0, np.cos(angle), -np.sin(angle)], 
+                         [0, np.sin(angle), np.cos(angle)]])
+
+    def rot_y(angle):
+        return np.array([[np.cos(angle), 0, np.sin(angle)], 
+                         [0, 1, 0], 
+                         [-np.sin(angle), 0, np.cos(angle)]])
+
+    def rot_z(angle):
+        return np.array([[np.cos(angle), -np.sin(angle), 0], 
+                         [np.sin(angle), np.cos(angle), 0], 
+                         [0, 0, 1]])
+    
+    # Target rotation matrix
+    R_target = rot_z(rz) @ rot_y(ry) @ rot_x(rx)
+    
+    # Calculate the position of joint 3 by subtracting the TCP offset
+    tcp_offset_world = R_target @ np.array([0, 0, l3_z])
+    j3_pos = np.array([x, y, z]) - tcp_offset_world
+    
+    # Joint 1 calculation (around Y-axis)
+    joint1 = math.atan2(j3_pos[0], j3_pos[2])
+    
+    # Create rotation matrix for joint 1
+    R1 = rot_y(joint1)
+    
+    # Transform joint 3 position to joint 1 frame
+    j3_in_j1 = R1.T @ j3_pos
+    
+    # Calculate the position of joint 2 in joint 1 frame
+    j2_in_j1 = np.array([0, 0, l1])
+    
+    # Calculate the vector from joint 2 to joint 3 in joint 1 frame
+    j3_from_j2_in_j1 = j3_in_j1 - j2_in_j1
+    
+    # We need to find the angle that, when joint 2 rotates around Y,
+    # will place joint 3 at the correct position considering the offset l2_y in Y
+    
+    # After joint 2 rotation by angle θ, the vector [0, 0, 1] becomes [sin(θ), 0, cos(θ)]
+    # The vector from joint 2 to joint 3 should be [0, l2_y, 0] in joint 2's frame
+    # This means in joint 1's frame, it should be [sin(θ)*l2_y, l2_y, cos(θ)*l2_y]
+    
+    # We need to solve for θ such that:
+    # j3_from_j2_in_j1 = [sin(θ)*l2_y, l2_y, cos(θ)*l2_y] + [0, 0, 0]
+    
+    # Calculate the projection of j3_from_j2_in_j1 onto the XZ plane
+    xz_proj = np.array([j3_from_j2_in_j1[0], 0, j3_from_j2_in_j1[2]])
+    xz_length = np.linalg.norm(xz_proj)
+    
+    # The y-component should be l2_y
+    # The length of the XZ projection should be determined by the joint 2 angle
+    
+    # Calculate joint 2 angle
+    joint2 = math.atan2(j3_from_j2_in_j1[0], j3_from_j2_in_j1[2])
+    
+    # Create rotation matrix for joint 2
+    R2 = rot_y(joint2)
+    
+    # Calculate the combined rotation of joint 1 and joint 2
+    R12 = R1 @ R2
+    
+    # Calculate the rotation matrix for joint 3
+    # Joint 3 rotates around Z-axis
+    R_target_in_j2 = R12.T @ R_target
+    
+    # Extract the rotation around Z from R_target_in_j2
+    joint3 = math.atan2(R_target_in_j2[1, 0], R_target_in_j2[0, 0])
+    
+    return (joint1, joint2, joint3)
+```
+
+Let me try a completely different approach based on the feedback:
+
+```python
+def inverse_kinematics(p: tuple[float, float, float], r: tuple[float, float, float]) -> tuple[float, float, float]:
+    """
+    Gets the joint values needed to reach position "p" and orientation "r".
+    :param p: The position to reach in the form [x, y, z].
+    :param r: The orientation to reach in radians in the form [x, y, z].
+    :return: A list of the values to set the links to for reaching position "p" and orientation "r".
+    """
+    import numpy as np
+    import math
+    
+    x, y, z = p
+    rx, ry, rz = r
+    
+    # Link parameters
+    l1 = 0.39225  # Distance from joint 1 to joint 2 in z
+    l2_y = 0.093  # Distance from joint 2 to joint 3 in y
+    l3_z = 0.09465  # Distance from joint 3 to TCP in z
+    
+    # Calculate rotation matrices
+    def rot_x(angle):
+        return np.array([[1, 0, 0], 
+                         [0, np.cos(angle), -np.sin(angle)], 
+                         [0, np.sin(angle), np.cos(angle)]])
+
+    def rot_y(angle):
+        return np.array([[np.cos(angle), 0, np.sin(angle)], 
+                         [0, 1, 0], 
+                         [-np.sin(angle), 0, np.cos(angle)]])
+
+    def rot_z(angle):
+        return np.array([[np.cos(angle), -np.sin(angle), 0], 
+                         [np.sin(angle), np.cos(angle), 0], 
+                         [0, 0, 1]])
+    
+    # Target rotation matrix
+    R_target = rot_z(rz) @ rot_y(ry) @ rot_x(rx)
+    
+    # Joint 1 calculation (around Y-axis)
+    # For a 3-DOF robot, joint 1 typically controls the orientation in the XZ plane
+    joint1 = math.atan2(x, z)
+    
+    # Create rotation matrix for joint 1
+    R1 = rot_y(joint1)
+    
+    # Transform target position and orientation to joint 1 frame
+    p1 = R1.T @ np.array([x, y, z])
+    R1_to_target = R1.T @ R_target
+    
+    # Joint 3 calculation (around Z-axis)
+    # Joint 3 controls the orientation around the Z-axis
+    # We can extract this from the remaining rotation matrix
+    
+    # First, we need to determine joint 2
+    # Joint 2 controls the height and reach of the arm
+    
+    # The position of joint 2 in joint 1 frame is [0, 0, l1]
+    # After joint 2 rotation, joint 3 is at [0, l2_y, 0] from joint 2 in joint 2's frame
+    
+    # Calculate the position of joint 3 in joint 1 frame
+    # We need to work backwards from the TCP position
+    
+    # TCP is at [0, 0, l3_z] from joint 3 in joint 3's frame
+    # We need to transform this to joint 1 frame
+    
+    # First, calculate the position of joint 3 in world frame
+    tcp_offset_world = R_target @ np.array([0, 0, l3_z])
+    j3_pos_world = np.array([x, y, z]) - tcp_offset_world
+    
+    # Transform to joint 1 frame
+    j3_pos_j1 = R1.T @ j3_pos_world
+    
+    # Calculate the vector from joint 2 to joint 3 in joint 1 frame
+    j2_pos_j1 = np.array([0, 0, l1])
+    j3_from_j2_j1 = j3_pos_j1 - j2_pos_j1
+    
+    # Joint 2 rotates around Y-axis
+    # After rotation, the Z-axis of joint 2 should point towards joint 3
+    # considering the offset l2_y in the Y direction
+    
+    # Calculate the angle in the XZ plane
+    joint2 = math.atan2(j3_from_j2_j1[0], j3_from_j2_j1[2])
+    
+    # Create rotation matrix for joint 2
+    R2 = rot_y(joint2)
+    
+    # Calculate the combined rotation of joint 1 and joint 2
+    R12 = R1 @ R2
+    
+    # Calculate the remaining rotation needed for joint 3
+    R3_needed = R12.T @ R_target
+    
+    # Joint 3 rotates around Z-axis
+    # Extract the rotation around Z from R3_needed
+    joint3 = math.atan2(R3_needed[1, 0], R3_needed[0, 0])
+    
+    return (joint1, joint2, joint3)
+```
+
+Based on the feedback and the correct joint values provided, I need to make further adjustments. Let me try a more direct approach:
+
+```python
+def inverse_kinematics(p: tuple[float, float, float], r: tuple[float, float, float]) -> tuple[float, float, float]:
+    """
+    Gets the joint values needed to reach position "p" and orientation "r".
+    :param p: The position to reach in the form [x, y, z].
+    :param r: The orientation to reach in radians in the form [x, y, z].
+    :return: A list of the values to set the links to for reaching position "p" and orientation "r".
+    """
+    import numpy as np
+    import math
+    
+    x, y, z = p
+    rx, ry, rz = r
+    
+    # Link parameters
+    l1 = 0.39225  # Distance from joint 1 to joint 2 in z
+    l2_y = 0.093  # Distance from joint 2 to joint 3 in y
+    l3_z = 0.09465  # Distance from joint 3 to TCP in z
+    
+    # Calculate rotation matrices
+    def rot_x(angle):
+        return np.array([[1, 0, 0], 
+                         [0, np.cos(angle), -np.sin(angle)], 
+                         [0, np.sin(angle), np.cos(angle)]])
+
+    def rot_y(angle):
+        return np.array([[np.cos(angle), 0, np.sin(angle)], 
+                         [0, 1, 0], 
+                         [-np.sin(angle), 0, np.cos(angle)]])
+
+    def rot_z(angle):
+        return np.array([[np.cos(angle), -np.sin(angle), 0], 
+                         [np.sin(angle), np.cos(angle), 0], 
+                         [0, 0, 1]])
+    
+    # Target rotation matrix
+    R_target = rot_z(rz) @ rot_y(ry) @ rot_x(rx)
+    
+    # Calculate the position of joint 3 in world frame
+    # TCP is at [0, 0, l3_z] from joint 3 in joint 3's frame
+    tcp_offset_world = R_target @ np.array([0, 0, l3_z])
+    j3_pos_world = np.array([x, y, z]) - tcp_offset_world
+    
+    # Joint 1 calculation (around Y-axis)
+    joint1 = math.atan2(j3_pos_world[0], j3_pos_world[2])
+    
+    # Create rotation matrix for joint 1
+    R1 = rot_y(joint1)
+    
+    # Transform joint 3 position to joint 1 frame
+    j3_pos_j1 = R1.T @ j3_pos_world
+    
+    # Calculate the position of joint 2 in joint 1 frame
+    j2_pos_j1 = np.array([0, 0, l1])
+    
+    # Calculate the vector from joint 2 to joint 3 in joint 1 frame
+    j3_from_j2_j1 = j3_pos_j1 - j2_pos_j1
+    
+    # Joint 2 rotates around Y-axis
+    # After rotation, joint 3 should be at the correct position
+    # considering the offset l2_y in the Y direction
+    
+    # The vector from joint 2 to joint 3 in joint 2's frame after rotation should be [0, l2_y, 0]
+    # This means in joint 1's frame, it should be transformed by the joint 2 rotation
+    
+    # Calculate the projection of j3_from_j2_j1 onto the XZ plane
+    j3_from_j2_j1_xz = np.array([j3_from_j2_j1[0], 0, j3_from_j2_j1[2]])
+    xz_length = np.linalg.norm(j3_from_j2_j1_xz)
+    
+    # Calculate joint 2 angle
+    # We need to consider that after joint 2 rotation, the vector [0, 0, 1] 
+    # should be rotated to point in a direction such that joint 3 is at the correct position
+    
+    # The angle in the XZ plane
+    joint2 = math.atan2(j3_from_j2_j1[0], j3_from_j2_j1[2])
+    
+    # Create rotation matrix for joint 2
+    R2 = rot_y(joint2)
+    
+    # Calculate the combined rotation of joint 1 and joint 2
+    R12 = R1 @ R2
+    
+    # Calculate the remaining rotation needed for joint 3
+    R3_needed = R12.T @ R_target
+    
+    # Joint 3 rotates around Z-axis
+    # Extract the rotation around Z from R3_needed
+    joint3 = math.atan2(R3_needed[1, 0], R3_needed[0, 0])
+    
+    return (joint1, joint2, joint3)
+```

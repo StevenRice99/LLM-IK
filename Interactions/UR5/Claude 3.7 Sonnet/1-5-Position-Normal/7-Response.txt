@@ -1,0 +1,205 @@
+I'll now develop the inverse kinematics solution for this 5-DOF robot manipulator. Let me analyze the forward kinematics results to understand the robot's structure and derive the inverse kinematics equations.
+
+Based on the robot description and forward kinematics tests, I can see that:
+- Joints 1, 2, 3, and 5 rotate around the Y-axis
+- Joint 4 rotates around the Z-axis
+- The robot has a specific configuration with offsets between joints
+
+Let me complete the inverse kinematics function:
+
+```python
+def inverse_kinematics(p: tuple[float, float, float]) -> tuple[float, float, float, float, float]:
+    """
+    Gets the joint values needed to reach position "p".
+    :param p: The position to reach in the form [x, y, z].
+    :return: A list of the values to set the links to for reaching position "p".
+    """
+    import numpy as np
+    
+    # Target position
+    x, y, z = p
+    
+    # Robot parameters from the DETAILS table
+    l1 = 0.425       # Distance from joint 1 to joint 2
+    l2 = 0.39225     # Distance from joint 2 to joint 3
+    l3 = 0.093       # Offset of joint 4 in y direction
+    l4 = 0.09465     # Distance from joint 4 to joint 5
+    l5 = 0.0823      # Distance from joint 5 to TCP
+    
+    y_offset = -0.1197  # Y offset of joint 2
+    
+    # Adjust target position to account for the TCP offset
+    # We need to find the position of joint 5, not the TCP
+    # Since joint 5 rotates around Y, and TCP has an offset in Y direction
+    
+    # First, calculate joint 1 angle (rotation around Y-axis)
+    theta1 = np.arctan2(x, z)
+    
+    # Calculate the distance from origin to the target in the XZ plane
+    r = np.sqrt(x**2 + z**2)
+    
+    # Adjust for the y-offset of joint 2 and the TCP offset
+    # We need to work in the plane defined by joint 1 rotation
+    y_target = y - l5 - y_offset
+    
+    # Calculate the distance from joint 2 to the target in the joint 1 rotation plane
+    d = np.sqrt(r**2 + y_target**2)
+    
+    # Use the law of cosines to find angles for joints 2 and 3
+    cos_theta3 = (d**2 - l1**2 - l2**2) / (2 * l1 * l2)
+    # Ensure the value is within valid range for arccos
+    cos_theta3 = np.clip(cos_theta3, -1.0, 1.0)
+    theta3 = -np.arccos(cos_theta3)  # Negative because of the robot configuration
+    
+    # Calculate theta2 using the law of sines and arctangent
+    beta = np.arctan2(y_target, r)
+    gamma = np.arccos((l1**2 + d**2 - l2**2) / (2 * l1 * d))
+    theta2 = beta + gamma
+    
+    # Joint 4 and 5 are used to orient the end effector
+    # For position-only IK, we can set them to convenient values
+    # Joint 4 rotates around Z, so it doesn't affect the TCP position
+    theta4 = 0.0
+    
+    # Joint 5 rotates around Y, and with the TCP offset, it can affect the position
+    # For a position-only solution, we can set it to 0
+    theta5 = 0.0
+    
+    return (theta1, theta2, theta3, theta4, theta5)
+```
+
+Wait, I need to refine this solution. Let me reconsider the problem:
+
+1. The TCP has an offset in the Y direction (0.0823) and a rotation around Z (1.57...)
+2. Joint 5 rotates around Y, which means it affects the TCP position in X and Z directions
+3. Joint 4 rotates around Z, which means it affects the TCP position in X and Y directions
+
+Let me correct the solution:
+
+```python
+def inverse_kinematics(p: tuple[float, float, float]) -> tuple[float, float, float, float, float]:
+    """
+    Gets the joint values needed to reach position "p".
+    :param p: The position to reach in the form [x, y, z].
+    :return: A list of the values to set the links to for reaching position "p".
+    """
+    import numpy as np
+    
+    # Target position
+    x_target, y_target, z_target = p
+    
+    # Robot parameters from the DETAILS table
+    l1 = 0.425       # Distance from joint 1 to joint 2 (z direction)
+    l2 = 0.39225     # Distance from joint 2 to joint 3 (z direction)
+    l3 = 0.093       # Offset of joint 4 in y direction
+    l4 = 0.09465     # Distance from joint 4 to joint 5 (z direction)
+    l5 = 0.0823      # Distance from joint 5 to TCP (y direction)
+    
+    y_offset = -0.1197  # Y offset of joint 2
+    
+    # Since joints 4 and 5 are used for orientation, and we're only concerned with position,
+    # we can set them to 0 and calculate the position of the wrist center (joint 5)
+    # Then we solve the inverse kinematics for the first 3 joints to reach that position
+    
+    # Calculate the wrist center position (joint 5 position)
+    # When joint 5 is at 0, the TCP is offset by l5 in the y direction
+    x_wrist = x_target
+    y_wrist = y_target - l5
+    z_wrist = z_target
+    
+    # Calculate joint 1 angle (rotation around Y-axis)
+    theta1 = np.arctan2(x_wrist, z_wrist)
+    
+    # Calculate the distance from origin to the wrist in the XZ plane
+    r_xz = np.sqrt(x_wrist**2 + z_wrist**2)
+    
+    # Adjust for the y-offset of joint 2
+    y_adj = y_wrist - y_offset
+    
+    # Calculate the distance from joint 2 to the wrist
+    d = np.sqrt(r_xz**2 + y_adj**2)
+    
+    # Use the law of cosines to find angle for joint 3
+    cos_theta3 = (d**2 - l1**2 - l2**2) / (2 * l1 * l2)
+    # Ensure the value is within valid range for arccos
+    cos_theta3 = np.clip(cos_theta3, -1.0, 1.0)
+    theta3 = -np.arccos(cos_theta3)  # Negative because of the robot configuration
+    
+    # Calculate theta2 using the law of sines and arctangent
+    beta = np.arctan2(y_adj, r_xz)
+    gamma = np.arccos((l1**2 + d**2 - l2**2) / (2 * l1 * d))
+    theta2 = beta + gamma
+    
+    # For position-only IK, we can set joints 4 and 5 to 0
+    theta4 = 0.0
+    theta5 = 0.0
+    
+    return (theta1, theta2, theta3, theta4, theta5)
+```
+
+Let me refine this solution one more time to ensure it's correct:
+
+```python
+def inverse_kinematics(p: tuple[float, float, float]) -> tuple[float, float, float, float, float]:
+    """
+    Gets the joint values needed to reach position "p".
+    :param p: The position to reach in the form [x, y, z].
+    :return: A list of the values to set the links to for reaching position "p".
+    """
+    import numpy as np
+    
+    # Target position
+    x_target, y_target, z_target = p
+    
+    # Robot parameters from the DETAILS table
+    l1 = 0.425       # Distance from joint 1 to joint 2 (z direction)
+    l2 = 0.39225     # Distance from joint 2 to joint 3 (z direction)
+    l3 = 0.093       # Offset of joint 4 in y direction
+    l4 = 0.09465     # Distance from joint 4 to joint 5 (z direction)
+    l5 = 0.0823      # Distance from joint 5 to TCP (y direction)
+    
+    y_offset = -0.1197  # Y offset of joint 2
+    
+    # Calculate the wrist center position (joint 5 position)
+    # When joint 4 and 5 are at 0, the TCP is offset by l5 in the y direction
+    x_wrist = x_target
+    y_wrist = y_target - l5
+    z_wrist = z_target
+    
+    # Calculate joint 1 angle (rotation around Y-axis)
+    theta1 = np.arctan2(x_wrist, z_wrist)
+    
+    # Calculate the distance from origin to the wrist in the XZ plane
+    r_xz = np.sqrt(x_wrist**2 + z_wrist**2)
+    
+    # Adjust for the y-offset of joint 2
+    y_adj = y_wrist - y_offset
+    
+    # Calculate the distance from joint 2 to the wrist
+    d = np.sqrt(r_xz**2 + y_adj**2)
+    
+    # Use the law of cosines to find angle for joint 3
+    cos_theta3 = (d**2 - l1**2 - l2**2) / (2 * l1 * l2)
+    # Ensure the value is within valid range for arccos
+    cos_theta3 = np.clip(cos_theta3, -1.0, 1.0)
+    theta3 = -np.arccos(cos_theta3)  # Negative because of the robot configuration
+    
+    # Calculate theta2 using the law of sines and arctangent
+    beta = np.arctan2(y_adj, r_xz)
+    gamma = np.arccos((l1**2 + d**2 - l2**2) / (2 * l1 * d))
+    theta2 = beta + gamma
+    
+    # For position-only IK, we can set joints 4 and 5 to 0
+    theta4 = 0.0
+    theta5 = 0.0
+    
+    return (theta1, theta2, theta3, theta4, theta5)
+```
+
+This solution should work for the position-only inverse kinematics of this 5-DOF robot. The approach:
+
+1. Calculate the wrist center position by accounting for the TCP offset
+2. Solve for joint 1 angle using the arctan2 function
+3. Use the law of cosines to solve for joint 3 angle
+4. Calculate joint 2 angle using a combination of arctan2 and the law of cosines
+5. Set joints 4 and 5 to 0 since they primarily affect orientation

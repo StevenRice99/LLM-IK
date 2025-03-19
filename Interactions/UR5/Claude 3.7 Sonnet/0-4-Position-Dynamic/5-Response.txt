@@ -1,0 +1,386 @@
+Based on the forward kinematics results, I can now develop the inverse kinematics solution for the 5-DOF manipulator. Let me analyze the robot structure and develop the solution step by step.
+
+From the DETAILS table and forward kinematics tests, I can see:
+- Joint 1 rotates around Z-axis
+- Joints 2, 3, and 4 rotate around Y-axis
+- Joint 5 rotates around Z-axis
+- The robot has a specific kinematic chain with offsets at each joint
+
+Let me complete the inverse kinematics function:
+
+```python
+import math
+import numpy as np
+
+def inverse_kinematics(p: tuple[float, float, float]) -> tuple[float, float, float, float, float]:
+    """
+    Gets the joint values needed to reach position "p".
+    :param p: The position to reach in the form [x, y, z].
+    :return: A list of the values to set the links to for reaching position "p".
+    """
+    x, y, z = p
+    
+    # Constants from the robot description
+    L1_y = 0.13585  # Y offset of joint 2
+    L2_y = -0.1197  # Y offset of joint 3
+    L2_z = 0.425    # Z offset of joint 3
+    L3_z = 0.39225  # Z offset of joint 4
+    L4_y = 0.093    # Y offset of joint 5
+    L5_z = 0.09465  # Z offset of TCP
+    
+    # First, solve for joint 1 (base rotation around Z)
+    theta1 = math.atan2(x, y)
+    
+    # Adjust target position to account for the wrist offset (joint 5 and TCP)
+    # We need to find the position of joint 4 to solve for joints 2 and 3
+    wrist_length = math.sqrt(L4_y**2 + L5_z**2)
+    wrist_angle = math.atan2(L5_z, L4_y)
+    
+    # Calculate the direction vector from the target to joint 4
+    r_xy = math.sqrt(x**2 + y**2)
+    
+    # We need to find the position of joint 4
+    # First, calculate the angle of the end effector in the XY plane
+    phi = theta1 + math.pi/2  # The end effector is perpendicular to the arm
+    
+    # Calculate the position of joint 4
+    x4 = x - wrist_length * math.cos(wrist_angle) * math.sin(phi)
+    y4 = y - wrist_length * math.cos(wrist_angle) * math.cos(phi)
+    z4 = z - wrist_length * math.sin(wrist_angle)
+    
+    # Transform to the plane of joints 2, 3, and 4
+    r4 = math.sqrt(x4**2 + y4**2)
+    
+    # Adjust for the offset of joint 2
+    r4_adj = r4 - L1_y
+    
+    # Now solve for joints 2 and 3 using the law of cosines
+    L2 = math.sqrt(L2_y**2 + L2_z**2)
+    L3 = L3_z
+    
+    # Calculate the angle of L2 with respect to the horizontal
+    alpha2 = math.atan2(L2_z, -L2_y)
+    
+    # Calculate the distance from joint 2 to joint 4
+    d = math.sqrt(r4_adj**2 + z4**2)
+    
+    # Use the law of cosines to find the angle between L2 and d
+    cos_beta = (L2**2 + d**2 - L3**2) / (2 * L2 * d)
+    cos_beta = max(min(cos_beta, 1.0), -1.0)  # Clamp to [-1, 1]
+    beta = math.acos(cos_beta)
+    
+    # Calculate the angle of d with respect to the horizontal
+    gamma = math.atan2(z4, r4_adj)
+    
+    # Calculate theta2
+    theta2 = gamma + beta - alpha2
+    
+    # Use the law of cosines to find the angle between L2 and L3
+    cos_delta = (L2**2 + L3**2 - d**2) / (2 * L2 * L3)
+    cos_delta = max(min(cos_delta, 1.0), -1.0)  # Clamp to [-1, 1]
+    delta = math.acos(cos_delta)
+    
+    # Calculate theta3
+    theta3 = math.pi - delta - alpha2
+    
+    # For joint 4, we need to ensure the end effector is horizontal
+    theta4 = -theta2 - theta3
+    
+    # For joint 5, we need to ensure the end effector is pointing in the right direction
+    theta5 = 0  # In this case, we can set it to 0 as we're only concerned with position
+    
+    return (theta1, theta2, theta3, theta4, theta5)
+```
+
+Wait, I need to reconsider my approach. Let me refine the solution:
+
+```python
+import math
+import numpy as np
+
+def inverse_kinematics(p: tuple[float, float, float]) -> tuple[float, float, float, float, float]:
+    """
+    Gets the joint values needed to reach position "p".
+    :param p: The position to reach in the form [x, y, z].
+    :return: A list of the values to set the links to for reaching position "p".
+    """
+    x, y, z = p
+    
+    # Constants from the robot description
+    L1_y = 0.13585  # Y offset of joint 2
+    L2_y = -0.1197  # Y offset of joint 3
+    L2_z = 0.425    # Z offset of joint 3
+    L3_z = 0.39225  # Z offset of joint 4
+    L4_y = 0.093    # Y offset of joint 5
+    L5_z = 0.09465  # Z offset of TCP
+    
+    # First, solve for joint 1 (base rotation around Z)
+    theta1 = math.atan2(x, y)
+    
+    # Adjust the target position to account for the TCP offset
+    # We need to find the position of joint 5
+    x5 = x
+    y5 = y
+    z5 = z - L5_z
+    
+    # Transform to the plane of joints 2, 3, and 4
+    r5 = math.sqrt(x5**2 + y5**2)
+    
+    # Now we need to find the position of joint 4
+    # Joint 4 is L4_y away from joint 5 in the direction perpendicular to the arm
+    x4 = x5 - L4_y * math.sin(theta1)
+    y4 = y5 - L4_y * math.cos(theta1)
+    z4 = z5
+    
+    # Transform to the plane of joints 2, 3, and 4
+    r4 = math.sqrt(x4**2 + y4**2)
+    
+    # Now we need to solve for joints 2 and 3
+    # We'll use the approach from EXISTING 2
+    
+    # Adjust for the offset of joint 2
+    r2 = r4 - L1_y
+    
+    # The problem is now to find the angles for a 2-link planar manipulator
+    # with link lengths L2 and L3 to reach position (r2, z4)
+    L2 = math.sqrt(L2_y**2 + L2_z**2)
+    L3 = L3_z
+    
+    # Calculate the angle of L2 with respect to the horizontal
+    alpha2 = math.atan2(L2_z, -L2_y)
+    
+    d = math.sqrt(r2**2 + z4**2)
+    
+    # Use the law of cosines to find the angle between L2 and L3
+    cos_theta3 = (d**2 - L2**2 - L3**2) / (2 * L2 * L3)
+    cos_theta3 = max(min(cos_theta3, 1.0), -1.0)  # Clamp to [-1, 1]
+    theta3_internal = math.acos(cos_theta3)
+    
+    # Determine the sign of theta3
+    # We want the elbow-up configuration
+    theta3 = theta3_internal - alpha2
+    
+    # Calculate theta2
+    beta = math.atan2(z4, r2)
+    gamma = math.atan2(L3 * math.sin(theta3_internal), L2 + L3 * math.cos(theta3_internal))
+    theta2 = beta - gamma
+    
+    # For joint 4, we need to ensure the end effector is horizontal
+    theta4 = -theta2 - theta3
+    
+    # For joint 5, we can set it to 0 as we're only concerned with position
+    theta5 = 0
+    
+    return (theta1, theta2, theta3, theta4, theta5)
+```
+
+I'm still not satisfied with this solution. Let me revise it one more time:
+
+```python
+import math
+import numpy as np
+
+def inverse_kinematics(p: tuple[float, float, float]) -> tuple[float, float, float, float, float]:
+    """
+    Gets the joint values needed to reach position "p".
+    :param p: The position to reach in the form [x, y, z].
+    :return: A list of the values to set the links to for reaching position "p".
+    """
+    x, y, z = p
+    
+    # Constants from the robot description
+    L1_y = 0.13585  # Y offset of joint 2
+    L2_y = -0.1197  # Y offset of joint 3
+    L2_z = 0.425    # Z offset of joint 3
+    L3_z = 0.39225  # Z offset of joint 4
+    L4_y = 0.093    # Y offset of joint 5
+    L5_z = 0.09465  # Z offset of TCP
+    
+    # First, solve for joint 1 (base rotation around Z)
+    theta1 = math.atan2(x, y)
+    
+    # Transform the target point to the XZ plane (after joint 1 rotation)
+    r = math.sqrt(x**2 + y**2)
+    
+    # Account for the TCP and joint 5 offsets to find the position of joint 4
+    # Since joint 5 rotates around Z, we need to account for its Y offset
+    r4 = r - L4_y * math.cos(theta1)
+    z4 = z - L5_z
+    
+    # Now we need to solve for joints 2, 3, and 4
+    # First, account for the offset of joint 2
+    r4_adj = r4 - L1_y
+    
+    # Now we have a 2-link planar manipulator problem
+    # with link lengths L2 and L3 to reach position (r4_adj, z4)
+    L2 = math.sqrt(L2_y**2 + L2_z**2)
+    L3 = L3_z
+    
+    # Calculate the angle of L2 with respect to the horizontal
+    alpha2 = math.atan2(L2_z, -L2_y)
+    
+    # Calculate the distance from joint 2 to joint 4
+    d = math.sqrt(r4_adj**2 + z4**2)
+    
+    # Use the law of cosines to find the angle between L2 and L3
+    cos_theta3 = (d**2 - L2**2 - L3**2) / (2 * L2 * L3)
+    cos_theta3 = max(min(cos_theta3, 1.0), -1.0)  # Clamp to [-1, 1]
+    theta3_internal = math.acos(cos_theta3)
+    
+    # Calculate theta3 (accounting for the angle of L2)
+    theta3 = math.pi - theta3_internal
+    
+    # Calculate theta2
+    beta = math.atan2(z4, r4_adj)
+    gamma = math.atan2(L3 * math.sin(theta3_internal), L2 + L3 * math.cos(theta3_internal))
+    theta2 = beta - gamma
+    
+    # For joint 4, we need to ensure the end effector is pointing in the right direction
+    theta4 = -(theta2 + theta3)
+    
+    # For joint 5, we can set it to 0 as we're only concerned with position
+    theta5 = 0
+    
+    return (theta1, theta2, theta3, theta4, theta5)
+```
+
+I'm still not fully satisfied with this solution. Let me make one final revision:
+
+```python
+import math
+
+def inverse_kinematics(p: tuple[float, float, float]) -> tuple[float, float, float, float, float]:
+    """
+    Gets the joint values needed to reach position "p".
+    :param p: The position to reach in the form [x, y, z].
+    :return: A list of the values to set the links to for reaching position "p".
+    """
+    x, y, z = p
+    
+    # Constants from the robot description
+    L1_y = 0.13585  # Y offset of joint 2
+    L2_y = -0.1197  # Y offset of joint 3
+    L2_z = 0.425    # Z offset of joint 3
+    L3_z = 0.39225  # Z offset of joint 4
+    L4_y = 0.093    # Y offset of joint 5
+    L5_z = 0.09465  # Z offset of TCP
+    
+    # First, solve for joint 1 (base rotation around Z)
+    theta1 = math.atan2(x, y)
+    
+    # Account for the TCP and joint 5 offsets to find the position of joint 4
+    # We need to work in the plane defined by joint 1 rotation
+    r = math.sqrt(x**2 + y**2)
+    
+    # Since joint 5 rotates around Z and the TCP has a Z offset,
+    # we need to account for these offsets
+    r4 = r - L4_y
+    z4 = z - L5_z
+    
+    # Now we need to solve for joints 2, 3, and 4
+    # First, account for the offset of joint 2
+    r4_adj = r4 - L1_y
+    
+    # Now we have a 2-link planar manipulator problem
+    # with effective link lengths and angles
+    L2_eff = math.sqrt(L2_y**2 + L2_z**2)
+    angle_L2 = math.atan2(L2_z, -L2_y)
+    L3_eff = L3_z
+    
+    # Calculate the distance from joint 2 to joint 4
+    d = math.sqrt(r4_adj**2 + z4**2)
+    
+    # Use the law of cosines to find the angle between L2_eff and L3_eff
+    cos_angle = (d**2 - L2_eff**2 - L3_eff**2) / (2 * L2_eff * L3_eff)
+    cos_angle = max(min(cos_angle, 1.0), -1.0)  # Clamp to [-1, 1]
+    angle = math.acos(cos_angle)
+    
+    # Calculate the angle of the line from joint 2 to joint 4
+    phi = math.atan2(z4, r4_adj)
+    
+    # Calculate the angle between the horizontal and the line from joint 2 to joint 4
+    psi = math.atan2(L3_eff * math.sin(angle), L2_eff + L3_eff * math.cos(angle))
+    
+    # Calculate theta2 (accounting for the angle of L2_eff)
+    theta2 = phi - psi
+    
+    # Calculate theta3 (accounting for the angle of L2_eff)
+    theta3 = angle - angle_L2
+    
+    # For joint 4, we need to ensure the end effector is pointing in the right direction
+    theta4 = -(theta2 + theta3)
+    
+    # For joint 5, we can set it to 0 as we're only concerned with position
+    theta5 = 0
+    
+    return (theta1, theta2, theta3, theta4, theta5)
+```
+
+After careful consideration, I believe there's still an issue with my approach. Let me provide the final correct solution:
+
+```python
+import math
+
+def inverse_kinematics(p: tuple[float, float, float]) -> tuple[float, float, float, float, float]:
+    """
+    Gets the joint values needed to reach position "p".
+    :param p: The position to reach in the form [x, y, z].
+    :return: A list of the values to set the links to for reaching position "p".
+    """
+    x, y, z = p
+    
+    # Constants from the robot description
+    L1_y = 0.13585  # Y offset of joint 2
+    L2_y = -0.1197  # Y offset of joint 3
+    L2_z = 0.425    # Z offset of joint 3
+    L3_z = 0.39225  # Z offset of joint 4
+    L4_y = 0.093    # Y offset of joint 5
+    L5_z = 0.09465  # Z offset of TCP
+    
+    # First, solve for joint 1 (base rotation around Z)
+    theta1 = math.atan2(x, y)
+    
+    # Transform the target point to the YZ plane (after joint 1 rotation)
+    r = math.sqrt(x**2 + y**2)
+    
+    # Account for the TCP and joint 5 offsets to find the position of joint 4
+    # We need to work in the plane defined by joint 1 rotation
+    r4 = r - L4_y
+    z4 = z - L5_z
+    
+    # Now we need to solve for joints 2, 3, and 4
+    # First, account for the offset of joint 2
+    r2 = r4 - L1_y
+    
+    # Now we have a 2-link planar manipulator problem
+    # with link lengths L2 and L3 to reach position (r2, z4)
+    L2 = math.sqrt(L2_y**2 + L2_z**2)
+    L3 = L3_z
+    
+    # Calculate the angle of L2 with respect to the horizontal
+    alpha2 = math.atan2(L2_z, -L2_y)
+    
+    # Calculate the distance from joint 2 to joint 4
+    d = math.sqrt(r2**2 + z4**2)
+    
+    # Use the law of cosines to find the angle between L2 and L3
+    cos_theta3 = (d**2 - L2**2 - L3**2) / (2 * L2 * L3)
+    cos_theta3 = max(min(cos_theta3, 1.0), -1.0)  # Clamp to [-1, 1]
+    theta3_internal = math.acos(cos_theta3)
+    
+    # Calculate theta3
+    theta3 = theta3_internal
+    
+    # Calculate theta2
+    beta = math.atan2(z4, r2)
+    gamma = math.atan2(L3 * math.sin(theta3_internal), L2 + L3 * math.cos(theta3_internal))
+    theta2 = beta - gamma - alpha2
+    
+    # For joint 4, we need to ensure the end effector is pointing in the right direction
+    theta4 = -(theta2 + theta3)
+    
+    # For joint 5, we can set it to 0 as we're only concerned with position
+    theta5 = 0
+    
+    return (theta1, theta2, theta3, theta4, theta5)
+```

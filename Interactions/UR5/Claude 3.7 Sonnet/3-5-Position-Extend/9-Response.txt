@@ -1,0 +1,254 @@
+Based on the forward kinematics tests, I can now develop the inverse kinematics solution for this 3-DOF robot. Let me analyze the robot structure and the test results:
+
+1. Joint 1 rotates around Y-axis (affects X and Z coordinates)
+2. Joint 2 rotates around Z-axis (affects X and Y coordinates)
+3. Joint 3 rotates around Y-axis (affects X and Z coordinates)
+
+Let me complete the inverse kinematics function:
+
+```python
+import math
+import numpy as np
+
+def inverse_kinematics(p: tuple[float, float, float]) -> tuple[float, float, float]:
+    """
+    Gets the joint values needed to reach position "p".
+    :param p: The position to reach in the form [x, y, z].
+    :return: A tuple of the values to set the links to for reaching position "p".
+    """
+    px, py, pz = p
+    
+    # Link dimensions from the DETAILS table
+    l1 = 0.093  # Y offset of link 2
+    l2 = 0.09465  # Z offset of link 3
+    l3 = 0.0823  # Y offset of TCP
+    
+    # First, we need to find the position of the wrist (joint 3)
+    # The TCP has an offset from joint 3, and we need to account for joint 3's rotation
+    
+    # For joint 1, we need to consider the X-Z plane
+    theta1 = math.atan2(px, pz)
+    
+    # For joint 3, we can use the distance in the X-Z plane
+    r_xz = math.sqrt(px**2 + pz**2)
+    
+    # The Y coordinate is directly affected by joint 2 and the TCP offset
+    # We need to solve for joint 2 angle that gives us the correct Y position
+    # py = l1 + l3*cos(theta2)
+    cos_theta2 = (py - l1) / l3
+    # Ensure the value is within [-1, 1] for arccos
+    cos_theta2 = max(min(cos_theta2, 1.0), -1.0)
+    theta2 = math.acos(cos_theta2)
+    
+    # For joint 3, we need to consider how it affects the X-Z plane distance
+    # r_xz = l2*sin(theta3) + l3*sin(theta2+theta3)
+    sin_theta3 = (r_xz - l3*math.sin(theta2)) / l2
+    # Ensure the value is within [-1, 1] for arcsin
+    sin_theta3 = max(min(sin_theta3, 1.0), -1.0)
+    theta3 = math.asin(sin_theta3)
+    
+    return (theta1, theta2, theta3)
+```
+
+Wait, I need to reconsider my approach. The forward kinematics tests show that the relationships are more complex than my initial analysis. Let me revise:
+
+```python
+import math
+import numpy as np
+
+def inverse_kinematics(p: tuple[float, float, float]) -> tuple[float, float, float]:
+    """
+    Gets the joint values needed to reach position "p".
+    :param p: The position to reach in the form [x, y, z].
+    :return: A tuple of the values to set the links to for reaching position "p".
+    """
+    px, py, pz = p
+    
+    # Link dimensions from the DETAILS table
+    l1 = 0.093  # Y offset of link 2
+    l2 = 0.09465  # Z offset of link 3
+    l3 = 0.0823  # Y offset of TCP
+    
+    # Joint 1 rotates around Y-axis, affecting X and Z
+    theta1 = math.atan2(px, pz)
+    
+    # Calculate the distance in the X-Z plane
+    r_xz = math.sqrt(px**2 + pz**2)
+    
+    # Joint 2 rotates around Z-axis
+    # When joint 2 is at 0, the TCP is at y = l1 + l3
+    # When joint 2 is at π/2, the TCP's y position is affected by l2
+    # py = l1 + l3*cos(theta2)
+    y_offset = py - l1
+    theta2 = math.atan2(r_xz - l2, y_offset)
+    
+    # Joint 3 rotates around Y-axis
+    # This affects the final position in the X-Z plane
+    theta3 = -theta1  # This is a simplification, needs refinement
+    
+    return (theta1, theta2, theta3)
+```
+
+I'm still not capturing the full kinematics correctly. Let me revise one more time with a more systematic approach:
+
+```python
+import math
+
+def inverse_kinematics(p: tuple[float, float, float]) -> tuple[float, float, float]:
+    """
+    Gets the joint values needed to reach position "p".
+    :param p: The position to reach in the form [x, y, z].
+    :return: A tuple of the values to set the links to for reaching position "p".
+    """
+    px, py, pz = p
+    
+    # Link dimensions from the DETAILS table
+    l1 = 0.093    # Y offset of link 2
+    l2 = 0.09465  # Z offset of link 3
+    l3 = 0.0823   # Y offset of TCP
+    
+    # Joint 1 rotates around Y-axis
+    theta1 = math.atan2(px, pz)
+    
+    # Rotate the target point back by -theta1 to simplify the problem
+    # This puts the target in a plane where we can solve joints 2 and 3
+    r = math.sqrt(px**2 + pz**2)
+    
+    # Now we have a 2D problem in the Y-Z plane (where Z is now the rotated distance r)
+    # We need to solve for theta2 and theta3 to reach the point (py, r)
+    
+    # For joint 2 (rotation around Z), we need to find the angle that positions
+    # the end effector at the correct Y coordinate
+    theta2 = math.atan2(r, py - l1)
+    
+    # For joint 3 (rotation around Y), we need to ensure the end effector
+    # reaches the correct position after joint 2's rotation
+    theta3 = 0  # This is a placeholder, needs to be calculated
+    
+    return (theta1, theta2, theta3)
+```
+
+I'm still not getting the correct solution. Let me take a step back and analyze the forward kinematics more carefully:
+
+```python
+import math
+
+def inverse_kinematics(p: tuple[float, float, float]) -> tuple[float, float, float]:
+    """
+    Gets the joint values needed to reach position "p".
+    :param p: The position to reach in the form [x, y, z].
+    :return: A tuple of the values to set the links to for reaching position "p".
+    """
+    px, py, pz = p
+    
+    # Link dimensions
+    l1 = 0.093    # Y offset of link 2
+    l2 = 0.09465  # Z offset of link 3
+    l3 = 0.0823   # Y offset of TCP
+    
+    # Joint 1 (rotation around Y-axis)
+    # This affects the X and Z coordinates
+    theta1 = math.atan2(px, pz)
+    
+    # Calculate the distance in the X-Z plane
+    r = math.sqrt(px**2 + pz**2)
+    
+    # Joint 2 (rotation around Z-axis)
+    # This affects the distribution between Y and the X-Z plane
+    # When theta2 = 0, TCP is at (0, l1+l3, l2)
+    # When theta2 = π/2, TCP is at (l3, l1, l2)
+    
+    # Joint 3 (rotation around Y-axis)
+    # This affects the distribution between X and Z in the X-Z plane
+    
+    # We need to solve for theta2 and theta3 simultaneously
+    # Let's use the fact that the TCP's Y position is determined by theta2
+    # py = l1 + l3*cos(theta2)
+    cos_theta2 = (py - l1) / l3
+    # Ensure the value is within [-1, 1] for arccos
+    cos_theta2 = max(min(cos_theta2, 1.0), -1.0)
+    theta2 = math.acos(cos_theta2)
+    
+    # Now we can solve for theta3 using the X-Z plane distance
+    sin_theta2 = math.sin(theta2)
+    # r = l3*sin(theta2)
+    # We need to adjust theta3 to ensure we reach the correct X-Z distance
+    theta3 = 0  # This is still a placeholder
+    
+    return (theta1, theta2, theta3)
+```
+
+I'm still struggling with the exact relationship. Let me complete the solution with a more systematic approach:
+
+```python
+import math
+
+def inverse_kinematics(p: tuple[float, float, float]) -> tuple[float, float, float]:
+    """
+    Gets the joint values needed to reach position "p".
+    :param p: The position to reach in the form [x, y, z].
+    :return: A tuple of the values to set the links to for reaching position "p".
+    """
+    px, py, pz = p
+    
+    # Link dimensions
+    l1 = 0.093    # Y offset of link 2
+    l2 = 0.09465  # Z offset of link 3
+    l3 = 0.0823   # Y offset of TCP
+    
+    # Joint 1 (rotation around Y-axis)
+    theta1 = math.atan2(px, pz)
+    
+    # Calculate the distance in the X-Z plane
+    r = math.sqrt(px**2 + pz**2)
+    
+    # For joints 2 and 3, we need to solve the 2D problem in the plane defined by theta1
+    # The TCP position is determined by the combination of joints 2 and 3
+    
+    # From the forward kinematics tests, we can see that:
+    # - When all joints are 0, TCP is at [0, 0.1753, 0.09465]
+    # - When joint 2 is π/2, TCP's X coordinate becomes negative
+    
+    # Let's solve for theta2 first using the Y coordinate
+    theta2 = math.atan2(r - l2, py - l1)
+    
+    # Now solve for theta3 to ensure we reach the correct position in the X-Z plane
+    theta3 = theta1  # This ensures the TCP points in the right direction
+    
+    return (theta1, theta2, theta3)
+```
+
+I'm still not confident in this solution. Let me make one final attempt with a clearer understanding of the kinematics:
+
+```python
+import math
+
+def inverse_kinematics(p: tuple[float, float, float]) -> tuple[float, float, float]:
+    """
+    Gets the joint values needed to reach position "p".
+    :param p: The position to reach in the form [x, y, z].
+    :return: A tuple of the values to set the links to for reaching position "p".
+    """
+    px, py, pz = p
+    
+    # Link dimensions
+    l1 = 0.093    # Y offset of link 2
+    l2 = 0.09465  # Z offset of link 3
+    l3 = 0.0823   # Y offset of TCP
+    
+    # Calculate the angle of joint 1 (rotation around Y-axis)
+    theta1 = math.atan2(px, pz)
+    
+    # Calculate the distance in the X-Z plane
+    r = math.sqrt(px**2 + pz**2)
+    
+    # For joint 2, we need to consider how it affects the Y coordinate
+    # and the projection in the X-Z plane
+    theta2 = math.atan2(r, py - l1)
+    
+    # For joint 3, we need to ensure the end effector reaches the correct position
+    # Joint 3 needs to compensate for the rotation of joint 1
+    theta3 = -theta1
+    
+    return (theta1, theta2, theta3)
+```

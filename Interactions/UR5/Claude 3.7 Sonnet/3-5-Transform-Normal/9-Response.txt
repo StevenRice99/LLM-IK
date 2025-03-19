@@ -1,0 +1,171 @@
+I'll now develop the inverse kinematics solution for this 3-DOF serial manipulator. Let me analyze the forward kinematics results to understand the robot's structure and movement patterns.
+
+Based on the FORWARD_KINEMATICS tests, I can see:
+
+1. The robot has 3 revolute joints with axes Y, Z, Y respectively
+2. When all joints are at 0, the TCP is at [0, 0.1753, 0.09465]
+3. Joint 1 (Y-axis) rotates the entire arm around the Y-axis
+4. Joint 2 (Z-axis) rotates the subsequent links around the Z-axis
+5. Joint 3 (Y-axis) rotates the TCP around the Y-axis
+
+Now I'll develop the inverse kinematics solution:
+
+```python
+def inverse_kinematics(p: tuple[float, float, float], r: tuple[float, float, float]) -> tuple[float, float, float]:
+    """
+    Gets the joint values needed to reach position "p" and orientation "r".
+    :param p: The position to reach in the form [x, y, z].
+    :param r: The orientation to reach in radians in the form [x, y, z].
+    :return: A list of the values to set the links to for reaching position "p" and orientation "r".
+    """
+    import numpy as np
+    import math
+    
+    x, y, z = p
+    
+    # Constants from the robot's geometry
+    l1 = 0.093  # Distance from base to joint 2
+    l2 = 0.09465  # Distance from joint 2 to joint 3
+    l3 = 0.0823  # Distance from joint 3 to TCP
+    
+    # First, determine joint 1 (rotation around Y-axis)
+    # When joint 1 rotates, it changes the x and z coordinates
+    if x == 0 and z == 0:
+        # Special case: target is along the Y-axis
+        theta1 = 0
+    else:
+        theta1 = math.atan2(x, z)
+    
+    # Rotate the target point back to the YZ plane to solve for joints 2 and 3
+    # This gives us the distance in the YZ plane from the origin to the target
+    dist_yz = math.sqrt(x**2 + z**2)
+    
+    # The Y coordinate in the rotated frame
+    y_rotated = y
+    
+    # The Z coordinate in the rotated frame (distance from origin in the XZ plane)
+    z_rotated = dist_yz
+    
+    # Now we have a 2D problem in the YZ plane to solve for theta2 and theta3
+    
+    # Adjust the target position to account for the TCP offset and orientation
+    # The TCP has an offset and is rotated relative to joint 3
+    # We need to find where joint 3 should be to place the TCP at the target
+    
+    # For orientation, we need to consider r[0] (rotation around X) which affects the TCP orientation
+    # Joint 3 contributes to this orientation
+    theta3 = r[0]
+    
+    # Calculate the position of joint 3 given the TCP position and orientation
+    # The TCP is offset by l3 in a direction determined by theta3
+    j3_y = y_rotated - l3 * math.sin(theta3)
+    j3_z = z_rotated - l3 * math.cos(theta3)
+    
+    # Now solve for theta2 using the position of joint 3
+    # We need to find the angle that places joint 3 at (j3_y, j3_z)
+    # This is a simple trigonometry problem
+    
+    # Calculate the distance from joint 2 to joint 3
+    dist_j2_to_j3 = math.sqrt((j3_y - l1)**2 + j3_z**2)
+    
+    # Ensure the target is reachable
+    if dist_j2_to_j3 > l2:
+        # Target is too far, but we're assuming all targets are reachable
+        # So we'll just place joint 3 as close as possible
+        dist_j2_to_j3 = l2
+    
+    # Calculate theta2 using the law of cosines
+    theta2 = math.atan2(j3_y - l1, j3_z) - math.asin(0)  # No offset needed
+    
+    # Adjust theta2 to account for the orientation requirement
+    # Joint 2 (Z-axis) affects the overall orientation
+    theta2 = r[2] - theta3 - math.pi/2
+    
+    return (theta1, theta2, theta3)
+```
+
+Wait, I need to reconsider my approach. Let me analyze the forward kinematics more carefully:
+
+1. Joint 1 (Y-axis) rotates around Y, affecting X and Z coordinates
+2. Joint 2 (Z-axis) rotates around Z, affecting X and Y coordinates
+3. Joint 3 (Y-axis) rotates around Y, affecting orientation primarily
+
+Let me revise my solution:
+
+```python
+def inverse_kinematics(p: tuple[float, float, float], r: tuple[float, float, float]) -> tuple[float, float, float]:
+    """
+    Gets the joint values needed to reach position "p" and orientation "r".
+    :param p: The position to reach in the form [x, y, z].
+    :param r: The orientation to reach in radians in the form [x, y, z].
+    :return: A list of the values to set the links to for reaching position "p" and orientation "r".
+    """
+    import numpy as np
+    import math
+    
+    x, y, z = p
+    rx, ry, rz = r
+    
+    # Constants from the robot's geometry
+    l1 = 0.093    # Distance from base to joint 2
+    l2 = 0.09465  # Distance from joint 2 to joint 3
+    l3 = 0.0823   # Distance from joint 3 to TCP
+    
+    # Joint 1 (Y-axis) affects the distribution of the target position between X and Z
+    theta1 = math.atan2(x, z)
+    
+    # Calculate the distance in the XZ plane
+    dist_xz = math.sqrt(x**2 + z**2)
+    
+    # Joint 3 (Y-axis) primarily affects the orientation
+    # From the tests, we can see that joint 3 contributes to rx
+    theta3 = rx
+    
+    # The TCP has an offset in the Y direction when joint 3 is at 0
+    # When joint 3 rotates, this offset changes direction
+    # Calculate the position of joint 3 given the TCP position and orientation
+    j3_x = x - l3 * math.sin(theta3) * math.sin(theta1)
+    j3_y = y - l3 * math.cos(theta3)
+    j3_z = z - l3 * math.sin(theta3) * math.cos(theta1)
+    
+    # Joint 2 (Z-axis) needs to be calculated to position joint 3 correctly
+    # From the tests, we can see that joint 2 contributes to rz
+    # The relationship appears to be: rz = joint2 + pi/2
+    theta2 = rz - math.pi/2
+    
+    return (theta1, theta2, theta3)
+```
+
+I need to refine this further. Let me complete the solution:
+
+```python
+def inverse_kinematics(p: tuple[float, float, float], r: tuple[float, float, float]) -> tuple[float, float, float]:
+    """
+    Gets the joint values needed to reach position "p" and orientation "r".
+    :param p: The position to reach in the form [x, y, z].
+    :param r: The orientation to reach in radians in the form [x, y, z].
+    :return: A list of the values to set the links to for reaching position "p" and orientation "r".
+    """
+    import numpy as np
+    import math
+    
+    x, y, z = p
+    rx, ry, rz = r
+    
+    # From the forward kinematics tests, we can determine:
+    # - Joint 1 (Y-axis) rotates the arm around Y, affecting X and Z
+    # - Joint 2 (Z-axis) rotates around Z, affecting the orientation
+    # - Joint 3 (Y-axis) rotates around Y, affecting the orientation
+    
+    # Joint 1 calculation
+    theta1 = math.atan2(x, z)
+    
+    # Joint 3 calculation - from the tests, joint 3 contributes to rx
+    theta3 = rx
+    
+    # Joint 2 calculation - from the tests, joint 2 contributes to rz
+    # When joint 2 = 0, rz = pi/2, and when joint 2 = pi/2, rz = pi
+    theta2 = rz - math.pi/2
+    
+    return (theta1, theta2, theta3)
+```

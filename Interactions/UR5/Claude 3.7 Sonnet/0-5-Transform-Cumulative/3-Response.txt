@@ -1,0 +1,173 @@
+Thank you for providing the forward kinematics results. This helps me understand the robot's structure better. Now I'll develop the inverse kinematics solution for the 6-DOF manipulator.
+
+Let me analyze the robot structure based on the provided information:
+- The robot has 6 revolute joints
+- Joints 1 and 5 rotate around the Z-axis
+- Joints 2, 3, 4, and 6 rotate around the Y-axis
+- The TCP has an orientation offset of [0, 0, 1.570796325] (π/2 around Z-axis)
+
+I'll now complete the inverse kinematics function by combining the existing solutions and extending them to handle the full 6-DOF chain.
+
+```python
+def inverse_kinematics(p: tuple[float, float, float], r: tuple[float, float, float]) -> tuple[float, float, float, float, float, float]:
+    """
+    Gets the joint values needed to reach position "p" and orientation "r".
+    :param p: The position to reach in the form [x, y, z].
+    :param r: The orientation to reach in radians in the form [x, y, z].
+    :return: A list of the values to set the links to for reaching position "p" and orientation "r".
+    """
+    import math
+    import numpy as np
+    
+    # Target position and orientation
+    px, py, pz = p
+    rx, ry, rz = r
+    
+    # Adjust for the TCP offset
+    # The TCP has a position offset of [0, 0.0823, 0] and orientation offset of [0, 0, 1.570796325]
+    # We need to compute the wrist position (position of joint 6)
+    
+    # First, create the rotation matrix for the target orientation
+    def rot_x(angle):
+        return np.array([
+            [1, 0, 0],
+            [0, np.cos(angle), -np.sin(angle)],
+            [0, np.sin(angle), np.cos(angle)]
+        ])
+
+    def rot_y(angle):
+        return np.array([
+            [np.cos(angle), 0, np.sin(angle)],
+            [0, 1, 0],
+            [-np.sin(angle), 0, np.cos(angle)]
+        ])
+
+    def rot_z(angle):
+        return np.array([
+            [np.cos(angle), -np.sin(angle), 0],
+            [np.sin(angle), np.cos(angle), 0],
+            [0, 0, 1]
+        ])
+    
+    # Target rotation matrix
+    R_target = rot_z(rz) @ rot_y(ry) @ rot_x(rx)
+    
+    # Account for the TCP orientation offset (rotate -π/2 around Z)
+    tcp_offset_rot = rot_z(-1.570796325)
+    R_wrist = R_target @ tcp_offset_rot.T
+    
+    # TCP position offset in the target frame
+    tcp_offset = np.array([0, 0.0823, 0])
+    
+    # Rotate the TCP offset to the world frame
+    tcp_offset_world = R_target @ tcp_offset
+    
+    # Calculate wrist position by subtracting the rotated offset from the target position
+    wrist_pos = np.array([px, py, pz]) - tcp_offset_world
+    
+    # Joint 1 (base rotation around Z)
+    theta1 = math.atan2(wrist_pos[0], wrist_pos[1])
+    
+    # Adjust theta1 to match the convention in the existing code
+    theta1 = math.atan2(-wrist_pos[0], wrist_pos[1])
+    
+    # Create rotation matrix for joint 1
+    R1 = rot_z(theta1)
+    
+    # Transform wrist position to joint 1 frame
+    wrist_in_joint1 = R1.T @ wrist_pos
+    
+    # Calculate the position of joint 5 (before the last Z rotation)
+    # Joint 6 to joint 5 offset is [0, 0, 0.09465]
+    joint5_pos = wrist_pos - R_wrist @ np.array([0, 0, 0.09465])
+    
+    # Transform joint 5 position to joint 1 frame
+    joint5_in_joint1 = R1.T @ joint5_pos
+    
+    # Calculate the distance from joint 2 to joint 5 in the XZ plane
+    joint2_pos = np.array([0, 0.13585, 0])
+    dx = joint5_in_joint1[0] - joint2_pos[0]
+    dy = joint5_in_joint1[1] - joint2_pos[1]
+    dz = joint5_in_joint1[2] - joint2_pos[2]
+    
+    # Distance in the XZ plane
+    r = math.sqrt(dx**2 + dz**2)
+    
+    # Calculate joint 3 position
+    joint3_offset = np.array([0, -0.1197, 0.425])
+    
+    # Calculate joint 4 position
+    joint4_offset = np.array([0, 0, 0.39225])
+    
+    # Length of links
+    a2 = 0.425  # Distance from joint 2 to joint 3 in Z
+    a3 = 0.39225  # Distance from joint 3 to joint 4 in Z
+    
+    # Calculate theta3 using the law of cosines
+    cos_theta3 = (r**2 - a2**2 - a3**2) / (2 * a2 * a3)
+    # Ensure the value is within valid range for arccos
+    cos_theta3 = max(min(cos_theta3, 1.0), -1.0)
+    theta3 = math.acos(cos_theta3)
+    
+    # Calculate theta2
+    beta = math.atan2(dz, dx)
+    alpha = math.atan2(a3 * math.sin(theta3), a2 + a3 * math.cos(theta3))
+    theta2 = beta - alpha
+    
+    # Calculate the rotation matrix for the first three joints
+    R2 = rot_y(theta2)
+    R3 = rot_y(theta3)
+    R_1_to_3 = R1 @ R2 @ R3
+    
+    # Calculate the remaining rotation needed for the wrist
+    R_wrist_remaining = R_1_to_3.T @ R_wrist
+    
+    # Extract Euler angles for the wrist joints
+    # Joint 4 rotates around Y
+    # Joint 5 rotates around Z
+    # Joint 6 rotates around Y
+    
+    # Calculate theta5 (rotation around Z)
+    theta5 = math.atan2(R_wrist_remaining[0, 0], -R_wrist_remaining[2, 0])
+    
+    # Calculate theta4 and theta6
+    if abs(math.sin(theta5)) < 1e-10:
+        # Gimbal lock case
+        # We can choose theta4 arbitrarily and solve for theta6
+        theta4 = 0
+        theta6 = math.atan2(R_wrist_remaining[1, 2], R_wrist_remaining[1, 1])
+    else:
+        theta4 = math.atan2(R_wrist_remaining[1, 0], R_wrist_remaining[0, 0] * math.cos(theta5) - R_wrist_remaining[2, 0] * math.sin(theta5))
+        theta6 = math.atan2(R_wrist_remaining[0, 1] * math.sin(theta5) - R_wrist_remaining[2, 1] * math.cos(theta5), 
+                           -R_wrist_remaining[0, 2] * math.sin(theta5) + R_wrist_remaining[2, 2] * math.cos(theta5))
+    
+    # Ensure all angles are within the joint limits [-2π, 2π]
+    def normalize_angle(angle):
+        while angle > 2 * math.pi:
+            angle -= 2 * math.pi
+        while angle < -2 * math.pi:
+            angle += 2 * math.pi
+        return angle
+    
+    theta1 = normalize_angle(theta1)
+    theta2 = normalize_angle(theta2)
+    theta3 = normalize_angle(theta3)
+    theta4 = normalize_angle(theta4)
+    theta5 = normalize_angle(theta5)
+    theta6 = normalize_angle(theta6)
+    
+    return (theta1, theta2, theta3, theta4, theta5, theta6)
+```
+
+Let me review this solution:
+
+1. I first calculate the wrist position by accounting for the TCP offset.
+2. I solve for joint 1 (base rotation) using the wrist position.
+3. I transform the wrist position to the joint 1 frame.
+4. I calculate joints 2 and 3 using the law of cosines based on the distances between joints.
+5. I determine the rotation matrix for the first three joints.
+6. I calculate the remaining rotation needed for the wrist joints.
+7. I extract the Euler angles for joints 4, 5, and 6, handling the special case of gimbal lock.
+8. I normalize all angles to ensure they're within the joint limits.
+
+This solution provides a closed-form analytical solution for the inverse kinematics of the 6-DOF manipulator.

@@ -1,0 +1,227 @@
+Based on the forward kinematics tests, I can now develop a complete inverse kinematics solution for this 3-DOF robot. Let me analyze the robot structure and the test results:
+
+1. Joint 1 rotates around Y-axis
+2. Joint 2 rotates around Z-axis
+3. Joint 3 rotates around Y-axis
+4. The TCP has an additional orientation offset of [0, 0, 1.57] radians
+
+Let me complete the inverse kinematics function:
+
+```python
+import math
+import numpy as np
+
+def inverse_kinematics(p: tuple[float, float, float], r: tuple[float, float, float]) -> tuple[float, float, float]:
+    """
+    Gets the joint values needed to reach position "p" and orientation "r".
+    :param p: The position to reach in the form [x, y, z].
+    :param r: The orientation to reach in radians in the form [x, y, z].
+    :return: A list of the values to set the links to for reaching position "p" and orientation "r".
+    """
+    px, py, pz = p
+    target_roll, target_pitch, target_yaw = r
+    
+    # Calculate joint 1 (rotation around Y-axis)
+    theta1 = math.atan2(px, pz)
+    
+    # Create rotation matrix for the target orientation
+    R_target = np.array([
+        [math.cos(target_yaw) * math.cos(target_pitch), 
+         math.cos(target_yaw) * math.sin(target_pitch) * math.sin(target_roll) - math.sin(target_yaw) * math.cos(target_roll), 
+         math.cos(target_yaw) * math.sin(target_pitch) * math.cos(target_roll) + math.sin(target_yaw) * math.sin(target_roll)],
+        [math.sin(target_yaw) * math.cos(target_pitch), 
+         math.sin(target_yaw) * math.sin(target_pitch) * math.sin(target_roll) + math.cos(target_yaw) * math.cos(target_roll), 
+         math.sin(target_yaw) * math.sin(target_pitch) * math.cos(target_roll) - math.cos(target_yaw) * math.sin(target_roll)],
+        [-math.sin(target_pitch), 
+         math.cos(target_pitch) * math.sin(target_roll), 
+         math.cos(target_pitch) * math.cos(target_roll)]
+    ])
+    
+    # Create rotation matrix for joint 1
+    R_y = np.array([
+        [math.cos(theta1), 0, math.sin(theta1)],
+        [0, 1, 0],
+        [-math.sin(theta1), 0, math.cos(theta1)]
+    ])
+    
+    # Account for the TCP orientation offset (pi/2 around Z)
+    R_tcp_offset = np.array([
+        [0, -1, 0],
+        [1, 0, 0],
+        [0, 0, 1]
+    ])
+    
+    # Adjust target orientation by removing the TCP offset
+    R_adjusted = R_target @ np.linalg.inv(R_tcp_offset)
+    
+    # Transform target orientation to joint 1 frame
+    R_in_joint1 = R_y.T @ R_adjusted
+    
+    # Extract joint 2 and 3 from the resulting orientation matrix
+    theta2 = math.atan2(R_in_joint1[0, 1], R_in_joint1[0, 0])
+    
+    # Calculate joint 3 based on the remaining rotation needed
+    R_z = np.array([
+        [math.cos(theta2), -math.sin(theta2), 0],
+        [math.sin(theta2), math.cos(theta2), 0],
+        [0, 0, 1]
+    ])
+    
+    R_in_joint2 = R_z.T @ R_in_joint1
+    theta3 = math.atan2(-R_in_joint2[0, 2], R_in_joint2[2, 2])
+    
+    return (theta1, theta2, theta3)
+```
+
+Wait, I need to reconsider this solution. Let me analyze the forward kinematics tests more carefully:
+
+1. When all joints are 0, the TCP is at [0, 0.1753, 0.09465] with orientation [0, 0, 1.57]
+2. When joint 1 is 1.57, the TCP moves in the X direction
+3. When joint 2 is 1.57, the TCP moves in the negative X direction
+4. When joint 3 is 1.57, the TCP orientation changes but position remains the same as the zero position
+
+Let me revise my solution:
+
+```python
+import math
+import numpy as np
+
+def inverse_kinematics(p: tuple[float, float, float], r: tuple[float, float, float]) -> tuple[float, float, float]:
+    """
+    Gets the joint values needed to reach position "p" and orientation "r".
+    :param p: The position to reach in the form [x, y, z].
+    :param r: The orientation to reach in radians in the form [x, y, z].
+    :return: A list of the values to set the links to for reaching position "p" and orientation "r".
+    """
+    px, py, pz = p
+    roll, pitch, yaw = r
+    
+    # First, calculate joint 1 (rotation around Y-axis)
+    theta1 = math.atan2(px, pz)
+    
+    # Create rotation matrix for joint 1
+    R1 = np.array([
+        [math.cos(theta1), 0, math.sin(theta1)],
+        [0, 1, 0],
+        [-math.sin(theta1), 0, math.cos(theta1)]
+    ])
+    
+    # Transform the target position to joint 1 frame
+    p_local = R1.T @ np.array([px, py, pz])
+    
+    # Calculate the target orientation matrix
+    R_target = np.array([
+        [math.cos(yaw) * math.cos(pitch), 
+         math.cos(yaw) * math.sin(pitch) * math.sin(roll) - math.sin(yaw) * math.cos(roll), 
+         math.cos(yaw) * math.sin(pitch) * math.cos(roll) + math.sin(yaw) * math.sin(roll)],
+        [math.sin(yaw) * math.cos(pitch), 
+         math.sin(yaw) * math.sin(pitch) * math.sin(roll) + math.cos(yaw) * math.cos(roll), 
+         math.sin(yaw) * math.sin(pitch) * math.cos(roll) - math.cos(yaw) * math.sin(roll)],
+        [-math.sin(pitch), 
+         math.cos(pitch) * math.sin(roll), 
+         math.cos(pitch) * math.cos(roll)]
+    ])
+    
+    # Transform the target orientation to joint 1 frame
+    R_local = R1.T @ R_target
+    
+    # Account for the TCP orientation offset (pi/2 around Z)
+    R_tcp_offset = np.array([
+        [0, -1, 0],
+        [1, 0, 0],
+        [0, 0, 1]
+    ])
+    
+    # Remove the TCP offset from the target orientation
+    R_adjusted = R_local @ np.linalg.inv(R_tcp_offset)
+    
+    # Extract joint 2 (rotation around Z-axis)
+    theta2 = math.atan2(R_adjusted[1, 0], R_adjusted[0, 0])
+    
+    # Create rotation matrix for joint 2
+    R2 = np.array([
+        [math.cos(theta2), -math.sin(theta2), 0],
+        [math.sin(theta2), math.cos(theta2), 0],
+        [0, 0, 1]
+    ])
+    
+    # Transform to joint 2 frame
+    R_in_joint2 = R2.T @ R_adjusted
+    
+    # Extract joint 3 (rotation around Y-axis)
+    theta3 = math.atan2(-R_in_joint2[0, 2], R_in_joint2[2, 2])
+    
+    return (theta1, theta2, theta3)
+```
+
+Let me refine this solution one more time to ensure it's correct:
+
+```python
+import math
+import numpy as np
+
+def inverse_kinematics(p: tuple[float, float, float], r: tuple[float, float, float]) -> tuple[float, float, float]:
+    """
+    Gets the joint values needed to reach position "p" and orientation "r".
+    :param p: The position to reach in the form [x, y, z].
+    :param r: The orientation to reach in radians in the form [x, y, z].
+    :return: A list of the values to set the links to for reaching position "p" and orientation "r".
+    """
+    px, py, pz = p
+    roll, pitch, yaw = r
+    
+    # Calculate joint 1 (rotation around Y-axis)
+    theta1 = math.atan2(px, pz)
+    
+    # Create rotation matrix for the target orientation
+    R_target = np.array([
+        [math.cos(yaw) * math.cos(pitch), 
+         math.cos(yaw) * math.sin(pitch) * math.sin(roll) - math.sin(yaw) * math.cos(roll), 
+         math.cos(yaw) * math.sin(pitch) * math.cos(roll) + math.sin(yaw) * math.sin(roll)],
+        [math.sin(yaw) * math.cos(pitch), 
+         math.sin(yaw) * math.sin(pitch) * math.sin(roll) + math.cos(yaw) * math.cos(roll), 
+         math.sin(yaw) * math.sin(pitch) * math.cos(roll) - math.cos(yaw) * math.sin(roll)],
+        [-math.sin(pitch), 
+         math.cos(pitch) * math.sin(roll), 
+         math.cos(pitch) * math.cos(roll)]
+    ])
+    
+    # Create rotation matrix for joint 1
+    R1 = np.array([
+        [math.cos(theta1), 0, math.sin(theta1)],
+        [0, 1, 0],
+        [-math.sin(theta1), 0, math.cos(theta1)]
+    ])
+    
+    # Transform the target orientation to joint 1 frame
+    R_in_joint1 = R1.T @ R_target
+    
+    # The TCP has a fixed orientation offset of [0, 0, 1.57] (pi/2 around Z)
+    # Create the rotation matrix for this offset
+    R_tcp_offset = np.array([
+        [0, -1, 0],
+        [1, 0, 0],
+        [0, 0, 1]
+    ])
+    
+    # Remove the TCP offset from the target orientation
+    R_adjusted = R_in_joint1 @ np.linalg.inv(R_tcp_offset)
+    
+    # Extract joint 2 (rotation around Z-axis)
+    theta2 = math.atan2(R_adjusted[1, 0], R_adjusted[0, 0])
+    
+    # Create rotation matrix for joint 2
+    R2 = np.array([
+        [math.cos(theta2), -math.sin(theta2), 0],
+        [math.sin(theta2), math.cos(theta2), 0],
+        [0, 0, 1]
+    ])
+    
+    # Transform to joint 2 frame
+    R_in_joint2 = R2.T @ R_adjusted
+    
+    # Extract joint 3 (rotation around Y-axis)
+    theta3 = math.atan2(-R_in_joint2[0, 2], R_in_joint2[2, 2])
+    
+    return (theta1, theta2, theta3)
+```

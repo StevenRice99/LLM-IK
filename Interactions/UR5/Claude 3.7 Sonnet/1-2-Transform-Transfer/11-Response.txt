@@ -1,0 +1,249 @@
+I see the issue now. The problem is that I didn't account for the full 3D orientation representation correctly. Looking at the failed examples, I notice that when the target orientation has rx and rz values of π (3.141592653589793), my solution produces an orientation with rx and rz of 0.
+
+This suggests that I need to handle the orientation representation more carefully. In robotics, when rx and rz are both π, this typically represents a 180-degree rotation around the Y axis, which means the end effector is pointing in the opposite direction.
+
+Let me correct the solution:
+
+```python
+def inverse_kinematics(p: tuple[float, float, float], r: tuple[float, float, float]) -> tuple[float, float]:
+    """
+    Gets the joint values needed to reach position "p" and orientation "r".
+    :param p: The position to reach in the form [x, y, z].
+    :param r: The orientation to reach in radians in the form [x, y, z].
+    :return: A list of the values to set the links to for reaching position "p" and orientation "r".
+    """
+    import math
+    
+    x, y, z = p
+    rx, ry, rz = r
+    
+    # Link lengths
+    L1 = 0.425
+    L2 = 0.39225
+    
+    # Check if we need to flip the orientation (when rx and rz are both π)
+    flip_orientation = (abs(rx - math.pi) < 1e-6 and abs(rz - math.pi) < 1e-6)
+    
+    # If we need to flip, we add π to ry and then solve
+    effective_ry = ry
+    if flip_orientation:
+        effective_ry = ry + math.pi
+    
+    # Calculate intermediate values
+    sin_ry = math.sin(effective_ry)
+    cos_ry = math.cos(effective_ry)
+    
+    # Calculate the adjusted target position
+    x_adj = x - L2 * sin_ry
+    z_adj = z - L2 * cos_ry
+    
+    # Calculate theta1
+    theta1 = math.atan2(x_adj, z_adj)
+    
+    # Calculate theta2 from the orientation constraint
+    theta2 = effective_ry - theta1
+    
+    # Normalize angles to be within [-π, π]
+    theta1 = ((theta1 + math.pi) % (2 * math.pi)) - math.pi
+    theta2 = ((theta2 + math.pi) % (2 * math.pi)) - math.pi
+    
+    return (theta1, theta2)
+```
+
+Wait, I need to reconsider this approach. Looking at the failed examples more carefully, I see that when rx and rz are both π, the correct joint values are often quite different from what my solution produces.
+
+Let me revise the solution with a more comprehensive approach:
+
+```python
+def inverse_kinematics(p: tuple[float, float, float], r: tuple[float, float, float]) -> tuple[float, float]:
+    """
+    Gets the joint values needed to reach position "p" and orientation "r".
+    :param p: The position to reach in the form [x, y, z].
+    :param r: The orientation to reach in radians in the form [x, y, z].
+    :return: A list of the values to set the links to for reaching position "p" and orientation "r".
+    """
+    import math
+    
+    x, y, z = p
+    rx, ry, rz = r
+    
+    # Link lengths
+    L1 = 0.425
+    L2 = 0.39225
+    
+    # Check if we need to flip the orientation (when rx and rz are both π)
+    flip_orientation = (abs(rx - math.pi) < 1e-6 and abs(rz - math.pi) < 1e-6)
+    
+    # For a 2-DOF planar manipulator, there are typically two solutions (elbow up/down)
+    # Let's try both approaches and select the one that matches the orientation
+    
+    # First, solve for position only (similar to the existing solution)
+    d = math.sqrt(x**2 + z**2)
+    cos_theta2 = (d**2 - L1**2 - L2**2) / (2 * L1 * L2)
+    
+    # Clamp cos_theta2 to valid range [-1, 1]
+    cos_theta2 = max(min(cos_theta2, 1.0), -1.0)
+    
+    # Two possible solutions for theta2
+    theta2_pos = math.acos(cos_theta2)
+    theta2_neg = -theta2_pos
+    
+    # Calculate corresponding theta1 values
+    alpha = math.atan2(x, z)
+    
+    # For positive theta2
+    beta_pos = math.atan2(L2 * math.sin(theta2_pos), L1 + L2 * math.cos(theta2_pos))
+    theta1_pos = alpha - beta_pos
+    
+    # For negative theta2
+    beta_neg = math.atan2(L2 * math.sin(theta2_neg), L1 + L2 * math.cos(theta2_neg))
+    theta1_neg = alpha - beta_neg
+    
+    # Calculate the resulting orientations
+    orientation_pos = theta1_pos + theta2_pos
+    orientation_neg = theta1_neg + theta2_neg
+    
+    # If we need to flip the orientation, adjust the target orientation
+    target_orientation = ry
+    if flip_orientation:
+        # When rx and rz are π, we need to add π to the target orientation
+        target_orientation = ry + math.pi
+    
+    # Choose the solution that best matches the target orientation
+    diff_pos = abs((orientation_pos - target_orientation + math.pi) % (2 * math.pi) - math.pi)
+    diff_neg = abs((orientation_neg - target_orientation + math.pi) % (2 * math.pi) - math.pi)
+    
+    if diff_pos <= diff_neg:
+        theta1, theta2 = theta1_pos, theta2_pos
+    else:
+        theta1, theta2 = theta1_neg, theta2_neg
+    
+    # Normalize angles to be within [-π, π]
+    theta1 = ((theta1 + math.pi) % (2 * math.pi)) - math.pi
+    theta2 = ((theta2 + math.pi) % (2 * math.pi)) - math.pi
+    
+    return (theta1, theta2)
+```
+
+Actually, I need to reconsider this approach once more. Looking at the examples, I see that when rx and rz are both π, the joint values are often in a different quadrant than what I would expect.
+
+Let me revise with a more direct approach:
+
+```python
+def inverse_kinematics(p: tuple[float, float, float], r: tuple[float, float, float]) -> tuple[float, float]:
+    """
+    Gets the joint values needed to reach position "p" and orientation "r".
+    :param p: The position to reach in the form [x, y, z].
+    :param r: The orientation to reach in radians in the form [x, y, z].
+    :return: A list of the values to set the links to for reaching position "p" and orientation "r".
+    """
+    import math
+    
+    x, y, z = p
+    rx, ry, rz = r
+    
+    # Link lengths
+    L1 = 0.425
+    L2 = 0.39225
+    
+    # Check if we need to flip the orientation (when rx and rz are both π)
+    flip_orientation = (abs(rx - math.pi) < 1e-6 and abs(rz - math.pi) < 1e-6)
+    
+    # Adjust the target orientation if needed
+    if flip_orientation:
+        # When rx and rz are π, we need to add π to the target orientation
+        # and flip the x and z coordinates
+        ry = ry + math.pi
+        x = -x
+        z = -z
+    
+    # Now solve the inverse kinematics for the adjusted target
+    d = math.sqrt(x**2 + z**2)
+    cos_theta2 = (d**2 - L1**2 - L2**2) / (2 * L1 * L2)
+    
+    # Clamp cos_theta2 to valid range [-1, 1]
+    cos_theta2 = max(min(cos_theta2, 1.0), -1.0)
+    
+    theta2 = math.acos(cos_theta2)
+    
+    # Determine sign of theta2 based on cross product
+    cross_product = x * (L1 + L2 * math.cos(theta2)) - z * (L2 * math.sin(theta2))
+    if cross_product < 0:
+        theta2 = -theta2
+    
+    alpha = math.atan2(x, z)
+    beta = math.atan2(L2 * math.sin(theta2), L1 + L2 * math.cos(theta2))
+    theta1 = alpha - beta
+    
+    # Adjust theta1 and theta2 to match the desired orientation
+    current_orientation = theta1 + theta2
+    orientation_diff = ry - current_orientation
+    
+    # Distribute the orientation difference between theta1 and theta2
+    # to maintain the position while achieving the desired orientation
+    theta1 += orientation_diff / 2
+    theta2 += orientation_diff / 2
+    
+    # Normalize angles to be within [-π, π]
+    theta1 = ((theta1 + math.pi) % (2 * math.pi)) - math.pi
+    theta2 = ((theta2 + math.pi) % (2 * math.pi)) - math.pi
+    
+    return (theta1, theta2)
+```
+
+After further analysis of the examples, I see that I need a more direct approach that handles the orientation correctly:
+
+```python
+def inverse_kinematics(p: tuple[float, float, float], r: tuple[float, float, float]) -> tuple[float, float]:
+    """
+    Gets the joint values needed to reach position "p" and orientation "r".
+    :param p: The position to reach in the form [x, y, z].
+    :param r: The orientation to reach in radians in the form [x, y, z].
+    :return: A list of the values to set the links to for reaching position "p" and orientation "r".
+    """
+    import math
+    
+    x, y, z = p
+    rx, ry, rz = r
+    
+    # Link lengths
+    L1 = 0.425
+    L2 = 0.39225
+    
+    # Check if we need to flip the orientation (when rx and rz are both π)
+    flip_orientation = (abs(rx - math.pi) < 1e-6 and abs(rz - math.pi) < 1e-6)
+    
+    # If orientation needs to be flipped, negate x and z
+    if flip_orientation:
+        x = -x
+        z = -z
+    
+    # Solve for position
+    d = math.sqrt(x**2 + z**2)
+    cos_theta2 = (d**2 - L1**2 - L2**2) / (2 * L1 * L2)
+    
+    # Clamp cos_theta2 to valid range [-1, 1]
+    cos_theta2 = max(min(cos_theta2, 1.0), -1.0)
+    
+    theta2 = math.acos(cos_theta2)
+    
+    # Determine sign of theta2 based on cross product
+    cross_product = x * (L1 + L2 * math.cos(theta2)) - z * (L2 * math.sin(theta2))
+    if cross_product < 0:
+        theta2 = -theta2
+    
+    alpha = math.atan2(x, z)
+    beta = math.atan2(L2 * math.sin(theta2), L1 + L2 * math.cos(theta2))
+    theta1 = alpha - beta
+    
+    # If orientation is flipped, adjust the angles
+    if flip_orientation:
+        theta1 = theta1 + math.pi
+        theta2 = -theta2
+    
+    # Normalize angles to be within [-π, π]
+    theta1 = ((theta1 + math.pi) % (2 * math.pi)) - math.pi
+    theta2 = ((theta2 + math.pi) % (2 * math.pi)) - math.pi
+    
+    return (theta1, theta2)
+```

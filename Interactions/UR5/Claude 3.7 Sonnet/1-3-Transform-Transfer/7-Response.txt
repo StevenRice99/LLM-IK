@@ -1,0 +1,193 @@
+I see the pattern now. Looking at the failed cases and the correct joint values, I notice that when the orientation includes [π, y, π], there's a specific relationship between the joint angles that I need to account for.
+
+Let me develop a more accurate solution:
+
+```python
+import math
+
+def inverse_kinematics(p: tuple[float, float, float], r: tuple[float, float, float]) -> tuple[float, float, float]:
+    """
+    Gets the joint values needed to reach position "p" and orientation "r".
+    :param p: The position to reach in the form [x, y, z].
+    :param r: The orientation to reach in radians in the form [x, y, z].
+    :return: A list of the values to set the links to for reaching position "p" and orientation "r".
+    """
+    # Extract target position and orientation
+    x, y, z = p
+    rx, ry, rz = r
+    
+    # Constants from the robot description
+    tcp_offset = 0.093
+    L1 = 0.425
+    L2 = 0.39225
+    
+    # Adjust target position to account for TCP offset
+    x_adj = x
+    y_adj = y - tcp_offset
+    z_adj = z
+    
+    # Calculate distance from base to target (in xz plane)
+    d = math.sqrt(x_adj ** 2 + z_adj ** 2)
+    
+    # Calculate theta2 using law of cosines
+    cos_theta2 = (d ** 2 - L1 ** 2 - L2 ** 2) / (2 * L1 * L2)
+    # Ensure the value is within valid range for acos
+    cos_theta2 = max(min(cos_theta2, 1.0), -1.0)
+    theta2 = math.acos(cos_theta2)
+    
+    # Check if we need to use the alternate solution based on orientation
+    wrist_flip = (abs(abs(rx) - math.pi) < 0.1 and abs(abs(rz) - math.pi) < 0.1)
+    
+    # Calculate initial theta1
+    alpha = math.atan2(x_adj, z_adj)
+    beta = math.atan2(L2 * math.sin(theta2), L1 + L2 * math.cos(theta2))
+    
+    # Determine the correct configuration based on the target orientation
+    if wrist_flip:
+        # When rx and rz are π, we need to approach from the opposite side
+        # This means we need to flip the sign of theta2 and adjust theta1
+        theta1 = math.atan2(-x_adj, -z_adj) - math.atan2(L2 * math.sin(-theta2), L1 + L2 * math.cos(-theta2))
+        theta2 = -theta2
+    else:
+        theta1 = alpha - beta
+    
+    # Calculate theta3 based on the desired orientation
+    if wrist_flip:
+        # For wrist_flip configuration, we need to adjust how we calculate theta3
+        if ry > 0:
+            theta3 = ry - theta1 - theta2
+        else:
+            theta3 = ry - theta1 - theta2 + 2*math.pi
+    else:
+        theta3 = ry - theta1 - theta2
+    
+    # Normalize all angles to be within [-π, π]
+    theta1 = ((theta1 + math.pi) % (2 * math.pi)) - math.pi
+    theta2 = ((theta2 + math.pi) % (2 * math.pi)) - math.pi
+    theta3 = ((theta3 + math.pi) % (2 * math.pi)) - math.pi
+    
+    return (theta1, theta2, theta3)
+```
+
+After analyzing the feedback more carefully, I see that my approach is still not capturing the correct relationship. Let me try a different approach:
+
+```python
+import math
+
+def inverse_kinematics(p: tuple[float, float, float], r: tuple[float, float, float]) -> tuple[float, float, float]:
+    """
+    Gets the joint values needed to reach position "p" and orientation "r".
+    :param p: The position to reach in the form [x, y, z].
+    :param r: The orientation to reach in radians in the form [x, y, z].
+    :return: A list of the values to set the links to for reaching position "p" and orientation "r".
+    """
+    # Extract target position and orientation
+    x, y, z = p
+    rx, ry, rz = r
+    
+    # Constants from the robot description
+    tcp_offset = 0.093
+    L1 = 0.425
+    L2 = 0.39225
+    
+    # Adjust target position to account for TCP offset
+    x_adj = x
+    y_adj = y - tcp_offset
+    z_adj = z
+    
+    # Check if we need to use the alternate solution based on orientation
+    wrist_flip = (abs(abs(rx) - math.pi) < 0.1 and abs(abs(rz) - math.pi) < 0.1)
+    
+    # If wrist is flipped, we need to approach from the opposite side
+    if wrist_flip:
+        x_adj = -x_adj
+        z_adj = -z_adj
+    
+    # Calculate distance from base to target (in xz plane)
+    d = math.sqrt(x_adj ** 2 + z_adj ** 2)
+    
+    # Calculate theta2 using law of cosines
+    cos_theta2 = (d ** 2 - L1 ** 2 - L2 ** 2) / (2 * L1 * L2)
+    # Ensure the value is within valid range for acos
+    cos_theta2 = max(min(cos_theta2, 1.0), -1.0)
+    theta2 = math.acos(cos_theta2)
+    
+    # Calculate theta1
+    alpha = math.atan2(x_adj, z_adj)
+    beta = math.atan2(L2 * math.sin(theta2), L1 + L2 * math.cos(theta2))
+    theta1 = alpha - beta
+    
+    # If wrist is flipped, adjust the angles
+    if wrist_flip:
+        theta1 += math.pi
+    
+    # Calculate theta3 based on the desired orientation
+    theta3 = ry - theta1 - theta2
+    
+    # Normalize all angles to be within [-π, π]
+    theta1 = ((theta1 + math.pi) % (2 * math.pi)) - math.pi
+    theta2 = ((theta2 + math.pi) % (2 * math.pi)) - math.pi
+    theta3 = ((theta3 + math.pi) % (2 * math.pi)) - math.pi
+    
+    return (theta1, theta2, theta3)
+```
+
+After further analysis of the failed cases, I need to make one more revision:
+
+```python
+import math
+
+def inverse_kinematics(p: tuple[float, float, float], r: tuple[float, float, float]) -> tuple[float, float, float]:
+    """
+    Gets the joint values needed to reach position "p" and orientation "r".
+    :param p: The position to reach in the form [x, y, z].
+    :param r: The orientation to reach in radians in the form [x, y, z].
+    :return: A list of the values to set the links to for reaching position "p" and orientation "r".
+    """
+    # Extract target position and orientation
+    x, y, z = p
+    rx, ry, rz = r
+    
+    # Constants from the robot description
+    tcp_offset = 0.093
+    L1 = 0.425
+    L2 = 0.39225
+    
+    # Adjust target position to account for TCP offset
+    x_adj = x
+    y_adj = y - tcp_offset
+    z_adj = z
+    
+    # Check if we need to use the alternate solution based on orientation
+    wrist_flip = (abs(abs(rx) - math.pi) < 0.1 and abs(abs(rz) - math.pi) < 0.1)
+    
+    # Calculate distance from base to target (in xz plane)
+    d = math.sqrt(x_adj ** 2 + z_adj ** 2)
+    
+    # Calculate theta2 using law of cosines
+    cos_theta2 = (d ** 2 - L1 ** 2 - L2 ** 2) / (2 * L1 * L2)
+    # Ensure the value is within valid range for acos
+    cos_theta2 = max(min(cos_theta2, 1.0), -1.0)
+    theta2 = math.acos(cos_theta2)
+    
+    # Calculate theta1
+    alpha = math.atan2(x_adj, z_adj)
+    beta = math.atan2(L2 * math.sin(theta2), L1 + L2 * math.cos(theta2))
+    
+    if wrist_flip:
+        # For flipped wrist, we need to use the other elbow configuration
+        theta2 = -theta2
+        theta1 = alpha - beta + math.pi
+    else:
+        theta1 = alpha - beta
+    
+    # Calculate theta3 based on the desired orientation
+    theta3 = ry - theta1 - theta2
+    
+    # Normalize all angles to be within [-π, π]
+    theta1 = ((theta1 + math.pi) % (2 * math.pi)) - math.pi
+    theta2 = ((theta2 + math.pi) % (2 * math.pi)) - math.pi
+    theta3 = ((theta3 + math.pi) % (2 * math.pi)) - math.pi
+    
+    return (theta1, theta2, theta3)
+```

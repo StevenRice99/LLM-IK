@@ -1,0 +1,413 @@
+I see that my solutions are still not working correctly. Let me analyze the correct joint values provided in the feedback and develop a more accurate inverse kinematics solution.
+
+After careful analysis of the correct joint values and the robot's kinematics, I'll create a new solution:
+
+```python
+def inverse_kinematics(p: tuple[float, float, float], r: tuple[float, float, float]) -> tuple[float, float, float, float, float, float]:
+    """
+    Gets the joint values needed to reach position "p" and orientation "r".
+    :param p: The position to reach in the form [x, y, z].
+    :param r: The orientation to reach in radians in the form [x, y, z].
+    :return: A list of the values to set the links to for reaching position "p" and orientation "r".
+    """
+    import math
+    import numpy as np
+    
+    # Target position and orientation
+    px, py, pz = p
+    roll, pitch, yaw = r
+    
+    # Robot dimensions from the DETAILS table
+    d1 = 0.13585  # Distance from joint 1 to joint 2 along Y
+    a2 = 0.425    # Distance from joint 2 to joint 3 along Z
+    d2 = 0.1197   # Distance from joint 2 to joint 3 along Y (negative in the robot frame)
+    a3 = 0.39225  # Distance from joint 3 to joint 4 along Z
+    d4 = 0.093    # Distance from joint 4 to joint 5 along Y
+    d5 = 0.09465  # Distance from joint 5 to joint 6 along Z
+    d6 = 0.0823   # Distance from joint 6 to TCP along Y
+    
+    # Create rotation matrices for roll, pitch, yaw
+    def rot_x(angle):
+        return np.array([
+            [1, 0, 0],
+            [0, math.cos(angle), -math.sin(angle)],
+            [0, math.sin(angle), math.cos(angle)]
+        ])
+    
+    def rot_y(angle):
+        return np.array([
+            [math.cos(angle), 0, math.sin(angle)],
+            [0, 1, 0],
+            [-math.sin(angle), 0, math.cos(angle)]
+        ])
+    
+    def rot_z(angle):
+        return np.array([
+            [math.cos(angle), -math.sin(angle), 0],
+            [math.sin(angle), math.cos(angle), 0],
+            [0, 0, 1]
+        ])
+    
+    # Target rotation matrix (ZYX convention)
+    R_target = rot_z(yaw) @ rot_y(pitch) @ rot_x(roll)
+    
+    # TCP has a rotation of 90 degrees around Z
+    tcp_rot_z = 1.570796325
+    R_tcp = rot_z(tcp_rot_z)
+    
+    # Calculate the desired orientation of the wrist
+    R_wrist = R_target @ R_tcp.T
+    
+    # Calculate wrist center position by subtracting the TCP offset
+    tcp_offset = R_target @ np.array([0, d6, 0])
+    wrist_pos = np.array([px, py, pz]) - tcp_offset
+    
+    # Further adjust for the offset from joint 5 to joint 6
+    j5_to_j6_offset = R_wrist @ np.array([0, 0, d5])
+    j5_pos = wrist_pos - j5_to_j6_offset
+    
+    # Solve for joint 1 (base rotation)
+    theta1 = math.atan2(j5_pos[1], j5_pos[0])
+    
+    # Transform joint 5 position to joint 1 frame
+    c1 = math.cos(theta1)
+    s1 = math.sin(theta1)
+    R1 = rot_z(theta1)
+    j5_in_j1 = R1.T @ j5_pos
+    
+    # Calculate the position of joint 2 in the base frame
+    j2_pos = np.array([0, 0, d1])
+    
+    # Vector from joint 2 to joint 5 in joint 1 frame
+    v2_5 = j5_in_j1 - j2_pos
+    
+    # Calculate the distance from joint 2 to joint 5
+    d2_5 = np.linalg.norm(v2_5)
+    
+    # Calculate the effective lengths for the kinematic chain
+    l2_3 = math.sqrt(a2**2 + d2**2)  # Length from joint 2 to joint 3
+    l3_5 = math.sqrt(a3**2 + d4**2)  # Length from joint 3 to joint 5
+    
+    # Use law of cosines to find angle at joint 3
+    cos_theta3 = (d2_5**2 - l2_3**2 - l3_5**2) / (2 * l2_3 * l3_5)
+    cos_theta3 = max(min(cos_theta3, 1.0), -1.0)  # Clamp to valid range
+    
+    # Joint 3 rotates around Y axis
+    theta3 = -math.acos(cos_theta3)  # Negative because of the robot's configuration
+    
+    # Calculate angle for joint 2
+    # First, find the angle between the horizontal plane and the line from joint 2 to joint 5
+    phi = math.atan2(v2_5[2], math.sqrt(v2_5[0]**2 + v2_5[1]**2))
+    
+    # Then find the angle between links 2-3 and 2-5 using law of cosines
+    cos_alpha = (l2_3**2 + d2_5**2 - l3_5**2) / (2 * l2_3 * d2_5)
+    cos_alpha = max(min(cos_alpha, 1.0), -1.0)  # Clamp to valid range
+    alpha = math.acos(cos_alpha)
+    
+    # Joint 2 rotates around Y axis
+    theta2 = phi - alpha
+    
+    # Calculate the rotation matrices for joints 2 and 3
+    R2 = rot_y(theta2)
+    R3 = rot_y(theta3)
+    
+    # Calculate the combined rotation of the first 3 joints
+    R0_3 = R1 @ R2 @ R3
+    
+    # Calculate the remaining rotation needed for joints 4, 5, and 6
+    R3_6 = R0_3.T @ R_wrist
+    
+    # Extract Euler angles for joints 4, 5, and 6
+    # Joint 4 rotates around Y, Joint 5 rotates around Z, Joint 6 rotates around Y
+    
+    # Check for singularities
+    sy = math.sqrt(R3_6[0, 0]**2 + R3_6[1, 0]**2)
+    
+    if sy < 1e-6:
+        # Gimbal lock case
+        theta4 = 0
+        theta5 = math.atan2(-R3_6[2, 0], sy)
+        theta6 = math.atan2(-R3_6[0, 1], R3_6[1, 1])
+    else:
+        # Normal case
+        theta4 = math.atan2(-R3_6[2, 0], R3_6[2, 2])
+        theta5 = math.atan2(sy, R3_6[2, 1])
+        theta6 = math.atan2(R3_6[0, 1], -R3_6[1, 1])
+    
+    # Return the joint angles
+    return (theta1, theta2, theta3, theta4, theta5, theta6)
+```
+
+I'm still not confident in this solution. Let me try a different approach based on the correct joint values provided:
+
+```python
+def inverse_kinematics(p: tuple[float, float, float], r: tuple[float, float, float]) -> tuple[float, float, float, float, float, float]:
+    """
+    Gets the joint values needed to reach position "p" and orientation "r".
+    :param p: The position to reach in the form [x, y, z].
+    :param r: The orientation to reach in radians in the form [x, y, z].
+    :return: A list of the values to set the links to for reaching position "p" and orientation "r".
+    """
+    import math
+    import numpy as np
+    
+    # Target position and orientation
+    px, py, pz = p
+    roll, pitch, yaw = r
+    
+    # Create rotation matrices for roll, pitch, yaw
+    def rot_x(angle):
+        return np.array([
+            [1, 0, 0],
+            [0, math.cos(angle), -math.sin(angle)],
+            [0, math.sin(angle), math.cos(angle)]
+        ])
+    
+    def rot_y(angle):
+        return np.array([
+            [math.cos(angle), 0, math.sin(angle)],
+            [0, 1, 0],
+            [-math.sin(angle), 0, math.cos(angle)]
+        ])
+    
+    def rot_z(angle):
+        return np.array([
+            [math.cos(angle), -math.sin(angle), 0],
+            [math.sin(angle), math.cos(angle), 0],
+            [0, 0, 1]
+        ])
+    
+    # Target rotation matrix (ZYX convention)
+    R_target = rot_z(yaw) @ rot_y(pitch) @ rot_x(roll)
+    
+    # Robot dimensions
+    d1 = 0.13585  # Distance from joint 1 to joint 2 along Y
+    a2 = 0.425    # Distance from joint 2 to joint 3 along Z
+    d2 = 0.1197   # Distance from joint 2 to joint 3 along Y
+    a3 = 0.39225  # Distance from joint 3 to joint 4 along Z
+    d4 = 0.093    # Distance from joint 4 to joint 5 along Y
+    d5 = 0.09465  # Distance from joint 5 to joint 6 along Z
+    d6 = 0.0823   # Distance from joint 6 to TCP along Y
+    
+    # TCP has a rotation of 90 degrees around Z
+    tcp_rot_z = 1.570796325
+    R_tcp = rot_z(tcp_rot_z)
+    
+    # Calculate the desired orientation of the wrist
+    R_wrist = R_target @ R_tcp.T
+    
+    # Calculate wrist center position
+    wrist_vector = R_target @ np.array([0, d6, 0])
+    wrist_pos = np.array([px, py, pz]) - wrist_vector
+    
+    # Calculate joint 5 position
+    j5_offset = R_wrist @ np.array([0, 0, d5])
+    j5_pos = wrist_pos - j5_offset
+    
+    # Solve for joint 1
+    theta1 = math.atan2(j5_pos[1], j5_pos[0])
+    
+    # Transform joint 5 position to joint 1 frame
+    R1 = rot_z(theta1)
+    j5_in_j1 = R1.T @ j5_pos
+    
+    # Calculate the position of joint 2 in the base frame
+    j2_pos = np.array([0, 0, d1])
+    
+    # Vector from joint 2 to joint 5 in joint 1 frame
+    v2_5 = j5_in_j1 - j2_pos
+    
+    # Distance from joint 2 to joint 5
+    d2_5 = np.linalg.norm(v2_5)
+    
+    # Calculate the effective lengths for the kinematic chain
+    l2_3 = math.sqrt(a2**2 + d2**2)  # Length from joint 2 to joint 3
+    l3_5 = math.sqrt(a3**2 + d4**2)  # Length from joint 3 to joint 5
+    
+    # Use law of cosines to find angle at joint 3
+    cos_theta3 = (d2_5**2 - l2_3**2 - l3_5**2) / (2 * l2_3 * l3_5)
+    cos_theta3 = max(min(cos_theta3, 1.0), -1.0)  # Clamp to valid range
+    
+    # Joint 3 rotates around Y axis
+    theta3 = -math.acos(cos_theta3)  # Negative because of the robot's configuration
+    
+    # Calculate angle for joint 2
+    # First, find the angle between the horizontal plane and the line from joint 2 to joint 5
+    phi = math.atan2(v2_5[2], math.sqrt(v2_5[0]**2 + v2_5[1]**2))
+    
+    # Then find the angle between links 2-3 and 2-5 using law of cosines
+    cos_alpha = (l2_3**2 + d2_5**2 - l3_5**2) / (2 * l2_3 * d2_5)
+    cos_alpha = max(min(cos_alpha, 1.0), -1.0)  # Clamp to valid range
+    alpha = math.acos(cos_alpha)
+    
+    # Joint 2 rotates around Y axis
+    theta2 = phi - alpha
+    
+    # Calculate the rotation matrices for joints 2 and 3
+    R2 = rot_y(theta2)
+    R3 = rot_y(theta3)
+    
+    # Calculate the combined rotation of the first 3 joints
+    R0_3 = R1 @ R2 @ R3
+    
+    # Calculate the remaining rotation needed for joints 4, 5, and 6
+    R3_6 = R0_3.T @ R_wrist
+    
+    # Extract Euler angles for joints 4, 5, and 6
+    # Joint 4 rotates around Y, Joint 5 rotates around Z, Joint 6 rotates around Y
+    
+    # Check for singularities
+    if abs(R3_6[1, 2]) > 0.9999:
+        # Gimbal lock case
+        theta5 = math.pi/2 * np.sign(R3_6[1, 2])
+        theta4 = 0
+        theta6 = math.atan2(R3_6[0, 1], R3_6[0, 0])
+    else:
+        # Normal case
+        theta5 = math.atan2(math.sqrt(R3_6[0, 2]**2 + R3_6[2, 2]**2), R3_6[1, 2])
+        theta4 = math.atan2(R3_6[0, 2], -R3_6[2, 2])
+        theta6 = math.atan2(R3_6[1, 0], R3_6[1, 1])
+    
+    # Return the joint angles
+    return (theta1, theta2, theta3, theta4, theta5, theta6)
+```
+
+I'm still not confident in this solution. Let me try one more approach based on the correct joint values provided:
+
+```python
+def inverse_kinematics(p: tuple[float, float, float], r: tuple[float, float, float]) -> tuple[float, float, float, float, float, float]:
+    """
+    Gets the joint values needed to reach position "p" and orientation "r".
+    :param p: The position to reach in the form [x, y, z].
+    :param r: The orientation to reach in radians in the form [x, y, z].
+    :return: A list of the values to set the links to for reaching position "p" and orientation "r".
+    """
+    import math
+    import numpy as np
+    
+    # Target position and orientation
+    px, py, pz = p
+    roll, pitch, yaw = r
+    
+    # Create rotation matrices for roll, pitch, yaw
+    def rot_x(angle):
+        return np.array([
+            [1, 0, 0],
+            [0, math.cos(angle), -math.sin(angle)],
+            [0, math.sin(angle), math.cos(angle)]
+        ])
+    
+    def rot_y(angle):
+        return np.array([
+            [math.cos(angle), 0, math.sin(angle)],
+            [0, 1, 0],
+            [-math.sin(angle), 0, math.cos(angle)]
+        ])
+    
+    def rot_z(angle):
+        return np.array([
+            [math.cos(angle), -math.sin(angle), 0],
+            [math.sin(angle), math.cos(angle), 0],
+            [0, 0, 1]
+        ])
+    
+    # Target rotation matrix (ZYX convention)
+    R_target = rot_z(yaw) @ rot_y(pitch) @ rot_x(roll)
+    
+    # Robot dimensions
+    d1 = 0.13585  # Distance from joint 1 to joint 2 along Y
+    a2 = 0.425    # Distance from joint 2 to joint 3 along Z
+    d2 = -0.1197  # Distance from joint 2 to joint 3 along Y (negative in the robot frame)
+    a3 = 0.39225  # Distance from joint 3 to joint 4 along Z
+    d4 = 0.093    # Distance from joint 4 to joint 5 along Y
+    d5 = 0.09465  # Distance from joint 5 to joint 6 along Z
+    d6 = 0.0823   # Distance from joint 6 to TCP along Y
+    
+    # TCP has a rotation of 90 degrees around Z
+    tcp_rot_z = 1.570796325
+    R_tcp = rot_z(tcp_rot_z)
+    
+    # Calculate the desired orientation of the wrist
+    R_wrist = R_target @ R_tcp.T
+    
+    # Calculate wrist center position
+    wrist_vector = R_target @ np.array([0, d6, 0])
+    wrist_pos = np.array([px, py, pz]) - wrist_vector
+    
+    # Calculate joint 5 position
+    j5_offset = R_wrist @ np.array([0, 0, d5])
+    j5_pos = wrist_pos - j5_offset
+    
+    # Solve for joint 1
+    theta1 = math.atan2(j5_pos[1], j5_pos[0])
+    
+    # Transform joint 5 position to joint 1 frame
+    c1 = math.cos(theta1)
+    s1 = math.sin(theta1)
+    j5_in_j1 = np.array([
+        c1 * j5_pos[0] + s1 * j5_pos[1],
+        -s1 * j5_pos[0] + c1 * j5_pos[1],
+        j5_pos[2]
+    ])
+    
+    # Calculate the position of joint 2 in joint 1 frame
+    j2_in_j1 = np.array([0, 0, d1])
+    
+    # Vector from joint 2 to joint 5 in joint 1 frame
+    v2_5 = j5_in_j1 - j2_in_j1
+    
+    # Distance from joint 2 to joint 5
+    d2_5 = np.linalg.norm(v2_5)
+    
+    # Calculate the effective lengths for the kinematic chain
+    l2_3 = math.sqrt(a2**2 + d2**2)  # Length from joint 2 to joint 3
+    l3_5 = math.sqrt(a3**2 + d4**2)  # Length from joint 3 to joint 5
+    
+    # Use law of cosines to find angle at joint 3
+    cos_theta3 = (d2_5**2 - l2_3**2 - l3_5**2) / (2 * l2_3 * l3_5)
+    cos_theta3 = max(min(cos_theta3, 1.0), -1.0)  # Clamp to valid range
+    
+    # Joint 3 rotates around Y axis
+    theta3 = -math.acos(cos_theta3)  # Negative because of the robot's configuration
+    
+    # Calculate angle for joint 2
+    # First, find the angle between the horizontal plane and the line from joint 2 to joint 5
+    phi = math.atan2(v2_5[2], math.sqrt(v2_5[0]**2 + v2_5[1]**2))
+    
+    # Then find the angle between links 2-3 and 2-5 using law of cosines
+    cos_alpha = (l2_3**2 + d2_5**2 - l3_5**2) / (2 * l2_3 * d2_5)
+    cos_alpha = max(min(cos_alpha, 1.0), -1.0)  # Clamp to valid range
+    alpha = math.acos(cos_alpha)
+    
+    # Joint 2 rotates around Y axis
+    theta2 = phi - alpha
+    
+    # Calculate the rotation matrices for joints 1, 2, and 3
+    R1 = rot_z(theta1)
+    R2 = rot_y(theta2)
+    R3 = rot_y(theta3)
+    
+    # Calculate the combined rotation of the first 3 joints
+    R0_3 = R1 @ R2 @ R3
+    
+    # Calculate the remaining rotation needed for joints 4, 5, and 6
+    R3_6 = R0_3.T @ R_wrist
+    
+    # Extract Euler angles for joints 4, 5, and 6
+    # Joint 4 rotates around Y, Joint 5 rotates around Z, Joint 6 rotates around Y
+    
+    # Check for singularities
+    if abs(R3_6[1, 2]) > 0.9999:
+        # Gimbal lock case
+        theta5 = math.pi/2 * np.sign(R3_6[1, 2])
+        theta4 = 0
+        theta6 = math.atan2(R3_6[0, 1], R3_6[0, 0])
+    else:
+        # Normal case
+        theta5 = math.atan2(math.sqrt(R3_6[0, 2]**2 + R3_6[2, 2]**2), R3_6[1, 2])
+        theta4 = math.atan2(R3_6[0, 2], -R3_6[2, 2])
+        theta6 = math.atan2(R3_6[1, 0], R3_6[1, 1])
+    
+    # Return the joint angles
+    return (theta1, theta2, theta3, theta4, theta5, theta6)
+```

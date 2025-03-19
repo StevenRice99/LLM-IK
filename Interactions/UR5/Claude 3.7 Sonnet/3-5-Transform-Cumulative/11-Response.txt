@@ -1,0 +1,269 @@
+Thank you for the feedback. I see that my solution has significant issues. Let me analyze the correct joint values compared to my solution and develop a better approach.
+
+Looking at the robot structure again:
+- Joint 1 rotates around Y-axis
+- Joint 2 rotates around Z-axis
+- Joint 3 rotates around Y-axis
+- TCP has a fixed orientation offset of [0, 0, 1.57] radians
+
+Let me develop a more accurate inverse kinematics solution:
+
+```python
+def inverse_kinematics(p: tuple[float, float, float], r: tuple[float, float, float]) -> tuple[float, float, float]:
+    """
+    Gets the joint values needed to reach position "p" and orientation "r".
+    :param p: The position to reach in the form [x, y, z].
+    :param r: The orientation to reach in radians in the form [x, y, z].
+    :return: A list of the values to set the links to for reaching position "p" and orientation "r".
+    """
+    import numpy as np
+    import math
+    
+    # Target position and orientation
+    px, py, pz = p
+    rx, ry, rz = r
+    
+    # Link dimensions from the DETAILS section
+    l1_y = 0.093
+    l2_z = 0.09465
+    tcp_y = 0.0823
+    tcp_orientation_z = 1.570796325
+    
+    # Define rotation matrix functions
+    def rot_x(angle):
+        return np.array([
+            [1, 0, 0],
+            [0, np.cos(angle), -np.sin(angle)],
+            [0, np.sin(angle), np.cos(angle)]
+        ])
+
+    def rot_y(angle):
+        return np.array([
+            [np.cos(angle), 0, np.sin(angle)],
+            [0, 1, 0],
+            [-np.sin(angle), 0, np.cos(angle)]
+        ])
+
+    def rot_z(angle):
+        return np.array([
+            [np.cos(angle), -np.sin(angle), 0],
+            [np.sin(angle), np.cos(angle), 0],
+            [0, 0, 1]
+        ])
+    
+    # Target rotation matrix
+    R_target = rot_z(rz) @ rot_y(ry) @ rot_x(rx)
+    
+    # Calculate the wrist position by removing the TCP offset
+    # First, create the TCP offset transformation
+    R_tcp = rot_z(tcp_orientation_z)
+    
+    # The TCP offset in the TCP frame
+    tcp_offset_local = np.array([0, tcp_y, 0])
+    
+    # Transform the TCP offset to the world frame
+    tcp_offset_world = R_target @ tcp_offset_local
+    
+    # Calculate wrist position by subtracting the TCP offset from the target position
+    wrist_pos = np.array([px, py, pz]) - tcp_offset_world
+    wx, wy, wz = wrist_pos
+    
+    # Solve for joint 1 (rotation around Y-axis)
+    joint1 = math.atan2(wx, wz)
+    
+    # Calculate the position of joint 2 in the world frame
+    j2_world = np.array([0, l1_y, 0])
+    
+    # Calculate the vector from joint 2 to wrist in the world frame
+    j2_to_wrist = wrist_pos - j2_world
+    
+    # Rotate this vector by -joint1 to get it in the joint 1 frame
+    R1_inv = rot_y(-joint1)
+    j2_to_wrist_j1frame = R1_inv @ j2_to_wrist
+    
+    # Calculate joint 2 angle (around Z-axis)
+    # The projection of j2_to_wrist_j1frame onto the XZ plane
+    proj_xz = np.array([j2_to_wrist_j1frame[0], 0, j2_to_wrist_j1frame[2]])
+    
+    # Calculate the angle between this projection and the Z-axis
+    joint2 = math.atan2(j2_to_wrist_j1frame[0], j2_to_wrist_j1frame[2])
+    
+    # Calculate the rotation matrix for the orientation of the end effector
+    # We need to find joint3 such that when combined with joint1 and joint2, it gives us the target orientation
+    
+    # The combined rotation of joint1 and joint2
+    R1 = rot_y(joint1)
+    R2 = rot_z(joint2)
+    R12 = R1 @ R2
+    
+    # The desired end effector orientation is R_target
+    # We need to find R3 such that R12 @ R3 @ R_tcp = R_target
+    # Therefore, R3 = R12^-1 @ R_target @ R_tcp^-1
+    
+    R12_inv = np.linalg.inv(R12)
+    R_tcp_inv = np.linalg.inv(R_tcp)
+    R3 = R12_inv @ R_target @ R_tcp_inv
+    
+    # Extract joint3 from R3 (rotation around Y-axis)
+    # For a rotation around Y-axis, we can extract the angle from the elements of R3
+    joint3 = math.atan2(-R3[0, 2], R3[2, 2])
+    
+    return (joint1, joint2, joint3)
+```
+
+Wait, I need to reconsider my approach. Let me try a different method:
+
+```python
+def inverse_kinematics(p: tuple[float, float, float], r: tuple[float, float, float]) -> tuple[float, float, float]:
+    """
+    Gets the joint values needed to reach position "p" and orientation "r".
+    :param p: The position to reach in the form [x, y, z].
+    :param r: The orientation to reach in radians in the form [x, y, z].
+    :return: A list of the values to set the links to for reaching position "p" and orientation "r".
+    """
+    import numpy as np
+    import math
+    
+    # Target position and orientation
+    px, py, pz = p
+    rx, ry, rz = r
+    
+    # Link dimensions from the DETAILS section
+    l1_y = 0.093
+    l2_z = 0.09465
+    tcp_y = 0.0823
+    tcp_orientation_z = 1.570796325
+    
+    # Define rotation matrix functions
+    def rot_x(angle):
+        return np.array([
+            [1, 0, 0],
+            [0, np.cos(angle), -np.sin(angle)],
+            [0, np.sin(angle), np.cos(angle)]
+        ])
+
+    def rot_y(angle):
+        return np.array([
+            [np.cos(angle), 0, np.sin(angle)],
+            [0, 1, 0],
+            [-np.sin(angle), 0, np.cos(angle)]
+        ])
+
+    def rot_z(angle):
+        return np.array([
+            [np.cos(angle), -np.sin(angle), 0],
+            [np.sin(angle), np.cos(angle), 0],
+            [0, 0, 1]
+        ])
+    
+    # Target rotation matrix
+    R_target = rot_z(rz) @ rot_y(ry) @ rot_x(rx)
+    
+    # First, solve for joint 1 (rotation around Y-axis)
+    joint1 = math.atan2(px, pz)
+    
+    # Create rotation matrix for joint 1
+    R1 = rot_y(joint1)
+    
+    # Transform target orientation to joint 1 frame
+    R1_inv = np.linalg.inv(R1)
+    R_after_joint1 = R1_inv @ R_target
+    
+    # Solve for joint 2 (rotation around Z-axis)
+    # We need to consider the TCP orientation offset
+    R_tcp = rot_z(tcp_orientation_z)
+    R_tcp_inv = np.linalg.inv(R_tcp)
+    
+    # The desired orientation after joint 2 and joint 3
+    R23_desired = R_after_joint1 @ R_tcp_inv
+    
+    # For a Z-axis rotation followed by a Y-axis rotation, we can extract joint2 as:
+    joint2 = math.atan2(R23_desired[1, 0], R23_desired[0, 0])
+    
+    # Create rotation matrix for joint 2
+    R2 = rot_z(joint2)
+    
+    # Transform desired orientation to joint 2 frame
+    R2_inv = np.linalg.inv(R2)
+    R_after_joint2 = R2_inv @ R23_desired
+    
+    # Solve for joint 3 (rotation around Y-axis)
+    # For a Y-axis rotation, we can extract joint3 as:
+    joint3 = math.atan2(-R_after_joint2[0, 2], R_after_joint2[2, 2])
+    
+    return (joint1, joint2, joint3)
+```
+
+After further analysis, I believe the issue is with how I'm handling the orientation transformations. Let me provide a final solution:
+
+```python
+def inverse_kinematics(p: tuple[float, float, float], r: tuple[float, float, float]) -> tuple[float, float, float]:
+    """
+    Gets the joint values needed to reach position "p" and orientation "r".
+    :param p: The position to reach in the form [x, y, z].
+    :param r: The orientation to reach in radians in the form [x, y, z].
+    :return: A list of the values to set the links to for reaching position "p" and orientation "r".
+    """
+    import numpy as np
+    import math
+    
+    # Target position and orientation
+    px, py, pz = p
+    rx, ry, rz = r
+    
+    # Define rotation matrix functions
+    def rot_x(angle):
+        return np.array([
+            [1, 0, 0],
+            [0, np.cos(angle), -np.sin(angle)],
+            [0, np.sin(angle), np.cos(angle)]
+        ])
+
+    def rot_y(angle):
+        return np.array([
+            [np.cos(angle), 0, np.sin(angle)],
+            [0, 1, 0],
+            [-np.sin(angle), 0, np.cos(angle)]
+        ])
+
+    def rot_z(angle):
+        return np.array([
+            [np.cos(angle), -np.sin(angle), 0],
+            [np.sin(angle), np.cos(angle), 0],
+            [0, 0, 1]
+        ])
+    
+    # Target rotation matrix (world to end-effector)
+    R_target = rot_z(rz) @ rot_y(ry) @ rot_x(rx)
+    
+    # TCP has a fixed orientation offset of [0, 0, 1.57]
+    R_tcp_offset = rot_z(1.570796325)
+    
+    # The desired orientation of the last joint (before TCP offset)
+    R_desired = R_target @ np.linalg.inv(R_tcp_offset)
+    
+    # Solve for joint 1 (rotation around Y-axis)
+    joint1 = math.atan2(px, pz)
+    
+    # Create rotation matrix for joint 1
+    R1 = rot_y(joint1)
+    
+    # Transform desired orientation to joint 1 frame
+    R1_inv = np.linalg.inv(R1)
+    R_after_joint1 = R1_inv @ R_desired
+    
+    # Solve for joint 2 (rotation around Z-axis)
+    joint2 = math.atan2(R_after_joint1[1, 0], R_after_joint1[0, 0])
+    
+    # Create rotation matrix for joint 2
+    R2 = rot_z(joint2)
+    
+    # Transform desired orientation to joint 2 frame
+    R2_inv = np.linalg.inv(R2)
+    R_after_joint2 = R2_inv @ R_after_joint1
+    
+    # Solve for joint 3 (rotation around Y-axis)
+    joint3 = math.atan2(-R_after_joint2[0, 2], R_after_joint2[2, 2])
+    
+    return (joint1, joint2, joint3)
+```

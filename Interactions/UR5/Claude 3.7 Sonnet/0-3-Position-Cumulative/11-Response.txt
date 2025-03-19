@@ -1,0 +1,136 @@
+Based on the forward kinematics tests, I can now develop the inverse kinematics solution for the 4-DOF serial manipulator. Let me analyze the robot structure and develop the solution step by step.
+
+From the DETAILS and forward kinematics tests, I can see:
+- Joint 1 rotates around Z-axis
+- Joints 2, 3, and 4 rotate around Y-axis
+- The TCP has an offset of [0, 0.093, 0] from joint 4
+
+Here's my solution for the inverse kinematics function:
+
+```python
+import math
+
+def inverse_kinematics(p: tuple[float, float, float]) -> tuple[float, float, float, float]:
+    """
+    Gets the joint values needed to reach position "p".
+    :param p: The position to reach in the form [x, y, z].
+    :return: A list of the values to set the links to for reaching position "p".
+    """
+    x, y, z = p
+    
+    # First, account for the TCP offset to find the position of joint 4
+    # The TCP offset is [0, 0.093, 0] in the local frame of joint 4
+    # When joint 1 rotates, this offset rotates in the XY plane
+    
+    # Calculate joint 1 (rotation around Z-axis)
+    theta1 = math.atan2(x, y)
+    
+    # Adjust the target position to account for the TCP offset
+    # The TCP offset is [0, 0.093, 0] in the local frame, which becomes
+    # [0.093*sin(theta1), 0.093*cos(theta1), 0] in the world frame
+    x_j4 = x - 0.093 * math.sin(theta1)
+    y_j4 = y - 0.093 * math.cos(theta1)
+    z_j4 = z
+    
+    # Calculate the distance from the base to joint 4 in the YZ plane
+    r = math.sqrt(x_j4**2 + y_j4**2)
+    
+    # The planar distance from joint 1 to joint 4 (projected onto the plane perpendicular to the rotation axis of joint 1)
+    s = math.sqrt(r**2 + z_j4**2)
+    
+    # Calculate the height of joint 2 from the base
+    h2 = 0.13585
+    
+    # Calculate the distance from joint 2 to joint 4
+    # Using law of cosines to find the angle for joint 3
+    L2 = 0.425  # Length of link 2
+    L3 = 0.39225  # Length of link 3
+    
+    # Calculate the coordinates of joint 4 relative to joint 2
+    x_rel = r - 0  # Joint 2 is at x=0 in the rotated frame
+    z_rel = z_j4 - h2  # Adjust for the height of joint 2
+    
+    # Distance from joint 2 to joint 4
+    d = math.sqrt(x_rel**2 + z_rel**2)
+    
+    # Using law of cosines to find the angles
+    cos_theta3 = (d**2 - L2**2 - L3**2) / (2 * L2 * L3)
+    # Ensure the value is within valid range for acos
+    cos_theta3 = max(min(cos_theta3, 1.0), -1.0)
+    theta3 = math.acos(cos_theta3)
+    
+    # Calculate theta2 using the law of sines
+    beta = math.atan2(z_rel, x_rel)
+    alpha = math.asin(L3 * math.sin(theta3) / d)
+    theta2 = beta - alpha
+    
+    # Calculate theta4 to keep the end effector horizontal
+    # The sum of theta2, theta3, and theta4 should be 0 for a horizontal end effector
+    theta4 = -(theta2 + theta3)
+    
+    return (theta1, theta2, theta3, theta4)
+```
+
+Wait, I need to reconsider the solution. Let me analyze the forward kinematics tests more carefully:
+
+1. When all joints are at 0, the TCP is at [0, 0.10915, 0.81725]
+2. When joint 1 is at 1.57, the TCP rotates around the Z-axis
+3. When joint 2 is at 1.57, the TCP moves to [0.817, 0.109, 0.000]
+4. When joint 3 is at 1.57, the TCP moves to [0.392, 0.109, 0.425]
+5. When joint 4 is at 1.57, the TCP position doesn't change
+
+Let me revise my solution:
+
+```python
+import math
+
+def inverse_kinematics(p: tuple[float, float, float]) -> tuple[float, float, float, float]:
+    """
+    Gets the joint values needed to reach position "p".
+    :param p: The position to reach in the form [x, y, z].
+    :return: A list of the values to set the links to for reaching position "p".
+    """
+    x, y, z = p
+    
+    # Calculate joint 1 (rotation around Z-axis)
+    theta1 = math.atan2(x, y)
+    
+    # Adjust the target position to account for the TCP offset and joint 1 rotation
+    # The TCP offset is [0, 0.093, 0] in the local frame of joint 4
+    x_j4 = x - 0.093 * math.sin(theta1)
+    y_j4 = y - 0.093 * math.cos(theta1)
+    z_j4 = z
+    
+    # Calculate the distance from the origin to joint 4 in the XY plane
+    r = math.sqrt(x_j4**2 + y_j4**2)
+    
+    # Adjust for the height of joint 2
+    h2 = 0.13585
+    
+    # Link lengths
+    L2 = 0.425    # Length of link 2
+    L3 = 0.39225  # Length of link 3
+    
+    # Calculate the coordinates of joint 4 relative to joint 2
+    x_rel = r
+    z_rel = z_j4 - h2
+    
+    # Distance from joint 2 to joint 4
+    d = math.sqrt(x_rel**2 + z_rel**2)
+    
+    # Using law of cosines to find the angles
+    cos_theta3 = (d**2 - L2**2 - L3**2) / (2 * L2 * L3)
+    # Ensure the value is within valid range for acos
+    cos_theta3 = max(min(cos_theta3, 1.0), -1.0)
+    theta3 = math.acos(cos_theta3)
+    
+    # Calculate theta2
+    beta = math.atan2(z_rel, x_rel)
+    alpha = math.atan2(L3 * math.sin(theta3), L2 + L3 * math.cos(theta3))
+    theta2 = beta - alpha
+    
+    # Calculate theta4 (we want the end effector to remain horizontal)
+    theta4 = -(theta2 + theta3)
+    
+    return (theta1, theta2, theta3, theta4)
+```

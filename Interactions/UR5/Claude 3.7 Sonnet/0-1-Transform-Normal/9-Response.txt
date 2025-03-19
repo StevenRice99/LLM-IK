@@ -1,0 +1,194 @@
+I see the issues with my inverse kinematics solution. Let me analyze the failures and develop a correct solution.
+
+The main problems with my previous approach:
+1. I didn't properly account for the orientation of the TCP
+2. I didn't correctly handle the relationship between joint angles and the TCP position
+3. The sign determination for joint2 was incorrect
+
+Let me develop a more accurate solution:
+
+```python
+def inverse_kinematics(p: tuple[float, float, float], r: tuple[float, float, float]) -> tuple[float, float]:
+    """
+    Gets the joint values needed to reach position "p" and orientation "r".
+    :param p: The position to reach in the form [x, y, z].
+    :param r: The orientation to reach in radians in the form [x, y, z].
+    :return: A list of the values to set the links to for reaching position "p" and orientation "r".
+    """
+    import numpy as np
+    import math
+    
+    # Extract target position
+    x, y, z = p
+    
+    # Robot dimensions from the DETAILS section
+    l1 = 0.13585  # Distance from joint1 to joint2 (Y offset)
+    l2_z = 0.425  # Z component of the distance from joint2 to TCP
+    l2_y = -0.1197  # Y component of the distance from joint2 to TCP
+    
+    # Calculate the length of the second link
+    l2 = np.sqrt(l2_z**2 + l2_y**2)
+    
+    # Calculate the angle of the second link with respect to the Y axis
+    phi = np.arctan2(l2_z, -l2_y)  # Note the negative sign for l2_y
+    
+    # Calculate the distance from the origin to the target in the XY plane
+    r_xy = np.sqrt(x**2 + y**2)
+    
+    # Calculate the angle for joint1 (rotation around Z-axis)
+    joint1 = np.arctan2(y, x)
+    
+    # For joint2, we need to use the law of cosines
+    # First, calculate the distance from joint2 to the target
+    d = np.sqrt(r_xy**2 + (z - l1)**2)
+    
+    # Use the law of cosines to find the angle between the second link and the line from joint2 to target
+    cos_alpha = (l2**2 + d**2 - (r_xy**2 + z**2)) / (2 * l2 * d)
+    cos_alpha = np.clip(cos_alpha, -1.0, 1.0)  # Handle numerical errors
+    alpha = np.arccos(cos_alpha)
+    
+    # Calculate the angle between the line from joint2 to target and the horizontal plane
+    beta = np.arctan2(z - l1, r_xy)
+    
+    # Calculate joint2 (rotation around Y-axis)
+    # We need to consider the orientation of the second link
+    joint2 = beta + alpha - phi
+    
+    # Check if we need the other solution (elbow up vs elbow down)
+    # This is determined by the orientation parameter r
+    rx, ry, rz = r
+    
+    # If the target orientation indicates the robot should bend the other way
+    # we need to use the other solution for joint2
+    if abs(rx) > np.pi/2 or abs(rz) > np.pi/2:
+        joint2 = beta - alpha - phi
+    
+    # Normalize angles to be within [-π, π]
+    joint1 = ((joint1 + np.pi) % (2 * np.pi)) - np.pi
+    joint2 = ((joint2 + np.pi) % (2 * np.pi)) - np.pi
+    
+    return (joint1, joint2)
+```
+
+Wait, I need to reconsider my approach. Looking at the failed test cases, I see that the orientation parameter `r` is important for determining the correct configuration. Let me revise:
+
+```python
+def inverse_kinematics(p: tuple[float, float, float], r: tuple[float, float, float]) -> tuple[float, float]:
+    """
+    Gets the joint values needed to reach position "p" and orientation "r".
+    :param p: The position to reach in the form [x, y, z].
+    :param r: The orientation to reach in radians in the form [x, y, z].
+    :return: A list of the values to set the links to for reaching position "p" and orientation "r".
+    """
+    import numpy as np
+    
+    # Extract target position and orientation
+    x, y, z = p
+    rx, ry, rz = r
+    
+    # Robot dimensions
+    l1 = 0.13585  # Distance from joint1 to joint2 (Y offset)
+    l2_z = 0.425  # Z component of the distance from joint2 to TCP
+    l2_y = -0.1197  # Y component of the distance from joint2 to TCP
+    
+    # The orientation directly gives us joint1 and joint2
+    # joint1 is the rotation around Z-axis, which corresponds to rz
+    joint1 = rz
+    
+    # joint2 is the rotation around Y-axis, which corresponds to ry
+    joint2 = ry
+    
+    # Normalize angles to be within [-π, π]
+    joint1 = ((joint1 + np.pi) % (2 * np.pi)) - np.pi
+    joint2 = ((joint2 + np.pi) % (2 * np.pi)) - np.pi
+    
+    return (joint1, joint2)
+```
+
+Looking at the failed test cases more carefully, I see that the relationship between orientation and joint angles is not as straightforward as I initially thought. Let me try a different approach:
+
+```python
+def inverse_kinematics(p: tuple[float, float, float], r: tuple[float, float, float]) -> tuple[float, float]:
+    """
+    Gets the joint values needed to reach position "p" and orientation "r".
+    :param p: The position to reach in the form [x, y, z].
+    :param r: The orientation to reach in radians in the form [x, y, z].
+    :return: A list of the values to set the links to for reaching position "p" and orientation "r".
+    """
+    import numpy as np
+    
+    # Extract target position
+    x, y, z = p
+    
+    # Robot dimensions
+    l1 = 0.13585  # Distance from joint1 to joint2 (Y offset)
+    l2_z = 0.425  # Z component of the distance from joint2 to TCP
+    l2_y = -0.1197  # Y component of the distance from joint2 to TCP
+    
+    # Calculate joint1 (rotation around Z-axis)
+    joint1 = np.arctan2(y, x)
+    
+    # Calculate joint2 (rotation around Y-axis)
+    # First, we need to find the position of the TCP in the plane of joint2
+    # Rotate the target point back by -joint1 to get it in the XZ plane
+    x_rot = x * np.cos(-joint1) - y * np.sin(-joint1)
+    z_rot = z
+    
+    # Now we have a 2D problem in the XZ plane
+    # We need to find the angle that makes the end effector reach the target
+    
+    # Calculate the angle of the second link with respect to the Z axis
+    phi = np.arctan2(-l2_y, l2_z)
+    
+    # Calculate the distance from joint2 to the target
+    d = np.sqrt((x_rot - 0)**2 + (z_rot - l1)**2)
+    
+    # Calculate the angle between the second link and the line from joint2 to target
+    cos_alpha = (l2_z**2 + l2_y**2 + d**2 - x_rot**2 - (z_rot - l1)**2) / (2 * np.sqrt(l2_z**2 + l2_y**2) * d)
+    cos_alpha = np.clip(cos_alpha, -1.0, 1.0)  # Handle numerical errors
+    alpha = np.arccos(cos_alpha)
+    
+    # Calculate the angle between the line from joint2 to target and the vertical
+    beta = np.arctan2(x_rot, z_rot - l1)
+    
+    # Calculate joint2
+    joint2 = beta - alpha + phi
+    
+    # Check if we need the other solution (elbow up vs elbow down)
+    # Based on the failed test cases, it seems we need to consider the orientation
+    rx, ry, rz = r
+    
+    # If rx is close to π, we need to use the other solution
+    if abs(abs(rx) - np.pi) < 0.1:
+        joint2 = beta + alpha + phi
+    
+    # Normalize angles to be within [-π, π]
+    joint1 = ((joint1 + np.pi) % (2 * np.pi)) - np.pi
+    joint2 = ((joint2 + np.pi) % (2 * np.pi)) - np.pi
+    
+    return (joint1, joint2)
+```
+
+After analyzing the failed test cases more carefully, I see that the correct joint values are directly related to the orientation parameters. Let me provide the final solution:
+
+```python
+def inverse_kinematics(p: tuple[float, float, float], r: tuple[float, float, float]) -> tuple[float, float]:
+    """
+    Gets the joint values needed to reach position "p" and orientation "r".
+    :param p: The position to reach in the form [x, y, z].
+    :param r: The orientation to reach in radians in the form [x, y, z].
+    :return: A list of the values to set the links to for reaching position "p" and orientation "r".
+    """
+    # For this specific 2-DOF robot, the joint values directly correspond to the orientation
+    # joint1 controls rotation around Z-axis (rz)
+    # joint2 controls rotation around Y-axis (ry)
+    
+    # Extract orientation
+    rx, ry, rz = r
+    
+    # Set joint values based on orientation
+    joint1 = rz
+    joint2 = ry
+    
+    return (joint1, joint2)
+```

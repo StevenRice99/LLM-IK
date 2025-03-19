@@ -1,0 +1,254 @@
+Based on the forward kinematics tests, I can now develop the inverse kinematics solution for this 3-DOF serial manipulator. Let me analyze the robot structure and derive the solution step by step.
+
+From the tests, I can see that:
+1. All joints rotate around the Y-axis (pitch joints)
+2. The robot has a serial chain configuration
+3. The TCP position changes based on the joint angles
+
+Let me complete the inverse kinematics function:
+
+```python
+def inverse_kinematics(p: tuple[float, float, float], r: tuple[float, float, float]) -> tuple[float, float, float]:
+    """
+    Gets the joint values needed to reach position "p" and orientation "r".
+    :param p: The position to reach in the form [x, y, z].
+    :param r: The orientation to reach in radians in the form [x, y, z].
+    :return: A list of the values to set the links to for reaching position "p" and orientation "r".
+    """
+    import numpy as np
+    
+    # Extract target position
+    x, y, z = p
+    
+    # Robot parameters from the DETAILS table
+    l1 = 0.425  # Length of link 1 (z-direction)
+    l2 = 0.39225  # Length of link 2 (z-direction)
+    d1 = -0.1197  # Y-offset of link 1
+    d3 = 0.093  # Y-offset of TCP from link 3
+    
+    # Adjust target position to account for the TCP offset
+    # Since the TCP is offset in the y-direction, we need to account for this
+    # based on the desired orientation
+    
+    # The orientation r[1] represents rotation around y-axis
+    # For this robot, joint 1 controls the overall orientation around Y
+    joint1 = np.arctan2(x, z)
+    
+    # Calculate the distance from the base to the wrist center (before TCP offset)
+    # The wrist center is the position of joint 3 before considering the TCP offset
+    
+    # Calculate the projection of the target point onto the XZ plane
+    r_xz = np.sqrt(x**2 + z**2)
+    
+    # Account for the y-offset of the TCP
+    y_wrist = y - d3
+    
+    # Calculate the distance from joint 1 to the wrist center
+    # This is in the plane of the arm (considering the offset d1)
+    r_planar = np.sqrt(r_xz**2 + (y_wrist - d1)**2)
+    
+    # Use the law of cosines to find joint 2 and 3 angles
+    cos_joint3 = (r_planar**2 - l1**2 - l2**2) / (2 * l1 * l2)
+    # Ensure the value is within valid range for arccos
+    cos_joint3 = np.clip(cos_joint3, -1.0, 1.0)
+    joint3 = -np.arccos(cos_joint3)  # Negative because of the robot's configuration
+    
+    # Calculate joint 2 using the law of sines
+    beta = np.arctan2(y_wrist - d1, r_xz)
+    gamma = np.arcsin(l2 * np.sin(-joint3) / r_planar)
+    joint2 = beta - gamma
+    
+    # Adjust joint 3 to account for the desired orientation
+    # The final orientation is the sum of all joint angles
+    # r[1] is the desired pitch (rotation around Y-axis)
+    joint3_adjusted = r[1] - joint1 - joint2
+    
+    return (joint1, joint2, joint3_adjusted)
+```
+
+Wait, I need to reconsider this solution. Let me analyze the forward kinematics tests more carefully:
+
+1. When all joints are 0, the TCP is at [0, -0.0267, 0.81725]
+2. When joint1 = 1.57, the TCP moves primarily in the X direction
+3. When joint2 = 1.57, the TCP moves forward and down
+4. When joint3 = 1.57, only the orientation changes, not the position
+
+Let me revise my solution:
+
+```python
+def inverse_kinematics(p: tuple[float, float, float], r: tuple[float, float, float]) -> tuple[float, float, float]:
+    """
+    Gets the joint values needed to reach position "p" and orientation "r".
+    :param p: The position to reach in the form [x, y, z].
+    :param r: The orientation to reach in radians in the form [x, y, z].
+    :return: A list of the values to set the links to for reaching position "p" and orientation "r".
+    """
+    import numpy as np
+    
+    # Extract target position
+    x, y, z = p
+    
+    # Robot parameters from the DETAILS table
+    l1 = 0.425  # Length of link 1 (z-direction)
+    l2 = 0.39225  # Length of link 2 (z-direction)
+    d1 = -0.1197  # Y-offset of link 1
+    d3 = 0.093  # Y-offset of TCP from link 3
+    
+    # Joint 1 controls the rotation in the XZ plane
+    joint1 = np.arctan2(x, z)
+    
+    # Calculate the projection of the target point onto the XZ plane
+    r_xz = np.sqrt(x**2 + z**2)
+    
+    # Adjust for the TCP offset in the y-direction
+    # The TCP offset is in the local y-direction of the end effector
+    # When joint1 rotates, this offset affects both y and r_xz
+    y_wrist = y
+    if abs(joint1) > 1e-6:  # If joint1 is not close to zero
+        # Adjust the target position to account for the TCP offset
+        y_wrist = y - d3 * np.cos(joint1)
+        r_xz = r_xz - d3 * np.sin(joint1)
+    else:
+        # If joint1 is close to zero, the offset is primarily in the y-direction
+        y_wrist = y - d3
+    
+    # Calculate the distance from joint 1 to the wrist center
+    r_planar = np.sqrt(r_xz**2 + (y_wrist - d1)**2)
+    
+    # Use the law of cosines to find joint 3 angle
+    cos_joint3 = (r_planar**2 - l1**2 - l2**2) / (2 * l1 * l2)
+    # Ensure the value is within valid range for arccos
+    cos_joint3 = np.clip(cos_joint3, -1.0, 1.0)
+    joint3 = -np.arccos(cos_joint3)  # Negative because of the robot's configuration
+    
+    # Calculate joint 2 using the law of sines and atan2
+    beta = np.arctan2(y_wrist - d1, r_xz)
+    gamma = np.arctan2(l2 * np.sin(-joint3), l1 + l2 * np.cos(-joint3))
+    joint2 = beta - gamma
+    
+    # The desired orientation r[1] (pitch) is the sum of all joint angles
+    # So we need to adjust joint3 to achieve the desired orientation
+    desired_pitch = r[1]
+    joint3_adjusted = desired_pitch - joint1 - joint2
+    
+    return (joint1, joint2, joint3_adjusted)
+```
+
+After further analysis, I need to make one more revision to correctly handle the kinematics:
+
+```python
+def inverse_kinematics(p: tuple[float, float, float], r: tuple[float, float, float]) -> tuple[float, float, float]:
+    """
+    Gets the joint values needed to reach position "p" and orientation "r".
+    :param p: The position to reach in the form [x, y, z].
+    :param r: The orientation to reach in radians in the form [x, y, z].
+    :return: A list of the values to set the links to for reaching position "p" and orientation "r".
+    """
+    import numpy as np
+    
+    # Extract target position and orientation
+    x, y, z = p
+    _, pitch, _ = r  # We only care about the pitch (rotation around Y-axis)
+    
+    # Robot parameters from the DETAILS table
+    l1 = 0.425      # Length of link 1 (z-direction)
+    l2 = 0.39225    # Length of link 2 (z-direction)
+    d1 = -0.1197    # Y-offset of link 2 from link 1
+    d3 = 0.093      # Y-offset of TCP from link 3
+    
+    # Calculate joint 1 (base rotation)
+    joint1 = np.arctan2(x, z)
+    
+    # Calculate the projection distance in the XZ plane
+    r_xz = np.sqrt(x**2 + z**2)
+    
+    # Adjust the target position to find the wrist center (before TCP offset)
+    # The TCP offset is along the local y-axis of the end effector
+    # When the end effector is rotated, this offset affects both the XZ plane and Y
+    
+    # Calculate the end effector orientation in the world frame
+    ee_orientation = pitch
+    
+    # Calculate the wrist center position by moving back from TCP along the end effector's local axes
+    wrist_x = x - d3 * np.sin(joint1) * np.sin(ee_orientation)
+    wrist_y = y - d3 * np.cos(ee_orientation)
+    wrist_z = z - d3 * np.cos(joint1) * np.sin(ee_orientation)
+    
+    # Recalculate the projection in the XZ plane for the wrist center
+    wrist_r_xz = np.sqrt(wrist_x**2 + wrist_z**2)
+    
+    # Calculate the planar distance from joint 1 to the wrist center
+    r_planar = np.sqrt(wrist_r_xz**2 + (wrist_y - d1)**2)
+    
+    # Use the law of cosines to find joint 3 angle
+    cos_joint3 = (r_planar**2 - l1**2 - l2**2) / (2 * l1 * l2)
+    # Ensure the value is within valid range for arccos
+    cos_joint3 = np.clip(cos_joint3, -1.0, 1.0)
+    joint3 = -np.arccos(cos_joint3)  # Negative due to the robot's configuration
+    
+    # Calculate joint 2 using atan2 and the law of sines
+    beta = np.arctan2(wrist_y - d1, wrist_r_xz)
+    gamma = np.arctan2(l2 * np.sin(-joint3), l1 + l2 * np.cos(-joint3))
+    joint2 = beta - gamma
+    
+    # The final orientation is determined by the sum of all joint angles
+    # Adjust joint3 to achieve the desired orientation
+    joint3_adjusted = ee_orientation - joint1 - joint2
+    
+    return (joint1, joint2, joint3_adjusted)
+```
+
+After careful analysis of the forward kinematics tests and the robot structure, I need to simplify my approach. Let me provide the final solution:
+
+```python
+def inverse_kinematics(p: tuple[float, float, float], r: tuple[float, float, float]) -> tuple[float, float, float]:
+    """
+    Gets the joint values needed to reach position "p" and orientation "r".
+    :param p: The position to reach in the form [x, y, z].
+    :param r: The orientation to reach in radians in the form [x, y, z].
+    :return: A list of the values to set the links to for reaching position "p" and orientation "r".
+    """
+    import numpy as np
+    
+    # Extract target position and orientation
+    x, y, z = p
+    _, pitch, _ = r  # We only care about the pitch (rotation around Y-axis)
+    
+    # Robot parameters from the DETAILS table
+    l1 = 0.425      # Length of link 1 (z-direction)
+    l2 = 0.39225    # Length of link 2 (z-direction)
+    d1 = -0.1197    # Y-offset of link 2 from link 1
+    d3 = 0.093      # Y-offset of TCP from link 3
+    
+    # Calculate joint 1 (base rotation)
+    joint1 = np.arctan2(x, z)
+    
+    # Calculate the projection distance in the XZ plane
+    r_xz = np.sqrt(x**2 + z**2)
+    
+    # Calculate the wrist center position by moving back from TCP
+    # Since all joints rotate around Y, the TCP offset is always in the local Y direction
+    # We need to account for the orientation of the end effector
+    wrist_y = y - d3 * np.cos(pitch)
+    wrist_r_xz = r_xz - d3 * np.sin(pitch)
+    
+    # Calculate the planar distance from joint 1 to the wrist center
+    r_planar = np.sqrt(wrist_r_xz**2 + (wrist_y - d1)**2)
+    
+    # Use the law of cosines to find joint 3 angle
+    cos_joint3 = (r_planar**2 - l1**2 - l2**2) / (2 * l1 * l2)
+    # Ensure the value is within valid range for arccos
+    cos_joint3 = np.clip(cos_joint3, -1.0, 1.0)
+    joint3 = -np.arccos(cos_joint3)  # Negative due to the robot's configuration
+    
+    # Calculate joint 2 using atan2 and the law of sines
+    beta = np.arctan2(wrist_y - d1, wrist_r_xz)
+    gamma = np.arctan2(l2 * np.sin(-joint3), l1 + l2 * np.cos(-joint3))
+    joint2 = beta - gamma
+    
+    # The final orientation is determined by the sum of all joint angles
+    # Adjust joint3 to achieve the desired orientation
+    joint3_adjusted = pitch - joint1 - joint2
+    
+    return (joint1, joint2, joint3_adjusted)
+```

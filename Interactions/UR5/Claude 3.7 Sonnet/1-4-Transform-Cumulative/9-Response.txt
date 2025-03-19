@@ -1,0 +1,614 @@
+Thank you for the additional feedback. I see that my solution still has issues. Let me analyze the failures more carefully and develop a more accurate solution.
+
+Looking at the correct joint values compared to my calculated ones, I notice:
+
+1. There are significant differences in joint angles, especially for joints 2 and 3
+2. The solution needs to handle multiple configurations better
+3. The approach to calculating joint angles needs to be revised
+
+Let me develop a more accurate solution:
+
+```python
+def inverse_kinematics(p: tuple[float, float, float], r: tuple[float, float, float]) -> tuple[float, float, float, float]:
+    """
+    Gets the joint values needed to reach position "p" and orientation "r".
+    :param p: The position to reach in the form [x, y, z].
+    :param r: The orientation to reach in radians in the form [x, y, z].
+    :return: A list of the values to set the links to for reaching position "p" and orientation "r".
+    """
+    import math
+    import numpy as np
+    
+    # Extract target position and orientation
+    x, y, z = p
+    rx, ry, rz = r
+    
+    # Define rotation matrix functions
+    def rot_x(angle):
+        return np.array([
+            [1, 0, 0],
+            [0, np.cos(angle), -np.sin(angle)],
+            [0, np.sin(angle), np.cos(angle)]
+        ])
+
+    def rot_y(angle):
+        return np.array([
+            [np.cos(angle), 0, np.sin(angle)],
+            [0, 1, 0],
+            [-np.sin(angle), 0, np.cos(angle)]
+        ])
+
+    def rot_z(angle):
+        return np.array([
+            [np.cos(angle), -np.sin(angle), 0],
+            [np.sin(angle), np.cos(angle), 0],
+            [0, 0, 1]
+        ])
+    
+    # Target rotation matrix
+    R_target = rot_z(rz) @ rot_y(ry) @ rot_x(rx)
+    
+    # Link dimensions from the DETAILS section
+    l1_y = -0.1197
+    l1_z = 0.425
+    l2_z = 0.39225
+    l3_y = 0.093
+    tcp_z = 0.09465
+    
+    # Calculate the position of joint 4 (before TCP offset)
+    tcp_offset = np.array([0, 0, tcp_z])
+    p_joint4 = np.array([x, y, z]) - R_target @ tcp_offset
+    
+    # Calculate joint 1 (rotation around Y-axis)
+    theta1 = math.atan2(p_joint4[0], p_joint4[2])
+    
+    # Create rotation matrix for joint 1
+    R1 = rot_y(theta1)
+    
+    # Transform joint 4 position to the frame after joint 1 rotation
+    p_joint4_local = R1.T @ p_joint4
+    
+    # The position of joint 2 in the local frame
+    p_joint2_local = np.array([0, l1_y, l1_z])
+    
+    # Vector from joint 2 to joint 4
+    v = p_joint4_local - p_joint2_local
+    
+    # Calculate the planar distance from joint 2 to joint 4
+    L = math.sqrt(v[1]**2 + v[2]**2)
+    
+    # Lengths of links
+    L2 = l2_z  # Length of link 2
+    L3 = l3_y  # Length of link 3 projected onto the plane
+    
+    # Calculate joint 3 using law of cosines
+    cos_theta3 = (L**2 - L2**2 - L3**2) / (2 * L2 * L3)
+    cos_theta3 = max(min(cos_theta3, 1.0), -1.0)  # Clamp to valid range
+    
+    # Calculate possible solutions for joint 3
+    theta3_candidates = [
+        math.acos(cos_theta3),
+        -math.acos(cos_theta3),
+        math.acos(cos_theta3) - 2*math.pi,
+        -math.acos(cos_theta3) + 2*math.pi
+    ]
+    
+    # Calculate possible solutions for joint 2
+    theta2_candidates = []
+    for theta3 in theta3_candidates:
+        # Angle from joint 2 to the line connecting joint 2 and joint 4
+        alpha = math.atan2(v[1], v[2])
+        
+        # Angle between the line connecting joint 2 and joint 4 and link 2
+        beta = math.atan2(L3 * math.sin(theta3), L2 + L3 * math.cos(theta3))
+        
+        # Calculate joint 2
+        theta2 = alpha - beta
+        theta2_candidates.append(theta2)
+    
+    # Calculate possible solutions for joint 4
+    theta4_candidates = []
+    R_after3_list = []
+    
+    for i in range(len(theta3_candidates)):
+        theta2 = theta2_candidates[i]
+        theta3 = theta3_candidates[i]
+        
+        # Orientation after the first three joints
+        R2 = rot_y(theta2)
+        R3 = rot_y(theta3)
+        R_after3 = R1 @ R2 @ R3
+        R_after3_list.append(R_after3)
+        
+        # Calculate the remaining rotation needed for joint 4
+        R_needed = R_after3.T @ R_target
+        
+        # Extract the rotation angle around Z for joint 4
+        theta4 = math.atan2(R_needed[1, 0], R_needed[0, 0])
+        theta4_candidates.append(theta4)
+    
+    # Evaluate all possible solutions
+    best_solution = None
+    min_error = float('inf')
+    
+    for i in range(len(theta3_candidates)):
+        theta2 = theta2_candidates[i]
+        theta3 = theta3_candidates[i]
+        theta4 = theta4_candidates[i]
+        R_after3 = R_after3_list[i]
+        
+        # Calculate the final orientation
+        R4 = rot_z(theta4)
+        R_final = R_after3 @ R4
+        
+        # Calculate the error between the final orientation and the target orientation
+        error = np.linalg.norm(R_final - R_target, 'fro')
+        
+        # Check if this solution is better than the current best
+        if error < min_error:
+            min_error = error
+            best_solution = (theta1, theta2, theta3, theta4)
+    
+    return best_solution
+```
+
+After further analysis, I need to make additional adjustments to handle the specific robot configuration better:
+
+```python
+def inverse_kinematics(p: tuple[float, float, float], r: tuple[float, float, float]) -> tuple[float, float, float, float]:
+    """
+    Gets the joint values needed to reach position "p" and orientation "r".
+    :param p: The position to reach in the form [x, y, z].
+    :param r: The orientation to reach in radians in the form [x, y, z].
+    :return: A list of the values to set the links to for reaching position "p" and orientation "r".
+    """
+    import math
+    import numpy as np
+    
+    # Extract target position and orientation
+    x, y, z = p
+    rx, ry, rz = r
+    
+    # Define rotation matrix functions
+    def rot_x(angle):
+        return np.array([
+            [1, 0, 0],
+            [0, np.cos(angle), -np.sin(angle)],
+            [0, np.sin(angle), np.cos(angle)]
+        ])
+
+    def rot_y(angle):
+        return np.array([
+            [np.cos(angle), 0, np.sin(angle)],
+            [0, 1, 0],
+            [-np.sin(angle), 0, np.cos(angle)]
+        ])
+
+    def rot_z(angle):
+        return np.array([
+            [np.cos(angle), -np.sin(angle), 0],
+            [np.sin(angle), np.cos(angle), 0],
+            [0, 0, 1]
+        ])
+    
+    # Target rotation matrix
+    R_target = rot_z(rz) @ rot_y(ry) @ rot_x(rx)
+    
+    # Link dimensions from the DETAILS section
+    l1_y = -0.1197
+    l1_z = 0.425
+    l2_z = 0.39225
+    l3_y = 0.093
+    tcp_z = 0.09465
+    
+    # Calculate the position of joint 4 (before TCP offset)
+    tcp_offset = np.array([0, 0, tcp_z])
+    p_joint4 = np.array([x, y, z]) - R_target @ tcp_offset
+    
+    # Calculate joint 1 (rotation around Y-axis)
+    theta1 = math.atan2(p_joint4[0], p_joint4[2])
+    
+    # Create rotation matrix for joint 1
+    R1 = rot_y(theta1)
+    
+    # Transform joint 4 position to the frame after joint 1 rotation
+    p_joint4_local = R1.T @ p_joint4
+    
+    # The position of joint 2 in the local frame
+    p_joint2_local = np.array([0, l1_y, l1_z])
+    
+    # Vector from joint 2 to joint 4
+    v = p_joint4_local - p_joint2_local
+    
+    # Calculate the planar distance from joint 2 to joint 4
+    L = math.sqrt(v[1]**2 + v[2]**2)
+    
+    # Lengths of links
+    L2 = l2_z  # Length of link 2
+    L3 = l3_y  # Length of link 3 projected onto the plane
+    
+    # Calculate joint 3 using law of cosines
+    cos_theta3 = (L**2 - L2**2 - L3**2) / (2 * L2 * L3)
+    cos_theta3 = max(min(cos_theta3, 1.0), -1.0)  # Clamp to valid range
+    
+    # Calculate possible solutions for joint 3
+    theta3_candidates = [
+        math.acos(cos_theta3),
+        -math.acos(cos_theta3)
+    ]
+    
+    # Calculate possible solutions for joint 2
+    theta2_candidates = []
+    for theta3 in theta3_candidates:
+        # Angle from joint 2 to the line connecting joint 2 and joint 4
+        alpha = math.atan2(v[1], v[2])
+        
+        # Angle between the line connecting joint 2 and joint 4 and link 2
+        beta = math.atan2(L3 * math.sin(theta3), L2 + L3 * math.cos(theta3))
+        
+        # Calculate joint 2
+        theta2 = alpha - beta
+        theta2_candidates.append(theta2)
+    
+    # Calculate possible solutions for joint 4
+    theta4_candidates = []
+    R_after3_list = []
+    
+    for i in range(len(theta3_candidates)):
+        theta2 = theta2_candidates[i]
+        theta3 = theta3_candidates[i]
+        
+        # Orientation after the first three joints
+        R2 = rot_y(theta2)
+        R3 = rot_y(theta3)
+        R_after3 = R1 @ R2 @ R3
+        R_after3_list.append(R_after3)
+        
+        # Calculate the remaining rotation needed for joint 4
+        R_needed = R_after3.T @ R_target
+        
+        # Extract the rotation angle around Z for joint 4
+        theta4 = math.atan2(R_needed[1, 0], R_needed[0, 0])
+        theta4_candidates.append(theta4)
+    
+    # Try additional configurations by adding/subtracting 2π to joint angles
+    additional_solutions = []
+    
+    for i in range(len(theta3_candidates)):
+        theta2 = theta2_candidates[i]
+        theta3 = theta3_candidates[i]
+        theta4 = theta4_candidates[i]
+        
+        # Try different configurations
+        additional_solutions.extend([
+            (theta1, theta2, theta3, theta4),
+            (theta1 + 2*math.pi, theta2, theta3, theta4),
+            (theta1 - 2*math.pi, theta2, theta3, theta4),
+            (theta1, theta2 + 2*math.pi, theta3, theta4),
+            (theta1, theta2 - 2*math.pi, theta3, theta4),
+            (theta1, theta2, theta3 + 2*math.pi, theta4),
+            (theta1, theta2, theta3 - 2*math.pi, theta4),
+            (theta1, theta2, theta3, theta4 + 2*math.pi),
+            (theta1, theta2, theta3, theta4 - 2*math.pi)
+        ])
+    
+    # Evaluate all possible solutions
+    best_solution = None
+    min_error = float('inf')
+    
+    for solution in additional_solutions:
+        theta1, theta2, theta3, theta4 = solution
+        
+        # Calculate the final orientation
+        R1 = rot_y(theta1)
+        R2 = rot_y(theta2)
+        R3 = rot_y(theta3)
+        R4 = rot_z(theta4)
+        R_final = R1 @ R2 @ R3 @ R4
+        
+        # Calculate the error between the final orientation and the target orientation
+        error = np.linalg.norm(R_final - R_target, 'fro')
+        
+        # Check if this solution is better than the current best
+        if error < min_error:
+            min_error = error
+            best_solution = solution
+    
+    return best_solution
+```
+
+After further analysis of the robot structure and the failed cases, I need to make a more comprehensive solution:
+
+```python
+def inverse_kinematics(p: tuple[float, float, float], r: tuple[float, float, float]) -> tuple[float, float, float, float]:
+    """
+    Gets the joint values needed to reach position "p" and orientation "r".
+    :param p: The position to reach in the form [x, y, z].
+    :param r: The orientation to reach in radians in the form [x, y, z].
+    :return: A list of the values to set the links to for reaching position "p" and orientation "r".
+    """
+    import math
+    import numpy as np
+    
+    # Extract target position and orientation
+    x, y, z = p
+    rx, ry, rz = r
+    
+    # Define rotation matrix functions
+    def rot_x(angle):
+        return np.array([
+            [1, 0, 0],
+            [0, np.cos(angle), -np.sin(angle)],
+            [0, np.sin(angle), np.cos(angle)]
+        ])
+
+    def rot_y(angle):
+        return np.array([
+            [np.cos(angle), 0, np.sin(angle)],
+            [0, 1, 0],
+            [-np.sin(angle), 0, np.cos(angle)]
+        ])
+
+    def rot_z(angle):
+        return np.array([
+            [np.cos(angle), -np.sin(angle), 0],
+            [np.sin(angle), np.cos(angle), 0],
+            [0, 0, 1]
+        ])
+    
+    # Target rotation matrix
+    R_target = rot_z(rz) @ rot_y(ry) @ rot_x(rx)
+    
+    # Link dimensions from the DETAILS section
+    l1_y = -0.1197
+    l1_z = 0.425
+    l2_z = 0.39225
+    l3_y = 0.093
+    tcp_z = 0.09465
+    
+    # Calculate the position of joint 4 (before TCP offset)
+    tcp_offset = np.array([0, 0, tcp_z])
+    p_joint4 = np.array([x, y, z]) - R_target @ tcp_offset
+    
+    # Calculate joint 1 (rotation around Y-axis)
+    theta1 = math.atan2(p_joint4[0], p_joint4[2])
+    
+    # Create rotation matrix for joint 1
+    R1 = rot_y(theta1)
+    
+    # Transform joint 4 position to the frame after joint 1 rotation
+    p_joint4_local = R1.T @ p_joint4
+    
+    # The position of joint 2 in the local frame
+    p_joint2_local = np.array([0, l1_y, l1_z])
+    
+    # Vector from joint 2 to joint 4
+    v = p_joint4_local - p_joint2_local
+    
+    # Calculate the planar distance from joint 2 to joint 4
+    L = math.sqrt(v[1]**2 + v[2]**2)
+    
+    # Lengths of links
+    L2 = l2_z  # Length of link 2
+    L3 = l3_y  # Length of link 3 projected onto the plane
+    
+    # Calculate joint 3 using law of cosines
+    cos_theta3 = (L**2 - L2**2 - L3**2) / (2 * L2 * L3)
+    cos_theta3 = max(min(cos_theta3, 1.0), -1.0)  # Clamp to valid range
+    
+    # Calculate possible solutions for joint 3
+    theta3_candidates = [
+        math.acos(cos_theta3),
+        -math.acos(cos_theta3)
+    ]
+    
+    # Calculate possible solutions for joint 2
+    theta2_candidates = []
+    for theta3 in theta3_candidates:
+        # Angle from joint 2 to the line connecting joint 2 and joint 4
+        alpha = math.atan2(v[1], v[2])
+        
+        # Angle between the line connecting joint 2 and joint 4 and link 2
+        beta = math.atan2(L3 * math.sin(theta3), L2 + L3 * math.cos(theta3))
+        
+        # Calculate joint 2
+        theta2 = alpha - beta
+        theta2_candidates.append(theta2)
+    
+    # Calculate possible solutions for joint 4
+    solutions = []
+    
+    for i in range(len(theta3_candidates)):
+        theta2 = theta2_candidates[i]
+        theta3 = theta3_candidates[i]
+        
+        # Orientation after the first three joints
+        R2 = rot_y(theta2)
+        R3 = rot_y(theta3)
+        R_after3 = R1 @ R2 @ R3
+        
+        # Calculate the remaining rotation needed for joint 4
+        R_needed = R_after3.T @ R_target
+        
+        # Extract the rotation angle around Z for joint 4
+        theta4 = math.atan2(R_needed[1, 0], R_needed[0, 0])
+        
+        # Add this solution
+        solutions.append((theta1, theta2, theta3, theta4))
+        
+        # Add alternative solutions with different joint 1 values
+        solutions.append((theta1 + math.pi, -theta2, -theta3, theta4 + math.pi))
+        solutions.append((theta1 - math.pi, -theta2, -theta3, theta4 - math.pi))
+    
+    # Evaluate all possible solutions
+    best_solution = None
+    min_error = float('inf')
+    
+    for solution in solutions:
+        theta1, theta2, theta3, theta4 = solution
+        
+        # Calculate the final position and orientation
+        R1 = rot_y(theta1)
+        R2 = rot_y(theta2)
+        R3 = rot_y(theta3)
+        R4 = rot_z(theta4)
+        R_final = R1 @ R2 @ R3 @ R4
+        
+        # Calculate the error between the final orientation and the target orientation
+        error = np.linalg.norm(R_final - R_target, 'fro')
+        
+        # Check if this solution is better than the current best
+        if error < min_error:
+            min_error = error
+            best_solution = solution
+    
+    return best_solution
+```
+
+Let me refine this solution one more time to ensure it's accurate:
+
+```python
+def inverse_kinematics(p: tuple[float, float, float], r: tuple[float, float, float]) -> tuple[float, float, float, float]:
+    """
+    Gets the joint values needed to reach position "p" and orientation "r".
+    :param p: The position to reach in the form [x, y, z].
+    :param r: The orientation to reach in radians in the form [x, y, z].
+    :return: A list of the values to set the links to for reaching position "p" and orientation "r".
+    """
+    import math
+    import numpy as np
+    
+    # Extract target position and orientation
+    x, y, z = p
+    rx, ry, rz = r
+    
+    # Define rotation matrix functions
+    def rot_x(angle):
+        return np.array([
+            [1, 0, 0],
+            [0, np.cos(angle), -np.sin(angle)],
+            [0, np.sin(angle), np.cos(angle)]
+        ])
+
+    def rot_y(angle):
+        return np.array([
+            [np.cos(angle), 0, np.sin(angle)],
+            [0, 1, 0],
+            [-np.sin(angle), 0, np.cos(angle)]
+        ])
+
+    def rot_z(angle):
+        return np.array([
+            [np.cos(angle), -np.sin(angle), 0],
+            [np.sin(angle), np.cos(angle), 0],
+            [0, 0, 1]
+        ])
+    
+    # Target rotation matrix
+    R_target = rot_z(rz) @ rot_y(ry) @ rot_x(rx)
+    
+    # Link dimensions from the DETAILS section
+    l1_y = -0.1197
+    l1_z = 0.425
+    l2_z = 0.39225
+    l3_y = 0.093
+    tcp_z = 0.09465
+    
+    # Calculate the position of joint 4 (before TCP offset)
+    tcp_offset = np.array([0, 0, tcp_z])
+    p_joint4 = np.array([x, y, z]) - R_target @ tcp_offset
+    
+    # Calculate joint 1 (rotation around Y-axis)
+    theta1 = math.atan2(p_joint4[0], p_joint4[2])
+    
+    # Create rotation matrix for joint 1
+    R1 = rot_y(theta1)
+    
+    # Transform joint 4 position to the frame after joint 1 rotation
+    p_joint4_local = R1.T @ p_joint4
+    
+    # The position of joint 2 in the local frame
+    p_joint2_local = np.array([0, l1_y, l1_z])
+    
+    # Vector from joint 2 to joint 4
+    v = p_joint4_local - p_joint2_local
+    
+    # Calculate the planar distance from joint 2 to joint 4
+    L = math.sqrt(v[1]**2 + v[2]**2)
+    
+    # Lengths of links
+    L2 = l2_z  # Length of link 2
+    L3 = l3_y  # Length of link 3 projected onto the plane
+    
+    # Calculate joint 3 using law of cosines
+    cos_theta3 = (L**2 - L2**2 - L3**2) / (2 * L2 * L3)
+    cos_theta3 = max(min(cos_theta3, 1.0), -1.0)  # Clamp to valid range
+    
+    # Calculate possible solutions for joint 3
+    theta3_candidates = [
+        math.acos(cos_theta3),
+        -math.acos(cos_theta3)
+    ]
+    
+    # Calculate possible solutions for joint 2
+    theta2_candidates = []
+    for theta3 in theta3_candidates:
+        # Angle from joint 2 to the line connecting joint 2 and joint 4
+        alpha = math.atan2(v[1], v[2])
+        
+        # Angle between the line connecting joint 2 and joint 4 and link 2
+        beta = math.atan2(L3 * math.sin(theta3), L2 + L3 * math.cos(theta3))
+        
+        # Calculate joint 2
+        theta2 = alpha - beta
+        theta2_candidates.append(theta2)
+    
+    # Calculate possible solutions for joint 4
+    solutions = []
+    
+    for i in range(len(theta3_candidates)):
+        theta2 = theta2_candidates[i]
+        theta3 = theta3_candidates[i]
+        
+        # Orientation after the first three joints
+        R2 = rot_y(theta2)
+        R3 = rot_y(theta3)
+        R_after3 = R1 @ R2 @ R3
+        
+        # Calculate the remaining rotation needed for joint 4
+        R_needed = R_after3.T @ R_target
+        
+        # Extract the rotation angle around Z for joint 4
+        theta4 = math.atan2(R_needed[1, 0], R_needed[0, 0])
+        
+        # Add this solution
+        solutions.append((theta1, theta2, theta3, theta4))
+        
+        # Add alternative solutions with different joint 1 values
+        solutions.append((theta1 + math.pi, -theta2, -theta3, theta4 + math.pi))
+        solutions.append((theta1 - math.pi, -theta2, -theta3, theta4 - math.pi))
+    
+    # Evaluate all possible solutions
+    best_solution = None
+    min_error = float('inf')
+    
+    for solution in solutions:
+        theta1, theta2, theta3, theta4 = solution
+        
+        # Calculate the final position and orientation
+        R1 = rot_y(theta1)
+        R2 = rot_y(theta2)
+        R3 = rot_y(theta3)
+        R4 = rot_z(theta4)
+        R_final = R1 @ R2 @ R3 @ R4
+        
+        # Calculate the error between the final orientation and the target orientation
+        error = np.linalg.norm(R_final - R_target, 'fro')
+        
+        # Check if this solution is better than the current best
+        if error < min_error:
+            min_error = error
+            best_solution = solution
+    
+    return best_solution
+```

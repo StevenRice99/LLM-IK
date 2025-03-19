@@ -1,0 +1,157 @@
+Based on the forward kinematics results, I can now develop a complete inverse kinematics solution for the 5-DOF manipulator. Let me analyze the robot structure and develop the solution step by step.
+
+From the DETAILS and FORWARD_KINEMATICS results, I can see:
+- Joints 1, 2, 3, and 5 rotate around the Y-axis
+- Joint 4 rotates around the Z-axis
+- There are specific link offsets that need to be accounted for
+
+Here's my complete solution:
+
+```python
+import math
+import numpy as np
+
+def inverse_kinematics(p: tuple[float, float, float]) -> tuple[float, float, float, float, float]:
+    """
+    Gets the joint values needed to reach position "p".
+    :param p: The position to reach in the form [x, y, z].
+    :return: A list of the values to set the links to for reaching position "p".
+    """
+    x, y, z = p
+    
+    # Constants from the robot's geometry
+    L1 = 0.425      # Length of link 1 (z-direction)
+    L2 = 0.39225    # Length of link 2 (z-direction)
+    d1 = 0.1197     # Offset of link 1 (y-direction, negative)
+    d2 = 0.093      # Offset of link 3 to 4 (y-direction, positive)
+    d3 = 0.09465    # Length of link 4 (z-direction)
+    d4 = 0.0823     # TCP offset (y-direction, positive)
+    
+    # First, we need to account for the TCP offset to find the wrist position
+    # The TCP is offset in the y-direction by d4 from the wrist
+    # We need to subtract this offset to find the wrist position
+    
+    # Calculate the position of the wrist (joint 5)
+    wrist_y = y - d4
+    wrist_x = x
+    wrist_z = z
+    
+    # Calculate joint 1 (rotation around Y-axis)
+    # This joint determines the x-z plane position
+    theta1 = math.atan2(wrist_x, wrist_z)
+    
+    # Calculate the distance in the x-z plane
+    r = math.sqrt(wrist_x**2 + wrist_z**2)
+    
+    # Adjust for the y-offset of joint 2 and the offset from joint 3 to joint 4
+    y_adj = wrist_y + d1 - d2
+    
+    # Calculate the distance from the base to the wrist in the adjusted y-r plane
+    D = math.sqrt(r**2 + y_adj**2)
+    
+    # Use the law of cosines to find theta2 and theta3
+    cos_theta2 = (D**2 - L1**2 - L2**2) / (2 * L1 * L2)
+    # Ensure the value is within valid range for acos
+    cos_theta2 = max(min(cos_theta2, 1.0), -1.0)
+    theta2 = math.acos(cos_theta2)
+    
+    # Calculate the angle alpha (angle between the line from base to wrist and the horizontal)
+    alpha = math.atan2(y_adj, r)
+    
+    # Calculate the angle beta (angle between the line from base to wrist and link 1)
+    beta = math.atan2(L2 * math.sin(theta2), L1 + L2 * math.cos(theta2))
+    
+    # Calculate theta2 (angle of joint 2)
+    theta2_final = alpha - beta
+    
+    # Calculate theta3 (angle of joint 3)
+    theta3 = -theta2 - theta2_final
+    
+    # For a 5-DOF robot, we can't fully control orientation
+    # Joint 4 (rotation around Z) and joint 5 (rotation around Y) are used to point the end effector
+    
+    # For simplicity, we can set joint 4 to orient the end effector in the desired direction
+    # and joint 5 to align with the target
+    theta4 = 0  # Default value, can be adjusted based on desired end effector orientation
+    theta5 = 0  # Default value, can be adjusted based on desired end effector orientation
+    
+    return (theta1, theta2_final, theta3, theta4, theta5)
+```
+
+Wait, I need to refine this solution. The approach is correct, but there are some issues with the calculations for joints 4 and 5. Let me revise:
+
+```python
+import math
+import numpy as np
+
+def inverse_kinematics(p: tuple[float, float, float]) -> tuple[float, float, float, float, float]:
+    """
+    Gets the joint values needed to reach position "p".
+    :param p: The position to reach in the form [x, y, z].
+    :return: A list of the values to set the links to for reaching position "p".
+    """
+    x, y, z = p
+    
+    # Constants from the robot's geometry
+    L1 = 0.425      # Length of link 1 (z-direction)
+    L2 = 0.39225    # Length of link 2 (z-direction)
+    d1 = 0.1197     # Offset of link 1 (y-direction, negative)
+    d2 = 0.093      # Offset of link 3 to 4 (y-direction, positive)
+    d3 = 0.09465    # Length of link 4 (z-direction)
+    d4 = 0.0823     # TCP offset (y-direction, positive)
+    
+    # First, we need to account for the TCP offset to find the wrist position
+    # The TCP is offset in the y-direction by d4 from the wrist
+    wrist_y = y - d4
+    wrist_x = x
+    wrist_z = z
+    
+    # For the first 3 joints, we can use the existing solution from EXISTING 1
+    # but we need to adjust for the full chain
+    
+    # Calculate joint 1 (rotation around Y-axis)
+    theta1 = math.atan2(wrist_x, wrist_z)
+    
+    # Project the wrist position onto the x-z plane
+    r = math.sqrt(wrist_x**2 + wrist_z**2)
+    
+    # Adjust for the y-offset of joint 2 and the offset from joint 3 to joint 4
+    y_adj = wrist_y + d1 - d2
+    
+    # Calculate the distance from the base to the wrist in the adjusted y-r plane
+    D = math.sqrt(r**2 + y_adj**2)
+    
+    # Use the law of cosines to find theta2
+    cos_theta2 = (D**2 - L1**2 - L2**2) / (2 * L1 * L2)
+    # Ensure the value is within valid range for acos
+    cos_theta2 = max(min(cos_theta2, 1.0), -1.0)
+    theta2 = math.acos(cos_theta2)
+    
+    # Determine the sign of theta2 based on the cross product
+    # If the cross product is negative, we need to use the negative solution
+    cross_product = r * (L1 + L2 * math.cos(theta2)) - y_adj * (L2 * math.sin(theta2))
+    if cross_product < 0:
+        theta2 = -theta2
+    
+    # Calculate the angle alpha (angle between the line from base to wrist and the horizontal)
+    alpha = math.atan2(y_adj, r)
+    
+    # Calculate the angle beta (angle between the line from base to wrist and link 1)
+    beta = math.atan2(L2 * math.sin(theta2), L1 + L2 * math.cos(theta2))
+    
+    # Calculate theta2 (angle of joint 2)
+    theta2_final = alpha - beta
+    
+    # Calculate theta3 (angle of joint 3)
+    theta3 = -theta2
+    
+    # For joints 4 and 5, we can use a simplified approach since we're only concerned with position
+    # Joint 4 rotates around Z and joint 5 rotates around Y
+    # For a position-only IK solution, we can set these to 0
+    theta4 = 0
+    theta5 = 0
+    
+    return (theta1, theta2_final, theta3, theta4, theta5)
+```
+
+This solution focuses on positioning the end effector at the target position. Since we're only concerned with position (not orientation), joints 4 and 5 are set to 0 as a default. In a full IK solution that includes orientation, these joints would be calculated based on the desired end effector orientation.

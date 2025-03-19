@@ -1,0 +1,260 @@
+I see the issue. The error occurs when trying to calculate the inverse cosine (math.acos) with a value outside the valid range [-1, 1]. This typically happens when the target position is unreachable for the robot. Let me fix the solution by ensuring all values passed to math.acos are properly clamped to the valid range.
+
+```python
+def inverse_kinematics(p: tuple[float, float, float], r: tuple[float, float, float]) -> tuple[float, float, float, float]:
+    """
+    Gets the joint values needed to reach position "p" and orientation "r".
+    :param p: The position to reach in the form [x, y, z].
+    :param r: The orientation to reach in radians in the form [x, y, z].
+    :return: A list of the values to set the links to for reaching position "p" and orientation "r".
+    """
+    import math
+    
+    x, y, z = p
+    rx, ry, rz = r
+    
+    # First, solve for joint 1 (rotation around Z)
+    theta1 = math.atan2(-x, y)
+    
+    # Transform the target position to the frame after joint 1
+    c1 = math.cos(theta1)
+    s1 = math.sin(theta1)
+    
+    # Account for the TCP offset
+    # The TCP has an offset of [0, 0.093, 0] in the local frame of the last joint
+    
+    # Calculate the TCP offset in the global frame
+    # The orientation is primarily determined by the sum of joint angles 2, 3, and 4
+    c_ry = math.cos(ry)
+    s_ry = math.sin(ry)
+    
+    # Rotate the TCP offset by the orientation and then by joint 1
+    tcp_offset_x_local = 0.093 * s_ry
+    tcp_offset_y_local = 0.093 * c_ry
+    
+    # Transform to global frame
+    tcp_offset_x = tcp_offset_x_local * c1 - tcp_offset_y_local * s1
+    tcp_offset_y = tcp_offset_x_local * s1 + tcp_offset_y_local * c1
+    
+    # Subtract the offset to get the position of the wrist (joint 4)
+    wrist_x = x - tcp_offset_x
+    wrist_y = y - tcp_offset_y
+    wrist_z = z
+    
+    # Transform the wrist position to the frame after joint 1
+    x_1 = wrist_x * c1 + wrist_y * s1
+    y_1 = -wrist_x * s1 + wrist_y * c1
+    z_1 = wrist_z
+    
+    # The position of the wrist relative to joint 2
+    # Joint 2 is at [0, 0.13585, 0] relative to joint 1
+    y_2 = y_1 - 0.13585
+    z_2 = z_1
+    
+    # Calculate the distance from joint 2 to the wrist
+    D = math.sqrt(y_2**2 + z_2**2)
+    
+    # Calculate the lengths of the links
+    L2 = math.sqrt(0.1197**2 + 0.425**2)  # Length from joint 2 to joint 3
+    L3 = 0.39225  # Length from joint 3 to joint 4
+    
+    # Use law of cosines to find the angles
+    # Calculate the angle at joint 3
+    cos_theta3 = (D**2 - L2**2 - L3**2) / (2 * L2 * L3)
+    # Ensure the value is within valid range for arccos
+    cos_theta3 = max(min(cos_theta3, 1.0), -1.0)
+    theta3 = math.acos(cos_theta3)
+    
+    # Calculate the angle at joint 2
+    # Ensure the value is within valid range for arccos
+    cos_alpha = (L2**2 + D**2 - L3**2) / (2 * L2 * D)
+    cos_alpha = max(min(cos_alpha, 1.0), -1.0)
+    alpha = math.acos(cos_alpha)
+    
+    beta = math.atan2(z_2, y_2)
+    theta2 = beta - alpha
+    
+    # Adjust for the orientation of joint 3 relative to joint 2
+    phi = math.atan2(0.425, -0.1197)  # Angle of the link from joint 2 to joint 3
+    theta2 = theta2 - phi
+    
+    # Finally, calculate joint 4 to achieve the desired orientation
+    theta4 = ry - theta2 - theta3
+    
+    return (theta1, theta2, theta3, theta4)
+```
+
+Wait, I need to reconsider the geometry of this robot more carefully. Let me revise the solution:
+
+```python
+def inverse_kinematics(p: tuple[float, float, float], r: tuple[float, float, float]) -> tuple[float, float, float, float]:
+    """
+    Gets the joint values needed to reach position "p" and orientation "r".
+    :param p: The position to reach in the form [x, y, z].
+    :param r: The orientation to reach in radians in the form [x, y, z].
+    :return: A list of the values to set the links to for reaching position "p" and orientation "r".
+    """
+    import math
+    
+    x, y, z = p
+    rx, ry, rz = r
+    
+    # First, solve for joint 1 (rotation around Z)
+    theta1 = math.atan2(-x, y)
+    
+    # Transform the target position to the frame after joint 1
+    c1 = math.cos(theta1)
+    s1 = math.sin(theta1)
+    
+    # Account for the TCP offset
+    # The TCP has an offset of [0, 0.093, 0] in the local frame of the last joint
+    
+    # Since all joints 2, 3, and 4 rotate around Y-axis, the orientation around Y
+    # is the sum of these joint angles
+    # The TCP offset is in the Y direction in the local frame of the last joint
+    
+    # First, transform the target position to the frame after joint 1
+    x_1 = x * c1 + y * s1
+    y_1 = -x * s1 + y * c1
+    z_1 = z
+    
+    # Account for the TCP offset
+    # The TCP offset is [0, 0.093, 0] in the local frame of the last joint
+    # We need to transform this to the frame after joint 1
+    
+    # The orientation ry affects how the TCP offset is projected
+    c_ry = math.cos(ry)
+    s_ry = math.sin(ry)
+    
+    # The TCP offset in the frame after joint 1
+    tcp_offset_x = 0
+    tcp_offset_y = 0.093 * c_ry
+    tcp_offset_z = 0.093 * s_ry
+    
+    # Subtract the offset to get the position of the wrist (joint 4)
+    wrist_x = x_1 - tcp_offset_x
+    wrist_y = y_1 - tcp_offset_y
+    wrist_z = z_1 - tcp_offset_z
+    
+    # The position of the wrist relative to joint 2
+    # Joint 2 is at [0, 0.13585, 0] relative to joint 1
+    y_2 = wrist_y - 0.13585
+    z_2 = wrist_z
+    
+    # Calculate the distance from joint 2 to the wrist
+    D = math.sqrt(y_2**2 + z_2**2)
+    
+    # Calculate the lengths of the links
+    L2 = math.sqrt(0.1197**2 + 0.425**2)  # Length from joint 2 to joint 3
+    L3 = 0.39225  # Length from joint 3 to joint 4
+    
+    # Use law of cosines to find the angles
+    # Calculate the angle at joint 3
+    cos_theta3 = (D**2 - L2**2 - L3**2) / (2 * L2 * L3)
+    # Ensure the value is within valid range for arccos
+    cos_theta3 = max(min(cos_theta3, 1.0), -1.0)
+    theta3 = math.acos(cos_theta3)
+    
+    # Calculate the angle at joint 2
+    # Ensure the value is within valid range for arccos
+    cos_alpha = (L2**2 + D**2 - L3**2) / (2 * L2 * D)
+    cos_alpha = max(min(cos_alpha, 1.0), -1.0)
+    alpha = math.acos(cos_alpha)
+    
+    beta = math.atan2(z_2, y_2)
+    theta2 = beta - alpha
+    
+    # Adjust for the orientation of joint 3 relative to joint 2
+    phi = math.atan2(0.425, -0.1197)  # Angle of the link from joint 2 to joint 3
+    theta2 = theta2 - phi
+    
+    # Finally, calculate joint 4 to achieve the desired orientation
+    theta4 = ry - theta2 - theta3
+    
+    return (theta1, theta2, theta3, theta4)
+```
+
+Let me make one final revision to ensure the solution is correct:
+
+```python
+def inverse_kinematics(p: tuple[float, float, float], r: tuple[float, float, float]) -> tuple[float, float, float, float]:
+    """
+    Gets the joint values needed to reach position "p" and orientation "r".
+    :param p: The position to reach in the form [x, y, z].
+    :param r: The orientation to reach in radians in the form [x, y, z].
+    :return: A list of the values to set the links to for reaching position "p" and orientation "r".
+    """
+    import math
+    
+    x, y, z = p
+    rx, ry, rz = r
+    
+    # First, solve for joint 1 (rotation around Z)
+    theta1 = math.atan2(-x, y)
+    
+    # Transform the target position to the frame after joint 1
+    c1 = math.cos(theta1)
+    s1 = math.sin(theta1)
+    
+    # Transform the target position to the frame after joint 1
+    x_1 = x * c1 + y * s1
+    y_1 = -x * s1 + y * c1
+    z_1 = z
+    
+    # Account for the TCP offset
+    # The TCP offset is [0, 0.093, 0] in the local frame of the last joint
+    # We need to transform this to the frame after joint 1
+    
+    # The orientation ry affects how the TCP offset is projected
+    # Since joints 2, 3, and 4 all rotate around Y-axis, the final orientation
+    # around Y is the sum of these joint angles
+    c_ry = math.cos(ry)
+    s_ry = math.sin(ry)
+    
+    # The TCP offset in the frame after joint 1
+    tcp_offset_x = 0.093 * s_ry
+    tcp_offset_y = 0.093 * c_ry
+    tcp_offset_z = 0
+    
+    # Subtract the offset to get the position of the wrist (joint 4)
+    wrist_x = x_1
+    wrist_y = y_1 - tcp_offset_y
+    wrist_z = z_1 - tcp_offset_x  # Note: x offset contributes to z in this frame
+    
+    # The position of the wrist relative to joint 2
+    # Joint 2 is at [0, 0.13585, 0] relative to joint 1
+    y_2 = wrist_y - 0.13585
+    z_2 = wrist_z
+    
+    # Calculate the distance from joint 2 to the wrist
+    D = math.sqrt(y_2**2 + z_2**2)
+    
+    # Calculate the lengths of the links
+    L2 = math.sqrt(0.1197**2 + 0.425**2)  # Length from joint 2 to joint 3
+    L3 = 0.39225  # Length from joint 3 to joint 4
+    
+    # Use law of cosines to find the angles
+    # Calculate the angle at joint 3
+    cos_theta3 = (D**2 - L2**2 - L3**2) / (2 * L2 * L3)
+    # Ensure the value is within valid range for arccos
+    cos_theta3 = max(min(cos_theta3, 1.0), -1.0)
+    theta3 = math.acos(cos_theta3)
+    
+    # Calculate the angle at joint 2
+    # Ensure the value is within valid range for arccos
+    cos_alpha = (L2**2 + D**2 - L3**2) / (2 * L2 * D)
+    cos_alpha = max(min(cos_alpha, 1.0), -1.0)
+    alpha = math.acos(cos_alpha)
+    
+    beta = math.atan2(z_2, y_2)
+    theta2 = beta - alpha
+    
+    # Adjust for the orientation of joint 3 relative to joint 2
+    phi = math.atan2(0.425, -0.1197)  # Angle of the link from joint 2 to joint 3
+    theta2 = theta2 - phi
+    
+    # Finally, calculate joint 4 to achieve the desired orientation
+    theta4 = ry - theta2 - theta3
+    
+    return (theta1, theta2, theta3, theta4)
+```

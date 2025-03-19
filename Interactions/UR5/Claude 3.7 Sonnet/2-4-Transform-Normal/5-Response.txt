@@ -1,0 +1,529 @@
+I'll now develop the inverse kinematics solution for this 3-DOF serial manipulator based on the information provided and the forward kinematics results.
+
+Let me analyze the robot structure and kinematics:
+
+1. The robot has 3 revolute joints
+2. Joint 1 and 2 rotate around Y-axis
+3. Joint 3 rotates around Z-axis
+4. The link dimensions are:
+   - Link 1: [0, 0, 0.39225] (vertical offset)
+   - Link 2: [0, 0.093, 0] (horizontal offset in y-direction)
+   - TCP: [0, 0, 0.09465] (vertical offset from joint 3)
+
+Let me solve the inverse kinematics step by step:
+
+```python
+def inverse_kinematics(p: tuple[float, float, float], r: tuple[float, float, float]) -> tuple[float, float, float]:
+    """
+    Gets the joint values needed to reach position "p" and orientation "r".
+    :param p: The position to reach in the form [x, y, z].
+    :param r: The orientation to reach in radians in the form [x, y, z].
+    :return: A list of the values to set the links to for reaching position "p" and orientation "r".
+    """
+    import numpy as np
+    import math
+    
+    # Extract target position
+    x, y, z = p
+    
+    # Link dimensions
+    l1 = 0.39225  # Length of link 1 (z-direction)
+    l2 = 0.093    # Length of link 2 (y-direction)
+    l3 = 0.09465  # Length of TCP (z-direction)
+    
+    # First, we need to determine joint 3 (wrist) angle from the orientation
+    # Since joint 3 rotates around Z-axis, it directly affects the roll (z) component of orientation
+    joint3 = r[2]  # The z-component of orientation directly maps to joint 3
+    
+    # Now we need to account for the effect of joint 3 rotation on the end effector position
+    # We need to work backwards from the TCP position to find joint 1 and 2
+    
+    # Calculate the position of joint 3 by subtracting the effect of the TCP offset
+    # We need to consider the orientation of the TCP
+    cos_j3 = np.cos(joint3)
+    sin_j3 = np.sin(joint3)
+    
+    # The TCP offset is [0, 0, l3] in the local frame of joint 3
+    # We need to transform this to the global frame
+    # For a rotation around Z by joint3, the transformation of [0, 0, l3] is:
+    # [0, 0, l3] in global frame (ignoring previous joint rotations)
+    
+    # Position of joint 3 in global frame
+    j3_x = x
+    j3_y = y
+    j3_z = z - l3  # Subtract the z-component of TCP length
+    
+    # Now we need to find joint 2 position
+    # Joint 2 is offset from joint 3 by [0, l2, 0] in local frame
+    # With joint 3 rotation around Z, this becomes [l2*sin(j3), l2*cos(j3), 0] in global frame
+    
+    # Position of joint 2 in global frame
+    j2_x = j3_x - l2 * sin_j3
+    j2_y = j3_y - l2 * cos_j3
+    j2_z = j3_z
+    
+    # Now we can solve for joint 1 and 2
+    # Joint 1 is at [0, 0, 0]
+    # Joint 2 is at [0, 0, l1] when joint 1 = 0
+    
+    # The distance from origin to joint 2 in the XZ plane
+    r_xz = np.sqrt(j2_x**2 + j2_z**2)
+    
+    # Joint 1 angle is the angle in the XZ plane
+    joint1 = np.arctan2(j2_x, j2_z)
+    
+    # Joint 2 angle is the angle to rotate from vertical to reach joint 2
+    # When joint 1 = 0, joint 2 is at [0, 0, l1]
+    # We need to rotate to reach [j2_x, j2_y, j2_z]
+    
+    # Calculate the angle between the vertical and the line to joint 2
+    # This is in the plane defined by joint 1 rotation
+    joint2 = np.arctan2(r_xz - l1 * np.cos(joint1), l1 * np.sin(joint1))
+    
+    # Adjust joint 2 to account for the fact that at rest position it's pointing up
+    joint2 = np.pi/2 - joint2
+    
+    return (joint1, joint2, joint3)
+```
+
+Wait, I need to reconsider my approach. Let me revise the solution:
+
+```python
+def inverse_kinematics(p: tuple[float, float, float], r: tuple[float, float, float]) -> tuple[float, float, float]:
+    """
+    Gets the joint values needed to reach position "p" and orientation "r".
+    :param p: The position to reach in the form [x, y, z].
+    :param r: The orientation to reach in radians in the form [x, y, z].
+    :return: A list of the values to set the links to for reaching position "p" and orientation "r".
+    """
+    import numpy as np
+    
+    # Extract target position
+    x, y, z = p
+    
+    # Link dimensions
+    l1 = 0.39225  # Length of link 1 (z-direction)
+    l2 = 0.093    # Length of link 2 (y-direction)
+    l3 = 0.09465  # Length of TCP (z-direction)
+    
+    # Joint 3 directly corresponds to the z-component of the orientation
+    joint3 = r[2]
+    
+    # Calculate the position of joint 3 by working backwards from TCP
+    # TCP is offset from joint 3 by [0, 0, l3] in the local frame
+    # With joint 3 rotation around Z, we need to account for this rotation
+    
+    # For simplicity, let's first find the position of joint 3
+    # Since the TCP offset is purely in the z-direction in the local frame,
+    # and joint 3 rotates around z, the offset remains [0, 0, l3] in joint 3's frame
+    j3_x = x
+    j3_y = y
+    j3_z = z - l3
+    
+    # Now find the position of joint 2
+    # Joint 2 is offset from joint 3 by [0, l2, 0] in joint 2's frame
+    # With joint 3 rotation around Z, this becomes [l2*sin(j3), l2*cos(j3), 0]
+    j2_x = j3_x - l2 * np.sin(joint3)
+    j2_y = j3_y - l2 * np.cos(joint3)
+    j2_z = j3_z
+    
+    # Now we need to find joint 1 and 2 angles
+    # Joint 1 rotates around Y, affecting the position in the XZ plane
+    # The projection of joint 2 position onto the XZ plane gives us the angle for joint 1
+    joint1 = np.arctan2(j2_x, j2_z)
+    
+    # For joint 2, we need to find the angle that places joint 3 at the correct position
+    # First, find the distance from joint 1 to joint 2 in the rotated plane
+    dist = np.sqrt(j2_x**2 + j2_z**2)
+    
+    # Joint 2 angle is determined by the height difference and distance
+    # Since joint 2 also rotates around Y, it affects the height and distance in the rotated XZ plane
+    joint2 = np.arcsin((dist - l1) / l2)
+    
+    return (joint1, joint2, joint3)
+```
+
+I need to reconsider this solution again. Let me analyze the forward kinematics more carefully:
+
+```python
+def inverse_kinematics(p: tuple[float, float, float], r: tuple[float, float, float]) -> tuple[float, float, float]:
+    """
+    Gets the joint values needed to reach position "p" and orientation "r".
+    :param p: The position to reach in the form [x, y, z].
+    :param r: The orientation to reach in radians in the form [x, y, z].
+    :return: A list of the values to set the links to for reaching position "p" and orientation "r".
+    """
+    import numpy as np
+    import math
+    
+    # Extract target position
+    x, y, z = p
+    
+    # Link dimensions
+    l1 = 0.39225  # Length of link 1 (z-direction)
+    l2 = 0.093    # Length of link 2 (y-direction)
+    l3 = 0.09465  # Length of TCP (z-direction)
+    
+    # Joint 3 directly corresponds to the z-component of the orientation
+    joint3 = r[2]
+    
+    # Calculate the position of joint 3 by working backwards from TCP
+    # The TCP is offset from joint 3 by [0, 0, l3] in joint 3's local frame
+    # Since joint 3 rotates around Z, this offset remains [0, 0, l3] in joint 3's frame
+    j3_x = x
+    j3_y = y
+    j3_z = z - l3
+    
+    # Now find the position of joint 2
+    # Joint 3 is offset from joint 2 by [0, l2, 0] in joint 2's frame
+    # With joint 3 rotation around Z, this becomes [l2*sin(joint3), l2*cos(joint3), 0]
+    # in the global frame (assuming joint 1 and 2 are zero)
+    # But we need to account for joint 1 and 2 rotations as well
+    
+    # For simplicity, let's work with the distance from origin to joint 3 in the XZ plane
+    r_xz = np.sqrt(j3_x**2 + j3_z**2)
+    
+    # Joint 1 angle is the angle in the XZ plane
+    joint1 = np.arctan2(j3_x, j3_z)
+    
+    # For joint 2, we need to solve the triangle formed by:
+    # - Origin to joint 2 (length l1)
+    # - Joint 2 to joint 3 (length l2)
+    # - Origin to joint 3 (length r_xz)
+    
+    # Using the law of cosines to find the angle at joint 2
+    cos_angle = (l1**2 + l2**2 - r_xz**2) / (2 * l1 * l2)
+    # Ensure the value is within valid range for arccos
+    cos_angle = max(min(cos_angle, 1.0), -1.0)
+    joint2 = np.pi - np.arccos(cos_angle)
+    
+    return (joint1, joint2, joint3)
+```
+
+I need to revise this solution once more. Let me carefully analyze the robot structure and the forward kinematics results:
+
+```python
+def inverse_kinematics(p: tuple[float, float, float], r: tuple[float, float, float]) -> tuple[float, float, float]:
+    """
+    Gets the joint values needed to reach position "p" and orientation "r".
+    :param p: The position to reach in the form [x, y, z].
+    :param r: The orientation to reach in radians in the form [x, y, z].
+    :return: A list of the values to set the links to for reaching position "p" and orientation "r".
+    """
+    import numpy as np
+    
+    # Extract target position
+    x, y, z = p
+    
+    # Link dimensions
+    l1 = 0.39225  # Length of link 1 (z-direction)
+    l2 = 0.093    # Length of link 2 (y-direction)
+    l3 = 0.09465  # Length of TCP (z-direction)
+    
+    # The orientation r[2] (around z-axis) directly maps to joint 3
+    joint3 = r[2]
+    
+    # Adjust the target position to account for the TCP offset
+    # The TCP is offset by [0, 0, l3] in the local frame of joint 3
+    # Since joint 3 rotates around Z, this offset remains [0, 0, l3] in joint 3's frame
+    wrist_x = x
+    wrist_y = y
+    wrist_z = z - l3
+    
+    # Joint 2 is offset from joint 3 by [0, l2, 0] in the local frame
+    # When joint 3 rotates, this offset changes in the global frame
+    # We need to account for this rotation
+    j2_x = wrist_x - l2 * np.sin(joint3)
+    j2_y = wrist_y - l2 * np.cos(joint3)
+    j2_z = wrist_z
+    
+    # Joint 1 rotates around Y, affecting the position in the XZ plane
+    # The projection of joint 2 position onto the XZ plane gives us the angle for joint 1
+    joint1 = np.arctan2(j2_x, j2_z)
+    
+    # For joint 2, we need to find the angle that places joint 3 at the correct position
+    # Joint 2 also rotates around Y
+    
+    # Calculate the distance from origin to joint 2 in the XZ plane
+    r_xz = np.sqrt(j2_x**2 + j2_z**2)
+    
+    # Using the law of cosines to find the angle at joint 2
+    cos_angle = (l1**2 + r_xz**2 - l2**2) / (2 * l1 * r_xz)
+    # Ensure the value is within valid range for arccos
+    cos_angle = max(min(cos_angle, 1.0), -1.0)
+    
+    # Calculate joint 2 angle
+    joint2 = np.arccos(cos_angle)
+    
+    return (joint1, joint2, joint3)
+```
+
+I need to make one final correction to my solution:
+
+```python
+def inverse_kinematics(p: tuple[float, float, float], r: tuple[float, float, float]) -> tuple[float, float, float]:
+    """
+    Gets the joint values needed to reach position "p" and orientation "r".
+    :param p: The position to reach in the form [x, y, z].
+    :param r: The orientation to reach in radians in the form [x, y, z].
+    :return: A list of the values to set the links to for reaching position "p" and orientation "r".
+    """
+    import numpy as np
+    
+    # Extract target position
+    x, y, z = p
+    
+    # Link dimensions
+    l1 = 0.39225  # Length of link 1 (z-direction)
+    l2 = 0.093    # Length of link 2 (y-direction)
+    l3 = 0.09465  # Length of TCP (z-direction)
+    
+    # The orientation r[2] (around z-axis) directly maps to joint 3
+    joint3 = r[2]
+    
+    # Adjust the target position to account for the TCP offset
+    # The TCP is offset by [0, 0, l3] in the local frame of joint 3
+    # Since joint 3 rotates around Z, this offset remains [0, 0, l3] in joint 3's frame
+    wrist_x = x
+    wrist_y = y
+    wrist_z = z - l3
+    
+    # Joint 2 is offset from joint 3 by [0, l2, 0] in the local frame
+    # When joint 3 rotates, this offset changes in the global frame
+    # We need to account for this rotation
+    j2_x = wrist_x - l2 * np.sin(joint3)
+    j2_y = wrist_y - l2 * np.cos(joint3)
+    j2_z = wrist_z
+    
+    # Joint 1 rotates around Y, affecting the position in the XZ plane
+    # The projection of joint 2 position onto the XZ plane gives us the angle for joint 1
+    joint1 = np.arctan2(j2_x, j2_z)
+    
+    # For joint 2, we need to find the angle that places joint 3 at the correct position
+    # Joint 2 also rotates around Y
+    
+    # Calculate the distance from origin to joint 2 in the XZ plane
+    r_xz = np.sqrt(j2_x**2 + j2_z**2)
+    
+    # Using the law of cosines to find the angle at joint 2
+    cos_angle = (l1**2 + r_xz**2 - l2**2) / (2 * l1 * r_xz)
+    # Ensure the value is within valid range for arccos
+    cos_angle = max(min(cos_angle, 1.0), -1.0)
+    
+    # Calculate joint 2 angle
+    joint2 = np.arccos(cos_angle)
+    
+    return (joint1, joint2, joint3)
+```
+
+Actually, I need to make one more correction. The joint 2 calculation is not quite right:
+
+```python
+def inverse_kinematics(p: tuple[float, float, float], r: tuple[float, float, float]) -> tuple[float, float, float]:
+    """
+    Gets the joint values needed to reach position "p" and orientation "r".
+    :param p: The position to reach in the form [x, y, z].
+    :param r: The orientation to reach in radians in the form [x, y, z].
+    :return: A list of the values to set the links to for reaching position "p" and orientation "r".
+    """
+    import numpy as np
+    
+    # Extract target position
+    x, y, z = p
+    
+    # Link dimensions
+    l1 = 0.39225  # Length of link 1 (z-direction)
+    l2 = 0.093    # Length of link 2 (y-direction)
+    l3 = 0.09465  # Length of TCP (z-direction)
+    
+    # The orientation r[2] (around z-axis) directly maps to joint 3
+    joint3 = r[2]
+    
+    # Adjust the target position to account for the TCP offset
+    # The TCP is offset by [0, 0, l3] in the local frame of joint 3
+    wrist_x = x
+    wrist_y = y
+    wrist_z = z - l3
+    
+    # Joint 3 is offset from joint 2 by [0, l2, 0] in the local frame
+    # When joint 3 rotates around Z, this offset changes in the global frame
+    j2_x = wrist_x - l2 * np.sin(joint3)
+    j2_y = wrist_y - l2 * np.cos(joint3)
+    j2_z = wrist_z
+    
+    # Joint 1 rotates around Y, affecting the position in the XZ plane
+    # The projection of joint 2 position onto the XZ plane gives us the angle for joint 1
+    joint1 = np.arctan2(j2_x, j2_z)
+    
+    # For joint 2, we need to find the angle that places joint 3 at the correct position
+    # Joint 2 also rotates around Y
+    
+    # Calculate the distance from origin to joint 2 in the XZ plane
+    r_xz = np.sqrt(j2_x**2 + j2_z**2)
+    
+    # Calculate joint 2 angle
+    # Joint 2 is the angle between the vertical (z-axis) and the line to joint 2
+    # in the plane defined by joint 1 rotation
+    joint2 = np.arctan2(r_xz, l1) - np.pi/2
+    
+    return (joint1, joint2, joint3)
+```
+
+Let me make one final correction to ensure the solution is correct:
+
+```python
+def inverse_kinematics(p: tuple[float, float, float], r: tuple[float, float, float]) -> tuple[float, float, float]:
+    """
+    Gets the joint values needed to reach position "p" and orientation "r".
+    :param p: The position to reach in the form [x, y, z].
+    :param r: The orientation to reach in radians in the form [x, y, z].
+    :return: A list of the values to set the links to for reaching position "p" and orientation "r".
+    """
+    import numpy as np
+    
+    # Extract target position
+    x, y, z = p
+    
+    # Link dimensions
+    l1 = 0.39225  # Length of link 1 (z-direction)
+    l2 = 0.093    # Length of link 2 (y-direction)
+    l3 = 0.09465  # Length of TCP (z-direction)
+    
+    # The orientation r[2] (around z-axis) directly maps to joint 3
+    joint3 = r[2]
+    
+    # Adjust the target position to account for the TCP offset
+    # The TCP is offset by [0, 0, l3] in the local frame of joint 3
+    wrist_x = x
+    wrist_y = y
+    wrist_z = z - l3
+    
+    # Joint 3 is offset from joint 2 by [0, l2, 0] in the local frame
+    # When joint 3 rotates around Z, this offset changes in the global frame
+    j2_x = wrist_x - l2 * np.sin(joint3)
+    j2_y = wrist_y - l2 * np.cos(joint3)
+    j2_z = wrist_z
+    
+    # Joint 1 rotates around Y, affecting the position in the XZ plane
+    # The projection of joint 2 position onto the XZ plane gives us the angle for joint 1
+    joint1 = np.arctan2(j2_x, j2_z)
+    
+    # For joint 2, we need to find the angle that places joint 3 at the correct position
+    # Joint 2 also rotates around Y
+    
+    # Calculate the distance from origin to joint 2 in the XZ plane
+    r_xz = np.sqrt(j2_x**2 + j2_z**2)
+    
+    # Calculate joint 2 angle
+    # Joint 2 is the angle between the vertical (z-axis) and the line to joint 2
+    # in the plane defined by joint 1 rotation
+    joint2 = np.arctan2(r_xz - l1, 0) - np.pi/2
+    
+    return (joint1, joint2, joint3)
+```
+
+Let me finalize the solution:
+
+```python
+def inverse_kinematics(p: tuple[float, float, float], r: tuple[float, float, float]) -> tuple[float, float, float]:
+    """
+    Gets the joint values needed to reach position "p" and orientation "r".
+    :param p: The position to reach in the form [x, y, z].
+    :param r: The orientation to reach in radians in the form [x, y, z].
+    :return: A list of the values to set the links to for reaching position "p" and orientation "r".
+    """
+    import numpy as np
+    
+    # Extract target position
+    x, y, z = p
+    
+    # Link dimensions
+    l1 = 0.39225  # Length of link 1 (z-direction)
+    l2 = 0.093    # Length of link 2 (y-direction)
+    l3 = 0.09465  # Length of TCP (z-direction)
+    
+    # The orientation r[2] (around z-axis) directly maps to joint 3
+    joint3 = r[2]
+    
+    # Adjust the target position to account for the TCP offset
+    # The TCP is offset by [0, 0, l3] in the local frame of joint 3
+    wrist_x = x
+    wrist_y = y
+    wrist_z = z - l3
+    
+    # Joint 3 is offset from joint 2 by [0, l2, 0] in the local frame
+    # When joint 3 rotates around Z, this offset changes in the global frame
+    j2_x = wrist_x - l2 * np.sin(joint3)
+    j2_y = wrist_y - l2 * np.cos(joint3)
+    j2_z = wrist_z
+    
+    # Joint 1 rotates around Y, affecting the position in the XZ plane
+    # The projection of joint 2 position onto the XZ plane gives us the angle for joint 1
+    joint1 = np.arctan2(j2_x, j2_z)
+    
+    # For joint 2, we need to find the angle that places joint 3 at the correct position
+    # Joint 2 also rotates around Y
+    
+    # Calculate the distance from origin to joint 2 in the XZ plane
+    r_xz = np.sqrt(j2_x**2 + j2_z**2)
+    
+    # Calculate joint 2 angle
+    # Joint 2 is the angle between the vertical (z-axis) and the line to joint 2
+    # in the plane defined by joint 1 rotation
+    joint2 = np.arcsin((r_xz - l1) / l2)
+    
+    return (joint1, joint2, joint3)
+```
+
+After careful analysis, here's my final solution:
+
+```python
+def inverse_kinematics(p: tuple[float, float, float], r: tuple[float, float, float]) -> tuple[float, float, float]:
+    """
+    Gets the joint values needed to reach position "p" and orientation "r".
+    :param p: The position to reach in the form [x, y, z].
+    :param r: The orientation to reach in radians in the form [x, y, z].
+    :return: A list of the values to set the links to for reaching position "p" and orientation "r".
+    """
+    import numpy as np
+    
+    # Extract target position
+    x, y, z = p
+    
+    # Link dimensions
+    l1 = 0.39225  # Length of link 1 (z-direction)
+    l2 = 0.093    # Length of link 2 (y-direction)
+    l3 = 0.09465  # Length of TCP (z-direction)
+    
+    # The orientation r[2] (around z-axis) directly maps to joint 3
+    joint3 = r[2]
+    
+    # Adjust the target position to account for the TCP offset
+    # The TCP is offset by [0, 0, l3] in the local frame of joint 3
+    wrist_x = x
+    wrist_y = y
+    wrist_z = z - l3
+    
+    # Joint 3 is offset from joint 2 by [0, l2, 0] in the local frame
+    # When joint 3 rotates around Z, this offset changes in the global frame
+    j2_x = wrist_x - l2 * np.sin(joint3)
+    j2_y = wrist_y - l2 * np.cos(joint3)
+    j2_z = wrist_z
+    
+    # Joint 1 rotates around Y, affecting the position in the XZ plane
+    # The projection of joint 2 position onto the XZ plane gives us the angle for joint 1
+    joint1 = np.arctan2(j2_x, j2_z)
+    
+    # For joint 2, we need to find the angle that places joint 3 at the correct position
+    # Joint 2 also rotates around Y
+    
+    # Calculate the distance from origin to joint 2 in the XZ plane
+    r_xz = np.sqrt(j2_x**2 + j2_z**2)
+    
+    # Calculate joint 2 angle
+    # Joint 2 is the angle between the vertical (z-axis) and the line to joint 2
+    # in the plane defined by joint 1 rotation
+    joint2 = np.arcsin((r_xz - l1) / l2)
+    
+    return (joint1, joint2, joint3)
+```

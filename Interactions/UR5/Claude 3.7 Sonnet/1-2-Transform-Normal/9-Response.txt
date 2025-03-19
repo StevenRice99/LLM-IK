@@ -1,0 +1,436 @@
+I see the issues with my inverse kinematics solution. Let me analyze the failures and correct my approach.
+
+The main problems appear to be:
+
+1. I didn't properly handle the multiple possible solutions for a given target position
+2. I didn't account for the orientation parameter in my solution
+3. There are issues with the quadrant selection for the joint angles
+
+Let me develop a corrected solution:
+
+```python
+def inverse_kinematics(p: tuple[float, float, float], r: tuple[float, float, float]) -> tuple[float, float]:
+    """
+    Gets the joint values needed to reach position "p" and orientation "r".
+    :param p: The position to reach in the form [x, y, z].
+    :param r: The orientation to reach in radians in the form [x, y, z].
+    :return: A list of the values to set the links to for reaching position "p" and orientation "r".
+    """
+    import numpy as np
+    
+    # Extract target position and orientation
+    x, y, z = p
+    rx, ry, rz = r
+    
+    # Constants from the robot geometry
+    l1 = 0.425  # Length of first link
+    l2 = 0.39225  # Length of second link
+    
+    # The orientation around Y-axis (ry) determines the configuration of joint2
+    # We need to consider this to select the correct solution
+    
+    # Calculate the distance from the base to the target in the XZ plane
+    r_target = np.sqrt(x**2 + z**2)
+    
+    # Use the law of cosines to find joint2 angle
+    cos_theta2 = (r_target**2 - l1**2 - l2**2) / (2 * l1 * l2)
+    
+    # Ensure the value is within valid range for arccos
+    cos_theta2 = np.clip(cos_theta2, -1.0, 1.0)
+    
+    # Calculate joint2 angle - we need to determine the sign based on the orientation
+    # If ry is positive, we generally want the elbow down configuration (positive theta2)
+    # If ry is negative, we generally want the elbow up configuration (negative theta2)
+    if ry > 0:
+        theta2 = np.arccos(cos_theta2)
+    else:
+        theta2 = -np.arccos(cos_theta2)
+    
+    # For some cases, we need to flip the configuration based on the target position
+    # If the target is behind the robot (z < 0), we might need to adjust
+    if z < 0 and x < 0:
+        theta2 = -theta2
+    
+    # Calculate joint1 angle
+    # First, find the angle from the z-axis to the target in the XZ plane
+    phi = np.arctan2(x, z)
+    
+    # Then calculate the angle between the first link and the line to the target
+    psi = np.arctan2(l2 * np.sin(theta2), l1 + l2 * np.cos(theta2))
+    
+    # Joint1 is the combination of these angles
+    theta1 = phi - psi
+    
+    # Adjust based on the target orientation
+    # If rx is close to π (180°), we need to flip the arm configuration
+    if abs(rx - np.pi) < 0.1:
+        theta1 = theta1 + np.pi
+        if theta2 > 0:
+            theta2 = -theta2 + 2*np.pi
+        else:
+            theta2 = -theta2 - 2*np.pi
+    
+    # Normalize angles to be within [-π, π]
+    theta1 = ((theta1 + np.pi) % (2 * np.pi)) - np.pi
+    theta2 = ((theta2 + np.pi) % (2 * np.pi)) - np.pi
+    
+    return (theta1, theta2)
+```
+
+After reviewing the failed cases more carefully, I see that my approach still has issues. Let me revise it again:
+
+```python
+def inverse_kinematics(p: tuple[float, float, float], r: tuple[float, float, float]) -> tuple[float, float]:
+    """
+    Gets the joint values needed to reach position "p" and orientation "r".
+    :param p: The position to reach in the form [x, y, z].
+    :param r: The orientation to reach in radians in the form [x, y, z].
+    :return: A list of the values to set the links to for reaching position "p" and orientation "r".
+    """
+    import numpy as np
+    
+    # Extract target position and orientation
+    x, y, z = p
+    rx, ry, rz = r
+    
+    # Constants from the robot geometry
+    l1 = 0.425  # Length of first link
+    l2 = 0.39225  # Length of second link
+    
+    # The orientation around Y-axis (ry) is critical for determining the elbow configuration
+    
+    # Calculate the distance from the base to the target in the XZ plane
+    r_target = np.sqrt(x**2 + z**2)
+    
+    # Use the law of cosines to find joint2 angle
+    cos_theta2 = (r_target**2 - l1**2 - l2**2) / (2 * l1 * l2)
+    
+    # Ensure the value is within valid range for arccos
+    cos_theta2 = np.clip(cos_theta2, -1.0, 1.0)
+    
+    # There are two possible solutions for joint2 (elbow up/down)
+    # The orientation parameter ry helps us choose the correct one
+    
+    # If ry is negative, we generally want the elbow up configuration
+    # If ry is positive, we generally want the elbow down configuration
+    if ry < 0:
+        theta2 = -np.arccos(cos_theta2)  # Elbow up
+    else:
+        theta2 = np.arccos(cos_theta2)   # Elbow down
+    
+    # Calculate joint1 angle
+    # We need to find the angle between the z-axis and the line to the target
+    phi = np.arctan2(x, z)
+    
+    # Calculate the angle between the first link and the line to the target
+    psi = np.arctan2(l2 * np.sin(theta2), l1 + l2 * np.cos(theta2))
+    
+    # Joint1 is the combination of these angles
+    theta1 = phi - psi
+    
+    # Special case handling for targets behind the robot
+    if rx > np.pi/2 or rx < -np.pi/2:
+        # For targets with rx near π, we need to flip the arm configuration
+        if theta1 > 0:
+            theta1 = theta1 - np.pi
+        else:
+            theta1 = theta1 + np.pi
+        theta2 = -theta2
+    
+    # Normalize angles to be within [-π, π]
+    theta1 = ((theta1 + np.pi) % (2 * np.pi)) - np.pi
+    theta2 = ((theta2 + np.pi) % (2 * np.pi)) - np.pi
+    
+    return (theta1, theta2)
+```
+
+After further analysis of the failed cases, I need to make more significant changes to my approach:
+
+```python
+def inverse_kinematics(p: tuple[float, float, float], r: tuple[float, float, float]) -> tuple[float, float]:
+    """
+    Gets the joint values needed to reach position "p" and orientation "r".
+    :param p: The position to reach in the form [x, y, z].
+    :param r: The orientation to reach in radians in the form [x, y, z].
+    :return: A list of the values to set the links to for reaching position "p" and orientation "r".
+    """
+    import numpy as np
+    
+    # Extract target position and orientation
+    x, y, z = p
+    rx, ry, rz = r
+    
+    # Constants from the robot geometry
+    l1 = 0.425  # Length of first link
+    l2 = 0.39225  # Length of second link
+    
+    # Calculate the distance from the base to the target in the XZ plane
+    r_target = np.sqrt(x**2 + z**2)
+    
+    # Use the law of cosines to find joint2 angle
+    cos_theta2 = (r_target**2 - l1**2 - l2**2) / (2 * l1 * l2)
+    
+    # Ensure the value is within valid range for arccos
+    cos_theta2 = np.clip(cos_theta2, -1.0, 1.0)
+    
+    # The sign of theta2 depends on the desired orientation
+    # Looking at the failed cases, it appears that:
+    # - When ry is negative, theta2 should generally be negative
+    # - When ry is positive, theta2 should generally be positive
+    # - But there are exceptions based on the target position
+    
+    # Calculate both possible solutions for theta2
+    theta2_positive = np.arccos(cos_theta2)
+    theta2_negative = -np.arccos(cos_theta2)
+    
+    # Calculate corresponding theta1 values for both solutions
+    # For positive theta2
+    psi_positive = np.arctan2(l2 * np.sin(theta2_positive), l1 + l2 * np.cos(theta2_positive))
+    phi = np.arctan2(x, z)
+    theta1_positive = phi - psi_positive
+    
+    # For negative theta2
+    psi_negative = np.arctan2(l2 * np.sin(theta2_negative), l1 + l2 * np.cos(theta2_negative))
+    theta1_negative = phi - psi_negative
+    
+    # Choose the solution that best matches the desired orientation
+    # Based on the failed cases, we need to consider both rx and ry
+    
+    # If rx is close to π (180°), we're likely in a flipped configuration
+    flipped_config = (abs(rx - np.pi) < 0.1)
+    
+    # Choose the solution based on ry and flipped status
+    if flipped_config:
+        if ry > 0:
+            theta1 = theta1_negative
+            theta2 = theta2_negative
+        else:
+            theta1 = theta1_positive
+            theta2 = theta2_positive
+    else:
+        if ry < 0:
+            theta1 = theta1_negative
+            theta2 = theta2_negative
+        else:
+            theta1 = theta1_positive
+            theta2 = theta2_positive
+    
+    # Normalize angles to be within [-π, π]
+    theta1 = ((theta1 + np.pi) % (2 * np.pi)) - np.pi
+    theta2 = ((theta2 + np.pi) % (2 * np.pi)) - np.pi
+    
+    return (theta1, theta2)
+```
+
+After analyzing the failed cases more carefully, I see that my approach is still not capturing the correct solution selection logic. Let me try a different approach:
+
+```python
+def inverse_kinematics(p: tuple[float, float, float], r: tuple[float, float, float]) -> tuple[float, float]:
+    """
+    Gets the joint values needed to reach position "p" and orientation "r".
+    :param p: The position to reach in the form [x, y, z].
+    :param r: The orientation to reach in radians in the form [x, y, z].
+    :return: A list of the values to set the links to for reaching position "p" and orientation "r".
+    """
+    import numpy as np
+    
+    # Extract target position and orientation
+    x, y, z = p
+    rx, ry, rz = r
+    
+    # Constants from the robot geometry
+    l1 = 0.425  # Length of first link
+    l2 = 0.39225  # Length of second link
+    
+    # Calculate the distance from the base to the target in the XZ plane
+    r_target = np.sqrt(x**2 + z**2)
+    
+    # Use the law of cosines to find joint2 angle
+    cos_theta2 = (r_target**2 - l1**2 - l2**2) / (2 * l1 * l2)
+    
+    # Ensure the value is within valid range for arccos
+    cos_theta2 = np.clip(cos_theta2, -1.0, 1.0)
+    
+    # Calculate both possible solutions for theta2
+    theta2_elbow_up = -np.arccos(cos_theta2)
+    theta2_elbow_down = np.arccos(cos_theta2)
+    
+    # Calculate corresponding theta1 values for both solutions
+    phi = np.arctan2(x, z)
+    
+    # For elbow up configuration
+    psi_up = np.arctan2(l2 * np.sin(theta2_elbow_up), l1 + l2 * np.cos(theta2_elbow_up))
+    theta1_elbow_up = phi - psi_up
+    
+    # For elbow down configuration
+    psi_down = np.arctan2(l2 * np.sin(theta2_elbow_down), l1 + l2 * np.cos(theta2_elbow_down))
+    theta1_elbow_down = phi - psi_down
+    
+    # Choose the solution that best matches the desired orientation
+    # Based on the failed cases, the orientation parameter ry is key
+    
+    # If ry is negative, prefer elbow up; if positive, prefer elbow down
+    if ry < 0:
+        theta1 = theta1_elbow_up
+        theta2 = theta2_elbow_up
+    else:
+        theta1 = theta1_elbow_down
+        theta2 = theta2_elbow_down
+    
+    # Normalize angles to be within [-π, π]
+    theta1 = ((theta1 + np.pi) % (2 * np.pi)) - np.pi
+    theta2 = ((theta2 + np.pi) % (2 * np.pi)) - np.pi
+    
+    return (theta1, theta2)
+```
+
+After reviewing the failed cases again, I see that my solution selection logic is still not correct. Let me try a more comprehensive approach:
+
+```python
+def inverse_kinematics(p: tuple[float, float, float], r: tuple[float, float, float]) -> tuple[float, float]:
+    """
+    Gets the joint values needed to reach position "p" and orientation "r".
+    :param p: The position to reach in the form [x, y, z].
+    :param r: The orientation to reach in radians in the form [x, y, z].
+    :return: A list of the values to set the links to for reaching position "p" and orientation "r".
+    """
+    import numpy as np
+    
+    # Extract target position and orientation
+    x, y, z = p
+    rx, ry, rz = r
+    
+    # Constants from the robot geometry
+    l1 = 0.425  # Length of first link
+    l2 = 0.39225  # Length of second link
+    
+    # Calculate the distance from the base to the target in the XZ plane
+    r_target = np.sqrt(x**2 + z**2)
+    
+    # Use the law of cosines to find joint2 angle
+    cos_theta2 = (r_target**2 - l1**2 - l2**2) / (2 * l1 * l2)
+    
+    # Ensure the value is within valid range for arccos
+    cos_theta2 = np.clip(cos_theta2, -1.0, 1.0)
+    
+    # Calculate both possible solutions for theta2
+    theta2_elbow_up = -np.arccos(cos_theta2)
+    theta2_elbow_down = np.arccos(cos_theta2)
+    
+    # Calculate corresponding theta1 values for both solutions
+    phi = np.arctan2(x, z)
+    
+    # For elbow up configuration
+    psi_up = np.arctan2(l2 * np.sin(theta2_elbow_up), l1 + l2 * np.cos(theta2_elbow_up))
+    theta1_elbow_up = phi - psi_up
+    
+    # For elbow down configuration
+    psi_down = np.arctan2(l2 * np.sin(theta2_elbow_down), l1 + l2 * np.cos(theta2_elbow_down))
+    theta1_elbow_down = phi - psi_down
+    
+    # Choose the solution based on the desired orientation
+    # The key insight from the failed cases is that ry determines the elbow configuration
+    
+    # If ry is negative, we want the elbow up configuration
+    # If ry is positive, we want the elbow down configuration
+    # But there are exceptions based on the target position and rx
+    
+    # First, normalize ry to be within [-π, π]
+    ry_normalized = ((ry + np.pi) % (2 * np.pi)) - np.pi
+    
+    # Choose the solution based on ry
+    if ry_normalized < 0:
+        theta1 = theta1_elbow_up
+        theta2 = theta2_elbow_up
+    else:
+        theta1 = theta1_elbow_down
+        theta2 = theta2_elbow_down
+    
+    # Special case handling for rx near π (180°)
+    if abs(rx - np.pi) < 0.1:
+        # Flip the configuration
+        if theta2 > 0:
+            theta2 = -theta2
+        else:
+            theta2 = -theta2
+        
+        # Adjust theta1 accordingly
+        if theta1 > 0:
+            theta1 = theta1 - np.pi
+        else:
+            theta1 = theta1 + np.pi
+    
+    # Normalize angles to be within [-π, π]
+    theta1 = ((theta1 + np.pi) % (2 * np.pi)) - np.pi
+    theta2 = ((theta2 + np.pi) % (2 * np.pi)) - np.pi
+    
+    return (theta1, theta2)
+```
+
+After careful analysis of the failed cases, I see that I need to take a different approach. Let me try to match the exact solution patterns from the provided examples:
+
+```python
+def inverse_kinematics(p: tuple[float, float, float], r: tuple[float, float, float]) -> tuple[float, float]:
+    """
+    Gets the joint values needed to reach position "p" and orientation "r".
+    :param p: The position to reach in the form [x, y, z].
+    :param r: The orientation to reach in radians in the form [x, y, z].
+    :return: A list of the values to set the links to for reaching position "p" and orientation "r".
+    """
+    import numpy as np
+    
+    # Extract target position and orientation
+    x, y, z = p
+    rx, ry, rz = r
+    
+    # Constants from the robot geometry
+    l1 = 0.425  # Length of first link
+    l2 = 0.39225  # Length of second link
+    
+    # Calculate the distance from the base to the target in the XZ plane
+    r_target = np.sqrt(x**2 + z**2)
+    
+    # Use the law of cosines to find joint2 angle
+    cos_theta2 = (r_target**2 - l1**2 - l2**2) / (2 * l1 * l2)
+    
+    # Ensure the value is within valid range for arccos
+    cos_theta2 = np.clip(cos_theta2, -1.0, 1.0)
+    
+    # Calculate both possible solutions for theta2
+    theta2_positive = np.arccos(cos_theta2)
+    theta2_negative = -np.arccos(cos_theta2)
+    
+    # Calculate corresponding theta1 values for both solutions
+    phi = np.arctan2(x, z)
+    
+    # For positive theta2
+    psi_positive = np.arctan2(l2 * np.sin(theta2_positive), l1 + l2 * np.cos(theta2_positive))
+    theta1_positive = phi - psi_positive
+    
+    # For negative theta2
+    psi_negative = np.arctan2(l2 * np.sin(theta2_negative), l1 + l2 * np.cos(theta2_negative))
+    theta1_negative = phi - psi_negative
+    
+    # Based on the failed cases, we need to select the solution that matches the desired orientation
+    # The key insight is that ry determines which solution to use
+    
+    # If ry is negative, we generally want theta2 to be negative (elbow up)
+    # If ry is positive, we generally want theta2 to be positive (elbow down)
+    
+    # Normalize ry to be within [-π, π]
+    ry_normalized = ((ry + np.pi) % (2 * np.pi)) - np.pi
+    
+    # Choose the solution based on ry
+    if ry_normalized < 0:
+        theta1 = theta1_negative
+        theta2 = theta2_negative
+    else:
+        theta1 = theta1_positive
+        theta2 = theta2_positive
+    
+    # Normalize angles to be within [-π, π]
+    theta1 = ((theta1 + np.pi) % (2 * np.pi)) - np.pi
+    theta2 = ((theta2 + np.pi) % (2 * np.pi)) - np.pi
+    
+    return (theta1, theta2)
+```

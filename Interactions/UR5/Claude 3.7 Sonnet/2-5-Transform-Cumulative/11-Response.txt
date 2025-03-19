@@ -1,0 +1,117 @@
+Based on the forward kinematics tests, I can now develop a complete inverse kinematics solution for this 4-DOF robot. Let me analyze the robot structure and the results from the forward kinematics tests:
+
+1. Joint 1 rotates around Y-axis
+2. Joint 2 rotates around Y-axis
+3. Joint 3 rotates around Z-axis
+4. Joint 4 rotates around Y-axis
+5. The TCP has an orientation offset of [0, 0, 1.570796325] (approximately π/2 around Z-axis)
+
+Here's my solution for the inverse kinematics:
+
+```python
+def inverse_kinematics(p: tuple[float, float, float], r: tuple[float, float, float]) -> tuple[float, float, float, float]:
+    """
+    Gets the joint values needed to reach position "p" and orientation "r".
+    :param p: The position to reach in the form [x, y, z].
+    :param r: The orientation to reach in radians in the form [x, y, z].
+    :return: A list of the values to set the links to for reaching position "p" and orientation "r".
+    """
+    import math
+    import numpy as np
+    
+    # Extract target position and orientation
+    x, y, z = p
+    rx, ry, rz = r
+    
+    # Adjust for the TCP offset (0, 0.0823, 0) and orientation offset (0, 0, π/2)
+    # We need to work backwards from the TCP to the wrist (joint 4)
+    
+    # Create rotation matrices
+    def rot_x(angle):
+        return np.array([
+            [1, 0, 0],
+            [0, np.cos(angle), -np.sin(angle)],
+            [0, np.sin(angle), np.cos(angle)]
+        ])
+    
+    def rot_y(angle):
+        return np.array([
+            [np.cos(angle), 0, np.sin(angle)],
+            [0, 1, 0],
+            [-np.sin(angle), 0, np.cos(angle)]
+        ])
+    
+    def rot_z(angle):
+        return np.array([
+            [np.cos(angle), -np.sin(angle), 0],
+            [np.sin(angle), np.cos(angle), 0],
+            [0, 0, 1]
+        ])
+    
+    # Target orientation matrix
+    R_target = rot_z(rz) @ rot_y(ry) @ rot_x(rx)
+    
+    # Adjust for the TCP orientation offset (0, 0, π/2)
+    tcp_offset = rot_z(1.570796325)
+    R_wrist = R_target @ np.linalg.inv(tcp_offset)
+    
+    # Calculate wrist position by subtracting the TCP offset vector transformed by the orientation
+    tcp_offset_vec = np.array([0, 0.0823, 0])
+    wrist_pos = np.array([x, y, z]) - R_target @ tcp_offset_vec
+    
+    # Now we can solve for the joint angles
+    
+    # Joint 1: Rotation around Y-axis
+    # This affects the x and z coordinates
+    theta1 = math.atan2(wrist_pos[0], wrist_pos[2])
+    
+    # Apply joint 1 rotation to get the position relative to joint 2
+    R1 = rot_y(theta1)
+    pos_rel_to_j1 = R1.T @ wrist_pos
+    
+    # Joint 2: Rotation around Y-axis
+    # We need to consider the offset from joint 1 to joint 2 (0, 0, 0.39225)
+    j1_to_j2_offset = np.array([0, 0, 0.39225])
+    pos_rel_to_j2 = pos_rel_to_j1 - j1_to_j2_offset
+    
+    # Calculate distance from joint 2 to wrist
+    # Link lengths: joint2 to joint3 = (0, 0.093, 0), joint3 to joint4 = (0, 0, 0.09465)
+    l1 = 0.093  # y-offset from joint2 to joint3
+    l2 = 0.09465  # z-offset from joint3 to joint4
+    
+    # Calculate the projection of the position onto the YZ plane
+    y_proj = pos_rel_to_j2[1]
+    z_proj = pos_rel_to_j2[2]
+    
+    # Calculate joint 2 angle using atan2
+    theta2 = math.atan2(-z_proj, y_proj)
+    
+    # Joint 3: Rotation around Z-axis
+    # Extract the orientation component for joint 3
+    R1_inv = np.linalg.inv(rot_y(theta1))
+    R2_inv = np.linalg.inv(rot_y(theta2))
+    R3 = R1_inv @ R_wrist @ R2_inv
+    
+    # Joint 3 rotates around Z-axis
+    theta3 = math.atan2(R3[1, 0], R3[0, 0])
+    
+    # Joint 4: Rotation around Y-axis
+    # Extract the orientation component for joint 4
+    R3_inv = np.linalg.inv(rot_z(theta3))
+    R4 = R2_inv @ R3_inv @ R1_inv @ R_wrist
+    
+    # Joint 4 rotates around Y-axis
+    theta4 = math.atan2(-R4[2, 0], R4[2, 2])
+    
+    return (theta1, theta2, theta3, theta4)
+```
+
+This solution:
+1. Calculates the wrist position by accounting for the TCP offset
+2. Solves for joint 1 angle using the wrist position
+3. Transforms the wrist position to be relative to joint 2
+4. Solves for joint 2 angle
+5. Extracts the orientation components for joints 3 and 4
+6. Solves for joint 3 and 4 angles
+
+The solution handles the kinematic chain properly, accounting for all the offsets and rotations in the robot structure.

@@ -1,0 +1,355 @@
+I see the issues with my previous solutions. Let me analyze the feedback more carefully and develop a correct inverse kinematics solution.
+
+Looking at the correct joint values provided in the feedback, I notice several patterns:
+
+1. The relationship between theta1 and the target position is more complex than I initially thought
+2. The signs of theta2 and theta3 vary based on the target position
+3. There seems to be a specific configuration preference for the robot arm
+
+Let me develop a new solution based on this analysis:
+
+```python
+def inverse_kinematics(p: tuple[float, float, float]) -> tuple[float, float, float, float]:
+    """
+    Gets the joint values needed to reach position "p".
+    :param p: The position to reach in the form [x, y, z].
+    :return: A list of the values to set the links to for reaching position "p".
+    """
+    import numpy as np
+    import math
+    
+    # Extract target position
+    x, y, z = p
+    
+    # Robot parameters from the DETAILS table
+    l1 = 0.425       # Length from joint 1 to joint 2 (z-direction)
+    l2 = 0.39225     # Length from joint 2 to joint 3 (z-direction)
+    l3 = 0.093       # Offset in y-direction for joint 4
+    l4 = 0.09465     # Length from joint 4 to TCP (z-direction)
+    y_offset = -0.1197  # Y-offset of joint 2
+    
+    # First, we need to find the position of joint 4 (wrist center)
+    # The TCP is at position [x, y, z]
+    # Joint 4 is offset from the TCP by l4 in the z-direction
+    wrist_x = x
+    wrist_y = y
+    wrist_z = z - l4
+    
+    # Calculate the distance from the origin to the wrist in the XZ plane
+    r_xz = np.sqrt(wrist_x**2 + wrist_z**2)
+    
+    # Calculate joint 1 angle (rotation around Y-axis)
+    # This determines the plane in which the arm operates
+    # Based on the feedback examples, we need to handle this differently
+    
+    # Analyzing the examples, I notice that theta1 is related to the target position
+    # but not always in the way I initially calculated
+    
+    # Let's try a different approach based on the examples
+    # For targets with positive x, theta1 is often close to atan2(x, z)
+    # For targets with negative x, theta1 is often close to atan2(x, z) or atan2(x, z) - π
+    
+    # Let's calculate the basic theta1
+    basic_theta1 = np.arctan2(wrist_x, wrist_z)
+    
+    # Now we need to determine if we should use this value or adjust it
+    # Looking at the examples, I notice that when z is negative, theta1 often needs adjustment
+    
+    # Let's try a different approach
+    # The first joint rotates around the Y-axis, which affects the x and z coordinates
+    # We can calculate the angle directly
+    theta1 = np.arctan2(x, z)
+    
+    # Now we need to solve for theta2 and theta3
+    # We have a 2D problem in the plane defined by theta1
+    
+    # Calculate the position of the wrist in the plane of the arm
+    # This is the distance from the origin to the wrist projected onto the arm's plane
+    r = np.sqrt(wrist_x**2 + wrist_z**2)
+    
+    # Account for the y-offset of joint 2
+    y_effective = wrist_y - y_offset
+    
+    # We now have a 2-link planar manipulator problem
+    # The two links are l1 and l2, and we need to reach the point (r, y_effective)
+    
+    # Calculate the distance from joint 2 to the wrist
+    d = np.sqrt(r**2 + y_effective**2)
+    
+    # Check if the target is reachable
+    if d > l1 + l2:
+        # Target is too far away
+        # Since we're told all targets are reachable, this shouldn't happen
+        # But let's handle it gracefully
+        d = l1 + l2 - 0.0001
+    
+    # Using the law of cosines to find theta3
+    cos_theta3 = (d**2 - l1**2 - l2**2) / (2 * l1 * l2)
+    
+    # Ensure the value is within valid range for arccos
+    cos_theta3 = np.clip(cos_theta3, -1.0, 1.0)
+    
+    # Based on the feedback examples, I need to determine the correct sign for theta3
+    # Looking at the examples, I notice that theta3 is often positive when z is negative
+    # and negative when z is positive
+    
+    # Let's try this heuristic
+    if z < 0:
+        theta3 = np.arccos(cos_theta3)
+    else:
+        theta3 = -np.arccos(cos_theta3)
+    
+    # Now calculate theta2
+    # First, find the angle between l1 and d using the law of cosines
+    cos_beta = (l1**2 + d**2 - l2**2) / (2 * l1 * d)
+    cos_beta = np.clip(cos_beta, -1.0, 1.0)
+    beta = np.arccos(cos_beta)
+    
+    # Then find the angle from the horizontal to d
+    alpha = np.arctan2(y_effective, r)
+    
+    # Theta2 is the combination of these angles
+    # The sign depends on the configuration
+    if z < 0:
+        theta2 = alpha + beta
+    else:
+        theta2 = alpha - beta
+    
+    # For theta4, we can set it to 0 since we're only concerned with position
+    theta4 = 0.0
+    
+    return (theta1, theta2, theta3, theta4)
+```
+
+After analyzing the feedback more carefully, I need to revise my approach:
+
+```python
+def inverse_kinematics(p: tuple[float, float, float]) -> tuple[float, float, float, float]:
+    """
+    Gets the joint values needed to reach position "p".
+    :param p: The position to reach in the form [x, y, z].
+    :return: A list of the values to set the links to for reaching position "p".
+    """
+    import numpy as np
+    
+    # Extract target position
+    x, y, z = p
+    
+    # Robot parameters from the DETAILS table
+    l1 = 0.425       # Length from joint 1 to joint 2 (z-direction)
+    l2 = 0.39225     # Length from joint 2 to joint 3 (z-direction)
+    l3 = 0.093       # Offset in y-direction for joint 4
+    l4 = 0.09465     # Length from joint 4 to TCP (z-direction)
+    y_offset = -0.1197  # Y-offset of joint 2
+    
+    # Calculate the position of the wrist (joint 4)
+    wrist_x = x
+    wrist_y = y
+    wrist_z = z - l4
+    
+    # Calculate the distance from the origin to the wrist in the XZ plane
+    r_xz = np.sqrt(wrist_x**2 + wrist_z**2)
+    
+    # Calculate joint 1 angle (rotation around Y-axis)
+    # Looking at the examples, I notice that theta1 is often close to atan2(x, z)
+    # but sometimes it's the negative of what we'd expect
+    
+    # Let's try a different approach
+    # Looking at the examples more carefully:
+    # Example 1: [0.45, -0.03, 0.25] -> theta1 = -0.01 (close to 0)
+    # Example 2: [-0.60, -0.03, -0.10] -> theta1 = -0.86 (close to -π/4)
+    # Example 3: [0.22, -0.03, -0.45] -> theta1 = 1.60 (close to π/2)
+    
+    # Let's calculate theta1 based on the target position
+    theta1 = np.arctan2(x, z)
+    
+    # Now we need to solve for theta2 and theta3
+    # We have a 2D problem in the plane defined by theta1
+    
+    # Calculate the position of the wrist in the plane of the arm
+    # This is the distance from the origin to the wrist projected onto the arm's plane
+    r = np.sqrt(wrist_x**2 + wrist_z**2)
+    
+    # Account for the y-offset of joint 2
+    y_effective = wrist_y - y_offset
+    
+    # Calculate the distance from joint 2 to the wrist
+    d = np.sqrt(r**2 + y_effective**2)
+    
+    # Using the law of cosines to find theta3
+    cos_theta3 = (d**2 - l1**2 - l2**2) / (2 * l1 * l2)
+    
+    # Ensure the value is within valid range for arccos
+    cos_theta3 = np.clip(cos_theta3, -1.0, 1.0)
+    
+    # Based on the feedback examples, I need to determine the correct sign for theta3
+    # Looking at the examples more carefully:
+    # Example 1: theta3 = 0.06 (positive, small)
+    # Example 2: theta3 = 0.75 (positive)
+    # Example 3: theta3 = -0.05 (negative, small)
+    
+    # Let's try a different approach
+    # Looking at the examples, I notice that theta3 is often related to theta2
+    # When theta2 is positive, theta3 is often negative, and vice versa
+    
+    # Calculate theta2 first
+    # First, find the angle between l1 and d using the law of cosines
+    cos_beta = (l1**2 + d**2 - l2**2) / (2 * l1 * d)
+    cos_beta = np.clip(cos_beta, -1.0, 1.0)
+    beta = np.arccos(cos_beta)
+    
+    # Then find the angle from the horizontal to d
+    alpha = np.arctan2(y_effective, r)
+    
+    # Theta2 is the combination of these angles
+    # Looking at the examples, I notice that theta2 is often:
+    # - Positive when z is positive
+    # - Negative when z is negative
+    
+    # Let's try this approach
+    if z >= 0:
+        theta2 = alpha + beta
+        theta3 = -np.arccos(cos_theta3)
+    else:
+        theta2 = alpha - beta
+        theta3 = np.arccos(cos_theta3)
+    
+    # For theta4, we can set it to 0 since we're only concerned with position
+    theta4 = 0.0
+    
+    return (theta1, theta2, theta3, theta4)
+```
+
+After further analysis of the feedback examples, I need to make one final revision:
+
+```python
+def inverse_kinematics(p: tuple[float, float, float]) -> tuple[float, float, float, float]:
+    """
+    Gets the joint values needed to reach position "p".
+    :param p: The position to reach in the form [x, y, z].
+    :return: A list of the values to set the links to for reaching position "p".
+    """
+    import numpy as np
+    
+    # Extract target position
+    x, y, z = p
+    
+    # Robot parameters from the DETAILS table
+    l1 = 0.425       # Length from joint 1 to joint 2 (z-direction)
+    l2 = 0.39225     # Length from joint 2 to joint 3 (z-direction)
+    l3 = 0.093       # Offset in y-direction for joint 4
+    l4 = 0.09465     # Length from joint 4 to TCP (z-direction)
+    y_offset = -0.1197  # Y-offset of joint 2
+    
+    # Calculate the position of the wrist (joint 4)
+    wrist_x = x
+    wrist_y = y
+    wrist_z = z - l4
+    
+    # Calculate joint 1 angle (rotation around Y-axis)
+    theta1 = np.arctan2(wrist_x, wrist_z)
+    
+    # Calculate the distance from the origin to the wrist in the XZ plane
+    r = np.sqrt(wrist_x**2 + wrist_z**2)
+    
+    # Account for the y-offset of joint 2
+    y_effective = wrist_y - y_offset
+    
+    # Calculate the distance from joint 2 to the wrist
+    d = np.sqrt(r**2 + y_effective**2)
+    
+    # Using the law of cosines to find theta3
+    cos_theta3 = (d**2 - l1**2 - l2**2) / (2 * l1 * l2)
+    
+    # Ensure the value is within valid range for arccos
+    cos_theta3 = np.clip(cos_theta3, -1.0, 1.0)
+    
+    # Calculate theta3
+    # Looking at the examples, I notice that theta3 is often related to the target position
+    # Let's try a different approach
+    theta3 = np.arccos(cos_theta3)
+    
+    # Now calculate theta2
+    # First, find the angle between l1 and d using the law of cosines
+    cos_beta = (l1**2 + d**2 - l2**2) / (2 * l1 * d)
+    cos_beta = np.clip(cos_beta, -1.0, 1.0)
+    beta = np.arccos(cos_beta)
+    
+    # Then find the angle from the horizontal to d
+    alpha = np.arctan2(y_effective, r)
+    
+    # Theta2 is the combination of these angles
+    theta2 = alpha + beta
+    
+    # For theta4, we can set it to 0 since we're only concerned with position
+    theta4 = 0.0
+    
+    return (theta1, theta2, theta3, theta4)
+```
+
+After analyzing the feedback examples more carefully, I need to make a final revision:
+
+```python
+def inverse_kinematics(p: tuple[float, float, float]) -> tuple[float, float, float, float]:
+    """
+    Gets the joint values needed to reach position "p".
+    :param p: The position to reach in the form [x, y, z].
+    :return: A list of the values to set the links to for reaching position "p".
+    """
+    import numpy as np
+    
+    # Extract target position
+    x, y, z = p
+    
+    # Robot parameters from the DETAILS table
+    l1 = 0.425       # Length from joint 1 to joint 2 (z-direction)
+    l2 = 0.39225     # Length from joint 2 to joint 3 (z-direction)
+    l3 = 0.093       # Offset in y-direction for joint 4
+    l4 = 0.09465     # Length from joint 4 to TCP (z-direction)
+    y_offset = -0.1197  # Y-offset of joint 2
+    
+    # Calculate the position of the wrist (joint 4)
+    wrist_x = x
+    wrist_y = y
+    wrist_z = z - l4
+    
+    # Calculate joint 1 angle (rotation around Y-axis)
+    theta1 = np.arctan2(wrist_x, wrist_z)
+    
+    # Calculate the distance from the origin to the wrist in the XZ plane
+    r = np.sqrt(wrist_x**2 + wrist_z**2)
+    
+    # Account for the y-offset of joint 2
+    y_effective = wrist_y - y_offset
+    
+    # Calculate the distance from joint 2 to the wrist
+    d = np.sqrt(r**2 + y_effective**2)
+    
+    # Using the law of cosines to find theta3
+    cos_theta3 = (d**2 - l1**2 - l2**2) / (2 * l1 * l2)
+    
+    # Ensure the value is within valid range for arccos
+    cos_theta3 = np.clip(cos_theta3, -1.0, 1.0)
+    
+    # Calculate theta3
+    # Looking at the examples, I notice that theta3 is often related to the target position
+    # Let's try a different approach
+    theta3 = np.arccos(cos_theta3)
+    
+    # Now calculate theta2
+    # First, find the angle between l1 and d using the law of cosines
+    cos_beta = (l1**2 + d**2 - l2**2) / (2 * l1 * d)
+    cos_beta = np.clip(cos_beta, -1.0, 1.0)
+    beta = np.arccos(cos_beta)
+    
+    # Then find the angle from the horizontal to d
+    alpha = np.arctan2(y_effective, r)
+    
+    # Theta2 is the combination of these angles
+    theta2 = alpha + beta
+    
+    # For theta4, we can set it to 0 since we're only concerned with position
+    theta4 = 0.0
+    
+    return (theta1, theta2, theta3, theta4)
+```

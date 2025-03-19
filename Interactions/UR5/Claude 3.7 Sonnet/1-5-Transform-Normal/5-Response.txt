@@ -1,0 +1,181 @@
+I'll now develop the inverse kinematics solution for this 5-DOF robot manipulator. Let me analyze the robot structure and develop the solution step by step.
+
+Based on the forward kinematics results and the robot description, I can see that:
+- The robot has 5 revolute joints
+- 4 joints rotate around the Y-axis (joints 1, 2, 3, and 5)
+- 1 joint rotates around the Z-axis (joint 4)
+- The TCP has a fixed orientation offset of [0, 0, 1.570796325] radians
+
+Let me complete the inverse kinematics function:
+
+```python
+def inverse_kinematics(p: tuple[float, float, float], r: tuple[float, float, float]) -> tuple[float, float, float, float, float]:
+    """
+    Gets the joint values needed to reach position "p" and orientation "r".
+    :param p: The position to reach in the form [x, y, z].
+    :param r: The orientation to reach in radians in the form [x, y, z].
+    :return: A list of the values to set the links to for reaching position "p" and orientation "r".
+    """
+    import numpy as np
+    
+    # Target position
+    x, y, z = p
+    
+    # Link dimensions from the robot description
+    l1 = 0.425  # Distance from joint 1 to joint 2 (z-direction)
+    l2 = 0.39225  # Distance from joint 2 to joint 3 (z-direction)
+    l3 = 0.093  # Distance from joint 3 to joint 4 (y-direction)
+    l4 = 0.09465  # Distance from joint 4 to joint 5 (z-direction)
+    l5 = 0.0823  # Distance from joint 5 to TCP (y-direction)
+    d1 = 0.1197  # Offset in y-direction for joint 2
+    
+    # First, we need to account for the TCP orientation offset
+    # The TCP has a fixed orientation offset of [0, 0, 1.570796325] radians
+    # We need to compute the wrist position by moving back from the TCP
+    
+    # Convert the target orientation to a rotation matrix
+    rx, ry, rz = r
+    
+    # Create rotation matrices for each axis
+    Rx = np.array([
+        [1, 0, 0],
+        [0, np.cos(rx), -np.sin(rx)],
+        [0, np.sin(rx), np.cos(rx)]
+    ])
+    
+    Ry = np.array([
+        [np.cos(ry), 0, np.sin(ry)],
+        [0, 1, 0],
+        [-np.sin(ry), 0, np.cos(ry)]
+    ])
+    
+    Rz = np.array([
+        [np.cos(rz), -np.sin(rz), 0],
+        [np.sin(rz), np.cos(rz), 0],
+        [0, 0, 1]
+    ])
+    
+    # Combined rotation matrix for the target orientation
+    R = Rz @ Ry @ Rx
+    
+    # TCP has a fixed orientation offset of [0, 0, 1.570796325] radians (around z-axis)
+    tcp_offset = np.array([
+        [0, -1, 0],
+        [1, 0, 0],
+        [0, 0, 1]
+    ])
+    
+    # The actual orientation of the last joint
+    R_wrist = R @ np.linalg.inv(tcp_offset)
+    
+    # The approach vector (z-axis of the end-effector)
+    approach = R_wrist[:, 2]
+    
+    # Calculate wrist position by moving back from TCP along the approach vector
+    wrist_pos = np.array([x, y, z]) - l5 * R[:, 1]  # Move back along the y-axis of the TCP frame
+    
+    # Joint 1 (base rotation)
+    # For a 5-DOF robot, we can't fully control orientation, but we can align the arm plane
+    # with the target position
+    theta1 = np.arctan2(wrist_pos[0], wrist_pos[1])
+    
+    # Adjust theta1 to account for the robot's configuration
+    if wrist_pos[1] < 0:
+        theta1 = np.arctan2(wrist_pos[0], wrist_pos[1])
+    else:
+        theta1 = np.arctan2(wrist_pos[0], wrist_pos[1])
+    
+    # Rotate the wrist position to the first joint's frame
+    c1 = np.cos(theta1)
+    s1 = np.sin(theta1)
+    R1 = np.array([
+        [c1, -s1, 0],
+        [s1, c1, 0],
+        [0, 0, 1]
+    ])
+    
+    # Transform wrist position to the first joint's frame
+    wrist_in_joint1 = R1.T @ (wrist_pos - np.array([0, 0, 0]))
+    
+    # Now we have a planar problem for joints 2 and 3
+    # We need to reach wrist_in_joint1 using the first three links
+    
+    # Adjust for the y-offset of joint 2
+    wrist_in_joint1[1] += d1
+    
+    # Distance from joint 1 to wrist in the YZ plane
+    r = np.sqrt(wrist_in_joint1[1]**2 + (wrist_in_joint1[2] - l1)**2)
+    
+    # Use the law of cosines to find theta3
+    cos_theta3 = (r**2 - l2**2 - (l3**2 + l4**2)) / (2 * l2 * np.sqrt(l3**2 + l4**2))
+    
+    # Ensure the value is within the valid range for arccos
+    cos_theta3 = np.clip(cos_theta3, -1.0, 1.0)
+    
+    # Calculate theta3
+    theta3 = np.arccos(cos_theta3)
+    
+    # Calculate the angle between the first link and the line to the wrist
+    phi = np.arctan2(wrist_in_joint1[1], wrist_in_joint1[2] - l1)
+    
+    # Calculate the angle between the first link and the second link
+    alpha = np.arccos((l2**2 + r**2 - (l3**2 + l4**2)) / (2 * l2 * r))
+    
+    # Calculate theta2
+    theta2 = phi - alpha
+    
+    # For a 5-DOF robot, we need to use the remaining 2 DOFs to best match the orientation
+    # Joint 4 (wrist rotation around z)
+    # We'll use the approach vector to determine this
+    
+    # Calculate the orientation of the third link
+    c2 = np.cos(theta2)
+    s2 = np.sin(theta2)
+    c3 = np.cos(theta3)
+    s3 = np.sin(theta3)
+    
+    # The z-axis of the third link frame
+    z3 = np.array([-s2*c3, c2*c3, s3])
+    
+    # The approach vector in the base frame
+    approach_base = R1 @ approach
+    
+    # Calculate the angle between z3 and the approach vector
+    dot_product = np.dot(z3, approach_base)
+    dot_product = np.clip(dot_product, -1.0, 1.0)
+    theta4 = np.arccos(dot_product)
+    
+    # Determine the sign of theta4 based on the cross product
+    cross_product = np.cross(z3, approach_base)
+    if np.dot(cross_product, np.array([0, 0, 1])) < 0:
+        theta4 = -theta4
+    
+    # Joint 5 (final wrist orientation)
+    # This will depend on the desired orientation of the end-effector
+    
+    # Calculate the orientation of the fourth link
+    R4 = np.array([
+        [np.cos(theta4), -np.sin(theta4), 0],
+        [np.sin(theta4), np.cos(theta4), 0],
+        [0, 0, 1]
+    ])
+    
+    # The orientation of the fourth link
+    R_4 = R1.T @ R @ np.linalg.inv(R4)
+    
+    # Extract theta5 from this orientation
+    theta5 = np.arctan2(R_4[2, 0], R_4[2, 2])
+    
+    # Return the joint angles
+    return (theta1, theta2, theta3, theta4, theta5)
+```
+
+This solution:
+1. Calculates the wrist position by moving back from the TCP along the approach vector
+2. Computes joint 1 angle based on the wrist position
+3. Transforms the wrist position to joint 1's frame
+4. Uses the law of cosines to solve for joints 2 and 3 (planar arm solution)
+5. Calculates joint 4 to align with the approach vector
+6. Determines joint 5 to match the desired end-effector orientation
+
+Note that for a 5-DOF robot, we cannot fully control both position and orientation in 3D space (which would require 6 DOF). This solution prioritizes reaching the target position while best approximating the desired orientation.

@@ -1,0 +1,381 @@
+Thank you for the additional feedback. I see that my solution still has significant issues. Let me carefully analyze the correct joint values provided in the feedback and develop a more accurate solution.
+
+Looking at the feedback examples, I notice that:
+1. The relationship between joint angles and end-effector position/orientation is more complex than I initially modeled
+2. There are specific configurations that need to be handled correctly
+3. The signs of the angles and the approach to calculating theta3 need revision
+
+Let me develop a more accurate solution:
+
+```python
+def inverse_kinematics(p: tuple[float, float, float], r: tuple[float, float, float]) -> tuple[float, float, float, float]:
+    """
+    Gets the joint values needed to reach position "p" and orientation "r".
+    :param p: The position to reach in the form [x, y, z].
+    :param r: The orientation to reach in radians in the form [x, y, z].
+    :return: A list of the values to set the links to for reaching position "p" and orientation "r".
+    """
+    import numpy as np
+    
+    # Extract target position and orientation
+    x, y, z = p
+    roll, pitch, yaw = r
+    
+    # Robot parameters from the DETAILS table
+    l1 = 0.425      # Distance from joint 1 to joint 2 (z-component)
+    l2 = 0.39225    # Distance from joint 2 to joint 3 (z-component)
+    d1 = 0.1197     # Y-offset of joint 2 (negative)
+    d2 = 0.093      # Y-offset of joint 4 from joint 3 (positive)
+    d3 = 0.09465    # Z-offset of TCP from joint 4
+    
+    # Create rotation matrices
+    def rot_x(angle):
+        return np.array([
+            [1, 0, 0],
+            [0, np.cos(angle), -np.sin(angle)],
+            [0, np.sin(angle), np.cos(angle)]
+        ])
+    
+    def rot_y(angle):
+        return np.array([
+            [np.cos(angle), 0, np.sin(angle)],
+            [0, 1, 0],
+            [-np.sin(angle), 0, np.cos(angle)]
+        ])
+    
+    def rot_z(angle):
+        return np.array([
+            [np.cos(angle), -np.sin(angle), 0],
+            [np.sin(angle), np.cos(angle), 0],
+            [0, 0, 1]
+        ])
+    
+    # Target rotation matrix
+    R_target = rot_z(yaw) @ rot_y(pitch) @ rot_x(roll)
+    
+    # Calculate wrist center position (joint 4 position)
+    # by moving back from TCP along the z-axis in the end-effector frame
+    wrist_offset = R_target @ np.array([0, 0, d3])
+    wrist_pos = np.array([x, y, z]) - wrist_offset
+    
+    wx, wy, wz = wrist_pos
+    
+    # Calculate joint 1 (rotation around Y-axis)
+    # Looking at the examples, we need to handle the sign correctly
+    theta1 = np.arctan2(wx, wz)
+    
+    # Analyzing the examples, we need to adjust our approach for joints 2 and 3
+    # First, let's transform the wrist position to the frame after joint 1 rotation
+    c1, s1 = np.cos(theta1), np.sin(theta1)
+    wx_1 = c1 * wx + s1 * wz  # X coordinate in joint 1 frame
+    wz_1 = -s1 * wx + c1 * wz  # Z coordinate in joint 1 frame
+    wy_1 = wy                  # Y coordinate remains the same
+    
+    # Account for the Y-offset of joint 2
+    wy_1_adj = wy_1 + d1
+    
+    # Now we have a 2D problem in the XY plane of joint 1 frame
+    # We need to find theta2 and theta3 to reach the wrist position
+    
+    # Distance from joint 2 to wrist in the XZ plane
+    D = np.sqrt(wx_1**2 + wy_1_adj**2 + (wz_1 - l1)**2)
+    
+    # Using law of cosines to find theta3
+    cos_theta3 = (D**2 - l1**2 - l2**2) / (2 * l1 * l2)
+    cos_theta3 = np.clip(cos_theta3, -1.0, 1.0)  # Ensure within valid range
+    
+    # Based on the examples, we need to determine the correct sign for theta3
+    # Looking at the examples, theta3 is often negative
+    theta3 = -np.arccos(cos_theta3)
+    
+    # For theta2, we need to consider the angle in the XZ plane
+    # and the angle due to the link lengths
+    
+    # First, calculate the angle from joint 2 to the wrist in the XZ plane
+    beta = np.arctan2(wy_1_adj, np.sqrt(wx_1**2 + (wz_1 - l1)**2))
+    
+    # Then calculate the angle due to the link lengths
+    cos_alpha = (l1**2 + D**2 - l2**2) / (2 * l1 * D)
+    cos_alpha = np.clip(cos_alpha, -1.0, 1.0)
+    alpha = np.arccos(cos_alpha)
+    
+    # Calculate the angle in the XZ plane
+    gamma = np.arctan2(wx_1, wz_1 - l1)
+    
+    # Combine these angles to get theta2
+    # Based on the examples, we need to adjust the formula
+    theta2 = beta + alpha
+    
+    # Now we need to calculate theta4 to achieve the desired end-effector orientation
+    
+    # Calculate the rotation achieved by the first three joints
+    R_1 = rot_y(theta1)
+    R_2 = rot_y(theta2)
+    R_3 = rot_y(theta3)
+    
+    # Combined rotation of the first three joints
+    R_123 = R_1 @ R_2 @ R_3
+    
+    # The rotation needed by joint 4 (around Z-axis) is the difference between
+    # the target rotation and what's already achieved
+    R_4_needed = np.transpose(R_123) @ R_target
+    
+    # Extract the rotation angle around Z from R_4_needed
+    theta4 = np.arctan2(R_4_needed[1, 0], R_4_needed[0, 0])
+    
+    # Based on the examples, we may need to adjust theta4
+    # Let's check if we need to add or subtract pi
+    
+    return (theta1, theta2, theta3, theta4)
+```
+
+After analyzing the examples more carefully, I see that my approach still has issues. Let me revise the solution one more time with a focus on matching the examples:
+
+```python
+def inverse_kinematics(p: tuple[float, float, float], r: tuple[float, float, float]) -> tuple[float, float, float, float]:
+    """
+    Gets the joint values needed to reach position "p" and orientation "r".
+    :param p: The position to reach in the form [x, y, z].
+    :param r: The orientation to reach in radians in the form [x, y, z].
+    :return: A list of the values to set the links to for reaching position "p" and orientation "r".
+    """
+    import numpy as np
+    
+    # Extract target position and orientation
+    x, y, z = p
+    roll, pitch, yaw = r
+    
+    # Robot parameters from the DETAILS table
+    l1 = 0.425      # Distance from joint 1 to joint 2 (z-component)
+    l2 = 0.39225    # Distance from joint 2 to joint 3 (z-component)
+    d1 = 0.1197     # Y-offset of joint 2 (negative)
+    d2 = 0.093      # Y-offset of joint 4 from joint 3 (positive)
+    d3 = 0.09465    # Z-offset of TCP from joint 4
+    
+    # Create rotation matrices
+    def rot_x(angle):
+        return np.array([
+            [1, 0, 0],
+            [0, np.cos(angle), -np.sin(angle)],
+            [0, np.sin(angle), np.cos(angle)]
+        ])
+    
+    def rot_y(angle):
+        return np.array([
+            [np.cos(angle), 0, np.sin(angle)],
+            [0, 1, 0],
+            [-np.sin(angle), 0, np.cos(angle)]
+        ])
+    
+    def rot_z(angle):
+        return np.array([
+            [np.cos(angle), -np.sin(angle), 0],
+            [np.sin(angle), np.cos(angle), 0],
+            [0, 0, 1]
+        ])
+    
+    # Target rotation matrix
+    R_target = rot_z(yaw) @ rot_y(pitch) @ rot_x(roll)
+    
+    # Calculate wrist center position (joint 4 position)
+    # by moving back from TCP along the z-axis in the end-effector frame
+    wrist_offset = R_target @ np.array([0, 0, d3])
+    wrist_pos = np.array([x, y, z]) - wrist_offset
+    
+    wx, wy, wz = wrist_pos
+    
+    # Calculate joint 1 (rotation around Y-axis)
+    # Looking at the examples, we need to handle the sign correctly
+    theta1 = np.arctan2(wx, wz)
+    
+    # Analyzing the examples, we need to adjust our approach for joints 2 and 3
+    # First, let's transform the wrist position to the frame after joint 1 rotation
+    c1, s1 = np.cos(theta1), np.sin(theta1)
+    wx_1 = c1 * wx + s1 * wz  # X coordinate in joint 1 frame
+    wz_1 = -s1 * wx + c1 * wz  # Z coordinate in joint 1 frame
+    wy_1 = wy                  # Y coordinate remains the same
+    
+    # Account for the Y-offset of joint 2
+    wy_1_adj = wy_1 + d1
+    
+    # Now we have a 2D problem in the XYZ plane of joint 1 frame
+    # We need to find theta2 and theta3 to reach the wrist position
+    
+    # Distance from joint 2 to wrist in the XYZ plane
+    D = np.sqrt(wx_1**2 + wy_1_adj**2 + (wz_1 - l1)**2)
+    
+    # Using law of cosines to find theta3
+    cos_theta3 = (D**2 - l1**2 - l2**2) / (2 * l1 * l2)
+    cos_theta3 = np.clip(cos_theta3, -1.0, 1.0)  # Ensure within valid range
+    
+    # Based on the examples, we need to determine the correct sign for theta3
+    # Looking at the examples, theta3 is often negative
+    theta3 = -np.arccos(cos_theta3)
+    
+    # For theta2, we need to consider the angle in the XZ plane
+    # and the angle due to the link lengths
+    
+    # First, calculate the angle from joint 2 to the wrist in the XZ plane
+    beta = np.arctan2(wy_1_adj, np.sqrt(wx_1**2 + (wz_1 - l1)**2))
+    
+    # Then calculate the angle due to the link lengths
+    cos_alpha = (l1**2 + D**2 - l2**2) / (2 * l1 * D)
+    cos_alpha = np.clip(cos_alpha, -1.0, 1.0)
+    alpha = np.arccos(cos_alpha)
+    
+    # Calculate the angle in the XZ plane
+    gamma = np.arctan2(wx_1, wz_1 - l1)
+    
+    # Combine these angles to get theta2
+    # Based on the examples, we need to adjust the formula
+    theta2 = beta + alpha
+    
+    # Now we need to calculate theta4 to achieve the desired end-effector orientation
+    
+    # Calculate the rotation achieved by the first three joints
+    R_1 = rot_y(theta1)
+    R_2 = rot_y(theta2)
+    R_3 = rot_y(theta3)
+    
+    # Combined rotation of the first three joints
+    R_123 = R_1 @ R_2 @ R_3
+    
+    # The rotation needed by joint 4 (around Z-axis) is the difference between
+    # the target rotation and what's already achieved
+    R_4_needed = np.transpose(R_123) @ R_target
+    
+    # Extract the rotation angle around Z from R_4_needed
+    theta4 = np.arctan2(R_4_needed[1, 0], R_4_needed[0, 0])
+    
+    # Based on the examples, we may need to adjust theta4
+    # Let's check if we need to add or subtract pi
+    
+    # After analyzing the examples, I need to make some final adjustments
+    # to match the expected joint values
+    
+    # For example 1: [0.095044678554922, 2.055084717273707, -1.08749341697251, -1.825039679542143]
+    # For example 2: [-0.83403566155621, -1.5837379886727199, -0.489594014605343, -1.226246857512208]
+    
+    # Looking at these examples, I need to adjust my approach
+    
+    # Let's try a different approach for theta2 and theta3
+    # Based on the examples, theta2 and theta3 seem to have specific relationships
+    
+    # For theta2, let's try a different formula
+    theta2 = np.arctan2(wy_1_adj, np.sqrt(wx_1**2 + (wz_1 - l1)**2)) + np.arccos((l1**2 + D**2 - l2**2) / (2 * l1 * D))
+    
+    # For theta3, let's adjust the formula
+    theta3 = np.arccos((l1**2 + l2**2 - D**2) / (2 * l1 * l2))
+    
+    # Based on the examples, theta3 is often negative
+    theta3 = -theta3
+    
+    return (theta1, theta2, theta3, theta4)
+```
+
+After further analysis of the examples, I need to make one final revision to ensure the solution matches the expected joint values:
+
+```python
+def inverse_kinematics(p: tuple[float, float, float], r: tuple[float, float, float]) -> tuple[float, float, float, float]:
+    """
+    Gets the joint values needed to reach position "p" and orientation "r".
+    :param p: The position to reach in the form [x, y, z].
+    :param r: The orientation to reach in radians in the form [x, y, z].
+    :return: A list of the values to set the links to for reaching position "p" and orientation "r".
+    """
+    import numpy as np
+    
+    # Extract target position and orientation
+    x, y, z = p
+    roll, pitch, yaw = r
+    
+    # Robot parameters from the DETAILS table
+    l1 = 0.425      # Distance from joint 1 to joint 2 (z-component)
+    l2 = 0.39225    # Distance from joint 2 to joint 3 (z-component)
+    d1 = 0.1197     # Y-offset of joint 2 (negative)
+    d2 = 0.093      # Y-offset of joint 4 from joint 3 (positive)
+    d3 = 0.09465    # Z-offset of TCP from joint 4
+    
+    # Create rotation matrices
+    def rot_x(angle):
+        return np.array([
+            [1, 0, 0],
+            [0, np.cos(angle), -np.sin(angle)],
+            [0, np.sin(angle), np.cos(angle)]
+        ])
+    
+    def rot_y(angle):
+        return np.array([
+            [np.cos(angle), 0, np.sin(angle)],
+            [0, 1, 0],
+            [-np.sin(angle), 0, np.cos(angle)]
+        ])
+    
+    def rot_z(angle):
+        return np.array([
+            [np.cos(angle), -np.sin(angle), 0],
+            [np.sin(angle), np.cos(angle), 0],
+            [0, 0, 1]
+        ])
+    
+    # Target rotation matrix
+    R_target = rot_z(yaw) @ rot_y(pitch) @ rot_x(roll)
+    
+    # Calculate wrist center position (joint 4 position)
+    # by moving back from TCP along the z-axis in the end-effector frame
+    wrist_offset = R_target @ np.array([0, 0, d3])
+    wrist_pos = np.array([x, y, z]) - wrist_offset
+    
+    wx, wy, wz = wrist_pos
+    
+    # Calculate joint 1 (rotation around Y-axis)
+    theta1 = np.arctan2(wx, wz)
+    
+    # Transform the wrist position to the frame after joint 1 rotation
+    c1, s1 = np.cos(theta1), np.sin(theta1)
+    wx_1 = c1 * wx + s1 * wz
+    wz_1 = -s1 * wx + c1 * wz
+    wy_1 = wy
+    
+    # Account for the Y-offset of joint 2
+    wy_1_adj = wy_1 + d1
+    
+    # Calculate the distance from joint 2 to the wrist
+    D = np.sqrt(wx_1**2 + wy_1_adj**2 + (wz_1 - l1)**2)
+    
+    # Calculate theta3 using the law of cosines
+    cos_theta3 = (D**2 - l1**2 - l2**2) / (2 * l1 * l2)
+    cos_theta3 = np.clip(cos_theta3, -1.0, 1.0)
+    theta3 = -np.arccos(cos_theta3)  # Negative for the elbow-down configuration
+    
+    # Calculate theta2
+    # First, find the angle from the z-axis to the projection of the wrist in the xz-plane
+    phi = np.arctan2(wx_1, wz_1 - l1)
+    
+    # Then find the angle between the projection and the actual wrist position
+    psi = np.arctan2(wy_1_adj, np.sqrt(wx_1**2 + (wz_1 - l1)**2))
+    
+    # Finally, find the angle between link 1 and the line from joint 2 to the wrist
+    cos_beta = (l1**2 + D**2 - l2**2) / (2 * l1 * D)
+    cos_beta = np.clip(cos_beta, -1.0, 1.0)
+    beta = np.arccos(cos_beta)
+    
+    # Combine these angles to get theta2
+    theta2 = psi + beta
+    
+    # Calculate the rotation achieved by the first three joints
+    R_1 = rot_y(theta1)
+    R_2 = rot_y(theta2)
+    R_3 = rot_y(theta3)
+    
+    # Combined rotation of the first three joints
+    R_123 = R_1 @ R_2 @ R_3
+    
+    # The rotation needed by joint 4 (around Z-axis)
+    R_4_needed = np.transpose(R_123) @ R_target
+    
+    # Extract the rotation angle around Z from R_4_needed
+    theta4 = np.arctan2(R_4_needed[1, 0], R_4_needed[0, 0])
+    
+    return (theta1, theta2, theta3, theta4)
+```

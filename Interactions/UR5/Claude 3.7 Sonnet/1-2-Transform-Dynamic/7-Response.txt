@@ -1,0 +1,246 @@
+I'll now develop the inverse kinematics solution for this 2-DOF manipulator. Let me analyze the robot structure and the forward kinematics results to derive the solution.
+
+From the provided information:
+- We have 2 revolute joints, both rotating around the Y-axis
+- The first joint is at the origin [0,0,0]
+- The second joint is at [0, -0.1197, 0.425] relative to the first joint
+- The TCP (end effector) is at [0, 0, 0.39225] relative to the second joint
+
+Let's analyze the forward kinematics results to understand the transformation:
+
+1. When both joints are at 0:
+   - TCP is at [0, -0.1197, 0.81725]
+   
+2. When joint1=0.5, joint2=0.5:
+   - TCP is at [0.5338228476976836, -0.1197, 0.5849061682801862]
+   
+3. When joint1=1.0, joint2=0:
+   - TCP is at [0.6876921623342533, -0.1197, 0.44156205947073723]
+
+Now I'll derive the inverse kinematics solution:
+
+```python
+import math
+import numpy as np
+
+def inverse_kinematics(p: tuple[float, float, float], r: tuple[float, float, float]) -> tuple[float, float]:
+    """
+    Gets the joint values needed to reach position "p" and orientation "r".
+    :param p: The position to reach in the form [x, y, z].
+    :param r: The orientation to reach in radians in the form [x, y, z].
+    :return: A list of the values to set the links to for reaching position "p" and orientation "r".
+    """
+    x, y, z = p
+    
+    # Constants from the robot description
+    l1 = 0.425  # Length of first link (z-direction)
+    l2 = 0.39225  # Length of second link (z-direction)
+    y_offset = -0.1197  # Y-offset of the second joint and TCP
+    
+    # Adjust target position to account for y-offset
+    # Since y is constant at -0.1197 for this robot, we need to check if target y matches
+    if abs(y - y_offset) > 1e-6:
+        raise ValueError(f"Target y-coordinate must be {y_offset} for this robot")
+    
+    # For a 2-DOF planar manipulator with both joints rotating around Y-axis,
+    # we can solve for joint angles in the XZ plane
+    
+    # Calculate the position of joint 2 relative to the target position
+    # We need to find joint1 angle that orients the first link correctly
+    
+    # First, calculate the angle of joint 1
+    # This is the angle in the XZ plane from the Z-axis to the line connecting
+    # the origin to the projection of the target point
+    theta1 = math.atan2(x, z)
+    
+    # Now calculate joint 2 angle
+    # We need to find the angle that positions the end effector at the target
+    
+    # Calculate the distance from origin to target in the XZ plane
+    target_dist = math.sqrt(x**2 + z**2)
+    
+    # Using the law of cosines to find the angle between the two links
+    # c^2 = a^2 + b^2 - 2ab*cos(C)
+    # where c is target_dist, a is l1, b is l2, and C is the supplementary angle to theta2
+    
+    cos_theta2 = (target_dist**2 - l1**2 - l2**2) / (2 * l1 * l2)
+    
+    # Ensure the value is within valid range for arccos
+    cos_theta2 = max(min(cos_theta2, 1.0), -1.0)
+    
+    # Calculate theta2 (negative because of the robot's configuration)
+    theta2 = -math.acos(cos_theta2)
+    
+    # Adjust theta1 to account for the angle of the first link relative to the target
+    # Using the law of sines: sin(A)/a = sin(B)/b = sin(C)/c
+    beta = math.atan2(l2 * math.sin(abs(theta2)), l1 + l2 * math.cos(theta2))
+    
+    # If theta2 is negative, we need to subtract beta from theta1
+    if theta2 < 0:
+        theta1 = theta1 - beta
+    else:
+        theta1 = theta1 + beta
+    
+    return (theta1, theta2)
+```
+
+Wait, I need to reconsider this solution. Let me correct it:
+
+```python
+import math
+import numpy as np
+
+def inverse_kinematics(p: tuple[float, float, float], r: tuple[float, float, float]) -> tuple[float, float]:
+    """
+    Gets the joint values needed to reach position "p" and orientation "r".
+    :param p: The position to reach in the form [x, y, z].
+    :param r: The orientation to reach in radians in the form [x, y, z].
+    :return: A list of the values to set the links to for reaching position "p" and orientation "r".
+    """
+    x, y, z = p
+    
+    # Constants from the robot description
+    l1 = 0.425  # Length of first link (z-direction)
+    l2 = 0.39225  # Length of second link (z-direction)
+    y_offset = -0.1197  # Y-offset of the second joint and TCP
+    
+    # Adjust target position to account for y-offset
+    # Since y is constant at -0.1197 for this robot, we need to check if target y matches
+    if abs(y - y_offset) > 1e-6:
+        raise ValueError(f"Target y-coordinate must be {y_offset} for this robot")
+    
+    # Calculate the distance from origin to target in the XZ plane
+    target_dist = math.sqrt(x**2 + z**2)
+    
+    # Using the law of cosines to find the angle of joint 2
+    cos_theta2 = (target_dist**2 - l1**2 - l2**2) / (2 * l1 * l2)
+    
+    # Ensure the value is within valid range for arccos
+    cos_theta2 = max(min(cos_theta2, 1.0), -1.0)
+    
+    # Calculate theta2
+    theta2 = math.acos(cos_theta2)
+    
+    # Calculate theta1 using atan2
+    # First, find the angle to the target
+    phi = math.atan2(x, z)
+    
+    # Then find the angle between the first link and the line to the target
+    psi = math.atan2(l2 * math.sin(theta2), l1 + l2 * math.cos(theta2))
+    
+    # Combine to get theta1
+    theta1 = phi - psi
+    
+    return (theta1, theta2)
+```
+
+Actually, I need to make one more correction to account for the orientation of the robot:
+
+```python
+def inverse_kinematics(p: tuple[float, float, float], r: tuple[float, float, float]) -> tuple[float, float]:
+    """
+    Gets the joint values needed to reach position "p" and orientation "r".
+    :param p: The position to reach in the form [x, y, z].
+    :param r: The orientation to reach in radians in the form [x, y, z].
+    :return: A list of the values to set the links to for reaching position "p" and orientation "r".
+    """
+    x, y, z = p
+    rx, ry, rz = r
+    
+    # Constants from the robot description
+    l1 = 0.425  # Length of first link (z-direction)
+    l2 = 0.39225  # Length of second link (z-direction)
+    y_offset = -0.1197  # Y-offset of the second joint and TCP
+    
+    # For this robot, the orientation is determined by the joint angles
+    # The y-component of the orientation (ry) is the sum of joint angles
+    # So joint2 = ry - joint1
+    
+    # Calculate the distance from origin to target in the XZ plane
+    target_dist = math.sqrt(x**2 + z**2)
+    
+    # Using the law of cosines to find the angle of joint 2
+    cos_theta2 = (target_dist**2 - l1**2 - l2**2) / (2 * l1 * l2)
+    
+    # Ensure the value is within valid range for arccos
+    cos_theta2 = max(min(cos_theta2, 1.0), -1.0)
+    
+    # Calculate theta2
+    theta2 = math.acos(cos_theta2)
+    
+    # Calculate theta1 using atan2
+    # First, find the angle to the target
+    phi = math.atan2(x, z)
+    
+    # Then find the angle between the first link and the line to the target
+    psi = math.atan2(l2 * math.sin(theta2), l1 + l2 * math.cos(theta2))
+    
+    # Combine to get theta1
+    theta1 = phi - psi
+    
+    # Check if the orientation matches what we expect
+    # For this robot, ry should equal theta1 + theta2
+    expected_ry = theta1 + theta2
+    
+    # If the orientation doesn't match, we need to use the other solution
+    # (there are typically two solutions for a 2-DOF arm)
+    if abs(expected_ry - ry) > 1e-6:
+        theta2 = -theta2
+        psi = math.atan2(l2 * math.sin(theta2), l1 + l2 * math.cos(theta2))
+        theta1 = phi - psi
+    
+    return (theta1, theta2)
+```
+
+After further analysis of the forward kinematics results, I need to make a final correction:
+
+```python
+import math
+
+def inverse_kinematics(p: tuple[float, float, float], r: tuple[float, float, float]) -> tuple[float, float]:
+    """
+    Gets the joint values needed to reach position "p" and orientation "r".
+    :param p: The position to reach in the form [x, y, z].
+    :param r: The orientation to reach in radians in the form [x, y, z].
+    :return: A list of the values to set the links to for reaching position "p" and orientation "r".
+    """
+    x, y, z = p
+    rx, ry, rz = r
+    
+    # Constants from the robot description
+    l1 = 0.425  # Length of first link (z-direction)
+    l2 = 0.39225  # Length of second link (z-direction)
+    
+    # For this robot, the orientation ry determines the sum of joint angles
+    # theta1 + theta2 = ry
+    
+    # Calculate the distance from origin to target in the XZ plane
+    target_dist = math.sqrt(x**2 + z**2)
+    
+    # Using the law of cosines to find the angle of joint 2
+    cos_theta2 = (target_dist**2 - l1**2 - l2**2) / (2 * l1 * l2)
+    
+    # Ensure the value is within valid range for arccos
+    cos_theta2 = max(min(cos_theta2, 1.0), -1.0)
+    
+    # Calculate theta2
+    theta2 = math.acos(cos_theta2)
+    
+    # Calculate the angle to the target in the XZ plane
+    phi = math.atan2(x, z)
+    
+    # Calculate the angle between the first link and the line to the target
+    psi = math.atan2(l2 * math.sin(theta2), l1 + l2 * math.cos(theta2))
+    
+    # Calculate theta1
+    theta1 = phi - psi
+    
+    # Check if the orientation constraint is satisfied
+    # If not, we need to use the other solution
+    if abs((theta1 + theta2) - ry) > 1e-6:
+        theta2 = -theta2
+        psi = math.atan2(l2 * math.sin(theta2), l1 + l2 * math.cos(theta2))
+        theta1 = phi - psi
+    
+    return (theta1, theta2)
+```

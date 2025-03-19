@@ -1,0 +1,156 @@
+I'll now develop the inverse kinematics solution for this 2-DOF robot. Let me analyze the forward kinematics results to understand the robot's structure and movement.
+
+From the test results, I can see:
+1. When both joints are at 0, the TCP is at [0, 0.01615, 0.425]
+2. When joint1 = 1.57 (π/2) and joint2 = 0, the TCP is at [-0.01615, 0.000013, 0.425]
+3. When joint1 = 0 and joint2 = 1.57 (π/2), the TCP is at [0.425, 0.01615, 0.00034]
+
+This confirms that:
+- Joint1 rotates around the Z-axis (affecting X and Y coordinates)
+- Joint2 rotates around the Y-axis (affecting X and Z coordinates)
+
+Now I'll complete the inverse kinematics solution:
+
+```python
+def inverse_kinematics(p: tuple[float, float, float], r: tuple[float, float, float]) -> tuple[float, float]:
+    """
+    Gets the joint values needed to reach position "p" and orientation "r".
+    :param p: The position to reach in the form [x, y, z].
+    :param r: The orientation to reach in radians in the form [x, y, z].
+    :return: A list of the values to set the links to for reaching position "p" and orientation "r".
+    """
+    import numpy as np
+    
+    # Extract target position
+    x, y, z = p
+    
+    # Link dimensions from the robot description
+    l1 = 0.13585  # Distance from joint1 to joint2
+    l2 = np.sqrt(0.425**2 + 0.1197**2)  # Distance from joint2 to TCP
+    
+    # Calculate the projection of the TCP position onto the XY plane
+    r_xy = np.sqrt(x**2 + y**2)
+    
+    # Adjust for the TCP offset from the second link
+    # The TCP has an offset of 0.01615 in Y direction when both joints are at 0
+    # This is the difference between l1 and the Y component of TCP when joints are 0
+    y_offset = 0.01615
+    
+    # Calculate joint1 (rotation around Z-axis)
+    joint1 = np.arctan2(y, x)
+    
+    # For joint2, we need to consider the projection of the target in the plane defined by joint1
+    # Calculate the distance from origin to the projection of the target in XY plane
+    # Adjust for the Y offset
+    r_adjusted = np.sqrt((r_xy - y_offset*np.sin(joint1))**2 + (z - y_offset*np.cos(joint1))**2)
+    
+    # Use the law of cosines to find the angle for joint2
+    cos_joint2 = (r_adjusted**2 - l1**2 - l2**2) / (2 * l1 * l2)
+    # Clamp to valid range to handle floating-point errors
+    cos_joint2 = np.clip(cos_joint2, -1.0, 1.0)
+    
+    # Calculate joint2 (rotation around Y-axis)
+    # The negative sign accounts for the direction of rotation
+    joint2 = -np.arccos(cos_joint2)
+    
+    # Adjust joint2 based on the Z position
+    if z < 0:
+        joint2 = -joint2
+    
+    return (joint1, joint2)
+```
+
+Wait, I need to reconsider my approach. Let me analyze the robot structure more carefully:
+
+1. Joint1 rotates around the Z-axis
+2. Joint2 rotates around the Y-axis after joint1's rotation
+3. The TCP has an offset from joint2
+
+Let me revise the solution:
+
+```python
+def inverse_kinematics(p: tuple[float, float, float], r: tuple[float, float, float]) -> tuple[float, float]:
+    """
+    Gets the joint values needed to reach position "p" and orientation "r".
+    :param p: The position to reach in the form [x, y, z].
+    :param r: The orientation to reach in radians in the form [x, y, z].
+    :return: A list of the values to set the links to for reaching position "p" and orientation "r".
+    """
+    import numpy as np
+    
+    # Extract target position
+    x, y, z = p
+    
+    # Calculate joint1 (rotation around Z-axis)
+    joint1 = np.arctan2(y, x)
+    
+    # Rotate the target point back by -joint1 to simplify the problem
+    x_rot = x * np.cos(-joint1) - y * np.sin(-joint1)
+    y_rot = x * np.sin(-joint1) + y * np.cos(-joint1)
+    z_rot = z
+    
+    # Now we have a 2D problem in the X-Z plane
+    # Link dimensions
+    l1 = 0.13585  # Distance from joint1 to joint2
+    l2_x = 0.425  # X component of the distance from joint2 to TCP
+    l2_y = -0.1197  # Y component of the distance from joint2 to TCP
+    l2 = np.sqrt(l2_x**2 + l2_y**2)  # Total length of second link
+    
+    # Calculate joint2 (rotation around Y-axis)
+    # Using the law of cosines
+    d = np.sqrt(x_rot**2 + (z_rot - l1)**2)
+    cos_joint2 = (d**2 - l2**2) / (2 * d * l2)
+    cos_joint2 = np.clip(cos_joint2, -1.0, 1.0)  # Handle numerical errors
+    
+    # Calculate the angle
+    joint2 = np.arccos(cos_joint2)
+    
+    # Determine the sign of joint2
+    if z_rot < l1:
+        joint2 = -joint2
+    
+    return (joint1, joint2)
+```
+
+I need to refine this further. Let me complete the final solution:
+
+```python
+def inverse_kinematics(p: tuple[float, float, float], r: tuple[float, float, float]) -> tuple[float, float]:
+    """
+    Gets the joint values needed to reach position "p" and orientation "r".
+    :param p: The position to reach in the form [x, y, z].
+    :param r: The orientation to reach in radians in the form [x, y, z].
+    :return: A list of the values to set the links to for reaching position "p" and orientation "r".
+    """
+    import numpy as np
+    
+    # Extract target position
+    x, y, z = p
+    
+    # Calculate joint1 (rotation around Z-axis)
+    joint1 = np.arctan2(y, x)
+    
+    # Link dimensions
+    l1 = 0.13585  # Distance from joint1 to joint2
+    l2_x = 0.425  # X component of the distance from joint2 to TCP
+    l2_y = -0.1197  # Y component of the distance from joint2 to TCP
+    l2 = np.sqrt(l2_x**2 + l2_y**2)  # Total length of second link
+    
+    # Calculate the distance from the origin to the target in the XY plane
+    r_xy = np.sqrt(x**2 + y**2)
+    
+    # Calculate joint2 (rotation around Y-axis)
+    # We need to find the angle that makes the end effector reach the target
+    # Using the law of cosines
+    cos_joint2 = (r_xy**2 + z**2 - l1**2 - l2**2) / (2 * l1 * l2)
+    cos_joint2 = np.clip(cos_joint2, -1.0, 1.0)  # Handle numerical errors
+    
+    # Calculate joint2
+    joint2 = np.arccos(cos_joint2)
+    
+    # Determine the correct sign for joint2 based on the target z position
+    if z < 0:
+        joint2 = -joint2
+    
+    return (joint1, joint2)
+```

@@ -1,0 +1,431 @@
+Based on the forward kinematics tests, I can now develop a closed-form analytical solution for the inverse kinematics of this 4-DOF serial manipulator. Let me analyze the robot structure and develop the solution step by step.
+
+From the DETAILS and forward kinematics tests, I can see that:
+1. Joint 1 rotates around the Z-axis
+2. Joints 2, 3, and 4 all rotate around the Y-axis
+3. The TCP has an offset in the Y direction
+
+Here's my solution for the inverse kinematics function:
+
+```python
+def inverse_kinematics(p: tuple[float, float, float], r: tuple[float, float, float]) -> tuple[float, float, float, float]:
+    """
+    Gets the joint values needed to reach position "p" and orientation "r".
+    :param p: The position to reach in the form [x, y, z].
+    :param r: The orientation to reach in radians in the form [x, y, z].
+    :return: A list of the values to set the links to for reaching position "p" and orientation "r".
+    """
+    import math
+    import numpy as np
+    
+    # Extract target position and orientation
+    px, py, pz = p
+    rx, ry, rz = r
+    
+    # Robot dimensions from the DETAILS table
+    l1 = 0.13585  # Z offset from joint 1 to joint 2
+    l2 = 0.425    # Z offset from joint 2 to joint 3
+    l3 = 0.39225  # Z offset from joint 3 to joint 4
+    l4 = 0.093    # Y offset from joint 4 to TCP
+    
+    # Adjust target position to account for TCP offset
+    # We need to find the position of joint 4, not the TCP
+    # The TCP is offset by l4 in the Y direction in the local frame of joint 4
+    
+    # First, calculate joint 1 (rotation around Z-axis)
+    # This is the angle in the XY plane
+    theta1 = math.atan2(px, py)
+    
+    # Adjust for the orientation of the coordinate system
+    if py < 0:
+        theta1 = theta1 + math.pi
+    
+    # Create rotation matrix for joint 1
+    c1 = math.cos(theta1)
+    s1 = math.sin(theta1)
+    
+    # Transform the target point to the frame after joint 1 rotation
+    # This simplifies the problem to a planar one
+    
+    # Calculate the position of joint 4 by subtracting the TCP offset
+    # The TCP offset is in the Y direction in the local frame of joint 4
+    # We need to transform this offset based on the desired orientation
+    
+    # Create rotation matrix from the desired orientation
+    Rx = np.array([
+        [1, 0, 0],
+        [0, math.cos(rx), -math.sin(rx)],
+        [0, math.sin(rx), math.cos(rx)]
+    ])
+    
+    Ry = np.array([
+        [math.cos(ry), 0, math.sin(ry)],
+        [0, 1, 0],
+        [-math.sin(ry), 0, math.cos(ry)]
+    ])
+    
+    Rz = np.array([
+        [math.cos(rz), -math.sin(rz), 0],
+        [math.sin(rz), math.cos(rz), 0],
+        [0, 0, 1]
+    ])
+    
+    R = Rz @ Ry @ Rx  # Complete rotation matrix
+    
+    # TCP offset in local frame
+    tcp_offset = np.array([0, l4, 0])
+    
+    # Transform TCP offset to world frame
+    world_offset = R @ tcp_offset
+    
+    # Calculate joint 4 position by subtracting the offset
+    j4_pos = np.array([px, py, pz]) - world_offset
+    
+    # Transform to frame after joint 1 rotation
+    j4x = c1 * j4_pos[0] + s1 * j4_pos[1]
+    j4y = -s1 * j4_pos[0] + c1 * j4_pos[1]
+    j4z = j4_pos[2]
+    
+    # Now we have a planar problem in the YZ plane
+    # We need to solve for theta2 and theta3 using the position of joint 4
+    
+    # Distance from joint 2 to joint 4 in the YZ plane
+    dx = j4x
+    dy = j4y - l1
+    dz = j4z
+    
+    # Distance from joint 2 to joint 4
+    d = math.sqrt(dx**2 + dy**2 + dz**2)
+    
+    # Use law of cosines to find theta3
+    cos_theta3 = (d**2 - l2**2 - l3**2) / (2 * l2 * l3)
+    # Clamp to handle numerical errors
+    cos_theta3 = max(min(cos_theta3, 1.0), -1.0)
+    
+    # There are two possible solutions for theta3
+    # We choose the elbow-up configuration
+    theta3 = -math.acos(cos_theta3)
+    
+    # Now find theta2
+    # First, find the angle of the line from joint 2 to joint 4 in the YZ plane
+    phi = math.atan2(dz, math.sqrt(dx**2 + dy**2))
+    
+    # Then find the angle between this line and link 2
+    psi = math.atan2(l3 * math.sin(-theta3), l2 + l3 * math.cos(-theta3))
+    
+    # Combine to get theta2
+    theta2 = phi - psi
+    
+    # Finally, calculate theta4 to achieve the desired orientation
+    # The total rotation around Y is the sum of theta2, theta3, and theta4
+    # So theta4 = ry - theta2 - theta3
+    theta4 = ry - theta2 - theta3
+    
+    # Normalize angles to be within [-π, π]
+    theta1 = ((theta1 + math.pi) % (2 * math.pi)) - math.pi
+    theta2 = ((theta2 + math.pi) % (2 * math.pi)) - math.pi
+    theta3 = ((theta3 + math.pi) % (2 * math.pi)) - math.pi
+    theta4 = ((theta4 + math.pi) % (2 * math.pi)) - math.pi
+    
+    return (theta1, theta2, theta3, theta4)
+```
+
+Wait, I need to refine this solution. There are some issues with the approach, particularly with how I'm handling the orientation. Let me correct it:
+
+```python
+def inverse_kinematics(p: tuple[float, float, float], r: tuple[float, float, float]) -> tuple[float, float, float, float]:
+    """
+    Gets the joint values needed to reach position "p" and orientation "r".
+    :param p: The position to reach in the form [x, y, z].
+    :param r: The orientation to reach in radians in the form [x, y, z].
+    :return: A list of the values to set the links to for reaching position "p" and orientation "r".
+    """
+    import math
+    import numpy as np
+    
+    # Extract target position and orientation
+    px, py, pz = p
+    rx, ry, rz = r
+    
+    # Robot dimensions from the DETAILS table
+    l1 = 0.13585  # Y offset from joint 1 to joint 2
+    l2_y = -0.1197  # Y offset from joint 2 to joint 3
+    l2_z = 0.425  # Z offset from joint 2 to joint 3
+    l3 = 0.39225  # Z offset from joint 3 to joint 4
+    l4 = 0.093  # Y offset from joint 4 to TCP
+    
+    # Adjust target position to account for TCP offset
+    # We need to find the position of joint 4, not the TCP
+    
+    # First, calculate joint 1 (rotation around Z-axis)
+    theta1 = math.atan2(px, py)
+    
+    # Create rotation matrix for joint 1
+    c1 = math.cos(theta1)
+    s1 = math.sin(theta1)
+    
+    # Calculate the position of joint 4 by subtracting the TCP offset
+    # The TCP offset is in the Y direction in the local frame of joint 4
+    # We need to transform this offset based on the desired orientation
+    
+    # For this robot, since all joints 2-4 rotate around Y, the orientation ry
+    # is the sum of all joint angles: ry = theta2 + theta3 + theta4
+    
+    # Calculate the wrist position (joint 4) by moving back from TCP
+    # along the Y axis in the local frame
+    wrist_offset = l4 * np.array([-s1 * math.sin(ry), c1 * math.sin(ry), -math.cos(ry)])
+    wrist_pos = np.array([px, py, pz]) - wrist_offset
+    
+    # Transform wrist position to the frame after joint 1 rotation
+    wx = c1 * wrist_pos[0] + s1 * wrist_pos[1]
+    wy = -s1 * wrist_pos[0] + c1 * wrist_pos[1]
+    wz = wrist_pos[2]
+    
+    # Now we have a planar problem in the YZ plane
+    # The position of joint 2 is (0, l1, 0) in this frame
+    
+    # Vector from joint 2 to wrist
+    dx = wx
+    dy = wy - l1
+    dz = wz
+    
+    # Distance from joint 2 to wrist
+    d = math.sqrt(dx**2 + dy**2 + dz**2)
+    
+    # Calculate the effective lengths for the planar problem
+    l2 = math.sqrt(l2_y**2 + l2_z**2)
+    
+    # Use law of cosines to find theta3
+    cos_theta3 = (d**2 - l2**2 - l3**2) / (2 * l2 * l3)
+    # Clamp to handle numerical errors
+    cos_theta3 = max(min(cos_theta3, 1.0), -1.0)
+    
+    # Calculate theta3
+    theta3 = math.acos(cos_theta3)
+    
+    # Calculate the angle of the line from joint 2 to wrist
+    phi = math.atan2(dz, dy)
+    
+    # Calculate the angle between this line and link 2
+    psi = math.atan2(l3 * math.sin(theta3), l2 + l3 * math.cos(theta3))
+    
+    # Calculate theta2
+    theta2 = phi - psi
+    
+    # Adjust theta2 for the offset angle of link 2
+    theta2_offset = math.atan2(l2_z, l2_y)
+    theta2 = theta2 - theta2_offset
+    
+    # Calculate theta4 to achieve the desired orientation
+    theta4 = ry - theta2 - theta3
+    
+    # Normalize angles to be within [-π, π]
+    theta1 = ((theta1 + math.pi) % (2 * math.pi)) - math.pi
+    theta2 = ((theta2 + math.pi) % (2 * math.pi)) - math.pi
+    theta3 = ((theta3 + math.pi) % (2 * math.pi)) - math.pi
+    theta4 = ((theta4 + math.pi) % (2 * math.pi)) - math.pi
+    
+    return (theta1, theta2, theta3, theta4)
+```
+
+I need to refine this solution further. Let me simplify and correct the approach:
+
+```python
+def inverse_kinematics(p: tuple[float, float, float], r: tuple[float, float, float]) -> tuple[float, float, float, float]:
+    """
+    Gets the joint values needed to reach position "p" and orientation "r".
+    :param p: The position to reach in the form [x, y, z].
+    :param r: The orientation to reach in radians in the form [x, y, z].
+    :return: A list of the values to set the links to for reaching position "p" and orientation "r".
+    """
+    import math
+    import numpy as np
+    
+    # Extract target position and orientation
+    px, py, pz = p
+    rx, ry, rz = r
+    
+    # Robot dimensions from the DETAILS table
+    l1_y = 0.13585  # Y offset from joint 1 to joint 2
+    l2_y = -0.1197  # Y offset from joint 2 to joint 3
+    l2_z = 0.425    # Z offset from joint 2 to joint 3
+    l3_z = 0.39225  # Z offset from joint 3 to joint 4
+    l4_y = 0.093    # Y offset from joint 4 to TCP
+    
+    # First, calculate joint 1 (rotation around Z-axis)
+    theta1 = math.atan2(px, py)
+    
+    # Adjust the target position to account for the TCP offset
+    # We need to find the position of joint 4, not the TCP
+    # Since the TCP is offset in the Y direction in the local frame of joint 4,
+    # we need to transform this offset based on the desired orientation
+    
+    # For this robot, since joints 2-4 rotate around Y, the Y component of the orientation
+    # is the sum of all joint angles: ry = theta2 + theta3 + theta4
+    
+    # Calculate the wrist position (joint 4) by moving back from TCP
+    # The TCP offset is rotated by the orientation
+    c_ry = math.cos(ry)
+    s_ry = math.sin(ry)
+    
+    # Rotate the TCP offset by the orientation and subtract from target position
+    # The TCP offset is [0, l4_y, 0] in the local frame
+    # After rotation by ry around Y-axis, it becomes [l4_y*s_ry, l4_y*c_ry, 0]
+    # Then rotate by theta1 around Z-axis
+    c1 = math.cos(theta1)
+    s1 = math.sin(theta1)
+    
+    # Calculate the wrist position in world coordinates
+    wx = px - l4_y * s_ry * c1
+    wy = py - l4_y * s_ry * s1
+    wz = pz - l4_y * c_ry
+    
+    # Transform wrist position to the frame after joint 1 rotation
+    # This gives us coordinates in the YZ plane
+    wx_local = c1 * wx + s1 * wy
+    wy_local = -s1 * wx + c1 * wy
+    wz_local = wz
+    
+    # Now we have a planar problem in the YZ plane
+    # The position of joint 2 is (0, l1_y, 0) in this frame
+    
+    # Vector from joint 2 to wrist
+    dy = wy_local - l1_y
+    dz = wz_local
+    
+    # Distance from joint 2 to wrist
+    d = math.sqrt(dy**2 + dz**2)
+    
+    # Calculate the effective lengths for the planar problem
+    l2 = math.sqrt(l2_y**2 + l2_z**2)
+    l3 = l3_z
+    
+    # Use law of cosines to find theta3
+    cos_theta3 = (d**2 - l2**2 - l3**2) / (2 * l2 * l3)
+    # Clamp to handle numerical errors
+    cos_theta3 = max(min(cos_theta3, 1.0), -1.0)
+    
+    # Calculate theta3
+    theta3 = math.acos(cos_theta3)
+    
+    # Calculate the angle of the line from joint 2 to wrist
+    phi = math.atan2(dz, dy)
+    
+    # Calculate the angle between this line and link 2
+    psi = math.atan2(l3 * math.sin(theta3), l2 + l3 * math.cos(theta3))
+    
+    # Calculate theta2
+    theta2 = phi - psi
+    
+    # Adjust theta2 for the offset angle of link 2
+    theta2_offset = math.atan2(l2_z, -l2_y)  # Note the negative l2_y
+    theta2 = theta2 - theta2_offset
+    
+    # Calculate theta4 to achieve the desired orientation
+    theta4 = ry - theta2 - theta3
+    
+    # Normalize angles to be within [-π, π]
+    theta1 = ((theta1 + math.pi) % (2 * math.pi)) - math.pi
+    theta2 = ((theta2 + math.pi) % (2 * math.pi)) - math.pi
+    theta3 = ((theta3 + math.pi) % (2 * math.pi)) - math.pi
+    theta4 = ((theta4 + math.pi) % (2 * math.pi)) - math.pi
+    
+    return (theta1, theta2, theta3, theta4)
+```
+
+Let me make one final refinement to ensure the solution is correct:
+
+```python
+def inverse_kinematics(p: tuple[float, float, float], r: tuple[float, float, float]) -> tuple[float, float, float, float]:
+    """
+    Gets the joint values needed to reach position "p" and orientation "r".
+    :param p: The position to reach in the form [x, y, z].
+    :param r: The orientation to reach in radians in the form [x, y, z].
+    :return: A list of the values to set the links to for reaching position "p" and orientation "r".
+    """
+    import math
+    import numpy as np
+    
+    # Extract target position and orientation
+    px, py, pz = p
+    rx, ry, rz = r
+    
+    # Robot dimensions from the DETAILS table
+    l1_y = 0.13585  # Y offset from joint 1 to joint 2
+    l2_y = -0.1197  # Y offset from joint 2 to joint 3
+    l2_z = 0.425    # Z offset from joint 2 to joint 3
+    l3_z = 0.39225  # Z offset from joint 3 to joint 4
+    l4_y = 0.093    # Y offset from joint 4 to TCP
+    
+    # First, calculate joint 1 (rotation around Z-axis)
+    theta1 = math.atan2(px, py)
+    
+    # Calculate the wrist position (joint 4) by moving back from TCP
+    # The TCP offset is rotated by the orientation
+    c_ry = math.cos(ry)
+    s_ry = math.sin(ry)
+    
+    # Rotate the TCP offset by the orientation and subtract from target position
+    c1 = math.cos(theta1)
+    s1 = math.sin(theta1)
+    
+    # Calculate the wrist position in world coordinates
+    # The TCP offset is [0, l4_y, 0] in the local frame of joint 4
+    # After rotation by ry around Y-axis, it becomes [l4_y*s_ry, l4_y*c_ry, 0]
+    # Then rotate by theta1 around Z-axis
+    wx = px - l4_y * s_ry * c1
+    wy = py - l4_y * s_ry * s1
+    wz = pz - l4_y * c_ry
+    
+    # Transform wrist position to the frame after joint 1 rotation
+    # This gives us coordinates in the YZ plane
+    wx_local = c1 * wx + s1 * wy
+    wy_local = -s1 * wx + c1 * wy
+    wz_local = wz
+    
+    # Now we have a planar problem in the YZ plane
+    # The position of joint 2 is (0, l1_y, 0) in this frame
+    
+    # Vector from joint 2 to wrist
+    dy = wy_local - l1_y
+    dz = wz_local
+    
+    # Distance from joint 2 to wrist
+    d = math.sqrt(dy**2 + dz**2)
+    
+    # Calculate the effective lengths for the planar problem
+    l2 = math.sqrt(l2_y**2 + l2_z**2)
+    l3 = l3_z
+    
+    # Use law of cosines to find theta3
+    cos_theta3 = (d**2 - l2**2 - l3**2) / (2 * l2 * l3)
+    # Clamp to handle numerical errors
+    cos_theta3 = max(min(cos_theta3, 1.0), -1.0)
+    
+    # Calculate theta3
+    theta3 = math.acos(cos_theta3)
+    
+    # Calculate the angle of the line from joint 2 to wrist
+    phi = math.atan2(dz, dy)
+    
+    # Calculate the angle between this line and link 2
+    psi = math.atan2(l3 * math.sin(theta3), l2 + l3 * math.cos(theta3))
+    
+    # Calculate theta2
+    theta2 = phi - psi
+    
+    # Adjust theta2 for the offset angle of link 2
+    theta2_offset = math.atan2(l2_z, -l2_y)  # Note the negative l2_y
+    theta2 = theta2 - theta2_offset
+    
+    # Calculate theta4 to achieve the desired orientation
+    theta4 = ry - theta2 - theta3
+    
+    # Normalize angles to be within [-π, π]
+    theta1 = ((theta1 + math.pi) % (2 * math.pi)) - math.pi
+    theta2 = ((theta2 + math.pi) % (2 * math.pi)) - math.pi
+    theta3 = ((theta3 + math.pi) % (2 * math.pi)) - math.pi
+    theta4 = ((theta4 + math.pi) % (2 * math.pi)) - math.pi
+    
+    return (theta1, theta2, theta3, theta4)
+```

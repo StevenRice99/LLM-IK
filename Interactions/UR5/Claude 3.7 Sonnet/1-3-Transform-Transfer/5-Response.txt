@@ -1,0 +1,272 @@
+I see the issue now. The main problem is that I didn't properly account for the orientation representation. Looking at the failed cases, I notice that the target orientations include values like [π, y, π] while my solution only considered the y component.
+
+Let me revise the inverse kinematics solution to properly handle the orientation:
+
+```python
+import math
+
+def inverse_kinematics(p: tuple[float, float, float], r: tuple[float, float, float]) -> tuple[float, float, float]:
+    """
+    Gets the joint values needed to reach position "p" and orientation "r".
+    :param p: The position to reach in the form [x, y, z].
+    :param r: The orientation to reach in radians in the form [x, y, z].
+    :return: A list of the values to set the links to for reaching position "p" and orientation "r".
+    """
+    # Extract target position and orientation
+    x, y, z = p
+    rx, ry, rz = r
+    
+    # Constants from the robot description
+    tcp_offset = 0.093
+    L1 = 0.425
+    L2 = 0.39225
+    
+    # Adjust target position to account for TCP offset
+    x_adj = x
+    y_adj = y - tcp_offset
+    z_adj = z
+    
+    # Calculate distance from base to target (in xz plane)
+    d = math.sqrt(x_adj ** 2 + z_adj ** 2)
+    
+    # Calculate theta2 using law of cosines
+    cos_theta2 = (d ** 2 - L1 ** 2 - L2 ** 2) / (2 * L1 * L2)
+    # Ensure the value is within valid range for acos
+    cos_theta2 = max(min(cos_theta2, 1.0), -1.0)
+    theta2 = math.acos(cos_theta2)
+    
+    # Determine if we need the elbow up or down configuration
+    # We need to check if we're in the correct configuration based on the target orientation
+    # If rx and rz are both π, we need to flip the arm configuration
+    flip_configuration = (abs(rx) > math.pi/2 and abs(rz) > math.pi/2)
+    
+    if flip_configuration:
+        theta2 = -theta2
+    
+    # Calculate theta1
+    alpha = math.atan2(x_adj, z_adj)
+    beta = math.atan2(L2 * math.sin(theta2), L1 + L2 * math.cos(theta2))
+    
+    if flip_configuration:
+        theta1 = alpha - beta + math.pi
+    else:
+        theta1 = alpha - beta
+    
+    # Normalize theta1 to be within [-π, π]
+    theta1 = ((theta1 + math.pi) % (2 * math.pi)) - math.pi
+    
+    # Calculate theta3 based on the target orientation
+    # For orientation [π, y, π], we need to adjust our approach
+    if flip_configuration:
+        theta3 = ry - theta1 - theta2 + math.pi
+    else:
+        theta3 = ry - theta1 - theta2
+    
+    # Normalize theta3 to be within [-π, π]
+    theta3 = ((theta3 + math.pi) % (2 * math.pi)) - math.pi
+    
+    return (theta1, theta2, theta3)
+```
+
+Wait, I need to reconsider this approach. The feedback shows that my understanding of the orientation representation is incorrect. Let me analyze the failed cases more carefully.
+
+Looking at the correct joint values and the corresponding orientations, I notice that when the target orientation has rx and rz equal to π, the solution often involves joint angles that sum differently than I expected.
+
+Let me revise my approach:
+
+```python
+import math
+
+def inverse_kinematics(p: tuple[float, float, float], r: tuple[float, float, float]) -> tuple[float, float, float]:
+    """
+    Gets the joint values needed to reach position "p" and orientation "r".
+    :param p: The position to reach in the form [x, y, z].
+    :param r: The orientation to reach in radians in the form [x, y, z].
+    :return: A list of the values to set the links to for reaching position "p" and orientation "r".
+    """
+    # Extract target position and orientation
+    x, y, z = p
+    rx, ry, rz = r
+    
+    # Constants from the robot description
+    tcp_offset = 0.093
+    L1 = 0.425
+    L2 = 0.39225
+    
+    # Adjust target position to account for TCP offset
+    x_adj = x
+    y_adj = y - tcp_offset
+    z_adj = z
+    
+    # Calculate distance from base to target (in xz plane)
+    d = math.sqrt(x_adj ** 2 + z_adj ** 2)
+    
+    # Calculate theta2 using law of cosines
+    cos_theta2 = (d ** 2 - L1 ** 2 - L2 ** 2) / (2 * L1 * L2)
+    # Ensure the value is within valid range for acos
+    cos_theta2 = max(min(cos_theta2, 1.0), -1.0)
+    theta2 = math.acos(cos_theta2)
+    
+    # Check if we need to flip the elbow configuration
+    # This is determined by whether rx and rz are both close to π
+    flip_arm = (abs(abs(rx) - math.pi) < 0.1 and abs(abs(rz) - math.pi) < 0.1)
+    
+    # Calculate initial theta1 and determine if we need to flip the arm
+    alpha = math.atan2(x_adj, z_adj)
+    beta = math.atan2(L2 * math.sin(theta2), L1 + L2 * math.cos(theta2))
+    
+    if flip_arm:
+        # For orientations with rx and rz near π, we need the opposite elbow configuration
+        theta2 = -theta2
+        theta1 = alpha - beta + math.pi
+    else:
+        # Standard configuration
+        theta1 = alpha - beta
+    
+    # Normalize theta1 to be within [-π, π]
+    theta1 = ((theta1 + math.pi) % (2 * math.pi)) - math.pi
+    
+    # Calculate theta3 to achieve the desired orientation
+    # The final orientation around Y is the sum of all joint angles
+    theta3 = ry - theta1 - theta2
+    
+    # Normalize theta3 to be within [-π, π]
+    theta3 = ((theta3 + math.pi) % (2 * math.pi)) - math.pi
+    
+    return (theta1, theta2, theta3)
+```
+
+After further analysis of the failed cases, I see that my approach still isn't capturing the correct relationship. Let me make one more revision:
+
+```python
+import math
+
+def inverse_kinematics(p: tuple[float, float, float], r: tuple[float, float, float]) -> tuple[float, float, float]:
+    """
+    Gets the joint values needed to reach position "p" and orientation "r".
+    :param p: The position to reach in the form [x, y, z].
+    :param r: The orientation to reach in radians in the form [x, y, z].
+    :return: A list of the values to set the links to for reaching position "p" and orientation "r".
+    """
+    # Extract target position and orientation
+    x, y, z = p
+    rx, ry, rz = r
+    
+    # Constants from the robot description
+    tcp_offset = 0.093
+    L1 = 0.425
+    L2 = 0.39225
+    
+    # Adjust target position to account for TCP offset
+    x_adj = x
+    y_adj = y - tcp_offset
+    z_adj = z
+    
+    # Calculate distance from base to target (in xz plane)
+    d = math.sqrt(x_adj ** 2 + z_adj ** 2)
+    
+    # Calculate theta2 using law of cosines
+    cos_theta2 = (d ** 2 - L1 ** 2 - L2 ** 2) / (2 * L1 * L2)
+    # Ensure the value is within valid range for acos
+    cos_theta2 = max(min(cos_theta2, 1.0), -1.0)
+    theta2 = math.acos(cos_theta2)
+    
+    # Check if we need to use the alternate solution (elbow up vs elbow down)
+    # For orientations with rx and rz near π, we typically need the alternate solution
+    use_alternate = (abs(abs(rx) - math.pi) < 0.1 and abs(abs(rz) - math.pi) < 0.1)
+    
+    # Calculate theta1
+    alpha = math.atan2(x_adj, z_adj)
+    beta = math.atan2(L2 * math.sin(theta2), L1 + L2 * math.cos(theta2))
+    
+    if use_alternate:
+        # For the alternate solution, we use -theta2 and adjust theta1
+        theta2 = -theta2
+        if z_adj < 0:
+            theta1 = alpha - beta
+        else:
+            theta1 = alpha - beta + math.pi
+    else:
+        # Standard solution
+        if z_adj < 0:
+            theta1 = alpha - beta
+        else:
+            theta1 = alpha - beta
+    
+    # Calculate theta3 to achieve the desired orientation
+    if use_alternate:
+        theta3 = ry - theta1 - theta2 + math.pi
+    else:
+        theta3 = ry - theta1 - theta2
+    
+    # Normalize all angles to be within [-π, π]
+    theta1 = ((theta1 + math.pi) % (2 * math.pi)) - math.pi
+    theta2 = ((theta2 + math.pi) % (2 * math.pi)) - math.pi
+    theta3 = ((theta3 + math.pi) % (2 * math.pi)) - math.pi
+    
+    return (theta1, theta2, theta3)
+```
+
+After careful analysis of the failed cases, I need to take a different approach. Let me provide a final solution:
+
+```python
+import math
+
+def inverse_kinematics(p: tuple[float, float, float], r: tuple[float, float, float]) -> tuple[float, float, float]:
+    """
+    Gets the joint values needed to reach position "p" and orientation "r".
+    :param p: The position to reach in the form [x, y, z].
+    :param r: The orientation to reach in radians in the form [x, y, z].
+    :return: A list of the values to set the links to for reaching position "p" and orientation "r".
+    """
+    # Extract target position and orientation
+    x, y, z = p
+    rx, ry, rz = r
+    
+    # Constants from the robot description
+    tcp_offset = 0.093
+    L1 = 0.425
+    L2 = 0.39225
+    
+    # Adjust target position to account for TCP offset
+    x_adj = x
+    y_adj = y - tcp_offset
+    z_adj = z
+    
+    # Calculate distance from base to target (in xz plane)
+    d = math.sqrt(x_adj ** 2 + z_adj ** 2)
+    
+    # Calculate theta2 using law of cosines
+    cos_theta2 = (d ** 2 - L1 ** 2 - L2 ** 2) / (2 * L1 * L2)
+    # Ensure the value is within valid range for acos
+    cos_theta2 = max(min(cos_theta2, 1.0), -1.0)
+    theta2 = math.acos(cos_theta2)
+    
+    # Check if we need to flip the arm configuration
+    # This is determined by whether rx and rz are both close to π
+    flip_config = (abs(abs(rx) - math.pi) < 0.1 and abs(abs(rz) - math.pi) < 0.1)
+    
+    # Calculate theta1
+    alpha = math.atan2(x_adj, z_adj)
+    beta = math.atan2(L2 * math.sin(theta2), L1 + L2 * math.cos(theta2))
+    
+    if flip_config:
+        theta2 = -theta2
+        theta1 = alpha - beta
+        if theta1 > 0:
+            theta1 -= math.pi
+        else:
+            theta1 += math.pi
+    else:
+        theta1 = alpha - beta
+    
+    # Calculate theta3 to achieve the desired orientation
+    theta3 = ry - theta1 - theta2
+    
+    # Normalize all angles to be within [-π, π]
+    theta1 = ((theta1 + math.pi) % (2 * math.pi)) - math.pi
+    theta2 = ((theta2 + math.pi) % (2 * math.pi)) - math.pi
+    theta3 = ((theta3 + math.pi) % (2 * math.pi)) - math.pi
+    
+    return (theta1, theta2, theta3)
+```

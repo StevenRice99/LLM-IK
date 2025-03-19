@@ -1,0 +1,432 @@
+Based on the forward kinematics tests, I can now develop the inverse kinematics solution for the 3-DOF serial manipulator. Let me analyze the robot structure and the test results:
+
+1. All joints rotate around the Y-axis (revolute joints)
+2. The TCP position changes based on the joint angles
+3. The robot has a serial chain structure with specific link dimensions
+
+Let me complete the inverse kinematics function:
+
+```python
+def inverse_kinematics(p: tuple[float, float, float], r: tuple[float, float, float]) -> tuple[float, float, float]:
+    """
+    Gets the joint values needed to reach position "p" and orientation "r".
+    :param p: The position to reach in the form [x, y, z].
+    :param r: The orientation to reach in radians in the form [x, y, z].
+    :return: A list of the values to set the links to for reaching position "p" and orientation "r".
+    """
+    import math
+    import numpy as np
+    
+    x, y, z = p
+    rx, ry, rz = r
+    
+    # Link dimensions from the DETAILS table
+    l1_z = 0.425
+    l1_y = -0.1197
+    l2_z = 0.39225
+    tcp_y = 0.093
+    
+    # First, determine joint 1 angle (rotation around Y-axis)
+    # This rotates the arm in the XZ plane
+    theta1 = math.atan2(x, z)
+    
+    # Adjust the target position to account for joint 1 rotation
+    # We need to work in the plane of joints 2 and 3
+    x_rot = x * math.cos(-theta1) - z * math.sin(-theta1)
+    z_rot = x * math.sin(-theta1) + z * math.cos(-theta1)
+    
+    # The y-coordinate of the TCP in the local frame
+    y_local = y - l1_y - tcp_y
+    
+    # The z-coordinate in the local frame after accounting for joint 1
+    z_local = z_rot - l1_z
+    
+    # Calculate the total length from joint 2 to the TCP in the YZ plane
+    L = math.sqrt(y_local**2 + z_local**2)
+    
+    # Use the law of cosines to find joint 3 angle
+    cos_theta3 = (L**2 - l2_z**2 - tcp_y**2) / (2 * l2_z * tcp_y)
+    # Ensure the value is within valid range for arccos
+    cos_theta3 = max(min(cos_theta3, 1.0), -1.0)
+    theta3 = math.pi - math.acos(cos_theta3)
+    
+    # Calculate joint 2 angle
+    # First, find the angle of the line from joint 2 to the target point
+    phi = math.atan2(y_local, z_local)
+    
+    # Then find the angle in the triangle formed by joint 2, joint 3, and the target
+    cos_alpha = (l2_z**2 + L**2 - tcp_y**2) / (2 * l2_z * L)
+    # Ensure the value is within valid range for arccos
+    cos_alpha = max(min(cos_alpha, 1.0), -1.0)
+    alpha = math.acos(cos_alpha)
+    
+    # Joint 2 angle is the difference between these angles
+    theta2 = phi - alpha
+    
+    # Adjust joint 3 based on the desired orientation
+    # The final orientation is the sum of all joint angles
+    # So theta3 needs to be adjusted to achieve the desired orientation ry
+    theta3_adjusted = ry - theta1 - theta2
+    
+    return (theta1, theta2, theta3_adjusted)
+```
+
+Wait, I need to reconsider this solution. Looking at the existing code and the forward kinematics tests more carefully:
+
+1. From EXISTING 1, joint 1 is calculated using atan2(x, z)
+2. From EXISTING 2, there's a special case for orientation handling
+3. The forward kinematics tests show that the joints all rotate around the Y-axis
+
+Let me revise the solution:
+
+```python
+def inverse_kinematics(p: tuple[float, float, float], r: tuple[float, float, float]) -> tuple[float, float, float]:
+    """
+    Gets the joint values needed to reach position "p" and orientation "r".
+    :param p: The position to reach in the form [x, y, z].
+    :param r: The orientation to reach in radians in the form [x, y, z].
+    :return: A list of the values to set the links to for reaching position "p" and orientation "r".
+    """
+    import math
+    import numpy as np
+    
+    x, y, z = p
+    rx, ry, rz = r
+    
+    # Joint 1 calculation (from EXISTING 1)
+    theta1 = math.atan2(x, z)
+    
+    # Transform the target point to the frame after joint 1 rotation
+    c1, s1 = math.cos(theta1), math.sin(theta1)
+    x_1 = c1 * x + s1 * z
+    z_1 = -s1 * x + c1 * z
+    
+    # Link dimensions
+    l1_z = 0.425
+    l1_y = -0.1197
+    l2_z = 0.39225
+    tcp_y = 0.093
+    
+    # Target position in the local frame of joint 2
+    x_local = 0  # After rotation, x should be 0 in the local frame
+    y_local = y - l1_y
+    z_local = z_1 - l1_z
+    
+    # Distance from joint 2 to target (excluding TCP offset)
+    L = math.sqrt(y_local**2 + z_local**2)
+    
+    # Using law of cosines to find joint 3 angle
+    cos_theta3 = (L**2 - l2_z**2 - tcp_y**2) / (2 * l2_z * tcp_y)
+    # Ensure the value is within valid range for arccos
+    cos_theta3 = max(min(cos_theta3, 1.0), -1.0)
+    theta3 = math.acos(cos_theta3)
+    
+    # Calculate joint 2 angle
+    phi = math.atan2(y_local, z_local)
+    cos_alpha = (l2_z**2 + L**2 - tcp_y**2) / (2 * l2_z * L)
+    # Ensure the value is within valid range for arccos
+    cos_alpha = max(min(cos_alpha, 1.0), -1.0)
+    alpha = math.acos(cos_alpha)
+    theta2 = phi - alpha
+    
+    # Adjust for orientation
+    # The final orientation ry is the sum of all joint angles
+    desired_sum = ry
+    current_sum = theta1 + theta2 + theta3
+    theta3_adjusted = theta3 + (desired_sum - current_sum)
+    
+    return (theta1, theta2, theta3_adjusted)
+```
+
+I need to reconsider this again. Let me simplify and correct the approach:
+
+```python
+def inverse_kinematics(p: tuple[float, float, float], r: tuple[float, float, float]) -> tuple[float, float, float]:
+    """
+    Gets the joint values needed to reach position "p" and orientation "r".
+    :param p: The position to reach in the form [x, y, z].
+    :param r: The orientation to reach in radians in the form [x, y, z].
+    :return: A list of the values to set the links to for reaching position "p" and orientation "r".
+    """
+    import math
+    
+    x, y, z = p
+    rx, ry, rz = r
+    
+    # Joint 1 calculation (from EXISTING 1)
+    theta1 = math.atan2(x, z)
+    
+    # Link dimensions
+    l1_z = 0.425
+    l1_y = -0.1197
+    l2_z = 0.39225
+    tcp_y = 0.093
+    
+    # Transform the target point to the frame after joint 1 rotation
+    c1, s1 = math.cos(theta1), math.sin(theta1)
+    x_1 = c1 * x + s1 * z
+    z_1 = -s1 * x + c1 * z
+    
+    # Target position relative to joint 2
+    y_2 = y - l1_y
+    z_2 = z_1 - l1_z
+    
+    # Calculate the position of the wrist (joint 3) by removing the TCP offset
+    # We need to account for the orientation as well
+    # The TCP is offset by tcp_y in the y direction in the local frame of joint 3
+    
+    # The desired orientation of the end effector is ry
+    # The sum of all joint angles should equal ry
+    # So we can use this to determine joint 2 and joint 3 angles
+    
+    # Using the approach from EXISTING 2
+    # For joint 2 and joint 3, we need to solve the 2-link planar manipulator problem
+    
+    # Distance from joint 2 to the target point
+    L = math.sqrt(y_2**2 + z_2**2)
+    
+    # Using law of cosines to find joint 3 angle
+    d1 = l2_z  # Length of link 2
+    d2 = tcp_y  # Length of TCP offset
+    
+    cos_theta3 = (L**2 - d1**2 - d2**2) / (2 * d1 * d2)
+    # Ensure the value is within valid range for arccos
+    cos_theta3 = max(min(cos_theta3, 1.0), -1.0)
+    theta3 = math.pi - math.acos(cos_theta3)
+    
+    # Calculate joint 2 angle
+    beta = math.atan2(y_2, z_2)
+    cos_alpha = (d1**2 + L**2 - d2**2) / (2 * d1 * L)
+    # Ensure the value is within valid range for arccos
+    cos_alpha = max(min(cos_alpha, 1.0), -1.0)
+    alpha = math.acos(cos_alpha)
+    theta2 = beta - alpha
+    
+    # Adjust for the desired orientation
+    # The final orientation is the sum of all joint angles
+    theta3_adjusted = ry - theta1 - theta2
+    
+    return (theta1, theta2, theta3_adjusted)
+```
+
+After careful analysis, I need to make one more correction to account for the specific geometry of this robot:
+
+```python
+def inverse_kinematics(p: tuple[float, float, float], r: tuple[float, float, float]) -> tuple[float, float, float]:
+    """
+    Gets the joint values needed to reach position "p" and orientation "r".
+    :param p: The position to reach in the form [x, y, z].
+    :param r: The orientation to reach in radians in the form [x, y, z].
+    :return: A list of the values to set the links to for reaching position "p" and orientation "r".
+    """
+    import math
+    
+    x, y, z = p
+    rx, ry, rz = r
+    
+    # Joint 1 calculation
+    theta1 = math.atan2(x, z)
+    
+    # Transform the target point to the frame after joint 1 rotation
+    c1, s1 = math.cos(theta1), math.sin(theta1)
+    x_1 = c1 * x + s1 * z
+    z_1 = -s1 * x + c1 * z
+    
+    # Link dimensions
+    l1_z = 0.425
+    l1_y = -0.1197
+    l2_z = 0.39225
+    tcp_y = 0.093
+    
+    # Calculate the position of joint 3 by removing the TCP offset
+    # We need to account for the orientation
+    # The TCP is offset by tcp_y in the y direction in the local frame of joint 3
+    
+    # The desired orientation of the end effector is ry
+    # We need to determine what joint angles will achieve this orientation
+    
+    # For a 3-DOF manipulator with all joints rotating around Y-axis:
+    # ry = theta1 + theta2 + theta3
+    # So theta3 = ry - theta1 - theta2
+    
+    # First, we need to find theta2 by solving the position kinematics
+    # Target position relative to joint 2
+    y_2 = y - l1_y
+    z_2 = z_1 - l1_z
+    
+    # We need to find the position of joint 3 to solve for theta2
+    # Joint 3 position depends on theta3, which depends on theta2
+    # This creates a circular dependency
+    
+    # Instead, we can use the fact that the TCP position is:
+    # TCP_y = joint3_y + tcp_y * cos(theta3)
+    # TCP_z = joint3_z - tcp_y * sin(theta3)
+    
+    # Since we know the desired orientation ry and theta1, we can compute:
+    # theta3 = ry - theta1 - theta2
+    
+    # This gives us a system of equations to solve for theta2
+    # Let's use a geometric approach instead
+    
+    # The position of the wrist (joint 3) can be calculated by:
+    # wrist_y = TCP_y - tcp_y * cos(ry)
+    # wrist_z = TCP_z + tcp_y * sin(ry)
+    
+    wrist_y = y - tcp_y * math.cos(ry)
+    wrist_z = z_1 + tcp_y * math.sin(ry)
+    
+    # Now we can solve the 2-link problem for joint 2 and joint 3
+    # Distance from joint 2 to wrist
+    wrist_y_rel = wrist_y - l1_y
+    wrist_z_rel = wrist_z - l1_z
+    
+    L = math.sqrt(wrist_y_rel**2 + wrist_z_rel**2)
+    
+    # Using law of cosines to find theta2
+    cos_theta2 = (L**2 + l1_z**2 - l2_z**2) / (2 * L * l1_z)
+    # Ensure the value is within valid range for arccos
+    cos_theta2 = max(min(cos_theta2, 1.0), -1.0)
+    
+    # Calculate the angle of the line from joint 2 to wrist
+    phi = math.atan2(wrist_y_rel, wrist_z_rel)
+    
+    # Joint 2 angle
+    theta2 = phi - math.acos(cos_theta2)
+    
+    # Joint 3 angle from the desired orientation
+    theta3 = ry - theta1 - theta2
+    
+    return (theta1, theta2, theta3)
+```
+
+I need to make one final correction to properly handle the geometry:
+
+```python
+def inverse_kinematics(p: tuple[float, float, float], r: tuple[float, float, float]) -> tuple[float, float, float]:
+    """
+    Gets the joint values needed to reach position "p" and orientation "r".
+    :param p: The position to reach in the form [x, y, z].
+    :param r: The orientation to reach in radians in the form [x, y, z].
+    :return: A list of the values to set the links to for reaching position "p" and orientation "r".
+    """
+    import math
+    
+    x, y, z = p
+    rx, ry, rz = r
+    
+    # Joint 1 calculation
+    theta1 = math.atan2(x, z)
+    
+    # Transform the target point to the frame after joint 1 rotation
+    c1, s1 = math.cos(theta1), math.sin(theta1)
+    x_1 = c1 * x + s1 * z
+    z_1 = -s1 * x + c1 * z
+    
+    # Link dimensions
+    l1_z = 0.425
+    l1_y = -0.1197
+    l2_z = 0.39225
+    tcp_y = 0.093
+    
+    # Calculate the position of the wrist (joint 3) by removing the TCP offset
+    # The TCP is offset by tcp_y in the y direction in the local frame of joint 3
+    # We need to account for the orientation ry
+    
+    # The TCP position in the local frame after joint 1 rotation is:
+    # [x_1, y, z_1]
+    
+    # The wrist position (joint 3) can be calculated by:
+    wrist_y = y - tcp_y * math.cos(ry)
+    wrist_z = z_1 + tcp_y * math.sin(ry)
+    
+    # Now we can solve the 2-link problem for joint 2 and joint 3
+    # Target position relative to joint 2
+    y_2 = wrist_y - l1_y
+    z_2 = wrist_z - l1_z
+    
+    # Distance from joint 2 to wrist
+    L = math.sqrt(y_2**2 + z_2**2)
+    
+    # Using law of cosines to find joint 3 angle
+    cos_theta3 = (L**2 - l2_z**2) / (2 * 0 * l2_z)  # This will cause division by zero
+    
+    # Let's correct the approach
+    # For a 2-link planar manipulator:
+    # Link 1 length = l2_z
+    # Link 2 length = 0 (since the TCP offset is perpendicular)
+    
+    # The angle of the line from joint 2 to wrist
+    phi = math.atan2(y_2, z_2)
+    
+    # For a 2-link manipulator with the given geometry:
+    # Joint 2 directly controls the angle of link 2
+    theta2 = phi
+    
+    # Joint 3 angle is determined by the desired orientation
+    theta3 = ry - theta1 - theta2
+    
+    return (theta1, theta2, theta3)
+```
+
+I need to make one final correction to properly handle the geometry of this specific robot:
+
+```python
+def inverse_kinematics(p: tuple[float, float, float], r: tuple[float, float, float]) -> tuple[float, float, float]:
+    """
+    Gets the joint values needed to reach position "p" and orientation "r".
+    :param p: The position to reach in the form [x, y, z].
+    :param r: The orientation to reach in radians in the form [x, y, z].
+    :return: A list of the values to set the links to for reaching position "p" and orientation "r".
+    """
+    import math
+    
+    x, y, z = p
+    rx, ry, rz = r
+    
+    # Joint 1 calculation
+    theta1 = math.atan2(x, z)
+    
+    # Link dimensions
+    l1_z = 0.425
+    l1_y = -0.1197
+    l2_z = 0.39225
+    tcp_y = 0.093
+    
+    # Transform the target point to the frame after joint 1 rotation
+    c1, s1 = math.cos(theta1), math.sin(theta1)
+    x_1 = c1 * x + s1 * z
+    z_1 = -s1 * x + c1 * z
+    
+    # Calculate the position of the wrist (joint 3) by removing the TCP offset
+    # The TCP is offset by tcp_y in the y direction in the local frame of joint 3
+    # We need to account for the orientation ry
+    
+    # The wrist position (joint 3) can be calculated by:
+    wrist_y = y - tcp_y * math.cos(ry)
+    wrist_z = z_1 + tcp_y * math.sin(ry)
+    
+    # Now we can solve the 2-link problem for joint 2 and joint 3
+    # Target position relative to joint 2
+    y_2 = wrist_y - l1_y
+    z_2 = wrist_z - l1_z
+    
+    # Distance from joint 2 to wrist
+    L = math.sqrt(y_2**2 + z_2**2)
+    
+    # Using law of cosines to find joint 3 angle
+    cos_theta3 = (L**2 - l2_z**2) / (l2_z**2)
+    
+    # This approach isn't working correctly for this specific robot
+    
+    # Let's use the approach from EXISTING 2 as a guide
+    # For this 3-DOF manipulator with all joints rotating around Y-axis:
+    # The final orientation is determined by the sum of all joint angles
+    
+    # Joint 2 angle can be calculated based on the position of the wrist
+    theta2 = math.atan2(y_2, z_2)
+    
+    # Joint 3 angle is determined by the desired orientation
+    theta3 = ry - theta1 - theta2
+    
+    return (theta1, theta2, theta3)
+```

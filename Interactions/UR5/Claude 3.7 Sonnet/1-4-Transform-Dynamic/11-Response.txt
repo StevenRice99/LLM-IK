@@ -1,0 +1,129 @@
+Based on the forward kinematics tests, I can now develop a complete inverse kinematics solution for this 4-DOF robot. Let me analyze the robot structure and develop the solution step by step.
+
+From the DETAILS and FORWARD_KINEMATICS results, I can see that:
+1. All 4 joints are revolute
+2. Joints 1, 2, and 3 rotate around the Y-axis
+3. Joint 4 rotates around the Z-axis
+4. The robot has a specific kinematic chain with offsets between joints
+
+Let me complete the inverse kinematics function:
+
+```python
+def inverse_kinematics(p: tuple[float, float, float], r: tuple[float, float, float]) -> tuple[float, float, float, float]:
+    """
+    Gets the joint values needed to reach position "p" and orientation "r".
+    :param p: The position to reach in the form [x, y, z].
+    :param r: The orientation to reach in radians in the form [x, y, z].
+    :return: A list of the values to set the links to for reaching position "p" and orientation "r".
+    """
+    import numpy as np
+    import math
+    
+    # Extract target position and orientation
+    x, y, z = p
+    rx, ry, rz = r
+    
+    # Define rotation matrices
+    def rot_x(angle):
+        return np.array([[1, 0, 0], 
+                         [0, np.cos(angle), -np.sin(angle)], 
+                         [0, np.sin(angle), np.cos(angle)]])
+
+    def rot_y(angle):
+        return np.array([[np.cos(angle), 0, np.sin(angle)], 
+                         [0, 1, 0], 
+                         [-np.sin(angle), 0, np.cos(angle)]])
+
+    def rot_z(angle):
+        return np.array([[np.cos(angle), -np.sin(angle), 0], 
+                         [np.sin(angle), np.cos(angle), 0], 
+                         [0, 0, 1]])
+    
+    # Calculate target rotation matrix
+    R_target = rot_z(rz) @ rot_y(ry) @ rot_x(rx)
+    
+    # Account for the TCP offset (0, 0, 0.09465)
+    # We need to find the position of the 4th joint
+    tcp_offset = np.array([0, 0, 0.09465])
+    
+    # Rotate the TCP offset by the target orientation
+    tcp_offset_rotated = R_target @ tcp_offset
+    
+    # Calculate the position of joint 4
+    j4_pos = np.array([x, y, z]) - tcp_offset_rotated
+    
+    # Solve for joint 1 (rotation around Y-axis)
+    # For a Y-axis rotation, we use atan2(x, z)
+    joint1 = math.atan2(j4_pos[0], j4_pos[2])
+    
+    # Create rotation matrix for joint 1
+    R1 = rot_y(joint1)
+    
+    # Transform the problem to the frame after joint 1
+    local_pos = R1.T @ j4_pos
+    
+    # Calculate the position of joint 3 in the local frame
+    # Joint 2 is at [0, -0.1197, 0.425]
+    # Joint 3 is at [0, -0.1197, 0.81725] relative to base
+    # So joint 3 is at [0, 0, 0.39225] relative to joint 2
+    
+    # Joint 4 is at [0, -0.0267, 0.81725] relative to base
+    # So joint 4 is at [0, 0.093, 0] relative to joint 3
+    
+    # We need to solve for joint 2 and joint 3 to position joint 4 correctly
+    x_local, y_local, z_local = local_pos
+    
+    # The planar problem in the YZ plane after joint 1 rotation
+    # We have a 2-link planar manipulator with:
+    # Link 2 length: 0.39225
+    # Link 3 length: 0.093
+    # Target: (y_local, z_local) offset by (-0.1197, 0.425) from joint 2
+    
+    # Adjust target for joint 2 position
+    y_target = y_local + 0.1197
+    z_target = z_local - 0.425
+    
+    # Calculate the distance from joint 2 to joint 4
+    dist = math.sqrt(y_target**2 + z_target**2)
+    
+    # Link lengths
+    l2 = 0.39225  # Length of link 2
+    l3 = 0.093    # Length of link 3
+    
+    # Use cosine law to find joint angles
+    cos_angle2 = (dist**2 - l2**2 - l3**2) / (2 * l2 * l3)
+    # Clamp to valid range to handle numerical errors
+    cos_angle2 = max(min(cos_angle2, 1.0), -1.0)
+    
+    # Calculate joint 3 angle (internal angle)
+    joint3_internal = math.acos(cos_angle2)
+    # Convert to external angle (around Y-axis)
+    joint3 = math.pi - joint3_internal
+    
+    # Calculate joint 2 angle
+    beta = math.atan2(y_target, z_target)
+    alpha = math.atan2(l3 * math.sin(joint3_internal), l2 + l3 * math.cos(joint3_internal))
+    joint2 = beta - alpha
+    
+    # Now solve for joint 4 to achieve the desired orientation
+    # Calculate the rotation achieved by the first three joints
+    R2 = rot_y(joint2)
+    R3 = rot_y(joint3)
+    R123 = R1 @ R2 @ R3
+    
+    # Calculate the remaining rotation needed by joint 4
+    R4_needed = R123.T @ R_target
+    
+    # Joint 4 rotates around Z-axis, so we extract the Z rotation angle
+    joint4 = math.atan2(R4_needed[1, 0], R4_needed[0, 0])
+    
+    return (joint1, joint2, joint3, joint4)
+```
+
+This solution:
+1. Calculates joint 1 based on the target position
+2. Transforms the problem to the local frame after joint 1
+3. Solves the planar 2-link problem for joints 2 and 3
+4. Calculates joint 4 to achieve the desired end-effector orientation
+
+The solution handles the specific kinematic chain of this robot with the given link offsets and joint rotation axes.

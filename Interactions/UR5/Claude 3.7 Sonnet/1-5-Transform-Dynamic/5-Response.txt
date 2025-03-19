@@ -1,0 +1,140 @@
+Based on the forward kinematics results, I can now develop a solution for the inverse kinematics of this 5-DOF robot. Let me analyze the robot structure and develop the solution step by step.
+
+First, let's understand the robot structure:
+- 5 revolute joints
+- Joints 1, 2, 3, and 5 rotate around Y-axis
+- Joint 4 rotates around Z-axis
+- The TCP has an offset and orientation relative to the last joint
+
+I'll now complete the inverse kinematics function by combining insights from the provided existing solutions:
+
+```python
+def inverse_kinematics(p: tuple[float, float, float], r: tuple[float, float, float]) -> tuple[float, float, float, float, float]:
+    """
+    Gets the joint values needed to reach position "p" and orientation "r".
+    :param p: The position to reach in the form [x, y, z].
+    :param r: The orientation to reach in radians in the form [x, y, z].
+    :return: A list of the values to set the links to for reaching position "p" and orientation "r".
+    """
+    import math
+    import numpy as np
+    
+    # Target position and orientation
+    x, y, z = p
+    rx, ry, rz = r
+    
+    # Create rotation matrix from target orientation
+    R_target = np.array([
+        [math.cos(rz) * math.cos(ry), 
+         math.cos(rz) * math.sin(ry) * math.sin(rx) - math.sin(rz) * math.cos(rx), 
+         math.cos(rz) * math.sin(ry) * math.cos(rx) + math.sin(rz) * math.sin(rx)],
+        [math.sin(rz) * math.cos(ry), 
+         math.sin(rz) * math.sin(ry) * math.sin(rx) + math.cos(rz) * math.cos(rx), 
+         math.sin(rz) * math.sin(ry) * math.cos(rx) - math.cos(rz) * math.sin(rx)],
+        [-math.sin(ry), 
+         math.cos(ry) * math.sin(rx), 
+         math.cos(ry) * math.cos(rx)]
+    ])
+    
+    # Account for the TCP offset and orientation
+    # TCP offset is [0, 0.0823, 0] with orientation [0, 0, 1.570796325]
+    tcp_offset = np.array([0, 0.0823, 0])
+    
+    # Create rotation matrix for TCP orientation
+    tcp_rz = 1.570796325
+    R_tcp = np.array([
+        [math.cos(tcp_rz), -math.sin(tcp_rz), 0],
+        [math.sin(tcp_rz), math.cos(tcp_rz), 0],
+        [0, 0, 1]
+    ])
+    
+    # Calculate the wrist position by removing the TCP offset
+    wrist_pos = np.array([x, y, z]) - R_target @ tcp_offset
+    
+    # Calculate the wrist orientation
+    R_wrist = R_target @ R_tcp.T
+    
+    # Solve for joint 1 (base rotation)
+    theta1 = math.atan2(wrist_pos[0], wrist_pos[2])
+    
+    # Create rotation matrix for joint 1
+    R1 = np.array([
+        [math.cos(theta1), 0, math.sin(theta1)],
+        [0, 1, 0],
+        [-math.sin(theta1), 0, math.cos(theta1)]
+    ])
+    
+    # Transform wrist position to joint 1 frame
+    wrist_in_j1 = R1.T @ (wrist_pos - np.array([0, 0, 0]))
+    
+    # Extract coordinates in joint 1 frame
+    x1, y1, z1 = wrist_in_j1
+    
+    # Calculate distance from joint 2 to wrist
+    # Joint 2 position is [0, -0.1197, 0.425]
+    j2_pos = np.array([0, -0.1197, 0.425])
+    
+    # Calculate the position of the wrist relative to joint 2
+    wrist_rel_j2 = wrist_in_j1 - j2_pos
+    
+    # Calculate the distance from joint 2 to wrist
+    L = np.linalg.norm(wrist_rel_j2)
+    
+    # Link lengths
+    l2 = 0.39225  # Length of link 2
+    l3 = math.sqrt(0.093**2 + 0.09465**2)  # Length of combined links 3 and 4
+    
+    # Calculate joint 3 using law of cosines
+    cos_theta3 = (L**2 - l2**2 - l3**2) / (2 * l2 * l3)
+    # Clamp to valid range
+    cos_theta3 = max(min(cos_theta3, 1.0), -1.0)
+    theta3 = math.acos(cos_theta3)
+    
+    # Calculate joint 2 using law of cosines and atan2
+    beta = math.atan2(wrist_rel_j2[1], math.sqrt(wrist_rel_j2[0]**2 + wrist_rel_j2[2]**2))
+    cos_alpha = (l2**2 + L**2 - l3**2) / (2 * l2 * L)
+    # Clamp to valid range
+    cos_alpha = max(min(cos_alpha, 1.0), -1.0)
+    alpha = math.acos(cos_alpha)
+    theta2 = beta - alpha
+    
+    # Calculate the orientation of the first three joints
+    R_3joints = R1 @ np.array([
+        [math.cos(theta2 + theta3), 0, math.sin(theta2 + theta3)],
+        [0, 1, 0],
+        [-math.sin(theta2 + theta3), 0, math.cos(theta2 + theta3)]
+    ])
+    
+    # Calculate the remaining rotation needed for the wrist
+    R_45 = R_3joints.T @ R_wrist
+    
+    # Extract joint 4 (rotation around Z)
+    theta4 = math.atan2(R_45[1, 0], R_45[0, 0])
+    
+    # Create rotation matrix for joint 4
+    R4 = np.array([
+        [math.cos(theta4), -math.sin(theta4), 0],
+        [math.sin(theta4), math.cos(theta4), 0],
+        [0, 0, 1]
+    ])
+    
+    # Calculate the remaining rotation for joint 5
+    R5 = R4.T @ R_45
+    
+    # Extract joint 5 (rotation around Y)
+    theta5 = math.atan2(-R5[2, 0], R5[2, 2])
+    
+    # Return all joint angles
+    return (theta1, theta2, theta3, theta4, theta5)
+```
+
+This solution follows these steps:
+1. Calculate the wrist position by accounting for the TCP offset
+2. Solve for joint 1 (base rotation) using atan2
+3. Transform the wrist position to the joint 1 frame
+4. Use the law of cosines to solve for joints 2 and 3
+5. Calculate the orientation achieved by the first three joints
+6. Determine the remaining rotation needed for joints 4 and 5
+7. Extract joint 4 (Z-axis rotation) and joint 5 (Y-axis rotation) angles
+
+The solution handles the kinematic chain properly and accounts for the TCP offset and orientation.

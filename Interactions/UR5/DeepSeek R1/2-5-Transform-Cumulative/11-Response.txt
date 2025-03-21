@@ -1,0 +1,129 @@
+To solve this problem, we need to determine the joint angles for a 4-DOF serial manipulator to reach a target position and orientation. The solution involves accurately modeling the forward kinematics for both position and orientation, considering all relevant joints and their contributions.
+
+### Approach
+1. **Position Calculation (Joints 1-3)**:
+   - The position of the end-effector (TCP) is determined by the first three joints (θ1, θ2, θ3). The y-coordinate is used to solve for θ3, while the x and z coordinates are used to solve for θ1 and θ2 using trigonometric identities and geometric relationships.
+
+2. **Orientation Calculation (Joint 4)**:
+   - After determining θ1, θ2, and θ3, the remaining rotation matrix is decomposed to find θ4, ensuring the end-effector's orientation matches the target.
+
+### Solution Code
+```python
+import math
+import numpy as np
+
+def inverse_kinematics(p: tuple[float, float, float], r: tuple[float, float, float]) -> tuple[float, float, float, float]:
+    x_target, y_target, z_target = p
+    target_roll, target_pitch, target_yaw = r
+
+    # Compute target rotation matrix
+    cr = math.cos(target_roll)
+    sr = math.sin(target_roll)
+    cp = math.cos(target_pitch)
+    sp = math.sin(target_pitch)
+    cy = math.cos(target_yaw)
+    sy = math.sin(target_yaw)
+    R_target = np.array([
+        [cy * cp, cy * sp * sr - sy * cr, cy * sp * cr + sy * sr],
+        [sy * cp, sy * sp * sr + cy * cr, sy * sp * cr - cy * sr],
+        [-sp, cp * sr, cp * cr]
+    ])
+
+    # Fixed TCP rotation (90 degrees around Z)
+    R_tcp = np.array([[0, -1, 0], [1, 0, 0], [0, 0, 1]])
+    R_tcp_inv = R_tcp.T
+
+    # Position parameters
+    a3 = 0.0823  # TCP's y-offset
+    d2 = 0.39225  # Revolute2's z-offset
+    d4 = 0.09465  # Revolute4's z-offset
+
+    # Calculate possible theta3 values based on y-coordinate
+    y_offset = y_target - 0.093  # Revolute3's y-offset
+    cos_theta3 = y_offset / a3
+    cos_theta3 = np.clip(cos_theta3, -1.0, 1.0)
+    theta3_pos = math.acos(cos_theta3)
+    theta3_neg = -theta3_pos
+    possible_theta3 = [theta3_pos, theta3_neg]
+
+    solutions = []
+    for theta3 in possible_theta3:
+        A = -a3 * math.sin(theta3)
+        B = d4
+
+        # Solve for theta2
+        numerator = x_target**2 + z_target**2 - A**2 - B**2
+        denominator = 2 * A * B
+        if abs(denominator) < 1e-6:
+            continue
+        sin_2theta2 = numerator / denominator
+        if abs(sin_2theta2) > 1:
+            continue
+
+        theta2_1 = 0.5 * math.asin(sin_2theta2)
+        theta2_2 = 0.5 * (math.pi - math.asin(sin_2theta2))
+        possible_theta2 = [theta2_1, theta2_2, -theta2_1, -theta2_2]
+
+        for theta2 in possible_theta2:
+            # Calculate Term1 and Term2
+            Term1 = A * math.cos(theta2) + B * math.sin(theta2)
+            Term2 = A * math.sin(theta2) + B * math.cos(theta2)
+
+            # Solve for theta1
+            denominator = Term1 * x_target + Term2 * z_target
+            numerator = x_target * Term2 - z_target * Term1
+            if abs(denominator) < 1e-6 and abs(numerator) < 1e-6:
+                continue
+            theta1 = math.atan2(numerator, denominator)
+
+            # Compute rotation matrices for the first three joints
+            R1 = np.array([
+                [math.cos(theta1), 0, math.sin(theta1)],
+                [0, 1, 0],
+                [-math.sin(theta1), 0, math.cos(theta1)]
+            ])
+            R2 = np.array([
+                [math.cos(theta2), 0, math.sin(theta2)],
+                [0, 1, 0],
+                [-math.sin(theta2), 0, math.cos(theta2)]
+            ])
+            R3 = np.array([
+                [math.cos(theta3), -math.sin(theta3), 0],
+                [math.sin(theta3), math.cos(theta3), 0],
+                [0, 0, 1]
+            ])
+
+            # Compute remaining rotation for theta4
+            R_remaining = R3.T @ R2.T @ R1.T @ R_target @ R_tcp_inv
+
+            # Extract theta4 from R_remaining (Y rotation)
+            theta4 = math.atan2(R_remaining[0, 2], R_remaining[0, 0])
+
+            # Check orientation error
+            R4 = np.array([
+                [math.cos(theta4), 0, math.sin(theta4)],
+                [0, 1, 0],
+                [-math.sin(theta4), 0, math.cos(theta4)]
+            ])
+            R_total = R1 @ R2 @ R3 @ R4 @ R_tcp
+            error = np.linalg.norm(R_total - R_target)
+
+            solutions.append((theta1, theta2, theta3, theta4, error))
+
+    if not solutions:
+        return (0.0, 0.0, 0.0, 0.0)
+
+    # Select the solution with the smallest orientation error
+    solutions.sort(key=lambda x: x[4])
+    best = solutions[0]
+    return (best[0], best[1], best[2], best[3])
+```
+
+### Explanation
+1. **Position Calculation**:
+   - The y-coordinate of the target position is used to determine possible values for θ3. The x and z coordinates are then used to solve for θ1 and θ2 using trigonometric identities derived from the forward kinematics equations.
+
+2. **Orientation Calculation**:
+   - After determining θ1, θ2, and θ3, the remaining rotation matrix is computed and decomposed to find θ4. This ensures the end-effector's orientation matches the target by considering the cumulative effect of all joint rotations and the fixed orientation of the TCP.
+
+This approach efficiently decouples the position and orientation problems, leveraging geometric and algebraic methods to determine the joint angles accurately.

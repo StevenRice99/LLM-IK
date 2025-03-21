@@ -1,0 +1,95 @@
+def inverse_kinematics(p: tuple[float, float, float]) -> tuple[float, float, float, float]:
+    """
+    Gets the joint values (q1, q2, q3, q4) needed to reach TCP position p = [p_x, p_y, p_z]
+    for a 4 DOF manipulator whose chain is:
+      - Revolute 1: translation [0, 0, 0], axis Y.
+      - Revolute 2: translation [0, 0, 0.39225], axis Y.
+      - Revolute 3: translation [0, 0.093, 0], axis Z.
+      - Revolute 4: translation [0, 0, 0.09465], axis Y.
+      - TCP: translation [0, 0.0823, 0].
+    Only the TCP position is matched (TCP orientation is ignored), and the redundancy of joint 4
+    (which does not affect the position) is resolved here by setting q4 = 0.
+    
+    The method uses the following strategy:
+      1. The y-coordinate of the TCP is given by:
+           p_y = 0.093 + 0.0823*cos(q3)
+         so we can solve for q3 as:
+           q3 = acos((p_y - 0.093)/0.0823)
+      
+      2. In the x-z plane, after accounting for the fixed offset along z from joint 2 (d = 0.39225),
+         we consider an effective 2R-chain whose parameters are:
+             a1 = 0.09465   (translation from joint 4)
+             a2 = 0.0823*sin(q3)   (effect of the TCP offset due to q3)
+         Let D be the distance to the target in the x-z plane:
+             D = sqrt(p_x^2 + p_z^2)
+         It can be shown that the unknown joint q2 must satisfy:
+             a1*cos(q2) + a2*sin(q2) = K
+         with
+             K = (D^2 - (a1^2 + a2^2 + d^2)) / (2*d)
+         We then write a1*cos(q2) + a2*sin(q2) in the form R*cos(q2 - alpha), where
+             R = sqrt(a1^2+a2^2)  and  alpha = atan2(a2, a1).
+         Choosing the “elbow–up” solution, we have:
+             q2 = alpha + acos(K/R)
+      
+      3. Finally, the planar (x,z) effect of the remaining two joints (q1 and q2) is given
+         by:
+            p_x = cos(q1)*A + sin(q1)*B
+            p_z = –sin(q1)*A + cos(q1)*B
+         where:
+            A = -0.0823*cos(q2)*sin(q3) + 0.09465*sin(q2)
+            B =  0.0823*sin(q2)*sin(q3) + 0.09465*cos(q2) + d
+         Solving these yields:
+            q1 = atan2(p_x*B - A*p_z, B*p_z + A*p_x)
+      
+      4. q4 is redundant for position and is set to 0.
+      
+    Any target p is assumed reachable.
+    """
+    import math
+
+    # Unpack target position
+    p_x, p_y, p_z = p
+
+    # 1. Solve for q3 from the TCP y-coordinate:
+    #    p_y = 0.093 + 0.0823*cos(q3)  => cos(q3) = (p_y - 0.093) / 0.0823
+    cos_q3 = (p_y - 0.093) / 0.0823
+    if abs(cos_q3) > 1.0:
+        raise ValueError("Target position is unreachable in the y-dimension.")
+    q3 = math.acos(cos_q3)
+    sin_q3 = math.sqrt(max(0.0, 1 - cos_q3**2))  # positive branch
+
+    # 2. Solve for q2 using the planar (x,z) chain.
+    # Remove the fixed z-offset from joint 2:
+    d = 0.39225
+    D = math.sqrt(p_x**2 + p_z**2)
+
+    # Parameters from chain (translation beyond q2)
+    a1 = 0.09465         # from Revolute 4's translation T_z(0.09465)
+    a2 = 0.0823 * sin_q3   # contribution of TCP offset rotated by q3
+
+    # The planar relation is:
+    #    a1*cos(q2) + a2*sin(q2) = K, where K = (D^2 - (a1^2 + a2^2 + d^2)) / (2*d)
+    K = (D**2 - (a1**2 + a2**2 + d**2)) / (2 * d)
+    R_val = math.sqrt(a1**2 + a2**2)
+    # Ensure K/R is in [-1, 1]
+    ratio = K / R_val
+    if abs(ratio) > 1.0:
+        raise ValueError("Target position is unreachable in the planar sub-problem.")
+    alpha = math.atan2(a2, a1)
+    # Choose the “elbow–up” branch: (other branch would be alpha - acos(ratio))
+    q2 = alpha + math.acos(ratio)
+
+    # 3. Solve for q1 using the (x,z) equations.
+    # First, compute intermediate quantities A and B that depend on q2 and q3.
+    A = -0.0823 * math.cos(q2) * sin_q3 + 0.09465 * math.sin(q2)
+    B =  0.0823 * math.sin(q2) * sin_q3 + 0.09465 * math.cos(q2) + d
+    # The equations:
+    #   p_x = cos(q1)*A + sin(q1)*B
+    #   p_z = -sin(q1)*A + cos(q1)*B
+    # are solved by:
+    q1 = math.atan2(p_x * B - A * p_z, B * p_z + A * p_x)
+
+    # 4. Joint 4 is redundant for positioning; we choose q4 = 0.
+    q4 = 0.0
+
+    return (q1, q2, q3, q4)

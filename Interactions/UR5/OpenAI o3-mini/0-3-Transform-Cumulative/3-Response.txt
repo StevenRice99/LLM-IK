@@ -1,0 +1,124 @@
+We can decouple the inverse kinematics into two parts. First, note that the overall TCP‐pose (position and orientation) can be written as
+
+  TCP = Rz(q₁) · { [0, 0.13585, 0] + Ry(q₂)*[0, –0.1197, 0.425] + Ry(q₂+q₃)*[0, 0, 0.39225] + [0, 0.093, 0] }
+
+where the TCP’s orientation (since all link “origin” rpy are zero) “accumulates” so that
+
+  R_TCP = Rz(q₁) · Ry(q₂+q₃+q₄).
+
+In what follows we describe one way to “invert” this chain.
+
+Step 1. Since joint 1 rotates about Z, its value (q₁) affects only the x–y plane. If you notice, the only parts in the x–y plane come from the fixed translations on link1 (d₁ = [0,0.13585,0]) and the TCP offset (d_tcp = [0,0.093,0]). (Note that the “y” entries from the intermediate links are not affected by rotations about Y.) In fact, if you “collect” these we have a constant offset in the (local) y‐direction:
+  offset = 0.13585 + 0.093 – 0.1197 = 0.10915.
+Furthermore, if you write the vector (in the frame of the axis of joint 1) that is “reached” by the remaining rotations you get
+
+  v_local = [ Lₓ, 0.10915, L_z ]
+   with Lₓ = 0.425·sin(q₂) + 0.39225·sin(q₂+q₃)
+      L_z = 0.425·cos(q₂) + 0.39225·cos(q₂+q₃).
+
+After applying the base rotation, the TCP’s x–y coordinates become
+
+  p_x = cos(q₁)*Lₓ – sin(q₁)*0.10915  
+  p_y = sin(q₁)*Lₓ + cos(q₁)*0.10915.
+
+A short calculation shows that
+
+  p_x² + p_y² = Lₓ² + 0.10915²  
+  ⟹ Lₓ = √((p_x²+p_y²) – 0.10915²).
+
+Also, writing the complex number (p_x + i·p_y) one may show that
+
+  p_x + i·p_y = e^(i·q₁)·[ Lₓ + i·0.10915 ],
+so that
+
+  q₁ = arg(p_x + i·p_y) – atan2(0.10915, Lₓ).
+
+Step 2. Next, the “planar” two‐link chain for joints 2–3 is defined by
+  Lₓ = 0.425·sin(q₂) + 0.39225·sin(q₂+q₃)
+  p_z = 0.425·cos(q₂) + 0.39225·cos(q₂+q₃).
+This is identical to the standard 2R problem if you “swap” coordinates (take x′ = p_z and y′ = Lₓ). That is, the law of cosines gives
+
+  cos(q₃) = (r² – a² – b²)/(2ab)  with r = √(p_z²+Lₓ²), a = 0.425, b = 0.39225,
+and then
+  q₂ = atan2(Lₓ, p_z) – atan2(b·sin(q₃), a+b·cos(q₃)).
+
+(Here we choose the “elbow‐up” solution by taking q₃ = arccos(…)—either branch is valid.)
+
+Step 3. Finally, the overall orientation is given by
+  R_TCP = Rz(q₁) · Ry(q₂+q₃+q₄).
+Existing methods (see, e.g., EXISTING 4) show that if you build the desired rotation matrix from the given roll–pitch–yaw (r = [roll, pitch, yaw]) then the combination
+
+  target_sum = q₂+q₃+q₄ = atan2(R_des[0,2], R_des[0,0])
+(where R_des is the rotation matrix computed from r) holds.
+Thus, the last joint is given by
+
+  q₄ = target_sum – (q₂+q₃).
+
+The complete inverse kinematics function is given below.
+
+────────────────────────────
+def inverse_kinematics(p: tuple[float, float, float], r: tuple[float, float, float]) -> tuple[float, float, float, float]:
+    """
+    Gets the joint values [q1, q2, q3, q4] needed to reach position p and orientation r.
+    p: Target TCP position [x, y, z].
+    r: Target TCP orientation (rpy in radians) [roll, pitch, yaw].
+    """
+    import math
+    # Unpack target position and orientation
+    p_x, p_y, p_z = p
+    roll, pitch, yaw = r
+
+    # --- Orientation decoupling ---
+    # Build desired rotation matrix from roll-pitch-yaw (using the same convention as in EXISTING 4)
+    cr = math.cos(roll)
+    sr = math.sin(roll)
+    cp = math.cos(pitch)
+    sp = math.sin(pitch)
+    cy = math.cos(yaw)
+    sy = math.sin(yaw)
+    # Compute elements of R_des; note that for our chain only the ratio R[0,2]/R[0,0] matters.
+    R00 = cy * cp
+    R02 = cy * sp * cr + sy * sr
+    # The overall rotation from the Y joints is:
+    target_sum = math.atan2(R02, R00)   # target_sum = q2 + q3 + q4
+
+    # --- Solve for joint 1 (q1) ---
+    # The fixed offsets from the origins: joint1->joint2 gives [0, 0.13585, 0],
+    # and TCP offset is [0, 0.093, 0]. Also, joint2 has an inherent y-offset of -0.1197.
+    # The net constant offset in y (in the “local” (after q1) frame) is:
+    offset = 0.13585 - 0.1197 + 0.093  # = 0.10915
+    # In the local frame before applying q1, the x-component (from joints 2 and 3) is:
+    r_xy = math.sqrt(p_x**2 + p_y**2)
+    # From p_x^2+p_y^2 = Lx^2 + offset^2 we deduce:
+    Lx = math.sqrt(r_xy**2 - offset**2)
+    # Now, writing p_x + i*p_y = e^(i·q1) * (Lx + i*offset) yields:
+    q1 = math.atan2(p_y, p_x) - math.atan2(offset, Lx)
+
+    # --- Solve for joints 2 and 3 (q2 and q3) ---
+    # In the plane defined by (p_z, Lx) the kinematics is:
+    #   p_z = 0.425*cos(q2) + 0.39225*cos(q2+q3)
+    #   Lx  = 0.425*sin(q2) + 0.39225*sin(q2+q3)
+    a = 0.425
+    b = 0.39225
+    r2 = math.sqrt(p_z**2 + Lx**2)
+    # Law of cosines for joint 3:
+    cos_q3 = (r2**2 - a**2 - b**2) / (2 * a * b)
+    # Clamp to avoid numerical errors:
+    cos_q3 = max(min(cos_q3, 1.0), -1.0)
+    q3 = math.acos(cos_q3)   # (choose the elbow-up solution)
+    # Then joint 2 is:
+    q2 = math.atan2(Lx, p_z) - math.atan2(b * math.sin(q3), a + b * math.cos(q3))
+
+    # --- Solve for joint 4 (q4) ---
+    q4 = target_sum - (q2 + q3)
+
+    return (q1, q2, q3, q4)
+
+────────────────────────────
+  
+A few notes:
+• We computed Lx from the horizontal (x–y) components (after “removing” the constant offset in y).
+• The 2R IK in the (p_z, Lx) plane uses the standard law of cosines.
+• Finally, since the TCP’s orientation depends only on Rz(q₁) (which we solve from position) and the sum q₂+q₃+q₄, we extract that sum from the given roll–pitch–yaw.
+  
+This closed‐form solution returns one valid set of joint angles (in radians) for the given target pose.

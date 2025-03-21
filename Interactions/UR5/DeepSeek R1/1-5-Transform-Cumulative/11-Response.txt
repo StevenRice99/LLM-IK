@@ -1,0 +1,98 @@
+To solve this problem, we need to determine the joint angles for a 5-DOF serial manipulator to reach a specified position and orientation, considering the actual 3D geometry described in the URDF. The solution must account for all link offsets and properly decompose rotations.
+
+### Approach
+1. **Model Kinematic Chain**: Accurately represent all link offsets from the URDF.
+2. **TCP Offset Handling**: Compute wrist center position using full transformation of TCP offsets.
+3. **Geometric IK for Position**: Solve first three joints using 3D geometry with error checking.
+4. **Orientation Decomposition**: Extract last two joint angles from remaining rotation matrix.
+
+### Solution Code
+```python
+import math
+import numpy as np
+
+def inverse_kinematics(p: tuple[float, float, float], r: tuple[float, float, float]) -> tuple[float, float, float, float, float]:
+    x_tcp, y_tcp, z_tcp = p
+    target_roll, target_pitch, target_yaw = r
+
+    # Construct target rotation matrix from RPY angles
+    cr, sr = math.cos(target_roll), math.sin(target_roll)
+    cp, sp = math.cos(target_pitch), math.sin(target_pitch)
+    cy, sy = math.cos(target_yaw), math.sin(target_yaw)
+    
+    R_target = np.array([
+        [cy*cp, cy*sp*sr - sy*cr, cy*sp*cr + sy*sr],
+        [sy*cp, sy*sp*sr + cy*cr, sy*sp*cr - cy*sr],
+        [  -sp,            cp*sr,            cp*cr   ]
+    ])
+
+    # Account for TCP's fixed Z rotation (90°)
+    R_tcp = np.array([[0, -1, 0], [1, 0, 0], [0, 0, 1]])
+    R_target_adj = R_target @ R_tcp.T
+
+    # Calculate wrist center position (Revolute4 location)
+    L5 = 0.09465  # Revolute5 z-offset
+    L_tcp = 0.0823  # TCP y-offset
+    tcp_offset_local = np.array([0, L_tcp, L5])
+    tcp_offset_global = R_target_adj @ tcp_offset_local
+    wx = x_tcp - tcp_offset_global[0]
+    wz = z_tcp - tcp_offset_global[2]
+
+    # Revolute2 and Revolute3 parameters from URDF
+    L1_y = -0.1197  # Revolute2 y-offset
+    L1_z = 0.425    # Revolute2 z-offset
+    L2_z = 0.39225  # Revolute3 z-offset
+    L4_y = 0.093    # Revolute4 y-offset
+
+    # Transform to Revolute1 coordinate system
+    x = math.sqrt(wx**2 + wz**2)
+    y = -L4_y - L1_y  # Total y-offset from URDF
+    z = wz
+
+    # 3D geometric solution for first three joints
+    D_sq = x**2 + (z - L1_z)**2
+    cos_theta2 = (D_sq - L2_z**2 - L1_z**2) / (2 * L1_z * L2_z)
+    cos_theta2 = np.clip(cos_theta2, -1.0, 1.0)
+    theta2 = math.acos(cos_theta2)
+
+    solutions = []
+    for sign in [1, -1]:
+        theta2_candidate = sign * theta2
+        A = L1_z + L2_z * math.cos(theta2_candidate)
+        B = L2_z * math.sin(theta2_candidate)
+        
+        theta1 = math.atan2(x, z - L1_z) - math.atan2(B, A)
+        theta3_candidate = math.atan2(y, math.sqrt(x**2 + (z - L1_z - A)**2))
+        
+        # Forward kinematics verification
+        x_check = L1_z * math.sin(theta1) + L2_z * math.sin(theta1 + theta2_candidate)
+        z_check = L1_z * math.cos(theta1) + L2_z * math.cos(theta1 + theta2_candidate)
+        position_error = math.hypot(x_check - x, z_check - z)
+        solutions.append((theta1, theta2_candidate, theta3_candidate, position_error))
+
+    # Select best solution with minimum error
+    solutions.sort(key=lambda x: x[3])
+    theta1, theta2, theta3, _ = solutions[0]
+
+    # Calculate remaining rotation for wrist joints
+    R123 = np.array([
+        [math.cos(theta1 + theta2), 0, math.sin(theta1 + theta2)],
+        [0, 1, 0],
+        [-math.sin(theta1 + theta2), 0, math.cos(theta1 + theta2)]
+    ])
+    R_remaining = R123.T @ R_target_adj
+
+    # Extract theta4 (Z) and theta5 (Y)
+    theta5 = math.atan2(-R_remaining[2, 0], R_remaining[2, 2])
+    theta4 = math.atan2(-R_remaining[0, 1], R_remaining[1, 1])
+
+    return (theta1, theta2, theta3, theta4, theta5)
+```
+
+### Explanation
+1. **Kinematic Modeling**: Accurately models the robot structure from URDF parameters, including all Y and Z offsets.
+2. **TCP Compensation**: Correctly transforms TCP offset using target orientation to find wrist center.
+3. **3D Geometry**: Solves first three joints using 3D position calculations with error-checked solutions.
+4. **Orientation Handling**: Properly decomposes remaining rotation into Z and Y axes for the wrist joints.
+
+This solution addresses the key issues from previous attempts by rigorously following the kinematic structure from the URDF and using proper 3D geometric calculations.

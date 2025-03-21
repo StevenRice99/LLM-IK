@@ -1,0 +1,107 @@
+def inverse_kinematics(p: tuple[float, float, float]) -> tuple[float, float, float, float, float]:
+    """
+    Computes a set of joint angles [θ₁, θ₂, θ₃, θ₄, θ₅] (in radians)
+    that yield a TCP at the desired position p, based on the following closed‐form kinematics:
+    
+      • p₃ = [ 0.425·sin(θ₂)·cos(θ₁) - 0.01615·sin(θ₁),
+               0.425·sin(θ₂)·sin(θ₁) + 0.01615·cos(θ₁),
+               0.425·cos(θ₂) ]
+      
+      • TCP = p₃ + [ 0.09465·sin(θ₄),  0.093,  0.39225 + 0.09465·cos(θ₄) ]
+      
+    Since the arm has 5 degrees-of-freedom and only 3 are necessary for positioning,
+    we choose the redundant joints by setting θ₃ = 0 and θ₅ = 0.
+    
+    The strategy is to “subtract” the wrist offset [0.09465·sin(θ₄), 0.093, 0.39225+0.09465·cos(θ₄)]
+    from the target position to obtain a virtual target that must be reached by p₃. Then,
+    we solve for θ₂ from the z–component and use the x– and y–components to compute θ₁.
+    
+    :param p: Desired TCP position as a tuple (x, y, z).
+    :return: A tuple of joint angles (θ₁, θ₂, θ₃, θ₄, θ₅) in radians.
+    """
+    import math
+
+    # Unpack the target TCP position.
+    x, y, z = p
+
+    # **********************
+    # Define the robot geometry (all units in meters):
+    # **********************
+    # For the "p₃" sub-chain (joints 1 and 2):
+    L_a = 0.425      # effective link length governing revolute-2 and revolute-3.
+    offset_y = 0.01615  # lateral offset from the geometry (as provided by Existing code 1).
+    # (The magnitude of p₃ satisfies: ||p₃||^2 = L_a^2 + offset_y^2.)
+    
+    # For the wrist (joints 4 and TCP offset):
+    d_y = 0.093     # constant translation in y (from revolute 5)
+    d_z = 0.39225   # constant translation in z (from revolute 4)
+    d_tcp = 0.09465 # TCP offset length applied along the wrist directions
+
+    # **********************
+    # Step 1: Solve for the wrist joint angle θ₄.
+    # The full TCP position is given by:
+    #      TCP = p₃ + [ d_tcp*sin(θ₄),   d_y,   d_z + d_tcp*cos(θ₄) ]
+    #
+    # Rearranging, the virtual target for p₃ is:
+    #      p₃ = [ x - d_tcp*sin(θ₄),
+    #             y - d_y,
+    #             z - d_z - d_tcp*cos(θ₄) ]
+    #
+    # Moreover, from the kinematics, the magnitude of p₃ is fixed:
+    #      ||p₃||^2 = L_a^2 + offset_y^2.
+    #
+    # Setting up this relation leads (after algebra) to:
+    #     (x - d_tcp*sin(θ₄))^2 + (y - d_y)^2 + (z - d_z - d_tcp*cos(θ₄))^2 = L_a^2 + offset_y^2.
+    #
+    # One can show that this results in an equation of the form:
+    #     x*sin(θ₄) + (z - d_z)*cos(θ₄) = K,
+    # where:
+    K = ((x**2 + (y - d_y)**2 + (z - d_z)**2 + d_tcp**2) - (L_a**2 + offset_y**2)) / (2 * d_tcp)
+    
+    # Define R and φ to rewrite the left-hand side:
+    R_val = math.sqrt(x**2 + (z - d_z)**2)
+    phi = math.atan2(x, (z - d_z))
+    
+    # With the formulation R_val*cos(θ₄ - φ) = K, we can solve for θ₄:
+    #    cos(θ₄ - φ) = K / R_val
+    # Choose the positive branch (alternate solutions exist).
+    ratio = K / R_val  # (Assumed to be within [-1, 1] as target is reachable.)
+    theta4 = phi + math.acos(ratio)
+    
+    # **********************
+    # Step 2: Compute the virtual target for p₃.
+    x_p3 = x - d_tcp * math.sin(theta4)
+    y_p3 = y - d_y
+    z_p3 = z - d_z - d_tcp * math.cos(theta4)
+    
+    # **********************
+    # Step 3: Solve for θ₂ and θ₁ from the p₃ equations.
+    #
+    # p₃ (from the joint kinematics) is given by:
+    #   p₃ = [ L_a*sin(θ₂)*cos(θ₁) - offset_y*sin(θ₁),
+    #          L_a*sin(θ₂)*sin(θ₁) + offset_y*cos(θ₁),
+    #          L_a*cos(θ₂) ]
+    #
+    # From the z–component:
+    #      z_p3 = L_a*cos(θ₂)   →   θ₂ = acos(z_p3 / L_a)
+    theta2 = math.acos(z_p3 / L_a)
+    
+    # Let A = L_a*sin(θ₂) and B = offset_y.
+    A = L_a * math.sin(theta2)
+    B = offset_y
+    # With the x– and y–components, we have:
+    #      x_p3 = A*cos(θ₁) - B*sin(θ₁)
+    #      y_p3 = A*sin(θ₁) + B*cos(θ₁)
+    # These can be solved by computing:
+    denom = A**2 + B**2  # This is nonzero since A and B are not simultaneously zero.
+    C = (A * x_p3 + B * y_p3) / denom
+    S = (-B * x_p3 + A * y_p3) / denom
+    theta1 = math.atan2(S, C)
+    
+    # **********************
+    # Step 4: Set the redundant joints.
+    # We choose:
+    theta3 = 0.0  # This joint is not required to achieve the position.
+    theta5 = 0.0  # Wrist rotation about the TCP (θ₅) does not affect position.
+    
+    return (theta1, theta2, theta3, theta4, theta5)

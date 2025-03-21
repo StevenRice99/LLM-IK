@@ -1,0 +1,86 @@
+To solve the inverse kinematics for the 5-DOF manipulator, we decompose the problem into positioning the wrist center using the first two joints and adjusting the orientation with the remaining three joints. Here's the step-by-step approach:
+
+1. **Calculate Wrist Center Position**: Subtract the TCP's offset (transformed by the target orientation) from the target position to find the wrist center's X and Z coordinates. The Y-coordinate is fixed at -0.0267 due to the robot's structure.
+
+2. **Solve for Joints 1-2**: Use geometric inverse kinematics for a planar 2R chain to determine theta1 and theta2, positioning the wrist center.
+
+3. **Solve for Joints 3-5**: Compute the remaining rotation needed to achieve the target orientation and decompose it into Y-Z-Y Euler angles corresponding to theta3, theta4, and theta5.
+
+```python
+import math
+import numpy as np
+
+def inverse_kinematics(p: tuple[float, float, float], r: tuple[float, float, float]) -> tuple[float, float, float, float, float]:
+    # Target position and orientation
+    x_tcp, y_tcp, z_tcp = p
+    target_roll, target_pitch, target_yaw = r
+
+    # Compute desired orientation matrix
+    cr, cp, cy = math.cos(target_roll), math.cos(target_pitch), math.cos(target_yaw)
+    sr, sp, sy = math.sin(target_roll), math.sin(target_pitch), math.sin(target_yaw)
+    R_target = np.array([
+        [cy * cp, cy * sp * sr - sy * cr, cy * sp * cr + sy * sr],
+        [sy * cp, sy * sp * sr + cy * cr, sy * sp * cr - cy * sr],
+        [-sp, cp * sr, cp * cr]
+    ])
+
+    # TCP offset from wrist center in TCP's frame
+    tcp_offset = np.array([0, 0.0823, 0.09465])
+    wrist_center = np.array(p) - R_target @ tcp_offset
+
+    # Wrist center Y is fixed at -0.0267
+    x_wc, _, z_wc = wrist_center
+    y_wc = -0.0267
+
+    # Solve for theta1 and theta2 using planar 2R inverse kinematics
+    a1, a2 = 0.425, 0.39225
+    dx, dz = x_wc, z_wc
+
+    D_sq = dx**2 + dz**2
+    D = math.sqrt(D_sq)
+    cos_theta2 = (D_sq - a1**2 - a2**2) / (2 * a1 * a2)
+    cos_theta2 = np.clip(cos_theta2, -1.0, 1.0)
+    theta2 = math.acos(cos_theta2)
+    theta1 = math.atan2(dx, dz) - math.atan2(a2 * math.sin(theta2), a1 + a2 * math.cos(theta2))
+
+    # Compute rotation from joints 1-2
+    R1 = np.array([
+        [math.cos(theta1), 0, math.sin(theta1)],
+        [0, 1, 0],
+        [-math.sin(theta1), 0, math.cos(theta1)]
+    ])
+    R2 = np.array([
+        [math.cos(theta2), 0, math.sin(theta2)],
+        [0, 1, 0],
+        [-math.sin(theta2), 0, math.cos(theta2)]
+    ])
+    R_joints_12 = R1 @ R2
+
+    # Fixed TCP rotation from URDF
+    R_tcp = np.array([[0, -1, 0], [1, 0, 0], [0, 0, 1]])
+
+    # Remaining rotation needed from joints 3-5 and TCP
+    R_remaining = R_joints_12.T @ R_target @ R_tcp.T
+
+    # Decompose R_remaining into Y-Z-Y Euler angles (theta3, theta4, theta5)
+    def yzy_decomposition(R):
+        theta4 = math.atan2(math.sqrt(R[0,1]**2 + R[2,1]**2), R[1,1])
+        if np.isclose(math.sin(theta4), 0):
+            # Gimbal lock case
+            theta3 = 0.0
+            theta5 = math.atan2(-R[2,0], R[0,0])
+        else:
+            theta3 = math.atan2(R[2,1] / math.sin(theta4), R[0,1] / math.sin(theta4))
+            theta5 = math.atan2(R[1,2] / math.sin(theta4), -R[1,0] / math.sin(theta4))
+        return theta3, theta4, theta5
+
+    theta3, theta4, theta5 = yzy_decomposition(R_remaining)
+
+    return (theta1, theta2, theta3, theta4, theta5)
+```
+
+**Explanation:**
+
+1. **Wrist Center Calculation**: The wrist center is determined by adjusting the target position with the TCP's offset, considering the target orientation.
+2. **Positioning (Joints 1-2)**: Using geometric inverse kinematics for a planar 2R chain, the first two joint angles are calculated to position the wrist center.
+3. **Orientation Adjustment (Joints 3-5)**: The remaining rotation needed to achieve the target orientation is decomposed into Y-Z-Y Euler angles, corresponding to the last three joints. This decomposition accounts for the sequential rotations around Y, Z, and Y axes to align the TCP's orientation correctly.

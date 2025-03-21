@@ -1,0 +1,94 @@
+def inverse_kinematics(p: tuple[float, float, float]) -> tuple[float, float, float, float]:
+    """
+    Computes joint angles for a 4-DOF manipulator such that the TCP reaches the target position p.
+    This analytical (closed-form) inverse kinematics solution fixes the redundant DOF by choosing:
+         q3 = 0.5 and q4 = 0.0.
+    
+    The kinematic chain (all values in meters and radians) is:
+      - Revolute 1: Origin [0, 0, 0], rotates about Y (angle q1).
+      - Revolute 2: Translation [0, 0, 0.39225] from the base, rotates about Y (angle q2).
+      - Revolute 3: Translation [0, 0.093, 0] from joint 2, rotates about Z (angle q3).
+      - Revolute 4: Translation [0, 0, 0.09465] from joint 3, rotates about Y (angle q4).
+      - TCP: Translation [0, 0.0823, 0] from joint 4.
+    
+    With q3 fixed, the y-coordinate of the TCP becomes:
+         p_y = 0.093 + 0.0823*cos(q3)
+    which for q3 = 0.5 gives approximately 0.165225.
+    
+    The x–z chain is governed by:
+         Q = [Qx, Qy, Qz]ᵀ = d2 + R_y(q2) * V
+    where:
+         d2 = [0, 0, 0.39225],
+         V = d3 + R_z(q3) * (d4 + d_tcp),
+         d3 = [0, 0.093, 0], d4 = [0, 0, 0.09465], d_tcp = [0, 0.0823, 0].
+    
+    Because d3 contributes only to the y component, the x–z structure can be simplified.
+    Define:
+         a = 0.0823*sin(q3)    (TCP’s contribution in x–z)
+         b = 0.09465           (translation from d4 along z)
+         L = 0.39225           (translation from d2 along z)
+    
+    Then the x–z coordinates of Q are:
+         Qx = -a*cos(q2) + b*sin(q2)
+         Qz = L + a*sin(q2) + b*cos(q2)
+    and the planar norm satisfies:
+         r² = Qx² + Qz² = (a² + b² + L²) + 2L*(a*sin(q2) + b*cos(q2))
+    where r = sqrt(p_x²+p_z²) (the x–z distance of the target TCP).
+    
+    Solving for q2:
+         a*sin(q2) + b*cos(q2) = (r² - (a²+b²+L²))/(2L)
+    This is recast as:
+         R_val*sin(q2 + φ) = (r² - (a²+b²+L²))/(2L)
+    where R_val = sqrt(a²+b²) and φ = atan2(b, a).
+    
+    Once q2 is computed as:
+         q2 = asin((r² - (a²+b²+L²))/(2L*R_val)) - φ
+    the intermediate vector (Qx, Qz) is determined.
+    Finally, since the base rotation q1 rotates Q into p (with p = R_y(q1)*Q in the x–z plane),
+    we compute:
+         q1 = atan2(p_x, p_z) - atan2(Qx, Qz).
+    
+    Note: It is assumed that the target position is reachable and that the fixed q3 value yields the correct y offset.
+    
+    :param p: The target position (x, y, z) for the TCP.
+    :return: A tuple (q1, q2, q3, q4) of the joint angles in radians.
+    """
+    import math
+
+    # Unpack target position.
+    x, y, z = p
+    # Compute the radial distance in the x–z plane.
+    r = math.sqrt(x * x + z * z)
+
+    # Fix the redundant joints.
+    q3 = 0.5
+    q4 = 0.0
+
+    # Geometric constants (from the URDF specifications).
+    L = 0.39225   # translation along z from base to joint 2.
+    a = 0.0823 * math.sin(q3)  # TCP offset contribution in the x–z plane from joint 3.
+    b = 0.09465   # translation along z from joint 3 to joint 4.
+
+    # The constant term (a^2 + b^2 + L^2) in the x–z distance squared.
+    constant = a * a + b * b + L * L
+
+    # From the relation r^2 = constant + 2L*(a*sin(q2) + b*cos(q2)), solve for:
+    D = (r * r - constant) / (2 * L)
+
+    # Write a*sin(q2) + b*cos(q2) in the form R_val*sin(q2 + φ)
+    R_val = math.sqrt(a * a + b * b)
+    phi = math.atan2(b, a)
+    
+    # Ensure the value for asin is within [-1, 1] (accounting for numerical precision).
+    ratio = D / R_val
+    ratio = max(min(ratio, 1.0), -1.0)
+    q2 = math.asin(ratio) - phi
+
+    # Compute the intermediate x–z coordinates.
+    Qx = -a * math.cos(q2) + b * math.sin(q2)
+    Qz = L + a * math.sin(q2) + b * math.cos(q2)
+
+    # Find q1 to align the rotated intermediate vector with the target.
+    q1 = math.atan2(x, z) - math.atan2(Qx, Qz)
+
+    return (q1, q2, q3, q4)

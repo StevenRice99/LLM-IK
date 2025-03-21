@@ -1,0 +1,86 @@
+def inverse_kinematics(p: tuple[float, float, float]) -> tuple[float, float, float, float, float]:
+    """
+    Computes an analytical closed-form inverse kinematics solution for a 5-DOF manipulator.
+    
+    The kinematic chain and relevant parameters are:
+      • Joint 1 rotates about Y and positions the arm horizontally:
+          θ₁ = atan2(px, pz)   where p = (px, py, pz) and R = sqrt(px² + pz²)
+      • Joint 2’s origin in the base frame is at [0, -0.1197, 0.425].
+      • Joint 3 translates by [0, 0, 0.39225] in its local frame.
+      
+    The wrist (joints 4 and 5) and TCP introduce a fixed offset relative to joint 3.
+    With the default wrist configuration (θ₄ = 0 and θ₅ = 0), the offsets are:
+      - Revolute 4: translation = [0, 0.093, 0]   (rotation about Z)
+      - Revolute 5: translation = [0, 0, 0.09465]  (rotation about Y)
+      - TCP:         translation = [0, 0.0823, 0] 
+      
+    When combined with the TCP’s rotation (rpy = [0, 0, 1.5708]), the effective constant
+    wrist offset becomes:
+         d_y = 0.093
+         d_z = 0.09465 + 0.0823   (i.e. 0.17695)
+    
+    To decouple position from the redundant wrist DOFs, we “remove” this fixed offset.
+    In the rotated frame, after applying θ₁ (so that the TCP now appears as (0, py, R)),
+    the wrist center position is (0, py - d_y, R - d_z).
+    
+    However, note that the translation from the base to joint 3 includes an additional shift
+    from joint 2’s origin ([0, -0.1197, 0.425]). To compensate, we add 0.1197 back to the y-axis.
+    Thus, the effective target for the (2R) subchain (joints 2 and 3) in the (y,z) plane is:
+         D_y = (py - d_y) + 0.1197   (i.e. py + 0.0267)
+         D_z = R - d_z
+         
+    The (2R) arm has link lengths:
+         A = 0.425,  B = 0.39225.
+         
+    We then solve for joint 3 (elbow) via the law of cosines:
+         cos(θ₃) = (D_y² + D_z² - A² - B²) / (2·A·B)
+         θ₃ = acos(clamped_cos_val)
+         
+    And joint 2 from:
+         θ₂ = atan2(D_y, D_z) - atan2(B*sin(θ₃), A + B*cos(θ₃))
+    
+    Finally, we set the redundant wrist joints to a default configuration:
+         θ₄ = 0,  θ₅ = 0.
+    
+    :param p: The target TCP position [x, y, z] in the base (world) frame.
+    :return: A tuple (θ₁, θ₂, θ₃, θ₄, θ₅) giving the joint angles (in radians).
+    """
+    import math
+
+    # Unpack target TCP coordinates.
+    px, py, pz = p
+
+    # (1) Compute θ₁ from the horizontal projection.
+    theta1 = math.atan2(px, pz)
+    R = math.sqrt(px**2 + pz**2)
+
+    # (2) Remove the wrist offset.
+    # With default wrist configuration (θ₄ = θ₅ = 0):
+    d_y = 0.093
+    d_z = 0.09465 + 0.0823  # This equals 0.17695.
+    # In the rotated frame the TCP appears at (0, py, R),
+    # so the wrist center is at (0, py - d_y, R - d_z).
+    # Correct for the offset due to joint 2’s origin at [0, -0.1197, 0.425]:
+    D_y = (py - d_y) + 0.1197  # simplifies to py + 0.0267.
+    D_z = R - d_z
+
+    # (3) Solve the 2R subchain for joints 2 and 3.
+    A = 0.425
+    B = 0.39225
+
+    # Calculate θ₃ using the cosine law.
+    cos_theta3 = (D_y**2 + D_z**2 - A**2 - B**2) / (2 * A * B)
+    # Clamp the cosine value to prevent numerical errors.
+    cos_theta3 = max(min(cos_theta3, 1.0), -1.0)
+    theta3 = math.acos(cos_theta3)  # This is the elbow-down solution.
+
+    # (4) Solve for θ₂.
+    K1 = A + B * math.cos(theta3)
+    K2 = B * math.sin(theta3)
+    theta2 = math.atan2(D_y, D_z) - math.atan2(K2, K1)
+
+    # (5) Specify the redundant wrist joints.
+    theta4 = 0.0
+    theta5 = 0.0
+
+    return (theta1, theta2, theta3, theta4, theta5)

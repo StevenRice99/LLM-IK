@@ -1,0 +1,81 @@
+To solve this problem, we need to determine the joint angles for a 5-DOF robotic arm to reach a target position and orientation. The solution involves positioning the wrist center using the first three joints and adjusting the orientation with the last two joints. Here's the approach:
+
+1. **Calculate the Wrist Center (WC):** The WC is derived by subtracting the TCP's offset (transformed by the desired orientation) from the target position.
+2. **Solve for Joints 1-2:** Use geometric inverse kinematics to position the WC by solving the planar 2R chain formed by the first two joints.
+3. **Solve for Joints 3-5:** Compute the remaining rotation needed and decompose it into the respective Euler angles for the last three joints.
+
+```python
+import math
+import numpy as np
+
+def inverse_kinematics(p: tuple[float, float, float], r: tuple[float, float, float]) -> tuple[float, float, float, float, float]:
+    # Target position and orientation
+    x_tcp, y_tcp, z_tcp = p
+    target_roll, target_pitch, target_yaw = r
+
+    # Compute desired orientation matrix
+    cr, cp, cy = math.cos(target_roll), math.cos(target_pitch), math.cos(target_yaw)
+    sr, sp, sy = math.sin(target_roll), math.sin(target_pitch), math.sin(target_yaw)
+    R_target = np.array([
+        [cy * cp, cy * sp * sr - sy * cr, cy * sp * cr + sy * sr],
+        [sy * cp, sy * sp * sr + cy * cr, sy * sp * cr - cy * sr],
+        [-sp, cp * sr, cp * cr]
+    ])
+
+    # TCP offset from wrist center in TCP's frame (Revolute4 to TCP)
+    tcp_offset = np.array([0, 0.0823, 0.09465])
+    wrist_center = np.array(p) - R_target @ tcp_offset
+
+    # Wrist center Y must be -0.0267 (fixed by link structure)
+    x_wc, _, z_wc = wrist_center
+    y_wc = -0.0267
+
+    # Solve for theta1 and theta2 using existing code 1 logic for planar 2R
+    a1, a2 = 0.425, 0.39225
+    dx, dz = x_wc, z_wc
+
+    # Law of cosines for planar 2R
+    D_sq = dx**2 + dz**2
+    D = math.sqrt(D_sq)
+    cos_theta2 = (D_sq - a1**2 - a2**2) / (2 * a1 * a2)
+    cos_theta2 = np.clip(cos_theta2, -1.0, 1.0)
+    theta2 = math.acos(cos_theta2)
+    theta1 = math.atan2(dx, dz) - math.atan2(a2 * math.sin(theta2), a1 + a2 * math.cos(theta2))
+
+    # Compute rotation from joints 1-2
+    R1 = np.array([
+        [math.cos(theta1), 0, math.sin(theta1)],
+        [0, 1, 0],
+        [-math.sin(theta1), 0, math.cos(theta1)]
+    ])
+    R2 = np.array([
+        [math.cos(theta2), 0, math.sin(theta2)],
+        [0, 1, 0],
+        [-math.sin(theta2), 0, math.cos(theta2)]
+    ])
+    R_joints_12 = R1 @ R2
+
+    # Remaining rotation for joints 3-5 (Y-Z-Y Euler angles)
+    R_tcp = np.array([[0, -1, 0], [1, 0, 0], [0, 0, 1]])  # TCP's fixed rotation
+    R_desired = R_target @ R_tcp.T
+    R_remaining = R_joints_12.T @ R_desired
+
+    # Extract theta3 (Y), theta4 (Z), theta5 (Y) from R_remaining
+    # Using Y-Z-Y Euler angles decomposition
+    theta4 = math.atan2(math.sqrt(R_remaining[0, 2]**2 + R_remaining[2, 2]**2), R_remaining[1, 2])
+    if not np.isclose(math.sin(theta4), 0):
+        theta3 = math.atan2(R_remaining[0, 2], R_remaining[2, 2])
+        theta5 = math.atan2(R_remaining[1, 0], -R_remaining[1, 1])
+    else:
+        # Gimbal lock case
+        theta3 = 0.0
+        theta5 = math.atan2(-R_remaining[0, 1], R_remaining[0, 0])
+
+    return (theta1, theta2, theta3, theta4, theta5)
+```
+
+**Explanation:**
+
+1. **Wrist Center Calculation:** The wrist center is computed by subtracting the TCP's offset (transformed by the target orientation) from the target position. This offset accounts for the kinematic chain from the wrist to the TCP.
+2. **Joints 1-2 Solution:** Using geometric inverse kinematics for a planar 2R chain, the first two joint angles (theta1, theta2) are determined to position the wrist center's X and Z coordinates.
+3. **Orientation Adjustment:** The remaining rotation needed to achieve the target orientation is decomposed into Euler angles (Y-Z-Y) corresponding to the last three joints (theta3, theta4, theta5). This accounts for the orientation contribution from all joints to align the TCP as desired.

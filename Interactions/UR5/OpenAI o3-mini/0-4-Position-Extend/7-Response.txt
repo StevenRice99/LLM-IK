@@ -1,0 +1,85 @@
+def inverse_kinematics(p: tuple[float, float, float]) -> tuple[float, float, float, float, float]:
+    """
+    Gets the joint values needed to reach the TCP position "p" for a 5-DOF serial manipulator.
+    
+    Manipulator parameters:
+      • Joint 1 (axis Z) at [0, 0, 0]
+      • Joint 2 (axis Y) at [0, 0.13585, 0]
+      • Joint 3 (axis Y) at [0, -0.1197, 0.425]
+      • Joint 4 (axis Y) at [0, 0, 0.39225]
+      • Joint 5 (axis Z) at [0, 0.093, 0]
+      • TCP (tool tip) offset: [0, 0, 0.09465] from Joint 5
+
+    This closed‐form solution first computes the wrist center p_wc by removing the TCP offset:
+         p_wc = [x, y, z - 0.09465]
+    Then, using the wrist center, it applies a geometric solution (law‐of‐cosines) for joints 1–3.
+    An additional effective y-offset of 0.10915 (derived from 0.13585 − 0.1197 + 0.093) is used in computing q1.
+    Joint 4 (q4) is set to 0 and joint 5 (q5) is redundant for TCP position and is also set to 0.
+    
+    Steps:
+      1. Compute wrist center: 
+             x_wc = x,  y_wc = y,  wrist_z = z - 0.09465.
+      2. For joints 3:
+             Let L1 = 0.425 and L2 = 0.39225.
+             Compute:
+               cos(q3) = (x_wc^2 + y_wc^2 + wrist_z^2 - (L1^2 + L2^2)) / (2 * L1 * L2)
+             Then q3 = arccos(cos(q3)).
+      3. Use the intermediate values:
+             A = L1 + L2*cos(q3)
+             B = L2*sin(q3)
+         and set:
+             S = sqrt(x_wc^2 + y_wc^2 - 0.10915^2)
+         (0.10915 comes from the net offset: 0.13585 - 0.1197 + 0.093),
+         C = wrist_z.
+      4. Then compute q2:
+             q2 = atan2(S*A - C*B, S*B + C*A).
+      5. Compute q1 by correcting the base angle with:
+             q1 = atan2(y_wc, x_wc) - atan2(0.10915, S)
+         and normalize q1 to the range [-pi, pi].
+      6. Set q4 = 0 and q5 = 0.
+    
+    :param p: The target TCP position as a tuple (x, y, z).
+    :return: A tuple (q1, q2, q3, q4, q5) of joint angles (in radians).
+    """
+    import numpy as np
+
+    # Extract TCP coordinates
+    x, y, z = p
+
+    # Step 1: Compute wrist center (removing the TCP offset along z)
+    wrist_z = z - 0.09465
+    x_wc = x
+    y_wc = y
+
+    # Link lengths for joints 3 computation
+    L1 = 0.425
+    L2 = 0.39225
+
+    # Step 2: Solve for q3 using the law of cosines
+    numerator = x_wc**2 + y_wc**2 + wrist_z**2 - (L1**2 + L2**2)
+    denominator = 2 * L1 * L2
+    cos_q3 = numerator / denominator
+    cos_q3 = np.clip(cos_q3, -1.0, 1.0)  # Clamp to avoid numerical issues
+    q3 = np.arccos(cos_q3)
+
+    # Step 3: Compute intermediate parameters A and B
+    A = L1 + L2 * np.cos(q3)
+    B = L2 * np.sin(q3)
+    offset = 0.10915  # Derived as: 0.13585 - 0.1197 + 0.093
+    S_squared = x_wc**2 + y_wc**2 - offset**2
+    S = np.sqrt(S_squared) if S_squared >= 0 else 0.0
+    C = wrist_z
+
+    # Step 4: Compute q2
+    q2 = np.arctan2(S * A - C * B, S * B + C * A)
+
+    # Step 5: Compute q1 (adjusting for the effective offset)
+    phi = np.arctan2(offset, S) if S != 0 else np.pi/2
+    q1 = np.arctan2(y_wc, x_wc) - phi
+    q1 = (q1 + np.pi) % (2 * np.pi) - np.pi  # Normalize to [-pi, pi]
+
+    # Step 6: Set joint 4 and joint 5 (q4 and q5) to zero since they do not affect TCP position.
+    q4 = 0.0
+    q5 = 0.0
+
+    return (q1, q2, q3, q4, q5)

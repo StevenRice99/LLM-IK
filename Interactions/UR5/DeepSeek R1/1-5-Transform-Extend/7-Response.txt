@@ -1,0 +1,103 @@
+To solve this problem, we need to determine the joint angles for a 5-DOF robotic arm to reach a specified target position and orientation. The solution involves decomposing the problem into position and orientation components, considering the kinematic chain and the effect of each joint on the end-effector's position and orientation.
+
+### Approach
+1. **Orientation Decomposition**: Decompose the target orientation into rotations around the Z-axis (theta4) and Y-axis (theta5) using elements of the target rotation matrix. This allows us to isolate the contributions of these joints to the end-effector's orientation.
+2. **Position Adjustment**: Adjust the target position to account for the offsets from the fifth joint and the end-effector (TCP) by transforming these offsets into the world frame using the derived orientation angles. This gives the wrist position, which must be reached by the first three joints.
+3. **Geometric Solution for Position**: Use a geometric approach to solve for the first three joint angles (theta1, theta2, theta3) such that their sum equals theta_sum (derived from the orientation decomposition) and they position the wrist correctly.
+
+### Solution Code
+```python
+import math
+import numpy as np
+
+def inverse_kinematics(p: tuple[float, float, float], r: tuple[float, float, float]) -> tuple[float, float, float, float, float]:
+    x_target, y_target, z_target = p
+    roll, pitch, yaw = r
+
+    # Construct target rotation matrix
+    cr, sr = math.cos(roll), math.sin(roll)
+    cp, sp = math.cos(pitch), math.sin(pitch)
+    cy, sy = math.cos(yaw), math.sin(yaw)
+    R_x = np.array([[1, 0, 0], [0, cr, -sr], [0, sr, cr]])
+    R_y = np.array([[cp, 0, sp], [0, 1, 0], [-sp, 0, cp]])
+    R_z = np.array([[cy, -sy, 0], [sy, cy, 0], [0, 0, 1]])
+    R_target = R_z @ R_y @ R_x
+
+    # Extract elements from R_target
+    r10, r11, r12 = R_target[1, 0], R_target[1, 1], R_target[1, 2]
+
+    # Solve for theta5 using the (1,0) and (1,2) elements
+    if np.isclose(r10, 0) and np.isclose(r12, 0):
+        theta5 = 0.0  # Singularity, choose arbitrary theta5
+    else:
+        theta5 = math.atan2(r12, r10)
+
+    # Solve for theta4
+    A = r10 * math.cos(theta5) + r12 * math.sin(theta5)
+    theta4 = math.atan2(A, r11)
+
+    # Compute M = R_z(theta4) * R_y(theta5)
+    cz, sz = math.cos(theta4), math.sin(theta4)
+    cy5, sy5 = math.cos(theta5), math.sin(theta5)
+    M = np.array([
+        [cz * cy5, -sz, cz * sy5],
+        [sz * cy5, cz, sz * sy5],
+        [-sy5, 0, cy5]
+    ])
+
+    # Compute R_y(theta_sum) = R_target @ M.T
+    R_y_theta_sum = R_target @ M.T
+
+    # Extract theta_sum from R_y_theta_sum
+    r13_sum = R_y_theta_sum[0, 2]
+    r33_sum = R_y_theta_sum[2, 2]
+    theta_sum = math.atan2(r13_sum, r33_sum)
+
+    # Compute offset from wrist to TCP
+    # Link5 offset: [0, 0, 0.09465], TCP offset: [0, 0.0823, 0]
+    # In link5's frame after R_y(theta5), TCP is [0.0823*sin(theta5), 0, 0.0823*cos(theta5)]
+    # Add link5's offset: [0.0823*sin(theta5), 0, 0.09465 + 0.0823*cos(theta5)]
+    # Apply R_z(theta4): x = 0.0823*sin(theta5)*cz, y = 0.0823*sin(theta5)*sz, z = 0.09465 + 0.0823*cos(theta5)
+    # Apply R_y(theta_sum): 
+    offset_x = (0.0823 * math.sin(theta5) * cz) * math.cos(theta_sum) + (0.09465 + 0.0823 * math.cos(theta5)) * math.sin(theta_sum)
+    offset_y = 0.0823 * math.sin(theta5) * sz
+    offset_z = -(0.0823 * math.sin(theta5) * cz) * math.sin(theta_sum) + (0.09465 + 0.0823 * math.cos(theta5)) * math.cos(theta_sum)
+
+    # Wrist position
+    x_wrist = x_target - offset_x
+    y_wrist = y_target - offset_y
+    z_wrist = z_target - offset_z
+
+    # Solve for theta1, theta2, theta3 using geometric approach
+    a, b = 0.425, 0.39225
+    x, z = x_wrist, z_wrist
+
+    d_sq = x**2 + z**2
+    cos_theta2 = (d_sq - a**2 - b**2) / (2 * a * b)
+    cos_theta2 = np.clip(cos_theta2, -1.0, 1.0)
+    theta2_1 = math.acos(cos_theta2)
+    theta2_2 = -theta2_1
+
+    solutions = []
+    for theta2 in [theta2_1, theta2_2]:
+        denom = a + b * math.cos(theta2)
+        num = b * math.sin(theta2)
+        theta1 = math.atan2(x, z) - math.atan2(num, denom)
+        x_calc = a * math.sin(theta1) + b * math.sin(theta1 + theta2)
+        z_calc = a * math.cos(theta1) + b * math.cos(theta1 + theta2)
+        if math.isclose(x_calc, x, abs_tol=1e-5) and math.isclose(z_calc, z, abs_tol=1e-5):
+            theta3 = theta_sum - theta1 - theta2
+            solutions.append((theta1, theta2, theta3, theta4, theta5))
+
+    if not solutions:
+        return (0.0, 0.0, 0.0, 0.0, 0.0)
+    else:
+        return solutions[0]
+```
+
+### Explanation
+1. **Orientation Decomposition**: The target rotation matrix is decomposed into rotations around the Z-axis (theta4) and Y-axis (theta5) using elements of the matrix. This isolates the contributions of these joints to the end-effector's orientation.
+2. **Position Adjustment**: The target position is adjusted by transforming the TCP offset (considering the derived theta4 and theta5) into the world frame. This gives the wrist position, which must be reached by the first three joints.
+3. **Geometric Solution**: The first three joint angles are determined using a geometric approach to position the wrist correctly, ensuring their sum equals theta_sum. This involves solving a system of equations based on the robot's link lengths and the derived wrist position.
+
+This approach ensures that both the position and orientation of the end-effector are accurately reached by considering the entire kinematic chain and the effects of each joint rotation.

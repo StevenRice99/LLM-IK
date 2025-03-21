@@ -1,0 +1,119 @@
+To solve this problem, we need to compute the inverse kinematics for a 5-DOF manipulator, ensuring accurate positioning and orientation of the end-effector. The key steps involve correctly handling the kinematic chain transformations and orientation decomposition.
+
+### Approach
+1. **Compute Joint 1 (θ₁)**: Determine the rotation around the Z-axis to align the arm with the target's x-y projection, considering the position of Joint 2.
+2. **Adjust Target Position**: Transform the target position into the coordinate frame of Joint 2 after accounting for its position relative to Joint 1.
+3. **Solve Planar Arm (Joints 2-4)**: Treat the remaining joints (2-4) as a planar arm in the x-z plane of Joint 2's frame, solving for the joint angles to reach the adjusted target position.
+4. **Compute Joint 5 (θ₅)**: Determine the Z-axis rotation needed to achieve the target orientation after accounting for the previous joints.
+
+### Solution Code
+```python
+import math
+import numpy as np
+
+def inverse_kinematics(p: tuple[float, float, float], r: tuple[float, float, float]) -> tuple[float, float, float, float, float]:
+    x_tcp, y_tcp, z_tcp = p
+    roll, pitch, yaw = r
+
+    # Compute theta1 (joint1) considering joint2's position
+    theta1 = math.atan2(-x_tcp, y_tcp)
+    
+    # Position of joint2 in world frame
+    j2_x = 0.13585 * math.sin(theta1)
+    j2_y = 0.13585 * math.cos(theta1)
+    j2_z = 0.0
+
+    # Vector from joint2 to TCP in world frame
+    dx = x_tcp - j2_x
+    dy = y_tcp - j2_y
+    dz = z_tcp - j2_z
+
+    # Rotate into joint2's frame (Z rotation by -theta1)
+    adj_x = dx * math.cos(theta1) + dy * math.sin(theta1)
+    adj_y = -dx * math.sin(theta1) + dy * math.cos(theta1)
+    adj_z = dz
+
+    # Adjust for joint3's position in joint2's frame (0, -0.1197, 0.425)
+    target_x = adj_x - 0.0
+    target_y = adj_y - (-0.1197)
+    target_z = adj_z - 0.425
+
+    # Planar arm parameters (joint3 to TCP)
+    a = 0.39225  # joint4's z offset
+    b = 0.093 + 0.09465  # joint5's y + TCP's z
+
+    # Solve planar arm in X-Z plane
+    x = math.sqrt(target_x**2 + target_z**2)
+    z = target_y
+
+    # Cosine law for theta3 (joint4)
+    D = (x**2 + z**2 - a**2 - b**2) / (2 * a * b)
+    D = max(min(D, 1.0), -1.0)
+    theta3 = math.acos(D)
+
+    # Two possible solutions for theta3
+    solutions = []
+    for theta3 in [theta3, -theta3]:
+        gamma = math.atan2(z, x)
+        beta = math.atan2(b * math.sin(theta3), a + b * math.cos(theta3))
+        theta2 = gamma - beta
+
+        # Validate solution
+        x_check = a * math.cos(theta2) + b * math.cos(theta2 + theta3)
+        z_check = a * math.sin(theta2) + b * math.sin(theta2 + theta3)
+        if math.isclose(x_check, x, abs_tol=1e-5) and math.isclose(z_check, z, abs_tol=1e-5):
+            solutions.append((theta2, theta3))
+
+    if not solutions:
+        theta2, theta3 = 0.0, 0.0
+    else:
+        theta2, theta3 = solutions[0]
+
+    # Compute theta4 (joint5 orientation)
+    R_target = np.array([
+        [math.cos(yaw)*math.cos(pitch), 
+         math.cos(yaw)*math.sin(pitch)*math.sin(roll) - math.sin(yaw)*math.cos(roll),
+         math.cos(yaw)*math.sin(pitch)*math.cos(roll) + math.sin(yaw)*math.sin(roll)],
+        [math.sin(yaw)*math.cos(pitch),
+         math.sin(yaw)*math.sin(pitch)*math.sin(roll) + math.cos(yaw)*math.cos(roll),
+         math.sin(yaw)*math.sin(pitch)*math.cos(roll) - math.cos(yaw)*math.sin(roll)],
+        [-math.sin(pitch),
+         math.cos(pitch)*math.sin(roll),
+         math.cos(pitch)*math.cos(roll)]
+    ])
+
+    # Compute cumulative rotation up to joint4
+    R_j1 = np.array([
+        [math.cos(theta1), -math.sin(theta1), 0],
+        [math.sin(theta1), math.cos(theta1), 0],
+        [0, 0, 1]
+    ])
+    R_j2 = np.array([
+        [math.cos(theta2), 0, math.sin(theta2)],
+        [0, 1, 0],
+        [-math.sin(theta2), 0, math.cos(theta2)]
+    ])
+    R_j3 = np.array([
+        [math.cos(theta3), 0, math.sin(theta3)],
+        [0, 1, 0],
+        [-math.sin(theta3), 0, math.cos(theta3)]
+    ])
+    R_arm = R_j1 @ R_j2 @ R_j3
+
+    # Remaining rotation for joint5 (Z-axis)
+    R_remaining = R_arm.T @ R_target
+    theta5 = math.atan2(R_remaining[1, 0], R_remaining[0, 0])
+
+    # Theta4 compensates for planar arm orientation
+    theta4 = - (theta2 + theta3)
+
+    return (theta1, theta2, theta3, theta4, theta5)
+```
+
+### Explanation
+1. **Joint 1 (θ₁)**: Calculated using the arctangent of the target's x and y coordinates to align the arm in the correct direction, considering the position of Joint 2.
+2. **Position Adjustment**: The target position is adjusted to Joint 2's frame by subtracting Joint 2's position and rotating by θ₁.
+3. **Planar Arm Solution**: The problem is reduced to a 3R planar arm (Joints 2-4) in the x-z plane of Joint 2's frame. Using geometric methods, we solve for the joint angles to reach the adjusted target position.
+4. **Orientation Handling**: The remaining rotation needed to achieve the target orientation is computed and attributed to Joint 5's Z-axis rotation, ensuring the correct orientation is achieved by considering all previous joint rotations.
+
+This approach ensures that all joint offsets and orientations are correctly accounted for, providing an accurate inverse kinematics solution.

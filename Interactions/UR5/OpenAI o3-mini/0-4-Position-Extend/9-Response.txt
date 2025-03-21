@@ -1,0 +1,53 @@
+def inverse_kinematics(p: tuple[float, float, float]) -> tuple[float, float, float, float, float]:
+    import math
+
+    # Extract the target TCP coordinates.
+    x, y, z = p
+
+    # Step 1: Compute the wrist center by subtracting the fixed TCP offset [0, 0, 0.09465] along joint 5’s z-axis.
+    # This gives the position at the origin of the final (5th) link.
+    z_wc = z - 0.09465
+
+    # Link lengths for joints 3 (from Revolute 3 to Revolute 4):
+    L1 = 0.425
+    L2 = 0.39225
+
+    # Step 2: Compute q3 using the law of cosines.
+    # The wrist center distance squared equals x^2 + y^2 + z_wc^2.
+    # The law of cosines gives: cos(q3) = (x^2 + y^2 + z_wc^2 - (L1^2+L2^2)) / (2*L1*L2)
+    numerator = x*x + y*y + z_wc*z_wc - (L1**2 + L2**2)
+    denominator = 2 * L1 * L2
+    cos_q3 = numerator / denominator
+    # Clamp cos_q3 in [-1,+1] to avoid numerical errors.
+    cos_q3 = max(-1.0, min(1.0, cos_q3))
+    q3 = math.acos(cos_q3)
+
+    # Step 3: Define intermediate parameters A and B.
+    A = L1 + L2 * math.cos(q3)
+    B = L2 * math.sin(q3)
+
+    # The effective offset in the y-direction comes from the combined translations of Revolute 2, Revolute 3, and Revolute 5:
+    # 0.13585 (from Joint2) + (-0.1197 from Joint3) + 0.093 (from Joint5) = 0.10915.
+    offset = 0.10915
+
+    # Compute S, the effective projection in the horizontal plane after removing the offset.
+    S_squared = x*x + y*y - offset**2
+    S = math.sqrt(S_squared) if S_squared >= 0 else 0.0
+    C = z_wc
+
+    # Step 4: Compute q2 using the geometric formulation.
+    # The numerator and denominator stem from rearranging the terms from the cosine and sine laws.
+    q2 = math.atan2(S * A - C * B, S * B + C * A)
+
+    # Step 5: Compute q1 by finding the base angle and compensating for the y-offset.
+    # phi accounts for the offset along y: phi = atan2(offset, S) for nonzero S.
+    phi = math.atan2(offset, S) if S != 0 else math.pi/2
+    q1 = math.atan2(y, x) - phi
+    # Normalize q1 to the range [-pi, pi]
+    q1 = (q1 + math.pi) % (2 * math.pi) - math.pi
+
+    # Step 6: q4 does not affect the TCP position in this formulation and q5 is redundant in position.
+    q4 = 0.0
+    q5 = 0.0
+
+    return (q1, q2, q3, q4, q5)

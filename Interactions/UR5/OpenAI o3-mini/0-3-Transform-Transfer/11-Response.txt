@@ -1,0 +1,58 @@
+def inverse_kinematics(p: tuple[float, float, float], r: tuple[float, float, float]) -> tuple[float, float, float, float]:
+    import numpy as np
+    # Unpack target position and orientation
+    x, y, z = p
+    roll, pitch, yaw = r
+
+    # --- POSITION INVERSE KINEMATICS ---
+    # Compute q3 using the law of cosines
+    numerator = x**2 + y**2 + z**2 - 0.346395
+    denominator = 0.3341625
+    cos_q3 = np.clip(numerator / denominator, -1.0, 1.0)
+    q3 = np.arccos(cos_q3)
+
+    # Calculate intermediate geometric parameters
+    A = 0.425 + 0.39225 * np.cos(q3)
+    B = 0.39225 * np.sin(q3)
+    S_squared = x**2 + y**2 - (0.10915)**2
+    S = np.sqrt(S_squared) if S_squared >= 0 else 0.0
+    C = z
+    q2 = np.arctan2(S * A - C * B, S * B + C * A)
+
+    # Compute q1 with a correction for the lateral offset
+    phi = np.arctan2(0.10915, S) if S != 0 else np.pi / 2
+    q1 = np.arctan2(y, x) - phi
+    q1 = (q1 + np.pi) % (2 * np.pi) - np.pi
+
+    # --- ORIENTATION INVERSE KINEMATICS ---
+    # Construct the desired rotation matrix R_des from roll-pitch-yaw using the URDF convention:
+    # R_des = Rz(yaw) @ Ry(pitch) @ Rx(roll)
+    R_x = np.array([[1,           0,            0],
+                    [0, np.cos(roll), -np.sin(roll)],
+                    [0, np.sin(roll),  np.cos(roll)]])
+    R_y = np.array([[ np.cos(pitch), 0, np.sin(pitch)],
+                    [             0, 1,             0],
+                    [-np.sin(pitch), 0, np.cos(pitch)]])
+    R_z = np.array([[np.cos(yaw), -np.sin(yaw), 0],
+                    [np.sin(yaw),  np.cos(yaw), 0],
+                    [          0,            0, 1]])
+    R_des = R_z @ R_y @ R_x
+
+    # Remove the base rotation about Z (q1) to isolate the net rotation about Y:
+    Rz_neg_q1 = np.array([[ np.cos(q1),  np.sin(q1), 0],
+                          [-np.sin(q1),  np.cos(q1), 0],
+                          [         0,           0, 1]])
+    R_aux = Rz_neg_q1 @ R_des
+
+    # For a pure rotation about Y by an angle theta, the rotation matrix is:
+    # [cos(theta)  0  sin(theta)]
+    # [    0       1      0     ]
+    # [-sin(theta) 0  cos(theta)]
+    # Extract the total rotation angle about Y (q_total = q2+q3+q4):
+    q_total = np.arctan2(R_aux[0, 2], R_aux[0, 0])
+    
+    # Solve for q4:
+    q4 = q_total - (q2 + q3)
+    q4 = (q4 + np.pi) % (2 * np.pi) - np.pi
+
+    return (q1, q2, q3, q4)

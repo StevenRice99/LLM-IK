@@ -1,0 +1,133 @@
+def inverse_kinematics(p: tuple[float, float, float]) -> tuple[float, float, float, float, float, float]:
+    """
+    Computes the inverse kinematics for a 6-DOF serial manipulator by decoupling the problem into:
+      • An "arm" sub–chain (joints 1–3) that positions the wrist center.
+      • A "wrist" sub–chain (joints 4–6) that ensures the correct TCP orientation.
+      
+    The robot’s URDF defines:
+      - TCP (tool) position in its own frame as [0, 0.0823, 0] and desired orientation rpy = [0, 0, 1.570796325].
+      - Fixed offsets along the chain:
+            • From revolute 4 to 5 (wrist): along Y by 0.093.
+            • From revolute 5 to 6: along Z by 0.09465.
+      - Thus, the overall TCP offset (in the wrist frame) is:
+              [0, 0.093 + 0.0823, 0.09465] = [0, 0.1753, 0.09465].
+      
+    The TCP’s fixed orientation rotates this offset by +90° about Z (Rz(1.570796325)), yielding a base‐frame offset of:
+              [ –0.1753, 0, 0.09465 ].
+              
+    Hence, the wrist center (i.e. the origin of revolute 4’s frame) is:
+              p_w = p_TCP – (offset in base frame)
+                  = (x_TCP – (–0.1753), y_TCP – 0, z_TCP – 0.09465)
+                  = (x_TCP + 0.1753, y_TCP, z_TCP – 0.09465).
+
+    For joints 1–3 (the arm), the following constants (derived from the URDF) are used:
+         L_arm2 = 0.425      (from revolute 2 to 3)
+         L_arm3 = 0.39225    (from revolute 3 to 4)
+         k = 0.01615         (lateral offset computed as 0.13585 – 0.1197)
+    
+    The closed-form solution employs the law of cosines:
+         cos(theta3) = (||p_w||² – (L_arm2² + L_arm3²)) / (2 * L_arm2 * L_arm3)
+    and then projects p_w to compute theta2 and theta1 appropriately.
+    
+    For the wrist (joints 4–6), we first compute the vector v from the wrist center to the TCP:
+         v = p_TCP − p_w,
+    then rotate it into the wrist frame by applying Rz(–1.570796325). For the given geometry,
+    this yields a constant target vector of approximately (0, 0.1753, 0.09465). A 2-link geometry
+    (using an offset L_wrist1 = 0.093 and TCP offset component a = 0.0823, with L_wrist2 = 0.09465)
+    is then used to compute theta5 and theta4; for this configuration it turns out that:
+         theta5 ≈ 0, theta4 ≈ 0.
+    We then set theta6 = 0.
+    
+    :param p: TCP target position (x, y, z) in the base frame.
+    :return: Tuple of joint angles (theta1, theta2, theta3, theta4, theta5, theta6) in radians.
+    """
+    import math
+
+    # --- Robot Geometry Constants ---
+    # Arm sub–chain (joints 1–3)
+    L_arm2 = 0.425      # Link from revolute 2 to 3
+    L_arm3 = 0.39225    # Link from revolute 3 to 4
+    k = 0.01615         # Lateral offset (0.13585 - 0.1197)
+    
+    # Wrist and TCP offsets
+    L_wrist1 = 0.093    # Translation from revolute 4 to 5 along Y
+    tcp_offset = 0.0823 # TCP offset along Y in its own frame
+    L_wrist2 = 0.09465  # Translation from revolute 5 to 6 along Z
+    # Combined offset in the wrist frame becomes: [0, L_wrist1 + tcp_offset, L_wrist2] = [0, 0.1753, 0.09465]
+    # After rotating by Rz(+1.570796325), the offset in the base frame is:
+    #        offset_base = [-0.1753, 0, 0.09465]
+
+    # --- Step 1: Compute the Wrist Center Position ---
+    x_tcp, y_tcp, z_tcp = p
+    # p_w = p_TCP - (offset in base frame)
+    x_w = x_tcp + 0.1753       # Subtracting -0.1753 gives addition.
+    y_w = y_tcp
+    z_w = z_tcp - 0.09465
+
+    # --- Step 2: Solve IK for the Arm Sub–chain (Joints 1–3) ---
+    # Compute joint 3 using the law of cosines:
+    #   cos(theta3) = (||p_w||² - (L_arm2² + L_arm3²)) / (2 * L_arm2 * L_arm3)
+    squared_norm = x_w**2 + y_w**2 + z_w**2
+    cos_theta3 = (squared_norm - (L_arm2**2 + L_arm3**2)) / (2 * L_arm2 * L_arm3)
+    # Clamp cos_theta3 for numerical precision:
+    cos_theta3 = max(min(cos_theta3, 1.0), -1.0)
+    theta3 = math.acos(cos_theta3)
+    
+    # Solve for joint 2.
+    C = L_arm2 + L_arm3 * math.cos(theta3)
+    D = L_arm3 * math.sin(theta3)
+    # Compute the projection of the wrist center in the x-y plane, adjusted by lateral offset k.
+    A_sq = x_w**2 + y_w**2 - k**2
+    A = math.sqrt(A_sq) if A_sq >= 0 else 0.0
+    den_theta2 = C**2 + D**2
+    sin_theta2 = (C * A - D * z_w) / den_theta2
+    cos_theta2 = (C * z_w + D * A) / den_theta2
+    theta2 = math.atan2(sin_theta2, cos_theta2)
+    
+    # Solve for joint 1 from the x-y projection.
+    if (x_w**2 + y_w**2) == 0:
+        theta1 = 0.0
+    else:
+        num_theta1 = A * y_w - k * x_w
+        den_theta1 = A * x_w + k * y_w
+        theta1 = math.atan2(num_theta1, den_theta1)
+    
+    # --- Step 3: Solve IK for the Wrist Sub–chain (Joints 4–6) ---
+    # Compute the vector from the wrist center to the TCP.
+    v_x = x_tcp - x_w  # Expected to be approximately -0.1753
+    v_y = y_tcp - y_w  # Expected to be approximately  0.0
+    v_z = z_tcp - z_w  # Expected to be approximately  0.09465
+    
+    # Rotate vector v into the wrist (joint-4) coordinate frame.
+    # This is achieved by "undoing" the TCP rotation Rz(1.570796325), i.e. applying Rz(-1.570796325).
+    angle = -1.570796325  # -90° in radians
+    cos_angle = math.cos(angle)
+    sin_angle = math.sin(angle)
+    x_target = cos_angle * v_x - sin_angle * v_y
+    y_target = sin_angle * v_x + cos_angle * v_y
+    z_target = v_z  # remains the same
+    
+    # For this robot, the transformed target becomes approximately:
+    #    (x_target, y_target, z_target) ≈ (0, 0.1753, 0.09465)
+    # Use a 2-link planar solution for the wrist:
+    #   Compute theta5 first.
+    c2_val = (y_target - L_wrist1) / tcp_offset
+    c2_val = max(min(c2_val, 1.0), -1.0)
+    theta5 = math.acos(c2_val)
+    s2_val = math.sin(theta5)
+    
+    # Compute theta4 using the computed sine value.
+    A_wrist = L_wrist2  # second wrist link length along Z
+    B_wrist = -tcp_offset * s2_val
+    denom_wrist = A_wrist**2 + (tcp_offset * s2_val)**2
+    if abs(denom_wrist) < 1e-10:
+        theta4 = 0.0
+    else:
+        sin_theta4 = (A_wrist * x_target - B_wrist * z_target) / denom_wrist
+        cos_theta4 = (A_wrist * z_target + B_wrist * x_target) / denom_wrist
+        theta4 = math.atan2(sin_theta4, cos_theta4)
+    
+    # For the given fixed TCP orientation and geometry, we set the final wrist joint as zero.
+    theta6 = 0.0
+    
+    return (theta1, theta2, theta3, theta4, theta5, theta6)

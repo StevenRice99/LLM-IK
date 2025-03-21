@@ -1,0 +1,111 @@
+import numpy as np
+
+def inverse_kinematics(p: tuple[float, float, float], r: tuple[float, float, float]) -> tuple[float, float, float, float]:
+    """
+    Gets the joint values needed to reach a desired end-effector position and orientation.
+    
+    The manipulator has 4 revolute joints with the following structure:
+      - Joint 1 rotates about Z.
+      - Joints 2, 3, and 4 rotate about Y (in their local frames), and because no additional rotations 
+        are introduced between these joints (all origin rpy are [0,0,0]), the rotations about Y combine additively.
+    
+    Thus the overall orientation (ignoring constant link rotations) is:
+        R = Rz(q1) * Ry(q2) * Ry(q3) * Ry(q4) = Rz(q1) * Ry(q2+q3+q4).
+    
+    The provided closed-form position solution (derived from the geometry of the arm) is:
+      x, y, z = p
+      q3 = arccos((x²+y²+z² – 0.346395)/0.3341625)
+      A = 0.425 + 0.39225*cos(q3)
+      B = 0.39225*sin(q3)
+      S = sqrt(x²+y² – 0.10915²)
+      q2 = arctan2(S*A – z*B, S*B + z*A)
+      phi = arctan2(0.10915, S)
+      q1 = arctan2(y, x) – phi
+    
+    To also satisfy the desired end‐effector orientation – represented as roll-pitch-yaw “r” (in radians) –
+    we compute the desired rotation matrix R_des from the rpy angles (using the common URDF convention,
+    where r = [roll, pitch, yaw] and R_des = Rz(yaw) @ Ry(pitch) @ Rx(roll)). Then note that the computed
+    position solution already fixes q1, so if we “remove” this rotation by pre‐multiplying by Rz(-q1), we should
+    be left with a pure rotation about Y:
+    
+         Rz(-q1)*R_des = Ry(q2+q3+q4)
+    
+    From a rotation about Y by an angle θ the matrix is:
+         Ry(θ) = [ [cosθ, 0, sinθ],
+                   [   0,  1,    0],
+                   [-sinθ, 0, cosθ] ]
+                   
+    So we can extract q_total (where q_total = q2+q3+q4) via:
+         q_total = atan2( R_aux[0,2], R_aux[0,0] )
+    
+    Then, knowing q2 and q3 from the positioning solution, we set:
+         q4 = q_total – (q2+q3)
+    
+    Assumes all inputs are reachable and that no singularities occur.
+    
+    :param p: The target position [x, y, z] in world coordinates.
+    :param r: The target orientation in roll-pitch-yaw (radians), as [roll, pitch, yaw].
+    :return: A tuple (q1, q2, q3, q4) of joint angles (in radians).
+    """
+    # Unpack target position
+    x, y, z = p
+
+    # --- POSITION INVERSE KINEMATICS (existing closed‐form solution) ---
+    # Compute q3 via the law of cosines
+    numerator   = x**2 + y**2 + z**2 - 0.346395
+    denominator = 0.3341625
+    cos_q3 = np.clip(numerator / denominator, -1.0, 1.0)
+    q3 = np.arccos(cos_q3)
+    
+    # Intermediate terms based on robot geometry (link lengths)
+    A = 0.425 + 0.39225 * np.cos(q3)
+    B = 0.39225 * np.sin(q3)
+    
+    # Compute S; note the offset 0.10915 in the x-y plane
+    S_squared = x**2 + y**2 - 0.10915**2
+    S = np.sqrt(S_squared) if S_squared >= 0 else 0.0
+    C = z
+    q2 = np.arctan2(S * A - C * B, S * B + C * A)
+    
+    # Correction for base joint angle due to lateral offset
+    phi = np.arctan2(0.10915, S) if S != 0 else np.pi / 2
+    q1 = np.arctan2(y, x) - phi
+    # Normalize q1 to be within [-pi, pi]
+    q1 = (q1 + np.pi) % (2 * np.pi) - np.pi
+
+    # --- ORIENTATION INVERSE KINEMATICS ---
+    # First, compute the desired end-effector rotation matrix R_des from rpy.
+    # Using the URDF convention: rpy (roll, pitch, yaw) --> R = Rz(yaw) @ Ry(pitch) @ Rx(roll)
+    roll, pitch, yaw = r
+    R_x = np.array([[1, 0, 0],
+                    [0, np.cos(roll), -np.sin(roll)],
+                    [0, np.sin(roll),  np.cos(roll)]])
+    R_y = np.array([[ np.cos(pitch), 0, np.sin(pitch)],
+                    [            0, 1,            0],
+                    [-np.sin(pitch), 0, np.cos(pitch)]])
+    R_z = np.array([[np.cos(yaw), -np.sin(yaw), 0],
+                    [np.sin(yaw),  np.cos(yaw), 0],
+                    [         0,           0, 1]])
+    R_des = R_z @ R_y @ R_x
+
+    # Remove the effect of q1 from the overall rotation.
+    # Rz(-q1) is the inverse rotation of q1 about Z.
+    Rz_neg_q1 = np.array([[ np.cos(q1),  np.sin(q1), 0],
+                          [-np.sin(q1),  np.cos(q1), 0],
+                          [         0,           0, 1]])
+    R_aux = Rz_neg_q1 @ R_des
+    # Now R_aux should be a pure rotation about Y, i.e., R_aux = Ry(q2+q3+q4).
+    # For a rotation about Y:
+    #    [ cos(theta)   0   sin(theta) ]
+    #    [     0        1        0     ]
+    #    [-sin(theta)   0   cos(theta) ]
+    # We can extract theta = q2+q3+q4 as:
+    q_total = np.arctan2(R_aux[0, 2], R_aux[0, 0])
+    
+    # With q_total known and q2, q3 determined from the position IK,
+    # the last joint angle is:
+    q4 = q_total - (q2 + q3)
+    # Normalize q4 to be within [-pi, pi]
+    q4 = (q4 + np.pi) % (2 * np.pi) - np.pi
+
+    return (q1, q2, q3, q4)

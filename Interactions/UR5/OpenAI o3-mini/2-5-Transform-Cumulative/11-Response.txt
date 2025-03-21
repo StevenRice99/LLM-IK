@@ -1,0 +1,112 @@
+def inverse_kinematics(p: tuple[float, float, float],
+                       r: tuple[float, float, float]) -> tuple[float, float, float, float]:
+    """
+    Computes the joint angles (theta1, theta2, theta3, theta4) for the 4-DOF serial manipulator 
+    given the desired TCP position p and orientation r.
+
+    The kinematic chain is:
+      • Revolute 1: Located at [0, 0, 0], rotates about Y.
+      • Revolute 2: Follows a translation [0, 0, 0.39225], rotates about Y.
+      • Revolute 3: Follows a translation [0, 0.093, 0], rotates about Z.
+      • Revolute 4: Follows a translation [0, 0, 0.09465], rotates about Y.
+      • TCP: Has a fixed translation [0, 0.0823, 0] and fixed rotation R_z(1.570796325).
+
+    This closed-form solution decouples the IK into a position portion (solving for joints 1 and 2)
+    and an orientation portion (solving for joints 3 and 4).
+
+    Steps:
+      1. Construct the target rotation matrix R_target using the provided roll–pitch–yaw (r)
+         with convention: R_target = R_z(rz) · R_y(ry) · R_x(rx).
+      2. Determine the combined rotation angle (phi = theta1 + theta2) from the z–axis direction 
+         of R_target:
+             phi = atan2(R_target[0,2], R_target[2,2])
+      3. Account for the offset introduced by joint 4's translation along its local z–axis (L4 = 0.09465)
+         by adjusting the x and z coordinates:
+             x_adj = x_target – L4*sin(phi)
+             z_adj = z_target – L4*cos(phi)
+         Then solve:
+             theta1 = atan2(x_adj, z_adj)
+             theta2 = phi - theta1
+      4. Solve for theta3 (rotation about Z) from the target's sideways view:
+             theta3 = atan2(R_target[1,0], R_target[1,1])
+      5. The rotation from the base up to joint 3 is R_0123 = R_y(theta1+theta2) · R_z(theta3).
+         The TCP has a fixed rotation offset R_tcp_off = R_z(1.570796325). Since the final 
+         forward kinematics is:
+             R_total = R_0123 · R_y(theta4) · R_tcp_off,
+         we solve for the remaining rotation R_y(theta4) via:
+             M = (R_0123)⁻¹ · R_target · (R_tcp_off)⁻¹,
+         and extract theta4 from the Y-axis rotation (i.e., M should have the form:
+             [ cos(theta4)   0   sin(theta4)
+                   0          1        0      
+              -sin(theta4)   0   cos(theta4) ] ).
+         Thus, theta4 = atan2(M[0,2], M[0,0]).
+
+    It is assumed that the given target (p, r) is reachable.
+
+    :param p: The target TCP position as a tuple (x, y, z).
+    :param r: The target TCP orientation as (roll, pitch, yaw) in radians.
+    :return: A tuple (theta1, theta2, theta3, theta4) of joint angles in radians.
+    """
+    import math
+    import numpy as np
+
+    # Unpack target position and orientation (roll, pitch, yaw)
+    x_target, y_target, z_target = p
+    rx, ry, rz = r
+
+    # --- Rotation helper functions ---
+    def rot_x(angle: float) -> np.ndarray:
+        return np.array([
+            [1, 0, 0],
+            [0, math.cos(angle), -math.sin(angle)],
+            [0, math.sin(angle),  math.cos(angle)]
+        ])
+
+    def rot_y(angle: float) -> np.ndarray:
+        return np.array([
+            [ math.cos(angle), 0, math.sin(angle)],
+            [0,                1,               0],
+            [-math.sin(angle), 0, math.cos(angle)]
+        ])
+
+    def rot_z(angle: float) -> np.ndarray:
+        return np.array([
+            [math.cos(angle), -math.sin(angle), 0],
+            [math.sin(angle),  math.cos(angle), 0],
+            [0,                         0,      1]
+        ])
+
+    # --- (1) Build the target rotation matrix R_target ---
+    # Using the convention: R_target = R_z(rz) · R_y(ry) · R_x(rx)
+    R_target = rot_z(rz) @ rot_y(ry) @ rot_x(rx)
+
+    # --- (2) Account for joints 1 & 2 (both rotate about Y) ---
+    # Their combined rotation (phi = theta1 + theta2) is obtained from the z-axis of R_target.
+    phi = math.atan2(R_target[0, 2], R_target[2, 2])
+
+    # --- (3) Remove the offset due to joint 4's translation ---
+    # Joint 4 has a translation L4 = 0.09465 along its local z-axis.
+    L4 = 0.09465
+    x_adj = x_target - L4 * math.sin(phi)
+    z_adj = z_target - L4 * math.cos(phi)
+
+    # Solve for theta1 (rotation about Y); theta2 follows from the compound angle phi.
+    theta1 = math.atan2(x_adj, z_adj)
+    theta2 = phi - theta1
+
+    # --- (4) Solve for joint 3 (rotation about Z) ---
+    theta3 = math.atan2(R_target[1, 0], R_target[1, 1])
+
+    # --- (5) Solve for joint 4 (rotation about Y) ---
+    # Rotation from base up to joint 3:
+    R_0123 = rot_y(theta1 + theta2) @ rot_z(theta3)
+    # TCP has a fixed rotation offset:
+    R_tcp_off = rot_z(1.570796325)
+    # Compute the residual rotation that must be provided by joint 4:
+    M = np.linalg.inv(R_0123) @ R_target @ np.linalg.inv(R_tcp_off)
+    # For a pure rotation about Y: M = [[cos(theta4), 0, sin(theta4)],
+    #                                   [     0,      1,      0     ],
+    #                                   [-sin(theta4),0, cos(theta4)]]
+    theta4 = math.atan2(M[0, 2], M[0, 0])
+
+    return (theta1, theta2, theta3, theta4)

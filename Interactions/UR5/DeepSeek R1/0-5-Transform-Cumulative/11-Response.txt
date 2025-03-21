@@ -1,0 +1,144 @@
+To solve the inverse kinematics problem for the 6-DOF robotic arm, we need to accurately compute the joint angles required to reach a target position and orientation. The solution involves geometric calculations for the first three joints (positioning) and orientation decomposition for the last three joints.
+
+### Approach
+1. **Wrist Center Position (WCP) Calculation**: Adjust the target position by accounting for the TCP's offset using the target orientation matrix.
+2. **Theta1 Calculation**: Solve for the first joint angle using geometric circle intersection to align the WCP with the robot's structure.
+3. **Theta2 and Theta3 Calculation**: Use the law of cosines and geometric validation to find valid configurations for the second and third joints.
+4. **Orientation Decomposition**: Decompose the remaining rotation into Y-Z-Y Euler angles for the last three joints, handling gimbal lock cases.
+5. **Solution Validation**: Evaluate all possible joint configurations and select the one with minimal error.
+
+### Solution Code
+```python
+import math
+import numpy as np
+
+def inverse_kinematics(p: tuple[float, float, float], r: tuple[float, float, float]) -> tuple[float, float, float, float, float, float]:
+    target_pos = np.array(p)
+    roll, pitch, yaw = r
+
+    # Construct target rotation matrix (ZYX Euler angles)
+    cr, sr = math.cos(roll), math.sin(roll)
+    cp, sp = math.cos(pitch), math.sin(pitch)
+    cy, sy = math.cos(yaw), math.sin(yaw)
+    R_target = np.array([
+        [cy * cp, cy * sp * sr - sy * cr, cy * sp * cr + sy * sr],
+        [sy * cp, sy * sp * sr + cy * cr, sy * sp * cr - cy * sr],
+        [-sp, cp * sr, cp * cr]
+    ])
+
+    # Wrist center position calculation (Revolute 4 to TCP offset)
+    d_local = np.array([0, 0.1753, 0.09465])  # From URDF parameters
+    WCP = target_pos - R_target @ d_local
+    wx, wy, wz = WCP
+
+    # Solve theta1 using geometric circle intersection
+    theta1_candidates = []
+    radius = 0.13585  # Revolute 2's y-offset
+    denominator = math.hypot(wx, wy)
+    if abs(denominator) < 1e-6:
+        theta1_candidates = [0.0]
+    else:
+        ratio = radius / denominator
+        if abs(ratio) > 1.0:
+            return (0.0, 0.0, 0.0, 0.0, 0.0, 0.0)  # Unreachable
+        alpha = math.acos(ratio)
+        base_angle = math.atan2(-wy, -wx)
+        theta1_candidates = [
+            (base_angle + alpha) % (2*math.pi),
+            (base_angle - alpha) % (2*math.pi)
+        ]
+
+    best_solution = None
+    min_error = float('inf')
+
+    for theta1 in theta1_candidates:
+        # Transform WCP to Revolute 1's coordinate system
+        x = wx * math.cos(theta1) + wy * math.sin(theta1)
+        z = wz
+        y_error = abs(-wx * math.sin(theta1) + wy * math.cos(theta1) - 0.13585)
+        if y_error > 1e-4:
+            continue
+
+        # Solve for theta2 and theta3 using geometric IK
+        a, b = 0.425, 0.39225
+        d_sq = x**2 + z**2
+        cos_theta3 = (d_sq - a**2 - b**2) / (2*a*b)
+        cos_theta3 = np.clip(cos_theta3, -1.0, 1.0)
+        theta3 = math.acos(cos_theta3)
+        
+        for theta3_val in [theta3, -theta3]:
+            k1 = a + b * math.cos(theta3_val)
+            k2 = b * math.sin(theta3_val)
+            theta2_val = math.atan2(x, z) - math.atan2(k2, k1)
+            
+            # Verify position
+            x_calc = a * math.sin(theta2_val) + b * math.sin(theta2_val + theta3_val)
+            z_calc = a * math.cos(theta2_val) + b * math.cos(theta2_val + theta3_val)
+            if not (math.isclose(x_calc, x, abs_tol=1e-4) and math.isclose(z_calc, z, abs_tol=1e-4)):
+                continue
+
+            # Compute rotation matrices for first three joints
+            R1 = np.array([
+                [math.cos(theta1), -math.sin(theta1), 0],
+                [math.sin(theta1), math.cos(theta1), 0],
+                [0, 0, 1]
+            ])
+            R2 = np.array([
+                [math.cos(theta2_val), 0, math.sin(theta2_val)],
+                [0, 1, 0],
+                [-math.sin(theta2_val), 0, math.cos(theta2_val)]
+            ])
+            R3 = np.array([
+                [math.cos(theta3_val), 0, math.sin(theta3_val)],
+                [0, 1, 0],
+                [-math.sin(theta3_val), 0, math.cos(theta3_val)]
+            ])
+            R_base_to_4 = R1 @ R2 @ R3
+
+            # Compute required rotation for last three joints
+            R_4_to_TCP = np.linalg.inv(R_base_to_4) @ R_target
+
+            # Y-Z-Y Euler angle decomposition
+            try:
+                theta5 = math.acos(R_4_to_TCP[1, 2])
+            except ValueError:
+                continue
+
+            if not np.isclose(math.sin(theta5), 0.0, atol=1e-6):
+                s5 = math.sin(theta5)
+                theta4 = math.atan2(R_4_to_TCP[2, 2]/s5, R_4_to_TCP[0, 2]/s5)
+                theta6 = math.atan2(R_4_to_TCP[1, 0]/s5, -R_4_to_TCP[1, 1]/s5)
+            else:
+                theta6 = 0.0
+                if R_4_to_TCP[1, 2] > 0:
+                    theta4 = math.atan2(R_4_to_TCP[2, 0], R_4_to_TCP[0, 0])
+                else:
+                    theta4 = math.atan2(-R_4_to_TCP[2, 0], -R_4_to_TCP[0, 0])
+
+            # Calculate solution error metric
+            current_solution = (
+                theta1 % (2*math.pi),
+                theta2_val % (2*math.pi),
+                theta3_val % (2*math.pi),
+                theta4 % (2*math.pi),
+                theta5 % (2*math.pi),
+                theta6 % (2*math.pi)
+            )
+            
+            # Prioritize solutions with minimal joint displacements
+            solution_error = sum(abs(j) for j in current_solution)
+            if solution_error < min_error:
+                min_error = solution_error
+                best_solution = current_solution
+
+    return best_solution if best_solution is not None else (0.0, 0.0, 0.0, 0.0, 0.0, 0.0)
+```
+
+### Explanation
+1. **Wrist Center Calculation**: The target position is adjusted using the TCP's offset transformed by the target orientation matrix to find the WCP.
+2. **Theta1 Calculation**: Two possible solutions for theta1 are found using geometric circle intersection, ensuring the WCP aligns with Revolute 2's position.
+3. **Geometric Validation**: For each theta1 candidate, theta2 and theta3 are computed and validated using the law of cosines and position checks.
+4. **Orientation Decomposition**: The remaining rotation is decomposed into Y-Z-Y Euler angles, correctly handling both normal and gimbal lock cases.
+5. **Solution Selection**: The solution with the minimal total joint displacement is selected to ensure the most natural arm configuration.
+
+This approach systematically addresses positioning and orientation challenges, improving accuracy and robustness in reaching target configurations.

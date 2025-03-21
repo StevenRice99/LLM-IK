@@ -1,0 +1,96 @@
+To solve this problem, we need to determine the joint angles for a 5-DOF serial manipulator to reach a specified position and orientation. The solution involves calculating the joint angles using geometric and trigonometric methods, considering the robot's link lengths and rotational axes.
+
+### Approach
+1. **Rotation Matrix Calculation**: Convert the target orientation (given as roll, pitch, yaw) into a rotation matrix.
+2. **Adjust for TCP Orientation**: The Tool Center Point (TCP) has a fixed orientation which must be accounted for by adjusting the target rotation matrix.
+3. **Position Adjustment**: Adjust the target position to account for the TCP's position relative to the last joint using the correct offset direction.
+4. **Solve for Joint Angles 1-3**: Use geometric methods to determine the first three joint angles (theta1, theta2, theta3) to position the end-effector.
+5. **Solve for Joint Angles 4-5**: Decompose the remaining rotation needed to achieve the target orientation into the Z and Y rotations for the fourth and fifth joints.
+
+### Solution Code
+```python
+import math
+import numpy as np
+
+def inverse_kinematics(p: tuple[float, float, float], r: tuple[float, float, float]) -> tuple[float, float, float, float, float]:
+    x_tcp, y_tcp, z_tcp = p
+    target_roll, target_pitch, target_yaw = r
+
+    # Construct target rotation matrix from RPY angles
+    cr, sr = math.cos(target_roll), math.sin(target_roll)
+    cp, sp = math.cos(target_pitch), math.sin(target_pitch)
+    cy, sy = math.cos(target_yaw), math.sin(target_yaw)
+    
+    R_target = np.array([
+        [cy*cp,  cy*sp*sr - sy*cr,  cy*sp*cr + sy*sr],
+        [sy*cp,  sy*sp*sr + cy*cr,  sy*sp*cr - cy*sr],
+        [  -sp,            cp*sr,            cp*cr   ]
+    ])
+
+    # Account for TCP's fixed orientation (90° Z rotation)
+    R_tcp = np.array([[0, -1, 0], [1, 0, 0], [0, 0, 1]])
+    R_target_adj = R_target @ R_tcp.T
+
+    # Calculate combined Y rotation from first three joints
+    r13 = R_target_adj[0, 2]
+    r33 = R_target_adj[2, 2]
+    theta_sum = math.atan2(r13, r33)
+
+    # Calculate wrist center position (Revolute4 location)
+    L5 = 0.09465  # Revolute5's z-offset
+    L_tcp = 0.0823  # TCP's y-offset in Revolute5's frame
+    local_offset = np.array([0, L_tcp, L5])  # y and z in local frame
+    global_offset = R_target_adj @ local_offset
+    wx = x_tcp - global_offset[0]
+    wz = z_tcp - global_offset[2]
+
+    # Geometric solution for theta1-3
+    L2 = 0.425
+    L3 = 0.39225
+    D_sq = wx**2 + wz**2
+    D = math.sqrt(D_sq)
+    cos_theta2 = (D_sq - L2**2 - L3**2) / (2 * L2 * L3)
+    cos_theta2 = np.clip(cos_theta2, -1.0, 1.0)
+    theta2 = math.acos(cos_theta2)
+    
+    solutions = []
+    for sign in [1, -1]:
+        theta2_candidate = sign * theta2
+        A = L2 + L3 * math.cos(theta2_candidate)
+        B = L3 * math.sin(theta2_candidate)
+        theta1 = math.atan2(wx * A - wz * B, wz * A + wx * B)
+        theta3_candidate = theta_sum - theta1 - theta2_candidate
+        
+        # Verify solution
+        x_check = L2 * math.sin(theta1) + L3 * math.sin(theta1 + theta2_candidate)
+        z_check = L2 * math.cos(theta1) + L3 * math.cos(theta1 + theta2_candidate)
+        position_error = math.hypot(x_check - wx, z_check - wz)
+        solutions.append((theta1, theta2_candidate, theta3_candidate, position_error))
+    
+    # Select best solution
+    solutions.sort(key=lambda x: x[3])
+    theta1, theta2, theta3, _ = solutions[0]
+
+    # Calculate remaining rotation for wrist joints
+    R123 = np.array([
+        [math.cos(theta_sum), 0, math.sin(theta_sum)],
+        [0, 1, 0],
+        [-math.sin(theta_sum), 0, math.cos(theta_sum)]
+    ])
+    R_remaining = R123.T @ R_target_adj
+
+    # Solve for theta4 (Z) and theta5 (Y)
+    theta5 = math.atan2(-R_remaining[2, 0], R_remaining[2, 2])
+    theta4 = math.atan2(-R_remaining[0, 1], R_remaining[1, 1])
+
+    return (theta1, theta2, theta3, theta4, theta5)
+```
+
+### Explanation
+1. **Rotation Matrix Calculation**: The target orientation is converted into a rotation matrix using the roll, pitch, and yaw angles.
+2. **Adjust for TCP Orientation**: The fixed orientation of the TCP is accounted for by adjusting the target rotation matrix.
+3. **Position Adjustment**: The target position is adjusted to account for the TCP's position relative to the last joint using the correct offset direction derived from the URDF specifications.
+4. **Geometric Solution for Joints 1-3**: Using geometric methods, the first three joint angles are determined to position the end-effector, considering both elbow-up and elbow-down configurations and selecting the solution with the smallest positional error.
+5. **Orientation Decomposition**: The remaining rotation needed to achieve the target orientation is decomposed into the Z and Y rotations for the fourth and fifth joints using the correct matrix elements, ensuring accurate orientation alignment.
+
+This approach ensures that the manipulator accurately reaches the target position and orientation by correctly handling the geometric and rotational components of the inverse kinematics problem.

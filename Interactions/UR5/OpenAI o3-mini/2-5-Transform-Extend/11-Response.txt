@@ -1,0 +1,68 @@
+def inverse_kinematics(p: tuple[float, float, float], r: tuple[float, float, float]) -> tuple[float, float, float, float]:
+    import numpy as np
+
+    # Unpack target TCP position (x, y, z) and desired TCP orientation (roll, pitch, yaw)
+    x, y, z = p
+    rx, ry, rz = r
+
+    # Build the target rotation matrix.
+    # Note: The order used here is roll → pitch → yaw so that:
+    #       R_target = R_yaw * R_pitch * R_roll
+    R_roll  = np.array([[1, 0, 0],
+                        [0, np.cos(rx), -np.sin(rx)],
+                        [0, np.sin(rx),  np.cos(rx)]])
+    R_pitch = np.array([[ np.cos(ry), 0, np.sin(ry)],
+                        [          0, 1,         0],
+                        [-np.sin(ry), 0, np.cos(ry)]])
+    R_yaw   = np.array([[np.cos(rz), -np.sin(rz), 0],
+                        [np.sin(rz),  np.cos(rz), 0],
+                        [         0,           0, 1]])
+    R_target = R_yaw @ R_pitch @ R_roll
+
+    # The manipulator design uses these fixed offsets:
+    # - Link 2: translation along z of 0.39225 (not needed in decoupling the orientation)
+    # - Link 4: translation along z (back-off) of B = 0.09465 before applying TCP fixed offset.
+    B = 0.09465
+
+    # ----- Solve the 3-DOF sub-chain (joints 1, 2, 3) for positioning -----
+    # The combined rotation from joints 1 and 2 will yield an overall orientation whose
+    # z-axis projection can be related to the target's z-axis direction.
+    theta_sum = np.arctan2(R_target[0, 2], R_target[2, 2])
+    # "Back off" the TCP offset along z before computing joint 1.
+    theta1 = np.arctan2(x - B * np.sin(theta_sum), z - B * np.cos(theta_sum))
+    theta2 = theta_sum - theta1
+
+    # Joint 3 rotates about Z. Its angle is extracted directly from the target rotation matrix.
+    theta3 = np.arctan2(R_target[1, 0], R_target[1, 1])
+
+    # ----- Solve for joint 4 using the full orientation.
+    # The complete forward kinematics (ignoring translation offsets that do not affect orientation)
+    # follows the chain:
+    #    R_total = Ry(θ1) · Ry(θ2) · Rz(θ3) · Ry(θ4) · Rz(fixed_tcp_rot)
+    # where the TCP fixed rotation is provided by:
+    fixed_tcp_rot = 1.570796325  # (rotation about Z)
+    #
+    # To isolate joint 4, note that:
+    #    Ry(θ4) = [R_arm]⁻¹ · R_target · Rz(–fixed_tcp_rot)
+    # where R_arm = Ry(θ1) · Ry(θ2) · Rz(θ3)
+    def Ry(angle):
+        return np.array([[ np.cos(angle), 0, np.sin(angle)],
+                         [             0, 1,             0],
+                         [-np.sin(angle), 0, np.cos(angle)]])
+
+    def Rz(angle):
+        return np.array([[ np.cos(angle), -np.sin(angle), 0],
+                         [ np.sin(angle),  np.cos(angle), 0],
+                         [             0,              0, 1]])
+
+    R_arm = Ry(theta1) @ Ry(theta2) @ Rz(theta3)
+    R_temp = np.linalg.inv(R_arm) @ R_target @ Rz(-fixed_tcp_rot)
+
+    # For a rotation about Y, the rotation matrix has the form:
+    #       [ cos(θ4)   0   sin(θ4) ]
+    #       [    0      1      0    ]
+    #       [ -sin(θ4)  0   cos(θ4) ]
+    # We thus extract θ4 as:
+    theta4 = np.arctan2(R_temp[0, 2], R_temp[2, 2])
+
+    return (theta1, theta2, theta3, theta4)

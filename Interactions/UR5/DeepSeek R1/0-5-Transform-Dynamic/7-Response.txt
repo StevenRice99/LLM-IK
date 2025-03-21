@@ -1,0 +1,104 @@
+To solve the inverse kinematics for the 6-DOF manipulator accurately, we need to address both positional and orientational requirements while respecting the kinematic chain and joint constraints. Here's the refined solution:
+
+### Approach
+1. **Wrist Center Calculation**: Correctly adjust the target position by accounting for the TCP offset transformed by the target orientation matrix.
+2. **First Joint (θ₁)**: Determine using the projected wrist center position in the XY-plane.
+3. **Second and Third Joints (θ₂, θ₃)**: Use geometric analysis in the plane defined by θ₁, incorporating link lengths and offsets.
+4. **Last Three Joints (θ₄, θ₅, θ₆)**: Decompose the orientation matrix using the correct Y-Z-Y Euler angle sequence for the wrist joints, considering axis directions and joint limits.
+
+### Solution Code
+```python
+import math
+import numpy as np
+
+def inverse_kinematics(p: tuple[float, float, float], r: tuple[float, float, float]) -> tuple[float, float, float, float, float, float]:
+    target_pos = np.array(p)
+    roll, pitch, yaw = r
+
+    # Convert target orientation to rotation matrix (ZYX Euler angles)
+    cr, cp, cy = math.cos(roll), math.cos(pitch), math.cos(yaw)
+    sr, sp, sy = math.sin(roll), math.sin(pitch), math.sin(yaw)
+    R_target = np.array([
+        [cy * cp, cy * sp * sr - sy * cr, cy * sp * cr + sy * sr],
+        [sy * cp, sy * sp * sr + cy * cr, sy * sp * cr - cy * sr],
+        [-sp, cp * sr, cp * cr]
+    ])
+
+    # Calculate wrist center position with corrected TCP offset transformation
+    tcp_offset_local = np.array([0, 0.0823, 0])
+    wrist_center = target_pos - R_target @ tcp_offset_local
+
+    # Solve theta1 using wrist center projection on XY-plane
+    x_wrist, y_wrist, z_wrist = wrist_center
+    theta1 = math.atan2(y_wrist, x_wrist)
+
+    # Transform wrist center to the plane after theta1 rotation and adjust for joint2's Y offset
+    r_xy = math.hypot(x_wrist, y_wrist)
+    x_prime = r_xy
+    z_prime = z_wrist - 0.13585  # Joint2's Y offset becomes Z offset after theta1 rotation
+
+    # Solve theta2 and theta3 using geometric approach with proper link lengths
+    a = 0.425  # Distance from joint2 to joint3
+    b = 0.39225  # Distance from joint3 to joint4
+    d_sq = x_prime**2 + z_prime**2
+    cos_theta3 = (d_sq - a**2 - b**2) / (2 * a * b)
+    cos_theta3 = np.clip(cos_theta3, -1.0, 1.0)
+    theta3 = math.acos(cos_theta3)
+
+    # Consider both elbow-up and elbow-down configurations
+    theta3_alt = -theta3
+    theta2 = math.atan2(x_prime, z_prime) - math.atan2(b * math.sin(theta3), a + b * math.cos(theta3))
+    theta2_alt = math.atan2(x_prime, z_prime) - math.atan2(b * math.sin(theta3_alt), a + b * math.cos(theta3_alt))
+
+    # Select configuration with minimal position error
+    error1 = abs(a * math.sin(theta2) + b * math.sin(theta2 + theta3) - x_prime) + \
+             abs(a * math.cos(theta2) + b * math.cos(theta2 + theta3) - z_prime)
+    error2 = abs(a * math.sin(theta2_alt) + b * math.sin(theta2_alt + theta3_alt) - x_prime) + \
+             abs(a * math.cos(theta2_alt) + b * math.cos(theta2_alt + theta3_alt) - z_prime)
+    
+    if error2 < error1:
+        theta2, theta3 = theta2_alt, theta3_alt
+
+    # Compute orientation for wrist joints with corrected Y-Z-Y decomposition
+    R_theta1 = np.array([
+        [math.cos(theta1), -math.sin(theta1), 0],
+        [math.sin(theta1), math.cos(theta1), 0],
+        [0, 0, 1]
+    ])
+    
+    R_theta23 = np.array([
+        [math.cos(theta2 + theta3), 0, math.sin(theta2 + theta3)],
+        [0, 1, 0],
+        [-math.sin(theta2 + theta3), 0, math.cos(theta2 + theta3)]
+    ])
+    
+    R_base = R_theta1 @ R_theta23
+    R_wrist = np.linalg.inv(R_base) @ R_target
+
+    # Y-Z-Y Euler angle decomposition (joint4: Y, joint5: Z, joint6: Y)
+    theta5 = math.acos(R_wrist[1, 1])
+    if abs(math.sin(theta5)) < 1e-6:
+        # Singularity handling
+        theta4 = 0.0
+        theta6 = math.atan2(-R_wrist[0, 2], R_wrist[2, 2])
+    else:
+        theta4 = math.atan2(R_wrist[2, 1]/math.sin(theta5), 
+                           -R_wrist[0, 1]/math.sin(theta5))
+        theta6 = math.atan2(R_wrist[1, 2]/math.sin(theta5), 
+                           R_wrist[1, 0]/math.sin(theta5))
+
+    # Adjust angles to [-π, π] range
+    theta4 = (theta4 + math.pi) % (2 * math.pi) - math.pi
+    theta5 = (theta5 + math.pi) % (2 * math.pi) - math.pi
+    theta6 = (theta6 + math.pi) % (2 * math.pi) - math.pi
+
+    return (theta1, theta2, theta3, theta4, theta5, theta6)
+```
+
+### Explanation
+1. **Wrist Center Calculation**: The TCP offset is properly rotated into the world frame using the target orientation before subtraction, ensuring accurate wrist center positioning.
+2. **First Joint (θ₁)**: Calculated using the arctangent of the wrist center's x and y coordinates, aligning the arm correctly in the XY-plane.
+3. **Second and Third Joints (θ₂, θ₃)**: Solved using geometric analysis with proper consideration of link lengths and configuration selection based on minimal position error.
+4. **Wrist Orientation (θ₄, θ₅, θ₆)**: The rotation matrix is decomposed using Y-Z-Y Euler angles with proper singularity handling and angle normalization to match the joint axes (Y for joint4, Z for joint5, Y for joint6).
+
+This solution addresses the previous orientation errors by correctly handling the rotation matrix decomposition and joint angle normalization, ensuring both position and orientation targets are met.

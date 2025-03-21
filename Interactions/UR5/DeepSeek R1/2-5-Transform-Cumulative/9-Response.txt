@@ -1,0 +1,110 @@
+To solve this problem, we need to determine the joint angles for a 4-DOF serial manipulator to reach a target position and orientation. The solution involves accurately modeling the forward kinematics for both position and orientation, considering all relevant joints and their contributions.
+
+### Approach
+1. **Position Calculation (Joints 1 and 4)**:
+   - The position of the end-effector (TCP) is determined by the first and fourth joints (θ1 and θ4). The geometric relationship between these joints and the target position is derived using trigonometric identities.
+
+2. **Orientation Calculation (Joints 2 and 3)**:
+   - After determining θ1 and θ4, the remaining joints (θ2 and θ3) are computed to achieve the desired orientation by decomposing the rotation matrix, ensuring the correct order of rotations and accounting for the TCP's fixed orientation.
+
+### Solution Code
+```python
+import math
+import numpy as np
+
+def inverse_kinematics(p: tuple[float, float, float], r: tuple[float, float, float]) -> tuple[float, float, float, float]:
+    x_target, y_target, z_target = p
+    target_roll, target_pitch, target_yaw = r
+
+    # Compute target rotation matrix
+    cr = math.cos(target_roll)
+    sr = math.sin(target_roll)
+    cp = math.cos(target_pitch)
+    sp = math.sin(target_pitch)
+    cy = math.cos(target_yaw)
+    sy = math.sin(target_yaw)
+    R_target = np.array([
+        [cy * cp, cy * sp * sr - sy * cr, cy * sp * cr + sy * sr],
+        [sy * cp, sy * sp * sr + cy * cr, sy * sp * cr - cy * sr],
+        [-sp, cp * sr, cp * cr]
+    ])
+
+    # Fixed TCP rotation (90 degrees around Z)
+    R_tcp = np.array([[0, -1, 0], [1, 0, 0], [0, 0, 1]])
+    R_tcp_inv = R_tcp.T
+
+    # Position equations based on θ1 and θ4
+    a = 0.39225
+    d = 0.09465
+    l = 0.0823
+
+    # Solve for θ1 and θ4 using geometric approach
+    solutions = []
+    for sign in [1, -1]:
+        # Calculate possible θ4 values
+        cos_theta4 = (z_target - a * math.cos(target_pitch) - d) / l
+        cos_theta4 = np.clip(cos_theta4, -1.0, 1.0)
+        theta4 = sign * math.acos(cos_theta4)
+
+        # Calculate θ1 based on θ4
+        sin_theta1 = (x_target - l * math.sin(theta4)) / a
+        sin_theta1 = np.clip(sin_theta1, -1.0, 1.0)
+        theta1 = math.asin(sin_theta1)
+
+        # Check if the solution is valid
+        current_z = a * math.cos(theta1) + d + l * math.cos(theta4)
+        if abs(current_z - z_target) > 1e-6:
+            continue
+
+        # Compute rotation matrices for θ1 and θ4
+        R1 = np.array([
+            [math.cos(theta1), 0, math.sin(theta1)],
+            [0, 1, 0],
+            [-math.sin(theta1), 0, math.cos(theta1)]
+        ])
+        R4 = np.array([
+            [math.cos(theta4), 0, math.sin(theta4)],
+            [0, 1, 0],
+            [-math.sin(theta4), 0, math.cos(theta4)]
+        ])
+
+        # Compute remaining rotation to achieve target orientation
+        R_remaining = np.linalg.inv(R1 @ R4) @ R_target @ R_tcp_inv
+
+        # Extract θ2 and θ3 from R_remaining
+        theta2 = math.atan2(R_remaining[2, 1], R_remaining[2, 2])
+        theta3 = math.atan2(-R_remaining[0, 1], R_remaining[1, 1])
+
+        # Check orientation error
+        R2 = np.array([
+            [math.cos(theta2), 0, math.sin(theta2)],
+            [0, 1, 0],
+            [-math.sin(theta2), 0, math.cos(theta2)]
+        ])
+        R3 = np.array([
+            [math.cos(theta3), -math.sin(theta3), 0],
+            [math.sin(theta3), math.cos(theta3), 0],
+            [0, 0, 1]
+        ])
+        R_total = R1 @ R2 @ R3 @ R4 @ R_tcp
+        error = np.linalg.norm(R_total - R_target)
+
+        solutions.append((theta1, theta2, theta3, theta4, error))
+
+    if not solutions:
+        return (0.0, 0.0, 0.0, 0.0)
+
+    # Select the solution with the smallest orientation error
+    solutions.sort(key=lambda x: x[4])
+    best = solutions[0]
+    return (best[0], best[1], best[2], best[3])
+```
+
+### Explanation
+1. **Position Calculation**:
+   - The position of the TCP is determined by θ1 and θ4. Using geometric relationships and trigonometric identities, we solve for these angles to place the TCP at the target position.
+
+2. **Orientation Calculation**:
+   - After determining θ1 and θ4, the remaining angles (θ2 and θ3) are computed by decomposing the rotation matrix required to achieve the target orientation. This involves matrix transformations and inverse kinematics to ensure the end-effector's orientation matches the target.
+
+This approach ensures that both the position and orientation of the TCP are accurately achieved by considering the contributions of all four joints in the kinematic chain.

@@ -1,0 +1,87 @@
+Below is one acceptable complete solution. In our chain the TCP frame is reached by first “rotating” by joint 1 about Z and then “rotating” by joint 2 about Y after a fixed translation. In fact the TCP position (in base coordinates) may be written as
+
+  p = Rz(θ₁) · ([0, 0.13585, 0] + (Ry(θ₂) · [0, –0.1197, 0.425]))  
+    = Rz(θ₁) · ([0.425·sin(θ₂), (0.13585 – 0.1197), 0.425·cos(θ₂)]).
+
+Noting that (0.13585 – 0.1197) = 0.01615, we see that if we call
+
+  A = 0.425·sin(θ₂)  and  B = 0.01615
+
+then the intermediate (or “wrist”) point (the TCP as expressed in the frame of joint 1) is
+
+  w = [A, B, 0.425·cos(θ₂)].
+
+Because the final TCP is p = Rz(θ₁)·w the Z‐component is unaffected so that
+
+  p_z = 0.425·cos(θ₂)  =>  θ₂ = arccos(p_z/0.425).
+
+(To choose the correct “branch” for θ₂ we look at the desired TCP orientation r; since the product Rz(θ₁)·Ry(θ₂) produces a TCP rpy of [0, θ₂, θ₁] the desired pitch r[1] determines the sign of θ₂.)
+
+Moreover, the (x,y) components satisfy
+
+  [p_x, p_y] = Rz(θ₁) · [A, B].
+
+Since rotation by θ₁ adds an angle to the “intrinsic” direction δ = atan2(B, A) of the vector [A, B], the (x,y) target p has polar angle φ = atan2(p_y, p_x) which must equal
+
+  φ = θ₁ + δ  =>  θ₁ = φ – δ.
+
+Thus, one acceptable closed‐form solution is as follows. (Do note that because the two inputs (position and orientation) are assumed consistent the computed joint‐angle values must satisfy r = [0, θ₂, θ₁].)
+
+────────────────────────────────────────────────────────────
+def inverse_kinematics(p: tuple[float, float, float], r: tuple[float, float, float]) -> tuple[float, float]:
+    """
+    Gets the joint values needed to reach position "p" and orientation "r".
+    The kinematics are such that:
+      • TCP position = Rz(θ₁) * ([0, 0.13585, 0] + (Ry(θ₂)*[0, -0.1197, 0.425]))
+      • TCP orientation rpy = [0, θ₂, θ₁]
+    :param p: The TCP position in the base frame in the form [x, y, z].
+    :param r: The desired TCP orientation (rpy, in radians) in the form [r_x, r_y, r_z].
+              (Here we assume r = [0, θ₂, θ₁].)
+    :return: A tuple (θ₁, θ₂) of joint angles in radians.
+    """
+    import math
+
+    # Unpack the target position and orientation.
+    px, py, pz = p
+    # r = [roll, pitch, yaw] => desired: pitch = θ₂ and yaw = θ₁.
+    # (The roll is unused because there is no roll degree-of-freedom.)
+    desired_pitch = r[1]  # this should match θ₂
+    desired_yaw = r[2]    # this should match θ₁
+
+    # In our forward kinematics the TCP position (in the frame after the first joint) is given by:
+    #   w = [0.425*sin(θ₂), 0.13585 - 0.1197, 0.425*cos(θ₂)]
+    # where 0.13585 - 0.1197 = 0.01615.
+    # Note that the z-coordinate is not influenced by θ₁ so pz = 0.425*cos(θ₂).
+    if abs(pz/0.425) > 1:
+        # (We assume all targets are reachable so this check is not expected to trigger.)
+        raise ValueError("Target is unreachable.")
+    theta2_candidate = math.acos(pz / 0.425)
+
+    # Choose the branch of θ₂ that is consistent with the desired pitch.
+    # (Because cos(θ) = cos(–θ) we use the sign of the desired pitch.)
+    theta2 = theta2_candidate if desired_pitch >= 0 else -theta2_candidate
+
+    # Now, let A = 0.425*sin(θ₂) and B = 0.01615.
+    A = 0.425 * math.sin(theta2)
+    B = 0.01615  # constant fixed offset from revolute 1 to TCP in Y
+    # When p is obtained by rotating [A, B] with Rz(θ₁), the angle of the resulting (x,y) vector is:
+    #   φ = θ₁ + δ    where δ = atan2(B, A).
+    # Thus θ₁ = φ – δ.
+    phi = math.atan2(py, px)
+    delta = math.atan2(B, A)
+    theta1 = phi - delta
+
+    # (Since the desired yaw is supposed to be equal to θ₁, one could check consistency with desired_yaw.)
+
+    return (theta1, theta2)
+────────────────────────────────────────────────────────────
+
+Explanation:
+
+1. We first compute θ₂ by inverting the z–component: pz = 0.425*cos(θ₂) gives θ₂ = arccos(pz/0.425). Because arccos returns a value in [0, π] but the desired pitch (r[1]) may be negative, we choose θ₂ with the appropriate sign.
+
+2. Next, we note that in the joint‑1 frame the (x,y) “wrist” vector is [0.425*sin(θ₂), 0.01615]. A rotation by θ₁ produces (px,py) so that the polar angle of (px,py), call it φ, satisfies φ = θ₁ + δ (with δ = atan2(0.01615, 0.425*sin(θ₂))). Hence, θ₁ = φ – δ.
+
+3. Since the overall TCP orientation (rpy) is [0, θ₂, θ₁] these computed joint angles are consistent with the target orientation r.
+
+This closed‐form analytical solution meets the requirements for the two‐DOF chain.

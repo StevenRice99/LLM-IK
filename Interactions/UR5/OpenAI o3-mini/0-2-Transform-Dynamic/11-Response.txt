@@ -1,0 +1,85 @@
+def inverse_kinematics(p: tuple[float, float, float], r: tuple[float, float, float]) -> tuple[float, float, float]:
+    """
+    Computes the joint angles (theta1, theta2, theta3) for a 3-DOF serial manipulator
+    so that the tool center point (TCP) reaches the desired position p and orientation r.
+    
+    Robot chain details:
+      - Revolute 1 rotates about Z at the origin.
+      - Revolute 2 rotates about Y with a translation [0, 0.13585, 0] from the base.
+      - Revolute 3 rotates about Y with a translation [0, -0.1197, 0.425] from Revolute 2.
+      - The TCP is offset from Revolute 3 by [0, 0, 0.39225].
+
+    The forward kinematics of the last two joints (in the joint-2 frame)
+    can be expressed (in the x-z plane) as:
+         x_target = L1*sin(theta2) + L2*sin(theta2+theta3)
+         z_target = L1*cos(theta2) + L2*cos(theta2+theta3)
+    where L1 = 0.425 (effective link length from joint 2 to joint 3 in x-z)
+          L2 = 0.39225 (TCP offset from joint 3 in x-z)
+
+    The overall TCP orientation is given by Rz(theta1) * Ry(theta2+theta3). We extract
+    phi = theta2 + theta3 from the desired orientation based on the assumption that a pure
+    Ry rotation has matrix elements:
+            R00 = cos(ry)*cos(rz)   and   R02 = sin(ry) = sin(phi)
+    so that phi = atan2(R02, R00).
+
+    Steps:
+      1. Compute theta1 using the projection of the TCP position on the x-y plane.
+      2. Rotate the TCP position into Joint 2's frame (which is rotated by theta1) 
+         and subtract the fixed translation from base to Joint 2.
+      3. Extract phi = theta2+theta3 from the desired orientation.
+      4. Solve the resulting 2-link planar inverse kinematics for theta2 and theta3.
+         
+    :param p: Desired TCP position (x, y, z) in the base frame.
+    :param r: Desired TCP orientation (roll, pitch, yaw) in radians.
+    :return: A tuple of joint angles (theta1, theta2, theta3) in radians.
+    """
+    import math
+
+    # ----------------------------
+    # 1. Solve for Joint 1: rotation about Z.
+    # Based on the convention from EXISTING 1.
+    x, y, z = p
+    theta1 = math.atan2(-x, y)
+    
+    # ----------------------------
+    # 2. Express the TCP position in Joint 2's coordinate frame.
+    # Rotate the base position by -theta1.
+    cos_t1 = math.cos(theta1)
+    sin_t1 = math.sin(theta1)
+    x_r = cos_t1 * x + sin_t1 * y
+    y_r = -sin_t1 * x + cos_t1 * y  # This y_r remains unused in planar IK.
+    z_r = z  # z remains unchanged by rotation about Z.
+
+    # Joint 2 is offset from the base by [0, 0.13585, 0], so subtract it.
+    # In the rotated frame, the effective TCP position relative to Joint 2 is:
+    x_target = x_r
+    # The y-coordinate should ideally satisfy y_r - 0.13585 = -0.1197 (as per the chain),
+    # but for planar IK (in x-z) only x_target and z_target are used.
+    z_target = z_r
+
+    # ----------------------------
+    # 3. Extract combined rotation phi = theta2 + theta3 from desired orientation.
+    # Using the assumption that for a rotation Ry(phi) we have:
+    #         R00 = cos(ry)*cos(rz) ≡ cos(phi)
+    #         R02 = sin(ry)         ≡ sin(phi)
+    rx, ry, rz = r  # Note: rx is unused in this extraction.
+    R00 = math.cos(ry) * math.cos(rz)
+    R02 = math.sin(ry)
+    phi = math.atan2(R02, R00)
+    
+    # ----------------------------
+    # 4. Solve 2-link planar inverse kinematics for joints 2 and 3.
+    L1 = 0.425    # Effective length from Joint 2 to Joint 3 in the x-z plane.
+    L2 = 0.39225  # TCP offset from Joint 3 in the x-z plane.
+    
+    # Remove the effect of the TCP offset (L2) to get the target for the first link.
+    term_x = x_target - L2 * math.sin(phi)
+    term_z = z_target - L2 * math.cos(phi)
+    
+    # For link length L1, the angle theta2 satisfies:
+    #         term_x = L1*sin(theta2)
+    #         term_z = L1*cos(theta2)
+    theta2 = math.atan2(term_x, term_z)
+    theta3 = phi - theta2
+
+    return (theta1, theta2, theta3)

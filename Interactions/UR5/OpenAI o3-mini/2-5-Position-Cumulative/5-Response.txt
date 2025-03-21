@@ -1,0 +1,93 @@
+def inverse_kinematics(p: tuple[float, float, float]) -> tuple[float, float, float, float]:
+    """
+    Computes a closed-form inverse kinematics solution for a 4-DOF serial manipulator,
+    where the TCP position p = (x, y, z) is to be reached.
+    
+    The kinematic chain is defined by:
+      • Revolute 1 (joint1): rotates about Y; no translation.
+      • Revolute 2 (joint2): rotates about Y; translation along Z by 0.39225.
+      • Revolute 3 (joint3): rotates about Z; translation along Y by 0.093.
+      • Revolute 4 (joint4): rotates about Y; translation along Z by 0.09465.
+      • TCP offset             : [0, 0.0823, 0].
+    
+    For the vertical (y) direction:
+      The TCP y-coordinate is given by:
+          y = 0.0823 * cos(theta3) + 0.093.
+      Hence, theta3 = arccos((y - 0.093)/0.0823).
+    
+    In the x–z plane the remaining joints (theta1 and theta2) must be chosen such that,
+    after the translations associated with joints 2 and 4, the effective position is reached.
+    Define:
+        K = 0.0823 * sin(theta3)   (effect of joint3 rotation on TCP offset)
+        L = 0.09465                (translation from joint4)
+        D = 0.39225                (translation from joint2)
+    
+    In the subchain (after joint1) the effective x and z coordinates are:
+        p2_x = -K*cos(theta2) + L*sin(theta2)
+        p2_z =  K*sin(theta2) + L*cos(theta2) + D.
+    
+    Writing r = sqrt(x^2 + z^2) for the target projection, one obtains:
+        r^2 = K^2 + L^2 + D^2 + 2*D*(L*cos(theta2) + K*sin(theta2)).
+    Define:
+        E = (r^2 - (K^2 + L^2 + D^2))/(2*D),
+    and note that the combination L*cos(theta2) + K*sin(theta2) can be rewritten as:
+        sqrt(L^2 + K^2)*cos(theta2 - alpha),
+    where alpha = atan2(K, L). Thus,
+        theta2 = alpha + arccos( E/ sqrt(L^2+K^2) ).
+    
+    Finally, joint1 (theta1) rotates the subchain in the x–z plane.
+    Let:
+          phi   = atan2(p2_z, p2_x)   (direction of the subchain’s effective position)
+          delta = atan2(z, x)           (direction of target projection)
+    Then, to align the subchain with the target, we require:
+          theta1 = phi - delta.
+    
+    Joint 4 does not influence the TCP position (its offset is purely along y); we set it to 0.
+    
+    :param p: The target TCP position (x, y, z) in meters.
+    :return: A tuple (theta1, theta2, theta3, theta4) with joint angles in radians.
+    """
+    import math
+
+    # Unpack the target TCP position.
+    x, y, z = p
+
+    # --- Solve for joint 3 using the vertical constraint.
+    # TCP y-coordinate: y = 0.0823*cos(theta3) + 0.093  =>  theta3 = arccos((y - 0.093)/0.0823)
+    theta3 = math.acos((y - 0.093) / 0.0823)
+
+    # --- Define constants for the planar (x-z) subchain.
+    K = 0.0823 * math.sin(theta3)  # Effect due to the TCP offset rotated by theta3.
+    L = 0.09465                  # Translation from joint 4.
+    D = 0.39225                  # Translation from joint 2.
+
+    # Compute the magnitude (r) of the target projection in the x-z plane.
+    r = math.sqrt(x**2 + z**2)
+
+    # --- Solve for joint 2 using the planar relation.
+    # From the geometry, we have:
+    #   r^2 = K^2 + L^2 + D^2 + 2*D*(L*cos(theta2) + K*sin(theta2)).
+    # Let E = (r^2 - (K^2 + L^2 + D^2))/(2*D), so that:
+    #   L*cos(theta2) + K*sin(theta2) = E.
+    # This expression can be rewritten as:
+    #   sqrt(L^2+K^2) * cos(theta2 - alpha),  where alpha = atan2(K, L).
+    # Hence,
+    #   theta2 = alpha + arccos(E/ sqrt(L^2+K^2)).
+    R_val = math.sqrt(L**2 + K**2)
+    E = (r**2 - (K**2 + L**2 + D**2)) / (2 * D)
+    alpha = math.atan2(K, L)
+    theta2 = alpha + math.acos(E / R_val)
+
+    # --- Compute the effective position (p2) after joints 2, 3, and 4.
+    p2_x = -K * math.cos(theta2) + L * math.sin(theta2)
+    p2_z =  K * math.sin(theta2) + L * math.cos(theta2) + D
+
+    # --- Solve for joint 1 to align the subchain with the target (in the x-z plane).
+    phi = math.atan2(p2_z, p2_x)
+    delta = math.atan2(z, x)
+    theta1 = phi - delta
+
+    # --- Joint 4 does not affect the TCP position; assign it a nominal value.
+    theta4 = 0.0
+
+    return (theta1, theta2, theta3, theta4)

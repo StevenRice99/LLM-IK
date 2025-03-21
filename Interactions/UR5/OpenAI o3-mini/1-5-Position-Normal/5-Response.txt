@@ -1,0 +1,109 @@
+We can “collapse” the five‐joint inverse kinematics into a “planar 2R” problem by fixing the redundant joints to nominal values. In our solution we choose
+
+  q3 = 0  q4 = 1.0  q5 = 0
+
+and then solve for q1 and q2 so that the TCP (whose only position “freedom” is in the x–z plane—its y‐coordinate comes out fixed by the constant offsets) satisfies
+
+  p = R_y(q1) · { p₂ + R_y(q2) · ([0,–0.1197,0.425] ⁻¹ plus the “arm” from joints 3–5) }.
+
+In our robot the chain from joint2 onward produces an effective “arm” whose x–z part is
+
+  X = –A·cos(q2) + B·sin(q2)
+  Z = 0.425 + A·sin(q2) + B·cos(q2)
+
+with
+  A = 0.0823·sin(1.0) ≈ 0.0693
+  B = 0.39225 + 0.09465 ≈ 0.4869
+
+(Note that the p₂ “translation” is [0,–0.1197,0.425] so that the y–axis of the TCP comes out 
+  p_y = –0.1197 + (0.0823·cos(1.0) + 0.093) ≈ 0.0178.)
+
+Then the forward equations are
+
+  p_x = cos(q1)·X + sin(q1)·Z   p_z = –sin(q1)·X + cos(q1)·Z.
+
+Since rotation by q1 does not change the length in the x–z plane, one first computes 
+  r_target = √(pₓ²+p_z²).
+
+A short calculation shows that
+  X²+Z² = A²+B² + 0.425² + 2·0.425·[A·sin(q2)+B·cos(q2)]
+and because 
+  A²+B²+0.425² ≈ 0.4225   and  2·0.425 = 0.85,
+one may “invert” for the function
+  C(q2) = A·sin(q2)+B·cos(q2)
+via
+  r_target² = 0.4225 + 0.85·C(q2) ⟹ C(q2) = (r_target²–0.4225)/0.85.
+
+Because
+  C(q2) can be written in amplitude–phase form as
+    C(q2) = R_const·cos(q2–φ),  with R_const = √(A²+B²) and φ = atan2(A,B),
+we have
+  cos(q2–φ) = [(r_target²–0.4225)/(0.85)]⁄R_const
+so that one may choose (for example, the “elbow‐down” solution)
+  q2 = φ + arccos( [(r_target²–0.4225)/(0.85)]⁄R_const ).
+
+Once q2 is known the “unrotated” x–z components are known (X and Z as above), and one easily finds q1 by “undoing” the effect of the last rotation:
+  q1 = atan2(pₓ,p_z) – atan2(X,Z).
+
+A complete Python solution (using math for simplicity) is given below. (Remember: no test code is included since testing is handled externally.) 
+
+Below is the inverse kinematics function that implements the closed–form analytical solution:
+
+------------------------------------------------------------
+def inverse_kinematics(p: tuple[float, float, float]) -> tuple[float, float, float, float, float]:
+    """
+    Returns joint angles [q1, q2, q3, q4, q5] (in radians) that yield TCP position p.
+    It assumes that the reachable target p has y = ~0.0178 (set by the constant offsets)
+    and uses a particular “solution branch” with q3 = 0, q4 = 1.0, and q5 = 0.
+    """
+    import math
+    px, py, pz = p
+    # (The forward kinematics always gives p_y ≈ –0.1197 + (0.0823*cos(1.0)+0.093) ≈ 0.0178.)
+    # --- Robot geometry constants (from URDF data) -------------------------
+    # p2 offset (Revolute 2 translation): 
+    d2 = 0.425
+    # p2 has an additional y translation of –0.1197 (which we use to check p_y).
+    # The “arm” from joints 3-5: 
+    #   p3: [0, 0, 0.39225]
+    #   p4: [0, 0.093, 0] with joint axis about Z (q4)
+    #   p5: [0, 0, 0.09465] with joint axis about Y (q5)
+    #   TCP: [0, 0.0823, 0]
+    # With q4 fixed to 1.0 and q5 = 0, one computes:
+    A = 0.0823 * math.sin(1.0)      # ≈ 0.0693
+    B = 0.39225 + 0.09465           # ≈ 0.4869
+    # The effective contribution from joint2 onward (before q1 rotation) is then:
+    #   X = –A*cos(q2) + B*sin(q2)
+    #   Z = d2 + A*sin(q2) + B*cos(q2)
+    # -------------------------------------------------------------------------
+    # In the x-z plane, the forward equations are:
+    #   p_x = cos(q1)*X + sin(q1)*Z
+    #   p_z = –sin(q1)*X + cos(q1)*Z
+    # so that the magnitude r_target = sqrt(p_x^2+p_z^2) satisfies:
+    #   r_target^2 = X^2+Z^2 = (A^2+B^2+d2^2) + 2*d2*(A*sin(q2)+B*cos(q2))
+    # Note: A^2+B^2+d2^2 ≈ 0.4225  and 2*d2 = 0.85.
+    r_target = math.sqrt(px**2 + pz**2)
+    # Solve for C(q2) = A*sin(q2)+B*cos(q2):
+    C_target = (r_target**2 - 0.4225) / 0.85
+    # Write C(q2) in amplitude–phase form:
+    R_const = math.sqrt(A**2 + B**2)        # ≈ 0.4919
+    phi = math.atan2(A, B)                   # ≈ 0.1419
+    # Solve cos(q2 – phi) = C_target/R_const. (Clamp to avoid numerical issues.)
+    cos_val = C_target / R_const
+    cos_val = max(min(cos_val, 1.0), -1.0)
+    # Choose the solution branch: (elbow–down) 
+    q2 = phi + math.acos(cos_val)
+    # Now compute the effective (unrotated) x–z components:
+    X_eff = -A * math.cos(q2) + B * math.sin(q2)
+    Z_eff = d2 + A * math.sin(q2) + B * math.cos(q2)
+    # Determine q1 by “undoing” the rotation of the R_y(q1) matrix:
+    q1 = math.atan2(px, pz) - math.atan2(X_eff, Z_eff)
+    # Use the nominal values for the remaining joints:
+    q3 = 0.0
+    q4 = 1.0
+    q5 = 0.0
+    return (q1, q2, q3, q4, q5)
+------------------------------------------------------------
+
+When this inverse_kinematics routine is given a reachable target position p (with its y–coordinate matching the value imposed by the constant offsets), it returns one valid closed–form joint solution that, when used with the forward kinematics, will yield the desired TCP position.
+
+Note that because the arm is redundant (5 DOF for a 3D task position) there exists an infinite number of solutions; here we choose one by fixing q3, q4, and q5 and then solving for q1 and q2 in closed–form.

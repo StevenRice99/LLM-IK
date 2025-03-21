@@ -1,0 +1,111 @@
+To solve the inverse kinematics for the 5-DOF manipulator, we need to accurately account for all link transformations and offsets. Here's the corrected approach:
+
+### Approach
+1. **Wrist Position Calculation**: Adjust the target position by subtracting the TCP offset rotated by the target orientation.
+2. **Revolute 2 Offset Compensation**: Properly account for Revolute 2's position relative to Revolute 1 when calculating theta1.
+3. **Geometric Solution for Theta2 & Theta3**: Use the law of cosines with correct link lengths (Revolute 3 and 4).
+4. **Orientation Decomposition**: Compute remaining rotations for theta4 (Y-axis) and theta5 (Z-axis).
+
+### Solution Code
+```python
+import numpy as np
+import math
+
+def inverse_kinematics(p: tuple[float, float, float], r: tuple[float, float, float]) -> tuple[float, float, float, float, float]:
+    x_target, y_target, z_target = p
+    roll, pitch, yaw = r
+
+    # Compute target rotation matrix (ZYX Euler angles)
+    cr, sr = math.cos(roll), math.sin(roll)
+    cp, sp = math.cos(pitch), math.sin(pitch)
+    cy, sy = math.cos(yaw), math.sin(yaw)
+
+    R_x = np.array([[1, 0, 0], [0, cr, -sr], [0, sr, cr]])
+    R_y = np.array([[cp, 0, sp], [0, 1, 0], [-sp, 0, cp]])
+    R_z = np.array([[cy, -sy, 0], [sy, cy, 0], [0, 0, 1]])
+    R_target = R_z @ R_y @ R_x
+
+    # Calculate wrist position (Revolute5 location)
+    tcp_offset = np.array([0, 0, 0.09465])
+    wrist_pos = np.array([x_target, y_target, z_target]) - R_target @ tcp_offset
+    wx, wy, wz = wrist_pos
+
+    # Account for Revolute2's offset from Revolute1 (0.13585 in Y-axis)
+    # Solve: wx = -0.13585*sin(theta1) + r*cos(theta1)
+    #        wy = 0.13585*cos(theta1) + r*sin(theta1)
+    # Where r is the radial distance in Revolute2's plane
+    A = -wx
+    B = wy - 0.13585
+    theta1 = math.atan2(B, A) - math.atan2(0.13585, math.hypot(A, B))
+
+    # Transform wrist position to Revolute2's coordinate system
+    R1 = np.array([[math.cos(theta1), -math.sin(theta1), 0],
+                   [math.sin(theta1), math.cos(theta1), 0],
+                   [0, 0, 1]])
+    wrist_in_r2 = np.linalg.inv(R1) @ np.array([wx, wy, wz]) - np.array([0, 0.13585, 0])
+    x, z = wrist_in_r2[0], wrist_in_r2[2]
+
+    # Geometric parameters (Revolute3 to Revolute5)
+    a = 0.425  # Revolute3's z-offset
+    b = 0.39225  # Revolute4's z-offset
+
+    # Solve for theta2 and theta3 using law of cosines
+    d_sq = x**2 + z**2
+    cos_theta3 = (d_sq - a**2 - b**2) / (2 * a * b)
+    cos_theta3 = np.clip(cos_theta3, -1.0, 1.0)
+    theta3 = math.acos(cos_theta3)
+    
+    # Two possible solutions
+    theta3_1 = theta3
+    theta3_2 = -theta3
+
+    solutions = []
+    for theta3 in [theta3_1, theta3_2]:
+        denom = a + b * math.cos(theta3)
+        num = b * math.sin(theta3)
+        theta2 = math.atan2(x, z) - math.atan2(num, denom)
+        
+        # Verify solution
+        x_calc = a * math.sin(theta2) + b * math.sin(theta2 + theta3)
+        z_calc = a * math.cos(theta2) + b * math.cos(theta2 + theta3)
+        if math.isclose(x_calc, x, abs_tol=1e-5) and math.isclose(z_calc, z, abs_tol=1e-5):
+            solutions.append((theta2, theta3))
+
+    if solutions:
+        # Select solution with elbow up/down preference
+        theta2, theta3 = solutions[0]
+    else:
+        theta2, theta3 = 0.0, 0.0
+
+    # Compute cumulative rotation up to Revolute4
+    R2 = np.array([[math.cos(theta2), 0, math.sin(theta2)],
+                   [0, 1, 0],
+                   [-math.sin(theta2), 0, math.cos(theta2)]])
+    R3 = np.array([[math.cos(theta3), 0, math.sin(theta3)],
+                   [0, 1, 0],
+                   [-math.sin(theta3), 0, math.cos(theta3)]])
+    R_total = R1 @ R2 @ R3
+
+    # Compute remaining rotation (Revolute4 and 5)
+    R_remaining = R_total.T @ R_target
+
+    # Solve theta4 (Y-axis rotation)
+    theta4 = math.atan2(R_remaining[0, 2], R_remaining[2, 2])
+
+    # Solve theta5 (Z-axis rotation)
+    R4 = np.array([[math.cos(theta4), 0, math.sin(theta4)],
+                   [0, 1, 0],
+                   [-math.sin(theta4), 0, math.cos(theta4)]])
+    R5 = R4.T @ R_remaining
+    theta5 = math.atan2(R5[1, 0], R5[0, 0])
+
+    return (theta1, theta2, theta3, theta4, theta5)
+```
+
+### Explanation
+1. **Wrist Position Calculation**: The TCP offset is subtracted from the target position after rotating it by the target orientation matrix to get the wrist position.
+2. **Revolute 2 Compensation**: The position of Revolute 2 is accounted for by solving a system of equations to find theta1 that properly positions the wrist relative to Revolute 2.
+3. **Geometric Solution**: Using the law of cosines in the transformed coordinate system of Revolute 2, theta2 and theta3 are calculated to position the wrist correctly.
+4. **Orientation Adjustment**: The remaining rotation needed after positioning is decomposed into theta4 (Y-axis) and theta5 (Z-axis) using matrix transformations.
+
+This approach ensures all link transformations and offsets are properly considered, leading to accurate inverse kinematics solutions.

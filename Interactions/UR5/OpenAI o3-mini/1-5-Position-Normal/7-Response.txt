@@ -1,0 +1,111 @@
+def inverse_kinematics(p: tuple[float, float, float]) -> tuple[float, float, float, float, float]:
+    """
+    Computes one valid closed–form joint solution [q1, q2, q3, q4, q5] (in radians)
+    for reaching the target TCP position p = (px, py, pz) for a 5-DOF serial manipulator.
+    
+    The robot’s kinematics (all lengths in meters, all angles in radians) are defined by:
+      • Revolute 1: origin at [0, 0, 0], rotation axis Y.
+      • Revolute 2: translation [0, -0.1197, 0.425], rotation axis Y.
+      • Revolute 3: translation [0, 0, 0.39225], rotation axis Y.
+      • Revolute 4: translation [0, 0.093, 0], rotation axis Z.
+      • Revolute 5: translation [0, 0, 0.09465], rotation axis Y.
+      • TCP: translation [0, 0.0823, 0] (with fixed orientation).
+      
+    Because only the TCP position is specified (and the chain is redundant for full pose),
+    we choose a particular solution branch by setting:
+         q3 = 0, q4 = 1.0, and q5 = 0.
+    
+    Under these assumptions, the effective contribution of joints 3–5 (and the TCP offset)
+    can be lumped into two constants:
+         A = 0.0823 * sin(q4)   and   B = 0.39225 + 0.09465.
+    
+    In the (x,z) plane (the rotation about Y, with q1, affects x and z), joint 2 (angle q2)
+    modulates an “arm” with effective coordinates (relative to the frame of joint 2)
+         X_eff = –A*cos(q2) + B*sin(q2)
+         Z_eff = d2 + A*sin(q2) + B*cos(q2)
+    where d2 = 0.425 comes from the z–translation of Revolute 2.
+    Joint 1 (angle q1) then rotates [X_eff, Z_eff] to yield the target (px, pz):
+         px = cos(q1)*X_eff + sin(q1)*Z_eff,
+         pz = –sin(q1)*X_eff + cos(q1)*Z_eff.
+    
+    To solve:
+      1. Compute r_target = sqrt(px^2+pz^2).
+      2. Note that X_eff^2+Z_eff^2 can be written as:
+             A² + B² + d2² + 2*d2*(A*sin(q2)+B*cos(q2)).
+         Define constant_term = A²+B²+d2². (Numerically, ≈0.4225.)
+      3. Solve for C(q2) = A*sin(q2)+B*cos(q2):
+             C_target = (r_target² – constant_term) / (2*d2).
+      4. Express C(q2) in amplitude–phase form:
+             Let R_const = sqrt(A²+B²) and φ = atan2(A, B). Then:
+             C(q2) = R_const * cos(q2 – φ).
+      5. Hence, cos(q2 – φ) = C_target / R_const. Choose q2 = φ + acos(C_target/R_const)
+         (this yields one valid branch, e.g. the “elbow-down” solution).
+      6. With q2 known, compute X_eff and Z_eff, then solve for:
+             q1 = atan2(px, pz) – atan2(X_eff, Z_eff).
+    
+    :param p: The target TCP position [px, py, pz].
+    :return: A tuple of joint angles (q1, q2, q3, q4, q5) in radians.
+    """
+    import math
+
+    # Extract target coordinates.
+    px, py, pz = p
+
+    # ----- Robot geometry from URDF -----
+    # Revolute 2 translation (link 2):
+    d2 = 0.425      # along z
+    # (There is an additional y-offset of -0.1197 at Revolute 2; it sets the fixed TCP y position.)
+    
+    # Revolute 3 translation:
+    d3 = 0.39225
+    # Revolute 4 translation:
+    a4 = 0.093
+    # Revolute 5 translation:
+    d5 = 0.09465
+    # TCP translation:
+    tcp_y = 0.0823
+    
+    # Nominally chosen joint angles for the redundant motions:
+    q3 = 0.0
+    q4 = 1.0
+    q5 = 0.0
+
+    # ---- Consolidate contributions from joints 3,4,5, and TCP ----
+    # With q4 fixed at 1.0 and q5 = 0, we define:
+    A = tcp_y * math.sin(q4)      # effective offset from TCP (≈0.0823*sin(1.0))
+    B = d3 + d5                   # effective combined link length from Revolute 3 and 5
+    
+    # The effective (x,z) coordinates (before joint 1 rotation) are:
+    #   X_eff = -A*cos(q2) + B*sin(q2)
+    #   Z_eff = d2 + A*sin(q2) + B*cos(q2)
+    #
+    # The target position (px, pz) is obtained after rotation by joint 1:
+    #   px = cos(q1)*X_eff + sin(q1)*Z_eff
+    #   pz = -sin(q1)*X_eff + cos(q1)*Z_eff
+
+    # ---- Solve for q2 via the x-z planar “arm” ---------------------------
+    r_target = math.sqrt(px**2 + pz**2)
+    # Note: X_eff^2 + Z_eff^2 expands to A^2 + B^2 + d2^2 + 2*d2*(A*sin(q2) + B*cos(q2)).
+    constant_term = A**2 + B**2 + d2**2   # ≈ 0.4225
+    # Compute the combined term C(q2)= A*sin(q2) + B*cos(q2)
+    C_target = (r_target**2 - constant_term) / (2 * d2)
+
+    # Write C(q2) as R_const*cos(q2 - phi)
+    R_const = math.sqrt(A**2 + B**2)
+    phi = math.atan2(A, B)
+
+    # Clamp the value to avoid numerical errors in acos.
+    ratio = C_target / R_const
+    ratio = max(min(ratio, 1.0), -1.0)
+
+    # Compute q2; choose the "elbow-down" solution branch.
+    q2 = phi + math.acos(ratio)
+
+    # ---- Solve for q1 using the (x,z) rotation -----------------------------
+    X_eff = -A * math.cos(q2) + B * math.sin(q2)
+    Z_eff = d2 + A * math.sin(q2) + B * math.cos(q2)
+
+    # q1 rotates the (X_eff, Z_eff) vector into the target (px, pz).
+    q1 = math.atan2(px, pz) - math.atan2(X_eff, Z_eff)
+
+    return (q1, q2, q3, q4, q5)

@@ -1,0 +1,119 @@
+def inverse_kinematics(p: tuple[float, float, float],
+                       r: tuple[float, float, float]) -> tuple[float, float, float, float, float]:
+    """
+    Computes the closed-form analytical inverse kinematics for a 5-DOF serial manipulator.
+    
+    The robot has the following structure:
+      • Revolute Joint 1 (about Z) at the base: position [0, 0, 0].
+      • Revolute Joint 2 (about Y): translation [0, 0.13585, 0] from Joint 1.
+      • Revolute Joint 3 (about Y): translation [0, -0.1197, 0.425] from Joint 2.
+      • Revolute Joint 4 (about Y): translation [0, 0, 0.39225] from Joint 3.
+      • Revolute Joint 5 (about Z): translation [0, 0.093, 0] from Joint 4.
+      • TCP: additional translation [0, 0, 0.09465] from Joint 5.
+      
+    The provided TCP orientation is given in roll–pitch–yaw (r = [roll, pitch, yaw]) and is assumed
+    to be reachable in the form:
+          R_target = R_z(theta1) · R_y(β) · R_z(theta5)
+    where the amount β corresponds to the combined rotation of joints 2, 3, and 4:
+          β = theta2 + theta3 + theta4.
+    
+    The method proceeds as follows:
+      1. Compute the target rotation matrix R_target from the given roll, pitch, yaw using
+         the R_z · R_y · R_x convention.
+      2. Compute the wrist center position (the origin of Joint 5) by subtracting the known TCP
+         offset (p_tool) rotated by R_target from the target TCP position.
+      3. Solve for Joint 1 angle (theta1) as the direction from the base to the wrist center.
+      4. Determine the world position of Joint 2 (which is fixed at [0, 0.13585, 0] in the base)
+         after applying the rotation of Joint 1.
+      5. Formulate a 2D (planar) problem in the X-Z plane for joints 2 and 3 (both rotate about Y) 
+         using the effective link lengths L1 and L2 (0.425 and 0.39225, respectively). Solve using
+         the cosine law to obtain theta3 (elbow) and determine theta2 (shoulder) from the geometry.
+      6. Remove the base rotation by applying R_z(-theta1) to R_target to extract the remaining 
+         rotation. From this, determine β and then solve for Joint 4 (theta4) via:
+               theta4 = β - (theta2 + theta3)
+      7. Finally, compute Joint 5 angle (theta5) from the remaining rotation.
+    
+    :param p: Desired TCP position as (x, y, z).
+    :param r: Desired TCP orientation (roll, pitch, yaw) in radians.
+    :return: Tuple (theta1, theta2, theta3, theta4, theta5) of joint angles in radians.
+    """
+    import math
+    import numpy as np
+
+    # Step 1. Compute R_target from roll, pitch, yaw.
+    x_target, y_target, z_target = p
+    roll, pitch, yaw = r
+
+    # Define rotation matrices for X, Y, and Z.
+    R_x = np.array([[1, 0, 0],
+                    [0, math.cos(roll), -math.sin(roll)],
+                    [0, math.sin(roll),  math.cos(roll)]])
+    R_y = np.array([[ math.cos(pitch), 0, math.sin(pitch)],
+                    [0,               1,              0],
+                    [-math.sin(pitch), 0, math.cos(pitch)]])
+    R_z = np.array([[math.cos(yaw), -math.sin(yaw), 0],
+                    [math.sin(yaw),  math.cos(yaw), 0],
+                    [0,                      0,     1]])
+    # Use the convention: R_target = R_z · R_y · R_x.
+    R_target = R_z @ R_y @ R_x
+
+    # Step 2. Compute the wrist center (position of joint 5's origin).
+    # The composite TCP offset (from joint 5) is the sum of the translation for Joint 5 ([0, 0.093, 0])
+    # and the additional TCP offset ([0, 0, 0.09465]).
+    p_tool = np.array([0, 0.093, 0.09465])
+    p_target = np.array([x_target, y_target, z_target])
+    # Subtract the tool offset transformed into the base frame.
+    p_wrist = p_target - (R_target @ p_tool)
+
+    # Step 3. Solve for Joint 1. For this robot, define theta1 so that if the wrist center lies along
+    # the positive Y-axis then theta1 = 0. Thus:
+    theta1 = math.atan2(p_wrist[0], p_wrist[1])
+
+    # Step 4. Compute the world-frame position of Joint 2.
+    # Joint 2 is located at [0, 0.13585, 0] in the base frame.
+    p_joint2 = np.array([0, 0.13585, 0])
+    Rz_theta1 = np.array([[math.cos(theta1), -math.sin(theta1), 0],
+                          [math.sin(theta1),  math.cos(theta1), 0],
+                          [0, 0, 1]])
+    p_joint2_world = Rz_theta1 @ p_joint2
+
+    # Step 5. Solve the 2R planar subproblem for joints 2 and 3.
+    # Compute the relative vector from Joint 2 to the wrist center.
+    p_rel = p_wrist - p_joint2_world
+    # For rotations about Y, only the X and Z components contribute.
+    x_eff = p_rel[0]
+    z_eff = p_rel[2]
+    r_plane = math.sqrt(x_eff**2 + z_eff**2)
+
+    # Effective link lengths (projected onto the X-Z plane):
+    L1 = 0.425    # from Joint 2 to Joint 3 (ignoring the Y-offset of -0.1197)
+    L2 = 0.39225  # from Joint 3 to wrist center (translation [0, 0, 0.39225])
+
+    # Compute the elbow angle (Joint 3) using the cosine law.
+    cos_theta3 = (r_plane**2 - L1**2 - L2**2) / (2 * L1 * L2)
+    # Clamp the value to the valid range to avoid numerical issues.
+    cos_theta3 = max(min(cos_theta3, 1.0), -1.0)
+    theta3 = math.acos(cos_theta3)
+
+    # Determine the shoulder angle (Joint 2).
+    psi = math.atan2(L2 * math.sin(theta3), L1 + L2 * math.cos(theta3))
+    gamma = math.atan2(x_eff, z_eff)
+    theta2 = gamma - psi
+
+    # Step 6. Compute the required wrist rotation.
+    # Remove the effect of Joint 1's rotation.
+    Rz_neg = np.array([[math.cos(theta1), math.sin(theta1), 0],
+                       [-math.sin(theta1), math.cos(theta1), 0],
+                       [0, 0, 1]])
+    R_rem = Rz_neg @ R_target
+    # Given the structure R_rem = R_y(β) · R_z(theta5), the (0,2) and (2,2) elements of R_rem yield β:
+    beta = math.atan2(R_rem[0, 2], R_rem[2, 2])
+    # With β = theta2 + theta3 + theta4, solve for theta4:
+    theta4 = beta - (theta2 + theta3)
+
+    # Step 7. Solve for Joint 5.
+    # In the decomposition, the second row of R_rem corresponds to the rotation about Z in the wrist,
+    # so extract theta5 using:
+    theta5 = math.atan2(R_rem[1, 0], R_rem[1, 1])
+
+    return (theta1, theta2, theta3, theta4, theta5)

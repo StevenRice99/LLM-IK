@@ -1,0 +1,88 @@
+Below is one acceptable closed‐form solution. In our solution we “decouple” the problem by noting that (with the given fixed link offsets) the TCP position is computed as
+
+  p = Rz(θ₁) · ([0.425·sin(θ₂), 0.13585–0.1197, 0.425·cos(θ₂)]ᵀ)
+
+so that the z‐coordinate gives
+
+  0.425·cos(θ₂) = p_z ⟹ θ₂ = ±acos(p_z/0.425).
+
+To select the proper branch we use the desired TCP “pitch” (the y–component from the rpy input, r[1]) to choose the sign (i.e. if r[1] is negative we take the negative solution, otherwise positive). Then the projection onto the xy–plane is
+
+  [p_x, p_y]ᵀ = Rz(θ₁) · [0.425·sin(θ₂), 0.13585–0.1197]ᵀ.
+
+In other words, if we denote
+  A = 0.425·sin(θ₂) and B = 0.13585–0.1197 (which equals 0.01615),
+then one may solve for θ₁ as
+
+  θ₁ = atan2(p_y, p_x) – atan2(B, A).
+
+A complete solution is as follows:
+
+---------------------------------------------------
+def inverse_kinematics(p: tuple[float, float, float], r: tuple[float, float, float]) -> tuple[float, float]:
+    """
+    Gets the joint values needed to reach position "p" and orientation "r".
+    p = [x, y, z] is the desired TCP position.
+    r = [roll, pitch, yaw] (in radians) is the desired orientation.
+    The robot has two revolute joints:
+      - Joint 1 rotates about Z.
+      - Joint 2 rotates about Y.
+    The forward kinematics are:
+      1) The first joint is at [0,0,0] with rotation Rz(θ₁).
+      2) The second joint is translated by [0, 0.13585, 0] (in the base frame)
+         and rotates about Y by θ₂.
+      3) The TCP (tool) is offset by [0, -0.1197, 0.425] from Joint2.
+    This gives the closed form position:
+        p = Rz(θ₁) * ( [0.425·sin(θ₂),
+                        (0.13585-0.1197),
+                        0.425·cos(θ₂)] )
+    and the TCP’s rpy (when extracted in ZYX order) becomes [0, θ₂, θ₁].
+    
+    Given a target (p, r) we first compute θ₂ from the z–component of p.
+    (Because cos(θ₂) = p_z / 0.425 there are two solutions; we select the one
+     whose sign is consistent with the desired pitch r[1].)
+    Then we compute θ₁ by comparing the angle of the provided [p_x, p_y]
+    with the angle of the vector [0.425·sin(θ₂), 0.13585–0.1197].
+    """
+    import math
+
+    # Constant offset along the local y direction from Joint1 to Joint2 and
+    # from Joint2 to TCP.
+    offset_joint2_TCP = 0.13585 - 0.1197  # equals 0.01615
+
+    # Compute theta2 from the z coordinate.
+    # p_z = 0.425*cos(theta2)  -->  theta2 = acos(p_z/0.425) (or its negative).
+    cos_theta2 = p[2] / 0.425
+    # Due to floating point errors, ensure the argument is in [-1, 1]
+    cos_theta2 = max(min(cos_theta2, 1.0), -1.0)
+    theta2_candidate = math.acos(cos_theta2)
+    # Choose branch based on desired TCP pitch (r[1])
+    if r[1] < 0:
+        theta2 = -theta2_candidate
+    else:
+        theta2 = theta2_candidate
+
+    # Now, the projection of the TCP offset onto the xy–plane comes from two contributions:
+    # from the rotation by theta2 of the [0, -0.1197, 0.425] offset and the fixed part [0, 0.13585, 0].
+    # It turns out that the final expression reduces to:
+    #    [p_x, p_y] = Rz(theta1) * [0.425*sin(theta2), offset_joint2_TCP]
+    # Let A = 0.425*sin(theta2), and B = offset_joint2_TCP.
+    A = 0.425 * math.sin(theta2)
+    B = offset_joint2_TCP
+
+    # Since a rotation by theta1 rotates [A, B] into [p_x, p_y], we have:
+    #    theta1 = angle(p_x, p_y) - angle(A, B)
+    phi = math.atan2(p[1], p[0])
+    alpha = math.atan2(B, A)
+    theta1 = phi - alpha
+
+    return (theta1, theta2)
+---------------------------------------------------
+
+Explanation:
+
+1. We first “solve” the z–equation p_z = 0.425*cos(θ₂). Since cosine is even there are two solutions. We pick the one whose sign (positive or negative) is consistent with the provided pitch (r[1]).
+
+2. Then, noting that the effective displacement in the xy–plane is given by [0.425·sin(θ₂), 0.01615] (with 0.01615 coming from 0.13585–0.1197) and that applying a rotation by θ₁ yields the desired [p_x, p_y], we solve for θ₁ by subtracting the “offset angle” of the vector [0.425·sin(θ₂), 0.01615] from the angle of the desired position in the xy–plane.
+
+This solution returns the joint angles (in radians) that achieve the target TCP position p and orientation r (which, when expressed as roll–pitch–yaw, are [0, θ₂, θ₁]).

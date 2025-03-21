@@ -1,0 +1,104 @@
+def inverse_kinematics(p: tuple[float, float, float]) -> tuple[float, float, float, float, float, float]:
+    """
+    Computes a closed‐form analytical solution for the inverse kinematics of the 6 DOF
+    serial manipulator, solving only for the TCP position p = (x, y, z).
+    
+    The robot is built as follows (with all joint rotations zeroed):
+      • Revolute 1 (q1): at [0, 0, 0], rotates about Z.
+      • Revolute 2 (q2): translated by [0, 0.13585, 0] then rotates about Y.
+      • Revolute 3 (q3): translated by [0, -0.1197, 0.425] (the “arm” before the wrist).
+      • Revolute 4 (q4): translated by [0, 0, 0.39225] then rotates about Y.
+      • Revolute 5 (q5): translated by [0, 0.093, 0] then rotates about Z.
+      • Revolute 6 (q6): translated by [0, 0, 0.09465] then rotates about Y.
+      • TCP offset: translated by [0, 0.0823, 0].
+    
+    When all joints are zero the forward kinematics yield:
+         TCP = [0, 0.19145, 0.9119].
+    
+    Because the “position‐only” IK problem is underconstrained (6 joints for position only),
+    we choose the solution with the wrist joints set to zero (q4 = q5 = q6 = 0). With this
+    assignment the TCP position can be written as:
+         p_TCP = Rz(q1) * { p2 + R_y(q2) * [ A + R_y(q3)*B ] },
+    where:
+         p2 = [0, 0.13585, 0]         (translation from base to link 2)
+         A  = [0, -0.1197, 0.425]       (translation from link 2 to link 3)
+         B  = [0, 0.1753, 0.4869]        (combined wrist and TCP offset;
+                                         note: 0.1753 = 0.093 + 0.0823, 
+                                               0.4869 = 0.39225 + 0.09465)
+    
+    In our convention the rotation about Z by q1 “rotates away” the X component so that in the
+    rotated frame the TCP appears to lie in a plane (with x = 0). One then identifies a planar
+    2R manipulator whose effective link lengths come from the Z components of A and B:
+         L1 = 0.425    and    L2 = 0.4869.
+    
+    In the rotated frame we have:
+         p' = Rz(-q1) * p  = (0, p'_y, z)
+    with (by construction) p'_y = 0.19145 and z unchanged.
+    
+    The planar equations (for the remaining joints) become:
+         (i)   L1*sin(q2) + L2*sin(q2+q3) = 0    (to cancel out any X-offset)
+         (ii)  L1*cos(q2) + L2*cos(q2+q3) = z.
+    
+    Equation (i) immediately implies:
+         tan(q2) = - [L2*sin(q3)] / [L1 + L2*cos(q3)],
+    so we may choose:
+         q2 = -atan2(L2*sin(q3), L1 + L2*cos(q3)).
+    
+    Moreover, (ii) leads to the relation:
+         z = sqrt(L1**2 + L2**2 + 2*L1*L2*cos(q3)),
+    from which we solve for q3:
+         cos(q3) = (z**2 - L1**2 - L2**2)/(2*L1*L2).
+    
+    Finally, q1 is obtained by “aligning” the target p so that after rotation by -q1 the x-component
+    of p vanishes. One may choose:
+         q1 = atan2(-x, y).
+    
+    With the above choices and setting q4=q5=q6=0 we obtain one valid inverse kinematics solution.
+    
+    :param p: The desired TCP position as (x, y, z).
+    :return: A 6-tuple of joint angles (q1, q2, q3, q4, q5, q6) in radians.
+    """
+    import math
+
+    # Extract target coordinates.
+    x, y, z = p
+
+    # --- Solve for q1 ---
+    # Choose q1 so that a rotation about Z removes the X-component from the target.
+    q1 = math.atan2(-x, y)
+
+    # For clarity, compute the rotated target p' = Rz(-q1)*p.
+    cos_q1 = math.cos(q1)
+    sin_q1 = math.sin(q1)
+    # After rotation, x_r should be (nearly) zero.
+    x_r = cos_q1 * x + sin_q1 * y
+    y_r = -sin_q1 * x + cos_q1 * y
+    # Note: The forward kinematics dictate that y_r should equal 0.19145.
+    # We proceed using z directly (z remains unchanged under Rz).
+
+    # --- Define effective link lengths ---
+    # From the structure of the chain:
+    L1 = 0.425    # comes from the Z-component of A = [0, -0.1197, 0.425]
+    L2 = 0.4869   # comes from the Z-component of B = [0, 0.1753, 0.4869]
+
+    # --- Solve for q3 ---
+    # From the planar equation:
+    #    z = sqrt(L1**2 + L2**2 + 2*L1*L2*cos(q3))
+    # hence,
+    #    cos(q3) = (z**2 - L1**2 - L2**2) / (2 * L1 * L2)
+    cos_q3 = (z**2 - L1**2 - L2**2) / (2 * L1 * L2)
+    # Clamp cos_q3 between -1 and 1 for numerical safety.
+    cos_q3 = max(min(cos_q3, 1.0), -1.0)
+    q3 = math.acos(cos_q3)
+
+    # --- Solve for q2 ---
+    # From the requirement that the rotated X-component vanish (the planar constraint):
+    q2 = -math.atan2(L2 * math.sin(q3), (L1 + L2 * math.cos(q3)))
+
+    # --- Set remaining joints ---
+    # We choose q4, q5, and q6 to be 0.
+    q4 = 0.0
+    q5 = 0.0
+    q6 = 0.0
+
+    return (q1, q2, q3, q4, q5, q6)

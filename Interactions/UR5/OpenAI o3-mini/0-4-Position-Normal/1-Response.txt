@@ -1,0 +1,137 @@
+Below is one acceptable closed‐form solution. In this solution we “fix” the extra two degrees of freedom by choosing q₄ = q₅ = 0 so that only q₁, q₂, and q₃ are “used” to position the tool center point (TCP). (Any other redundancy “pick” is acceptable.) The following derivation uses the fact that when all joint angles are zero the forward kinematics (by successive application of the URDF “origin” translations) puts the TCP at
+
+  (0, offset₂ + offset₃ + offset₅, offset₃_z + offset₄_z + tcp_z)  
+    = (0, 0.13585 – 0.1197 + 0.093, 0.425 + 0.39225 + 0.09465)  
+    = (0, 0.10915, 0.9119).
+
+One may “decouple” the inverse position problem by first computing the base (q₁) so that the desired (x,y) lies in the proper half‐plane. In fact, if we denote the desired position p = (x,y,z) and let Rₑff = √(x²+y²), then the TCP’s “zero‐configuration” offset in y is 0.10915. In our method we assume that after “undoing” the base rotation the effective coordinates become
+
+  x₍d₎ = √(Rₑff² – 0.10915²)   and  z (unchanged).
+
+Now the remaining “planar” portion is produced by the two “links” coming from joint 2 and joint 3. In our geometry the (planar) quantities come from the following combination. Notice that when q₄ = q₅ = 0 the net effect of the downstream translations is
+
+  B + (C + D + E) = (0, –0.1197 + 0.093, 0.425 + 0.39225 + 0.09465)
+    = (0, –0.0267, 0.9119).
+
+Then adding the translation from joint 2 (A = (0, 0.13585, 0)) produces the zero‐configuration TCP above. In the “planar 2R” model we identify
+
+  d = 0.425        (the offset along z from revolute 3)  
+  L = 0.39225 + 0.09465  (the effective length from the last two translations, here 0.4869)
+
+so that the 2R “chain” (with joint variable q₃) has the (constant) distance
+
+  D(q₃)² = d² + L² + 2·d·L·cos(q₃).
+
+Because (after “unwinding” q₁) the target “planar” distance is
+
+  Dₜₐᵣgₑₜ = √(x₍d₎² + z²),  
+
+one may solve for q₃ via  
+  cos(q₃) = [Dₜₐᵣgₑₜ² – (d² + L²)]⁄(2·d·L).
+
+Once q₃ is determined (choosing the principal value), an intermediate “angle” φ is defined by  
+  φ = atan2(L·sin(q₃), d + L·cos(q₃)).
+
+Then the “planar” joint q₂ is solved from the fact that (by writing the 2R forward kinematics)  
+  x₍d₎ = Dₜₐᵣgₑₜ·sin(q₂+φ)  and  z = Dₜₐᵣgₑₜ·cos(q₂+φ).
+
+Thus, one may pick  
+  q₂ = atan2(x₍d₎, z) – φ.
+
+Finally, the base joint q₁ is recovered by “rotating back” the (x,y) plane. One shows that the rotation by q₁ must align the vector (√(Rₑff² – 0.10915²), 0.10915) with (x, y). Hence pick
+
+  q₁ = atan2(y, x) – atan2(0.10915, √(Rₑff² – 0.10915²)).
+
+The following Python code implements this solution. (Remember, we have fixed q₄ and q₅ to zero.) 
+
+Below is the complete inverse_kinematics method:
+
+----------------------------------------------------------------
+def inverse_kinematics(p: tuple[float, float, float]) -> tuple[float, float, float, float, float]:
+    """
+    Gets the joint values needed to reach position "p".
+    :param p: The TCP position to reach in the form (x, y, z).
+    :return: A 5-tuple of joint values (in radians).
+    """
+    import math
+
+    # Unpack target position.
+    x, y, z = p
+
+    # -------------------------------
+    # Robot kinematics parameters (from the table)
+    offset2 = 0.13585    # Translation from Revolute 1 to Revolute 2 (along y)
+    offset3 = -0.1197    # Translation from Revolute 2 to Revolute 3 (along y)
+    offset3_z = 0.425    # Translation from Revolute 2 to Revolute 3 (along z)
+    offset4_z = 0.39225  # Translation from Revolute 3 to Revolute 4 (along z)
+    offset5  = 0.093     # Translation from Revolute 4 to Revolute 5 (along y)
+    tcp_z    = 0.09465   # Translation from Revolute 5 to TCP (along z)
+
+    # When all joint angles are zero the TCP is at:
+    #   (0, offset2 + offset3 + offset5, offset3_z + offset4_z + tcp_z)
+    base_y_offset = offset2 + offset3 + offset5  # 0.13585 - 0.1197 + 0.093 = 0.10915
+    # (The zero configuration TCP is then (0, 0.10915, 0.9119).)
+
+    # For the planar (shoulder/elbow) part we use:
+    d = offset3_z            # 0.425
+    L = offset4_z + tcp_z      # 0.39225 + 0.09465 ≈ 0.4869
+
+    # ---------------
+    # Step 1. Solve for the base rotation q1.
+    # In the (x,y) plane the target has radius:
+    R_eff = math.sqrt(x*x + y*y)
+    # In the zero configuration (before q1) the end effector offset in y is base_y_offset.
+    # Thus, the effective x-component (after "unwinding" q1) is:
+    temp_val = R_eff*R_eff - base_y_offset*base_y_offset
+    temp_val = max(temp_val, 0)  # avoid negative
+    # This vector (sqrt(R_eff^2 - base_y_offset^2), base_y_offset) must be rotated by q1 to yield (x,y).
+    q1 = math.atan2(y, x) - math.atan2(base_y_offset, math.sqrt(temp_val))
+
+    # ---------------
+    # Step 2. Unwind the rotation q1 from (x,y).
+    # In the new frame the remaining “planar” coordinate becomes:
+    x_d = math.sqrt(temp_val)   # (x_d)^2 + (base_y_offset)^2 = R_eff^2.
+    # And z remains the same.
+    
+    # The effective distance from the (rotated) origin to the target is:
+    D_target = math.sqrt(x_d*x_d + z*z)
+
+    # ---------------
+    # Step 3. Solve for q3 (elbow) using the law of cosines.
+    # For the planar 2R chain (joints 2 and 3) the forward kinematics yields:
+    #   D_target^2 = d^2 + L^2 + 2*d*L*cos(q3)
+    # so that
+    #   cos(q3) = [D_target^2 - (d^2 + L^2)] / (2*d*L)
+    cos_q3 = (D_target*D_target - (d*d + L*L)) / (2*d*L)
+    # Clamp for numerical precision.
+    cos_q3 = max(min(cos_q3, 1.0), -1.0)
+    q3 = math.acos(cos_q3)
+
+    # ---------------
+    # Step 4. Solve for q2 (shoulder pitch).
+    # Define an intermediate angle φ such that:
+    #   φ = atan2(L*sin(q3), d + L*cos(q3))
+    phi = math.atan2(L * math.sin(q3), d + L * math.cos(q3))
+    # In our 2R geometry, one has:
+    #   x_d = D_target*sin(q2+phi)
+    #   z   = D_target*cos(q2+phi)
+    # Thus:
+    q2 = math.atan2(x_d, z) - phi
+
+    # ---------------
+    # Step 5. Choose the remaining joints.
+    q4 = 0.0
+    q5 = 0.0
+
+    return (q1, q2, q3, q4, q5)
+----------------------------------------------------------------
+
+Comments:
+
+• We first “undo” the base rotation by computing q1 so that, when rotated by –q1, the (x,y) target seen in the base becomes a vector whose second (y) component equals the constant offset (0.10915) and whose first component is √(Rₑff² – 0.10915²).
+
+• Then we imagine a planar 2‐R chain (joints 2 and 3) with link lengths d and L; using the law of cosines we recover q₃ and (via an intermediate “angle” φ) q₂.
+
+• Finally, we simply pick q₄ and q₅ to be zero.
+
+This closed‐form solution uses only elementary functions (from Python’s math module) and meets the requirements. Note that because the robot is kinematically redundant (5 DOF for a 3D position), many solutions exist.

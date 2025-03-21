@@ -1,0 +1,96 @@
+def inverse_kinematics(p: tuple[float, float, float], r: tuple[float, float, float]) -> tuple[float, float, float]:
+    """
+    Computes the joint angles needed for the 3-DOF manipulator to reach a desired TCP
+    position p ([x, y, z]) and orientation r ([rx, ry, rz] in radians). The solution
+    follows these steps:
+      1. Solve for joint1 (rotation about the Z-axis) by decoupling the planar subproblem.
+      2. Rotate the target position by -theta1 and translate by joint2’s offset ([0, 0.13585, 0])
+         to obtain the effective TCP position for the 2-link planar chain.
+      3. Use the desired end-effector orientation (rpy) to compute the net rotation (theta2+theta3)
+         required by the last two joints.
+      4. Solve the planar inverse kinematics (law-of-cosines) for the two link lengths,
+         a = 0.425 (from joint2 to joint3) and b = 0.39225 (from joint3 to TCP).
+    Assumes that the target is reachable.
+    """
+    import math
+
+    # Unpack the target TCP position and orientation (rpy)
+    x, y, z = p
+    rx, ry, rz = r
+
+    # --- Step 1: Solve for joint1 (Rotation about Z) ---
+    # Using the decoupling strategy similar to EXISTING CODE 1:
+    theta1 = math.atan2(-x, y)
+    
+    # --- Step 2: Transform target position into the frame after joint1 rotation ---
+    # Rotate the target by -theta1 about Z:
+    cos1 = math.cos(theta1)
+    sin1 = math.sin(theta1)
+    x_rot = cos1 * x + sin1 * y
+    y_rot = -sin1 * x + cos1 * y
+    z_rot = z
+    # The origin of joint2 (Revolute 2) is at [0, 0.13585, 0]. Subtract this offset so that
+    # the 2-link chain (joints 2 and 3) acts in a plane.
+    # Note: Since joints 2 and 3 rotate about Y, they affect only the x and z coordinates.
+    x_eff = x_rot
+    # The y coordinate in the rotated frame, after subtracting joint2’s offset,
+    # is fixed by the design (should match the constant offset from the subsequent link).
+    y_eff = y_rot - 0.13585
+    z_eff = z_rot
+
+    # For the planar inverse kinematics, we use only the x and z coordinates.
+    x_target = x_eff
+    z_target = z_eff
+
+    # --- Step 3: Determine the net angle (theta2 + theta3) required from the TCP orientation ---
+    # Using a portion of the rotation matrix derived from the rpy angles.
+    # Here we extract an effective rotation about Y.
+    # R00 and R02 come from the standard conversion:
+    R00 = math.cos(ry) * math.cos(rz)
+    R02 = math.sin(ry)
+    theta_sum = math.atan2(R02, R00)  # This represents (theta2 + theta3).
+
+    # --- Step 4: Solve the 2-link (planar) inverse kinematics for joints 2 and 3 ---
+    # Link lengths from the robot description:
+    a = 0.425    # Length from joint2 to joint3 (ignoring the constant y-offset)
+    b = 0.39225  # Length from joint3 to TCP
+
+    # Compute the squared distance from joint2 (after offset) to the target TCP in x-z plane:
+    d_sq = x_target**2 + z_target**2
+
+    # Apply the law-of-cosines to find joint 3 angle.
+    cos_theta3 = (d_sq - a*a - b*b) / (2 * a * b)
+    # Clamp cos_theta3 to the interval [-1, 1] to handle numerical imprecision.
+    if cos_theta3 > 1:
+        cos_theta3 = 1
+    if cos_theta3 < -1:
+        cos_theta3 = -1
+
+    # There are two potential solutions for theta3.
+    theta3_candidate1 = math.acos(cos_theta3)
+    theta3_candidate2 = -theta3_candidate1
+
+    theta2 = None
+    theta3 = None
+    # Check each candidate to see if it satisfies the planar forward kinematics:
+    for candidate in (theta3_candidate1, theta3_candidate2):
+        # Enforce the orientation constraint: theta2 + candidate == theta_sum.
+        theta2_candidate = theta_sum - candidate
+        # Compute the forward kinematics for the planar two-link chain:
+        # x_calc = a*sin(theta2) + b*sin(theta2 + theta3)
+        # z_calc = a*cos(theta2) + b*cos(theta2 + theta3)
+        x_calc = a * math.sin(theta2_candidate) + b * math.sin(theta_sum)
+        z_calc = a * math.cos(theta2_candidate) + b * math.cos(theta_sum)
+        if math.isclose(x_calc, x_target, abs_tol=1e-5) and math.isclose(z_calc, z_target, abs_tol=1e-5):
+            theta2 = theta2_candidate
+            theta3 = candidate
+            break
+
+    # Fallback: if neither candidate offers an exact match (should not happen for reachable targets),
+    # compute theta2 directly and then assign theta3.
+    if theta2 is None or theta3 is None:
+        theta2 = math.atan2(x_target - b * math.sin(theta_sum),
+                            z_target - b * math.cos(theta_sum))
+        theta3 = theta_sum - theta2
+
+    return (theta1, theta2, theta3)

@@ -1,0 +1,73 @@
+def inverse_kinematics(p: tuple[float, float, float]) -> tuple[float, float, float, float]:
+    """
+    Computes the joint angles required for the 4-DOF serial manipulator to reach a given TCP position.
+    
+    The manipulator has the following structure:
+      - Revolute 1: Located at [0, 0, 0] with rotation about Y.
+      - Revolute 2: Located at [0, -0.1197, 0.425] relative to link 1; rotates about Y.
+      - Revolute 3: Located at [0, 0, 0.39225] relative to link 2; rotates about Y.
+      - Revolute 4: Located at [0, 0.093, 0] relative to link 3; rotates about Z.
+      - TCP: Located at [0, 0, 0.09465] relative to link 4.
+    
+    For TCP position control the main effect comes from joints 1–3 which affect the (x,z) position.
+    By “removing” the constant offsets:
+      • Subtract the TCP offset along z: z_eff = z - 0.09465.
+      • (Optionally note the link-4 offset, where y is shifted by 0.093, but since joints 1–3
+        rotate about Y and contribute only to x and z, it does not alter the planar computation.)
+    we obtain an effective 2D target (x, z_eff) to be solved with a two-link solution (with lengths L1 and L2).
+    
+    The two-link geometry is:
+      L1 = 0.425   (from revolute 1 to revolute 2),
+      L2 = 0.39225 (from revolute 2 to revolute 3).
+      
+    The steps are:
+      1. Compute the distance to the effective target: d = sqrt(x^2 + z_eff^2).
+      2. Use the cosine law to compute:
+             cos(theta2) = (d^2 - L1^2 - L2^2) / (2 * L1 * L2)
+         then theta2 = acos(cos(theta2)).
+      3. Use a cross–product test on the vectors to choose the elbow configuration (flip theta2’s sign when needed).
+      4. Compute theta1 from the geometry:
+             theta1 = atan2(x, z_eff) - atan2(L2*sin(theta2), L1 + L2*cos(theta2)).
+      5. Set theta3 to 0 because it is redundant when considering position only.
+      6. Set theta4 to 0 because its rotation about Z does not affect the TCP position.
+    
+    :param p: A tuple (x, y, z) representing the desired TCP position.
+    :return: A tuple (theta1, theta2, theta3, theta4) of joint angles in radians.
+    """
+    import math
+
+    # Unpack target TCP position.
+    x, y, z = p
+
+    # Remove TCP offset along z.
+    z_eff = z - 0.09465
+    
+    # Compute effective distance in the x-z plane.
+    d = math.sqrt(x**2 + z_eff**2)
+    
+    # Define link lengths for the two-link sub-chain.
+    L1 = 0.425
+    L2 = 0.39225
+
+    # Compute cosine of theta2 using the cosine law.
+    cos_theta2 = (d**2 - L1**2 - L2**2) / (2 * L1 * L2)
+    # Clamp to the valid range [-1, 1] (for numerical robustness).
+    cos_theta2 = max(min(cos_theta2, 1.0), -1.0)
+    theta2 = math.acos(cos_theta2)
+    
+    # Use a cross-product test to determine the proper sign (elbow configuration) for theta2.
+    # (This test compares the effective x component with the contribution from the links.)
+    cross = x * (L1 + L2 * cos_theta2) - z_eff * (L2 * math.sin(theta2))
+    if cross < 0:
+        theta2 = -theta2
+
+    # Compute theta1 from the effective target direction and the geometry of the links.
+    theta1 = math.atan2(x, z_eff) - math.atan2(L2 * math.sin(theta2), L1 + L2 * math.cos(theta2))
+    
+    # For position IK, joint 3 does not affect the TCP location.
+    theta3 = 0.0
+    
+    # Joint 4 rotates about Z; its rotation does not change the TCP position as the TCP offset is aligned with Z.
+    theta4 = 0.0
+    
+    return (theta1, theta2, theta3, theta4)

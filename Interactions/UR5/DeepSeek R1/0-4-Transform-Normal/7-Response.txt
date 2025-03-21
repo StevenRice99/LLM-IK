@@ -1,0 +1,92 @@
+To solve this problem, we need to determine the joint angles for a 5-DOF robotic arm to reach a specified position and orientation. The solution involves both position and orientation components, leveraging geometric and trigonometric calculations.
+
+### Approach
+1. **Position Calculation**:
+   - **Theta1 (Base Rotation)**: Calculate the angle to align the arm with the target's projection on the XY plane using `atan2`.
+   - **Distance Calculation**: Compute the Euclidean distance from the second joint (Revolute 2) to the target position, considering the offset of Revolute 2 from the base.
+   - **Reachability Check**: Ensure the target is within the arm's reach using the combined lengths of the links.
+   - **Theta2 and Theta3 (Elbow Joints)**: Use geometric relationships and the law of cosines to determine the angles for the elbow joints.
+   - **Theta4 (Wrist Adjustment)**: Adjust the wrist joint to align the end effector.
+
+2. **Orientation Calculation**:
+   - **Theta5 (End Effector Rotation)**: Adjust the end effector's orientation using the remaining degree of freedom (theta5) to match the desired orientation after positioning.
+
+### Solution Code
+```python
+import numpy as np
+from math import atan2, sqrt, acos, sin, cos
+
+def inverse_kinematics(p: tuple[float, float, float], r: tuple[float, float, float]) -> tuple[float, float, float, float, float]:
+    x, y, z = p
+    roll, pitch, yaw = r
+
+    # Calculate theta1 to align with target's projection on XY plane
+    theta1 = atan2(y, x)
+
+    # Corrected kinematic parameters
+    a2 = 0.425               # Revolute2 to Revolute3
+    a3 = 0.39225             # Revolute3 to Revolute4
+    a4 = sqrt(0.093**2 + 0.09465**2)  # Revolute4 to TCP
+
+    # Calculate distance from Revolute2 (0, 0.13585, 0) to target (x, y, z)
+    dx = x
+    dy = y - 0.13585  # Account for Revolute2's Y offset
+    dz = z
+    d = sqrt(dx**2 + dy**2 + dz**2)
+
+    # Reachability check
+    if not (abs(a2 - (a3 + a4)) <= d <= (a2 + a3 + a4)):
+        raise ValueError("Target position is unreachable")
+
+    # Solve for theta3 using law of cosines (elbow-down)
+    cos_theta3 = (d**2 - a2**2 - (a3 + a4)**2) / (2 * a2 * (a3 + a4))
+    cos_theta3 = np.clip(cos_theta3, -1.0, 1.0)
+    theta3 = -acos(cos_theta3)
+
+    # Solve for theta2 using geometric relationships
+    gamma = atan2(dz, sqrt(dx**2 + dy**2))  # Vertical angle to target
+    delta = acos((a2**2 + d**2 - (a3 + a4)**2) / (2 * a2 * d))
+    theta2 = gamma - delta
+
+    # Calculate theta4 to align the end effector
+    theta4 = - (theta2 + theta3)
+
+    # Compute rotation matrices up to joint4
+    R1 = np.array([[cos(theta1), -sin(theta1), 0],
+                   [sin(theta1), cos(theta1), 0],
+                   [0, 0, 1]])
+    R2 = np.array([[cos(theta2), 0, sin(theta2)],
+                   [0, 1, 0],
+                   [-sin(theta2), 0, cos(theta2)]])
+    R3 = np.array([[cos(theta3), 0, sin(theta3)],
+                   [0, 1, 0],
+                   [-sin(theta3), 0, cos(theta3)]])
+    R4 = np.array([[cos(theta4), 0, sin(theta4)],
+                   [0, 1, 0],
+                   [-sin(theta4), 0, cos(theta4)]])
+    R_combined = R1 @ R2 @ R3 @ R4
+
+    # Calculate final rotation for theta5
+    cr, sr = cos(roll), sin(roll)
+    cp, sp = cos(pitch), sin(pitch)
+    cy, sy = cos(yaw), sin(yaw)
+    R_target = np.array([
+        [cy*cp, cy*sp*sr - sy*cr, cy*sp*cr + sy*sr],
+        [sy*cp, sy*sp*sr + cy*cr, sy*sp*cr - cy*sr],
+        [-sp, cp*sr, cp*cr]
+    ])
+    R_diff = R_combined.T @ R_target
+    theta5 = atan2(R_diff[1, 0], R_diff[0, 0])
+
+    return (theta1, theta2, theta3, theta4, theta5)
+```
+
+### Explanation
+1. **Theta1 Calculation**: The base joint (theta1) is determined to align the arm with the target's projection on the XY plane using the arctangent function.
+2. **Distance Calculation**: The Euclidean distance from Revolute 2 to the target is computed, considering the offset of Revolute 2 from the base.
+3. **Reachability Check**: Ensures the target is within the arm's reach using the combined lengths of the links.
+4. **Theta2 and Theta3**: Using geometric methods and the law of cosines, the joint angles are computed to position the end effector at the target coordinates.
+5. **Theta4**: Adjusts the wrist joint to maintain orientation continuity.
+6. **Orientation Adjustment**: The rotation matrix up to the fourth joint is computed, and the fifth joint (theta5) is adjusted to match the desired orientation derived from the target RPY angles.
+
+This approach ensures that the robotic arm reaches the desired position and orientation using closed-form inverse kinematics, correctly accounting for the spatial relationships and link lengths.

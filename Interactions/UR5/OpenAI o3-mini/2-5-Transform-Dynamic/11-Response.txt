@@ -1,0 +1,141 @@
+def inverse_kinematics(p: tuple[float, float, float],
+                       r: tuple[float, float, float]) -> tuple[float, float, float, float]:
+    """
+    Computes the closed‐form inverse kinematics for a 4-DOF serial manipulator.
+
+    The robot geometry is:
+      • Revolute 1: Origin [0,0,0] with rotation about Y.
+      • Revolute 2: Translated by [0, 0, 0.39225] then rotation about Y.
+      • Revolute 3: Translated by [0, 0.093, 0] then rotation about Z.
+      • Revolute 4: Translated by [0, 0, 0.09465] then rotation about Y.
+      • TCP: Fixed translation [0, 0.0823, 0] with an additional rotation about Z by 90°.
+
+    The decoupled strategy is:
+      1. Compute q1 (Revolute 1) from the (x,z) projection:
+              q1 = atan2(x, z)
+      2. For the wrist sub-chain (joints 2–4), remove the fixed y-offset of 0.093 and
+         solve a planar problem with effective link lengths L1 = 0.0823 and L2 = 0.09465.
+         The cosine law for the y-direction gives:
+              cos(q3) = (py - 0.093) / L1
+         yielding two candidate solutions for q3 (Revolute 3, about Z).
+      3. For each candidate q3, solve a simple 2×2 linear system to get q2 (Revolute 2, about Y)
+         from the x and z coordinates.
+      4. Then determine q4 (Revolute 4, about Y) by requiring that:
+              (RotY(q2) • RotZ(q3) • RotY(q4) • R_tcp) = R_target,
+         where R_tcp is the fixed TCP rotation (90° about Z) and R_target is built from the 
+         desired roll, pitch, and yaw (using a ZYX convention).
+      5. Return the solution (q1, q2, q3, q4) that minimizes the orientation error.
+
+    :param p: The desired TCP position as a tuple (x, y, z).
+    :param r: The desired TCP orientation (roll, pitch, yaw) in radians.
+    :return: A 4-tuple (q1, q2, q3, q4) of joint angles in radians.
+    """
+    import math
+    import numpy as np
+
+    # ----- Step 1. Compute Joint 1 (rotation about Y) -----
+    x, y, z = p
+    q1 = math.atan2(x, z)  # Base rotation from the (x,z) projection
+
+    # ----- Step 2. Set Up the Wrist (Joints 2–4) -----
+    # Remove the fixed y-offset of revolute 3 (0.093 m) to form the planar problem.
+    px, py, pz = p
+    y_offset = py - 0.093
+    # For reachability the magnitude must not exceed the effective link length L1 = 0.0823.
+    if abs(y_offset) > 0.0823:
+        raise ValueError("Target y-coordinate unreachable (|py - 0.093| > 0.0823).")
+    
+    # ----- Step 3. Compute candidate values for q3 (rotation about Z) -----
+    # Using the cosine law:
+    #      cos(q3) = (py - 0.093) / L1   where L1 = 0.0823
+    cos_val = y_offset / 0.0823
+    # Clamp due to numerical issues.
+    if cos_val > 1.0:
+        cos_val = 1.0
+    elif cos_val < -1.0:
+        cos_val = -1.0
+    q3_candidate = math.acos(cos_val)
+    q3_candidates = [q3_candidate, -q3_candidate]
+
+    # ----- Build the target rotation matrix R_target (ZYX Euler angles) -----
+    roll, pitch, yaw = r
+    cr, sr = math.cos(roll), math.sin(roll)
+    cp, sp = math.cos(pitch), math.sin(pitch)
+    cy, sy = math.cos(yaw), math.sin(yaw)
+    R_target = np.array([[cy*cp,         cy*sp*sr - sy*cr,    cy*sp*cr + sy*sr],
+                         [sy*cp,         sy*sp*sr + cy*cr,    sy*sp*cr - cy*sr],
+                         [  -sp,                  cp*sr,             cp*cr   ]])
+    
+    # The TCP includes a fixed rotation of 90° about Z.
+    R_tcp = np.array([[0, -1, 0],
+                      [1,  0, 0],
+                      [0,  0, 1]])
+    R_tcp_inv = R_tcp.T  # Inverse of a rotation is its transpose
+
+    # ----- Helper functions for rotations about Y and Z -----
+    def rotY(theta: float) -> np.ndarray:
+        return np.array([[math.cos(theta), 0, math.sin(theta)],
+                         [0, 1, 0],
+                         [-math.sin(theta), 0, math.cos(theta)]])
+
+    def rotZ(theta: float) -> np.ndarray:
+        return np.array([[math.cos(theta), -math.sin(theta), 0],
+                         [math.sin(theta),  math.cos(theta), 0],
+                         [0, 0, 1]])
+    
+    # Effective link lengths for the planar sub-problem.
+    L1 = 0.0823    # from the start of the wrist (after revolute 3) to the TCP offset
+    L2 = 0.09465   # translation introduced by revolute 4
+
+    # ----- Step 4. Loop over candidates to solve for q2 and q4 -----
+    best_solution = None
+    best_error = float("inf")
+    for q3 in q3_candidates:
+        sin_q3 = math.sin(q3)
+        # Set up the 2×2 system for joint 2.
+        # Coefficients derived from the effective (planar) geometry:
+        A = -L1 * sin_q3
+        B = L2
+        C =  L1 * sin_q3
+        D = L2
+        det = B * D - A * C
+        if abs(det) < 1e-6:
+            continue  # Skip near-singular configurations
+        # Solve for intermediate quantities; these yield q2 (rotation about Y at revolute 2)
+        sin_q2 = (D * x - A * z) / det
+        cos_q2 = (-C * x + B * z) / det
+        q2 = math.atan2(sin_q2, cos_q2)
+        
+        # Compute the composite rotation from joints 2 and 3.
+        R2 = rotY(q2)
+        R3 = rotZ(q3)
+        R_23 = R2 @ R3
+        
+        # ----- Solve for q4 (rotation about Y at revolute 4) -----
+        # The overall wrist rotation must satisfy:
+        #      R_23 · (RotY(q4)) · R_tcp = R_target.
+        # Rearranging:
+        #      RotY(q4) = inv(R_23) · (R_target · inv(R_tcp)).
+        R_desired = R_target @ R_tcp_inv
+        R_remaining = np.linalg.inv(R_23) @ R_desired
+        # For a pure rotation about Y the matrix has the form:
+        #      [[ cos(q4), 0, sin(q4)],
+        #       [    0,   1,    0   ],
+        #       [-sin(q4), 0, cos(q4)]]
+        # Hence, extract q4 as:
+        q4 = math.atan2(R_remaining[0, 2], R_remaining[0, 0])
+        
+        # ----- Evaluate the solution based on the resulting TCP orientation -----
+        R4 = rotY(q4)
+        R_achieved = R_23 @ R4 @ R_tcp
+        error = np.linalg.norm(R_achieved - R_target)
+        if error < best_error:
+            best_error = error
+            best_solution = (q2, q3, q4)
+    
+    if best_solution is None:
+        # Fallback (should not be reached for reachable targets)
+        return (q1, 0.0, 0.0, 0.0)
+    
+    q2, q3, q4 = best_solution
+    return (q1, q2, q3, q4)

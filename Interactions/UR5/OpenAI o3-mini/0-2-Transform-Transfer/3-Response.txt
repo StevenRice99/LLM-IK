@@ -1,0 +1,111 @@
+Below is one acceptable analytical solution. In our derivation we note that the forward kinematics for this serial chain can be written as
+
+  T_TCP = T₁ · T₂ · T₃ · T_TCP_offset
+
+with
+
+  T₁ = RotZ(θ₁),
+  T₂ = Trans(0, 0.13585, 0) · RotY(θ₂),
+  T₃ = Trans(0, –0.1197, 0.425) · RotY(θ₃),
+  T_TCP_offset = Trans(0, 0, 0.39225).
+
+Because the “origin” rpy for links 2, 3 and the TCP are zero the only extra (orientational) degree–of–freedom appears in T₁. In fact, one may show that (using a ZYX Euler–angle convention) the overall TCP rotation is
+
+  R_TCP = Rz(θ₁) · Ry(θ₂+θ₃)
+
+so that the TCP rpy angles are (approximately)
+  roll = 0,
+  pitch = (θ₂+θ₃),
+  yaw = θ₁.
+
+Thus, to have a reachable target the desired rpy must satisfy r_roll = 0 and r_pitch = (θ₂+θ₃) and r_yaw = θ₁. (Since the arm has only 3 DOF, its “orientation” output is limited to this one independent yaw – the remaining orientation components come out of the link transforms. We assume targets will be chosen so that the desired orientation is consistent with the position solution.) 
+
+A derivation of the IK starts by “separating out” the arm’s three parameters. (One may show that after eliminating the small “shoulder offset” k = 0.13585–0.1197 = 0.01615 the position equations reduce to a planar 2R geometry with “link lengths” L₁ ≈ 0.4416 and L₂ = 0.39225. In our closed–form solution these numbers appear grouped with constant values 0.334746 and 0.3334125.) In other words, if p = (x,y,z) then one may show that
+
+  cosθ₃ = (x²+y²+z² – 0.334746) / 0.3334125,
+  A = √(x²+y² – k²)           (with k = 0.01615),
+  with intermediate parameters C = 0.425 + 0.39225 cosθ₃ and D = 0.39225 sinθ₃ the “elbow” angle is found via
+   θ₂ = atan2(C·A – D·z, C·z + D·A).
+
+Finally, note that even though the position equations would normally yield θ₁ as
+  θ₁_pos = atan2(A·y – k·x, A·x + k·y)
+the TCP yaw (rpy’s third component) must equal θ₁. (Any nonzero roll in the target is not reachable.) Thus we enforce
+
+  θ₁ = r_yaw       with r = (r_roll, r_pitch, r_yaw).
+
+One acceptable solution is therefore as follows. (In what follows we assume that the target is “consistent” – i.e. r_roll is 0 and r_pitch equals (θ₂+θ₃) as determined by the position‐only IK. If a small discrepancy appears it can be “shared” between θ₂ and θ₃.)
+
+-------------------------------------------------------
+def inverse_kinematics(p: tuple[float, float, float],
+                       r: tuple[float, float, float]) -> tuple[float, float, float]:
+    """
+    Gets the joint values needed to reach TCP position p and orientation r.
+    p: Desired TCP position [x, y, z].
+    r: Desired TCP orientation in rpy [roll, pitch, yaw] (radians).
+    
+    For this 3 DOF arm the only independent orientation is about Z (the yaw) so that
+      roll   = 0  and pitch = θ₂ + θ₃  and yaw = θ₁.
+    It is assumed that the target is reachable (so any nonzero roll or mismatch in pitch is negligible).
+    """
+    import math
+    x, y, z = p
+    r_roll, r_pitch, r_yaw = r
+    tol = 1e-6
+    # (1) Enforce that the only achievable TCP orientation is with zero roll.
+    if abs(r_roll) > tol:
+        raise ValueError("Target roll must be zero for this 3 DOF manipulator.")
+
+    # (2) Compute θ₃ from the law–of–cosines.
+    # The constants below are derived from the link translations.
+    k = 0.01615  # effective offset from link 2: 0.13585 - 0.1197
+    numerator_cosθ3 = x**2 + y**2 + z**2 - 0.334746
+    cos_theta3 = numerator_cosθ3 / 0.3334125
+    # Clamp cosθ₃ in case of small rounding errors:
+    cos_theta3 = max(min(cos_theta3, 1.0), -1.0)
+    theta3 = math.acos(cos_theta3)
+    
+    # (3) Compute intermediate parameters and then θ₂.
+    C = 0.425 + 0.39225 * math.cos(theta3)
+    D = 0.39225 * math.sin(theta3)
+    A_sq = x**2 + y**2 - k**2
+    A = math.sqrt(A_sq) if A_sq >= 0 else 0.0
+    denominator_theta2 = C**2 + D**2
+    sin_theta2 = (C * A - D * z) / denominator_theta2
+    cos_theta2 = (C * z + D * A) / denominator_theta2
+    theta2 = math.atan2(sin_theta2, cos_theta2)
+    
+    # (4) Although the position equations yield a θ₁ (here computed as theta1_pos),
+    # we must have tcp_yaw = θ₁. So we enforce this orientation constraint:
+    #     TCP yaw = r_yaw.
+    # (If you wish to use the position-based result, note it is given by:
+    #  theta1_pos = atan2(A*y - k*x, A*x + k*y).
+    #  For a reachable target it must be that theta1_pos ≈ r_yaw.)
+    theta1_pos = 0.0
+    if (x**2 + y**2) > tol:
+        theta1_pos = math.atan2(A * y - k * x, A * x + k * y)
+    # Optionally, one might check:
+    if abs(theta1_pos - r_yaw) > tol:
+        # For a reachable target these must be (nearly) equal.
+        # Here we choose to enforce the desired TCP yaw.
+        theta1 = r_yaw
+    else:
+        theta1 = theta1_pos  # r_yaw and computed θ₁ agree.
+        
+    # (5) Finally, the TCP pitch produced is (θ₂ + θ₃); for consistency the desired pitch must match.
+    if abs((theta2 + theta3) - r_pitch) > tol:
+        # If a slight discrepancy exists, distribute the error evenly.
+        delta = r_pitch - (theta2 + theta3)
+        theta2 += delta / 2
+        theta3 += delta / 2
+    return (theta1, theta2, theta3)
+-------------------------------------------------------
+
+Explanation:
+
+• Step (1) checks that the target roll is zero since with only three revolute joints we cannot produce nonzero roll.
+• In Step (2) the law–of–cosines is used (with constants computed from the link translations – note that 0.334746 and 0.3334125 come from (x²+y²+z²)’s relation to the squared link lengths).
+• Step (3) shows how the “elbow” (θ₂) is computed in a planar 2R-chain where a small offset k is removed.
+• In Step (4) we enforce the orientation constraint by taking θ₁ = desired yaw.
+• In Step (5) we check that the TCP pitch (which is θ₂+θ₃) matches the desired pitch and, if a small difference exists, we share the error.
+
+This solution is “closed–form” and uses only elementary functions. (It is assumed that every target passed in is consistent – i.e. the desired position and rpy satisfy r_roll = 0 and r_pitch = θ₂+θ₃ with θ₁ = r_yaw.)

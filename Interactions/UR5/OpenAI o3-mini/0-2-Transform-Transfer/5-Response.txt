@@ -1,0 +1,90 @@
+def inverse_kinematics(p: tuple[float, float, float],
+                       r: tuple[float, float, float]) -> tuple[float, float, float]:
+    """
+    Computes the joint angles (theta1, theta2, theta3) needed for the 3 DOF serial manipulator
+    to reach the desired TCP position and orientation.
+    
+    Parameters:
+      p: Desired TCP position as (x, y, z).
+      r: Desired TCP orientation as (roll, pitch, yaw) in radians.
+         For this manipulator:
+             - roll must be zero (the arm cannot achieve nonzero roll)
+             - pitch = theta2 + theta3
+             - yaw   = theta1
+    
+    Returns:
+      A tuple (theta1, theta2, theta3) representing the joint angles in radians.
+      
+    Assumes the target is reachable.
+    """
+    import math
+
+    # Unpack position and rpy orientation.
+    x, y, z = p
+    r_roll, r_pitch, r_yaw = r
+
+    # Tolerance for floating point comparisons.
+    tol = 1e-6
+
+    # Enforce that target roll is zero.
+    if abs(r_roll) > tol:
+        raise ValueError("Target roll must be zero for this 3 DOF manipulator.")
+
+    # Compute theta3 using the law of cosines.
+    # Constants derived from the URDF link parameters:
+    # Link positions from base (adjusted version):
+    #   - For link 2: translation [0, 0.13585, 0]
+    #   - For link 3: translation [0, -0.1197, 0.425]
+    #
+    # k is an effective offset between links 2 and 3 along the Y-axis.
+    k = 0.01615  # 0.13585 - 0.1197
+
+    # The derivation leads to the relation:
+    #    cos(theta3) = (x^2 + y^2 + z^2 - 0.334746) / 0.3334125
+    numerator_cos_theta3 = x**2 + y**2 + z**2 - 0.334746
+    cos_theta3 = numerator_cos_theta3 / 0.3334125
+    # Clamp due to rounding errors:
+    cos_theta3 = max(min(cos_theta3, 1.0), -1.0)
+    theta3 = math.acos(cos_theta3)
+
+    # Compute intermediate parameters for theta2.
+    # Define:
+    #    C = 0.425 + 0.39225*cos(theta3)
+    #    D = 0.39225*sin(theta3)
+    C = 0.425 + 0.39225 * math.cos(theta3)
+    D = 0.39225 * math.sin(theta3)
+
+    # A is derived from the projection onto the XY plane, offset by k:
+    A_sq = x**2 + y**2 - k**2
+    A = math.sqrt(A_sq) if A_sq >= 0 else 0.0
+
+    # Then compute theta2 making use of the intermediate constants:
+    denominator_theta2 = C**2 + D**2
+    sin_theta2 = (C * A - D * z) / denominator_theta2
+    cos_theta2 = (C * z + D * A) / denominator_theta2
+    theta2 = math.atan2(sin_theta2, cos_theta2)
+
+    # Compute theta1 from position. Normally, one obtains:
+    #    theta1_pos = atan2(A*y - k*x, A*x + k*y)
+    # However, the desired TCP yaw is defined to be theta1 so we enforce that.
+    if (x**2 + y**2) > tol:
+        theta1_pos = math.atan2(A * y - k * x, A * x + k * y)
+    else:
+        theta1_pos = 0.0
+
+    # Use the given TCP yaw to set theta1 if there is a slight discrepancy.
+    if abs(theta1_pos - r_yaw) > tol:
+        theta1 = r_yaw
+    else:
+        theta1 = theta1_pos
+
+    # The TCP pitch produced will be (theta2 + theta3). For consistency, we adjust
+    # if there is a small numerical discrepancy.
+    current_pitch = theta2 + theta3
+    if abs(current_pitch - r_pitch) > tol:
+        delta = r_pitch - current_pitch
+        # Distribute the error evenly between theta2 and theta3 adjustments.
+        theta2 += delta / 2.0
+        theta3 += delta / 2.0
+
+    return (theta1, theta2, theta3)

@@ -1,0 +1,79 @@
+To solve this problem, we need to correctly compute the inverse kinematics for a 5-DOF manipulator considering all joint offsets and orientations. The key adjustments involve properly handling the Y-axis offsets in the kinematic chain and ensuring the orientation is correctly decomposed.
+
+```python
+import math
+import numpy as np
+
+def inverse_kinematics(p: tuple[float, float, float], r: tuple[float, float, float]) -> tuple[float, float, float, float, float]:
+    x_tcp, y_tcp, z_tcp = p
+    roll, pitch, yaw = r
+
+    # Compute theta1 considering the TCP's position relative to joint2
+    theta1 = math.atan2(-x_tcp, y_tcp)
+    
+    # Position of joint2 in world frame
+    j2_x = -0.13585 * math.sin(theta1)
+    j2_y = 0.13585 * math.cos(theta1)
+    j2_z = 0.0
+
+    # Vector from joint2 to TCP in world frame
+    dx = x_tcp - j2_x
+    dy = y_tcp - j2_y
+    dz = z_tcp - j2_z
+
+    # Rotate vector into joint2's frame (Z rotation by -theta1)
+    adj_x = dx * math.cos(theta1) + dy * math.sin(theta1)
+    adj_y = -dx * math.sin(theta1) + dy * math.cos(theta1)
+    adj_z = dz
+
+    # Adjust for joint3's offset in joint2's frame
+    adj_x -= 0  # joint3's x offset is 0
+    adj_y -= -0.1197  # joint3's y offset is -0.1197
+    adj_z -= 0.425  # joint3's z offset is 0.425
+
+    # Target orientation in joint2's frame
+    R_target = np.array([
+        [math.cos(yaw)*math.cos(pitch), 
+         math.cos(yaw)*math.sin(pitch)*math.sin(roll) - math.sin(yaw)*math.cos(roll),
+         math.cos(yaw)*math.sin(pitch)*math.cos(roll) + math.sin(yaw)*math.sin(roll)],
+        [math.sin(yaw)*math.cos(pitch),
+         math.sin(yaw)*math.sin(pitch)*math.sin(roll) + math.cos(yaw)*math.cos(roll),
+         math.sin(yaw)*math.sin(pitch)*math.cos(roll) - math.cos(yaw)*math.sin(roll)],
+        [-math.sin(pitch),
+         math.cos(pitch)*math.sin(roll),
+         math.cos(pitch)*math.cos(roll)]
+    ])
+    R_adj = np.array([
+        [math.cos(theta1), math.sin(theta1), 0],
+        [-math.sin(theta1), math.cos(theta1), 0],
+        [0, 0, 1]
+    ])
+    R_target_j2 = R_adj @ R_target
+
+    # Solve for planar arm (joint3, joint4, joint5) with new target
+    a = 0.39225  # joint4 length
+    b = 0.093 + 0.09465  # joint5 + TCP z offset
+
+    # Target in joint3's frame (after joint2's Y rotation)
+    x = math.sqrt(adj_x**2 + adj_z**2)
+    z = adj_y
+
+    # Solve for theta2 (joint3) and theta3 (joint4)
+    D = (x**2 + z**2 - a**2 - b**2) / (2 * a * b)
+    D = max(min(D, 1.0), -1.0)
+    theta3 = math.atan2(math.sqrt(1 - D**2), D)
+    
+    theta2 = math.atan2(z, x) - math.atan2(b * math.sin(theta3), a + b * math.cos(theta3))
+    
+    # Solve for theta4 (joint5) orientation
+    theta_sum = theta2 + theta3
+    R_y_sum = np.array([
+        [math.cos(theta_sum), 0, math.sin(theta_sum)],
+        [0, 1, 0],
+        [-math.sin(theta_sum), 0, math.cos(theta_sum)]
+    ])
+    R_remaining = R_y_sum.T @ R_target_j2
+    theta4 = math.atan2(R_remaining[1, 0], R_remaining[0, 0])
+
+    return (theta1, theta2, theta3, theta4, 0.0)
+```

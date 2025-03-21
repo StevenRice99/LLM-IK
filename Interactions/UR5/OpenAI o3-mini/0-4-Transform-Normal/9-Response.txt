@@ -1,0 +1,78 @@
+def inverse_kinematics(p: tuple[float, float, float],
+                       r: tuple[float, float, float]) -> tuple[float, float, float, float, float]:
+    import numpy as np
+
+    # Unpack the target TCP position and desired orientation (roll, pitch, yaw)
+    p_x, p_y, p_z = p
+    roll, pitch, yaw = r
+
+    # Define basic rotation matrices
+    def Rx(a: float) -> np.ndarray:
+        return np.array([[1, 0, 0],
+                         [0, np.cos(a), -np.sin(a)],
+                         [0, np.sin(a),  np.cos(a)]])
+    
+    def Ry(a: float) -> np.ndarray:
+        return np.array([[ np.cos(a), 0, np.sin(a)],
+                         [         0, 1,         0],
+                         [-np.sin(a), 0, np.cos(a)]])
+    
+    def Rz(a: float) -> np.ndarray:
+        return np.array([[np.cos(a), -np.sin(a), 0],
+                         [np.sin(a),  np.cos(a), 0],
+                         [        0,          0, 1]])
+    
+    # Compute the target rotation matrix using the convention:
+    # R_target = Rz(yaw) @ Ry(pitch) @ Rx(roll)
+    R_target = Rz(yaw) @ Ry(pitch) @ Rx(roll)
+    
+    # -------------------------------------------------------------------------
+    # Step 1: Solve for Joint 1 (theta1)
+    # The effective x-y projection of the arm has an offset in the y-direction due to the fixed translations:
+    # offset_y = 0.13585 - 0.1197 + 0.093 = 0.10915.
+    offset_y = 0.10915
+    r_xy = np.hypot(p_x, p_y)
+    phi = np.arctan2(p_y, p_x)
+    theta1 = phi - np.arcsin(offset_y / r_xy)
+    # Compute the effective distance S along the arm's direction:
+    S = np.sqrt(r_xy**2 - offset_y**2)
+    
+    # -------------------------------------------------------------------------
+    # Step 2: Remove Joint 1's effect from the orientation
+    # This yields matrix M = Rz(-theta1) @ R_target which must equal Ry(gamma) @ Rz(theta5)
+    # where gamma = theta2 + theta3 + theta4 is the summed Y-axis rotation for joints 2,3,4.
+    M = Rz(-theta1) @ R_target
+    gamma = np.arctan2(M[0, 2], M[2, 2])
+    theta5 = np.arctan2(M[1, 0], M[1, 1])
+    
+    # -------------------------------------------------------------------------
+    # Step 3: Solve for Joints 2, 3, and 4 using a 2R planar formulation.
+    # The link parameters (from the URDF):
+    #   L1 = 0.425 (link from joint 2 to joint 3)
+    #   L2 = 0.39225 (link from joint 3 to joint 4)
+    #   L3 = 0.09465 (TCP offset from joint 5)
+    L1 = 0.425
+    L2 = 0.39225
+    L3 = 0.09465
+    
+    # The TCP's effective coordinates, adjusted for the TCP offset along the arm's direction
+    # (after removing the rotation from joint 1):
+    x_p = S - L3 * np.sin(gamma)
+    z_p = p_z - L3 * np.cos(gamma)
+    r_planar = np.hypot(x_p, z_p)
+    
+    # Solve for theta3 using the law of cosines:
+    cos_theta3 = (r_planar**2 - L1**2 - L2**2) / (2 * L1 * L2)
+    cos_theta3 = np.clip(cos_theta3, -1.0, 1.0)  # numerical safety
+    theta3 = np.arccos(cos_theta3)
+    
+    # Compute an intermediate angle delta for the 2R solution:
+    delta = np.arctan2(L2 * np.sin(theta3), L1 + L2 * np.cos(theta3))
+    
+    # Solve for theta2:
+    theta2 = np.arctan2(x_p, z_p) - delta
+    
+    # Joint 4 compensates such that: gamma = theta2 + theta3 + theta4
+    theta4 = gamma - (theta2 + theta3)
+    
+    return (theta1, theta2, theta3, theta4, theta5)

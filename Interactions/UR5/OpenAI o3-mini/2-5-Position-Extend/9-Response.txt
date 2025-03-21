@@ -1,0 +1,75 @@
+def inverse_kinematics(p: tuple[float, float, float]) -> tuple[float, float, float, float]:
+    """
+    Computes the closed-form inverse kinematics for a 4-DOF serial manipulator.
+    
+    The kinematic chain is summarized as follows:
+      - Revolute Joint 1: Located at [0, 0, 0], rotates about the Y-axis.
+      - Revolute Joint 2: After a translation of 0.39225 along the local z-axis, rotates about the Y-axis.
+      - Revolute Joint 3: After a translation of 0.093 along the local y-axis, rotates about the Z-axis.
+      - Revolute Joint 4: After a translation of 0.09465 along the local z-axis, rotates about the Y-axis.
+      - TCP (Tool Center Point): Offset by [0, 0.0823, 0] from the final joint.
+    
+    From the forward kinematics the TCP's horizontal (x, z) position is given by:
+    
+         x = 0.39225*sin(theta1) + 0.09465*sin(theta1 + theta2)
+         z = 0.39225*cos(theta1) + 0.09465*cos(theta1 + theta2)
+    
+    With fixed vertical offsets of 0.093 (from Joint 3) and 0.0823 (from the TCP),
+    the TCP y-coordinate is always 0.1753. Thus, only the x and z coordinates affect
+    the solution for theta1 and theta2.
+    
+    Using the law-of-cosines on the equivalent planar 2R arm, we solve for theta2:
+    
+         cos(theta2) = (r² - L1² - L2²) / (2 * L1 * L2)
+    
+    where r² = x_target² + z_target², and L1 = 0.39225, L2 = 0.09465.
+    
+    Once theta2 is determined, theta1 is found by rewriting the x and z equations in a decoupled form:
+    
+         A = L1 + L2*cos(theta2)
+         B = L2*sin(theta2)
+         
+         sin(theta1) = (A*x_target - B*z_target) / (A² + B²)
+         cos(theta1) = (B*x_target + A*z_target) / (A² + B²)
+    
+         theta1 = atan2(sin(theta1), cos(theta1))
+    
+    Since the rotations at joints 3 and 4 affect only the TCP’s orientation (and not its position),
+    we set theta3 and theta4 to zero.
+    
+    This function assumes that any provided target p (with y = 0.1753) is reachable.
+    
+    :param p: A tuple (x, y, z) representing the desired TCP position.
+    :return: A tuple (theta1, theta2, theta3, theta4) with angles in radians.
+    """
+    import math
+
+    # Unpack the target TCP position.
+    x_target, y_target, z_target = p
+
+    # Define the effective link lengths in the horizontal (x,z) plane.
+    L1 = 0.39225  # Distance from Joint 1 to Joint 2 along z.
+    L2 = 0.09465  # Distance from Joint 3 to Joint 4 along z.
+
+    # Compute the squared horizontal distance from the origin to the target.
+    r_sq = x_target**2 + z_target**2
+
+    # Solve for theta2 using the law-of-cosines.
+    cos_theta2 = (r_sq - L1**2 - L2**2) / (2 * L1 * L2)
+    theta2 = math.acos(cos_theta2)
+
+    # Compute intermediate terms for theta1.
+    A = L1 + L2 * math.cos(theta2)
+    B = L2 * math.sin(theta2)
+    denom = A**2 + B**2  # This is always positive.
+
+    # Solve for theta1 using the decoupled equations.
+    sin_theta1 = (A * x_target - B * z_target) / denom
+    cos_theta1 = (B * x_target + A * z_target) / denom
+    theta1 = math.atan2(sin_theta1, cos_theta1)
+
+    # The rotations at joints 3 and 4 do not affect the TCP position.
+    theta3 = 0.0
+    theta4 = 0.0
+
+    return (theta1, theta2, theta3, theta4)

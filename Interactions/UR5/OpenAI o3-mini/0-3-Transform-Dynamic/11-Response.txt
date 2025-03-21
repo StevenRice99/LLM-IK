@@ -1,0 +1,84 @@
+def inverse_kinematics(p: tuple[float, float, float],
+                       r: tuple[float, float, float]) -> tuple[float, float, float, float]:
+    import math
+    import numpy as np
+
+    # Step 1: Compute joint 1 angle (rotation about Z)
+    # p = (x, y, z)
+    x, y, z = p
+    q1 = math.atan2(-x, y)
+
+    # Step 2: Construct the TCP rotation matrix from roll, pitch, yaw.
+    # Using the convention:
+    #   R_tcp = [ [ cy*cp,           cy*sp*sr - sy*cr,   cy*sp*cr + sy*sr ],
+    #             [ sy*cp,           sy*sp*sr + cy*cr,   sy*sp*cr - cy*sr ],
+    #             [  -sp,                  cp*sr,              cp*cr    ] ]
+    roll, pitch, yaw = r
+    cr = math.cos(roll)
+    sr = math.sin(roll)
+    cp = math.cos(pitch)
+    sp = math.sin(pitch)
+    cy = math.cos(yaw)
+    sy = math.sin(yaw)
+    R_tcp = np.array([
+        [cy * cp,            cy * sp * sr - sy * cr,   cy * sp * cr + sy * sr],
+        [sy * cp,            sy * sp * sr + cy * cr,   sy * sp * cr - cy * sr],
+        [   -sp,                          cp * sr,               cp * cr]
+    ])
+
+    # Step 3: Compute the wrist center.
+    # TCP offset is given at [0, 0.093, 0]. Subtract it (transformed by R_tcp) from the target position.
+    tcp_offset = np.array([0.0, 0.093, 0.0])
+    p_tcp = np.array([x, y, z])
+    p_wrist = p_tcp - R_tcp.dot(tcp_offset)
+
+    # Step 4: Compute joint 2’s origin.
+    # Joint 2 is located at [0, 0.13585, 0] relative to the base, but rotated by q1.
+    Rz_q1 = np.array([
+        [math.cos(q1), -math.sin(q1), 0.0],
+        [math.sin(q1),  math.cos(q1), 0.0],
+        [0.0,           0.0,          1.0]
+    ])
+    joint2_origin = Rz_q1.dot(np.array([0.0, 0.13585, 0.0]))
+
+    # Step 5: Express wrist center relative to joint 2’s origin and undo the base rotation.
+    p_diff = p_wrist - joint2_origin
+    # To cancel q1, multiply by Rz(-q1):
+    Rz_neg_q1 = np.array([
+        [ math.cos(q1),  math.sin(q1), 0.0],
+        [-math.sin(q1),  math.cos(q1), 0.0],
+        [0.0,            0.0,         1.0]
+    ])
+    p_eff = Rz_neg_q1.dot(p_diff)
+
+    # In joint2’s coordinate frame the arm’s motion is in the x–z plane.
+    x_eff = p_eff[0]
+    z_eff = p_eff[2]
+    # Distance from joint 2 to wrist center:
+    d = math.sqrt(x_eff**2 + z_eff**2)
+    # Angle from the z-axis (shoulder elevation in the plane)
+    phi = math.atan2(x_eff, z_eff)
+
+    # Step 6: Solve the 2R inverse kinematics (planar) for joints 2 and 3.
+    L1 = 0.425    # Effective length from joint 2 to joint 3.
+    L2 = 0.39225  # Effective length from joint 3 to joint 4.
+
+    # Compute cosine of the angle for joint 3 using the law of cosines.
+    cos_angle = (d**2 - L1**2 - L2**2) / (2 * L1 * L2)
+    # Clip to account for potential numerical inaccuracies.
+    cos_angle = max(min(cos_angle, 1.0), -1.0)
+    angle = math.acos(cos_angle)
+    # Choose the elbow-down configuration:
+    q3 = -angle
+
+    # Compute the intermediate angle delta for joint 2.
+    delta = math.atan2(L2 * math.sin(angle), L1 + L2 * math.cos(angle))
+    q2 = phi - delta
+
+    # Step 7: Compute joint 4 to achieve the desired TCP orientation.
+    # The sum q2 + q3 + q4 should equal the desired wrist orientation.
+    # Extract target_sum from R_tcp using its first row elements.
+    target_sum = math.atan2(R_tcp[0, 2], R_tcp[0, 0])
+    q4 = target_sum - (q2 + q3)
+
+    return (q1, q2, q3, q4)

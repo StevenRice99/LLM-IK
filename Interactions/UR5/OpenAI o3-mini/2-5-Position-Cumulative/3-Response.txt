@@ -1,0 +1,134 @@
+We can “decouple” the (position-only) inverse kinematics into a “vertical” constraint (the y‑coordinate) and a “planar” constraint (the projection onto the x–z plane). In our robot the only link that “lifts” the TCP (in y) is the (fixed) sum of two y‑offsets, one coming from the translation on joint 3 and one from the TCP offset. In fact, if you write the forward kinematics (see the table) you find that
+
+  py = 0.0823·cos(θ₃) + 0.093
+
+so that
+  θ₃ = arccos((py – 0.093)/0.0823).
+
+Once θ₃ is known the “planar” problem (in x–z) depends on joints 1, 2, and 4. (Because the TCP offset of [0, 0.0823, 0] is purely in y it turns out the fourth joint does not affect the TCP position and so may be set at a nominal value—in our solution we choose θ₄ = 0.)
+
+Defining
+  K = 0.0823·sin(θ₃)
+  L = 0.09465      (translation from joint 4)
+  D = 0.39225      (translation from joint 2)
+one may show that the effective position (in the “subchain” after joint 1) is
+  p₂₍ₓ₎ = –K·cos(θ₂) + L·sin(θ₂)
+  p₂₍𝑧₎ = K·sin(θ₂) + L·cos(θ₂) + D.
+Then (after a rotation by joint 1) the TCP “planar” position (px, pz) is
+  px = cos(θ₁)·p₂₍ₓ₎ + sin(θ₁)·p₂₍𝑧₎ 
+  pz = –sin(θ₁)·p₂₍ₓ₎ + cos(θ₁)·p₂₍𝑧₎.
+A short calculation shows that (because rotations preserve length) the magnitude
+  r = √(px² + pz²)
+satisfies
+  r² = K² + L² + D² + 2·D · (L·cos(θ₂) + K·sin(θ₂)).
+Thus one may solve for θ₂ by writing
+  L·cos(θ₂) + K·sin(θ₂) = E   with E = (r² – (K² + L² + D²))/(2·D).
+Writing
+  √(L² + K²) · cos(θ₂ – α) = E   with α = atan2(K, L)
+yields the solution for θ₂ (choosing the branch that recovers the “forward” value):
+  θ₂ = α + arccos(E/√(L² + K²)).
+
+Finally, the “base” joint (θ₁) simply reorients the subchain’s x–z vector. Writing the (x,z) components of p₂ as
+  p₂ = (p₂₍ₓ₎, p₂₍𝑧₎)
+one may express that the rotation by θ₁ sends that vector into (px, pz). In particular if we write the polar angles
+  ϕ = atan2(p₂₍𝑧₎, p₂₍ₓ₎)  and δ = atan2(pz, px),
+then the rotation by θ₁ must “undo” the difference so that
+  θ₁ = ϕ – δ.
+Since the TCP position is independent of θ₄ we set
+  θ₄ = 0.
+
+Below is the complete Python function implementing the above closed‐form solution. (Remember: we assume that the target is reachable so no extra error checking is included.)
+
+------------------------------------------------
+def inverse_kinematics(p: tuple[float, float, float]) -> tuple[float, float, float, float]:
+    """
+    Gets the joint values needed to reach position "p".
+    The robot chain is as follows (length units in meters):
+      • Revolute 1 : rotates about Y.
+      • Revolute 2 : rotates about Y and has a translation of [0, 0, 0.39225].
+      • Revolute 3 : rotates about Z and has a translation of [0, 0.093, 0].
+      • Revolute 4 : rotates about Y and has a translation of [0, 0, 0.09465].
+      • TCP offset             : [0, 0.0823, 0].
+    The overall TCP y‐position is given by:
+         py = 0.0823 * cos(θ₃) + 0.093,
+    so that θ₃ = arccos((py - 0.093)/0.0823).
+    The remaining joints (θ₁ and θ₂) are solved from the x–z location (with
+    the effective translations coming from joint 2 and joint 4) and the overall rotation.
+    Joint 4 does not affect the position and is set to 0.
+    
+    :param p: The target TCP position in the form [x, y, z].
+    :return: A tuple of the joint values (θ₁, θ₂, θ₃, θ₄).
+    """
+    import math
+
+    # Unpack target TCP position.
+    px, py, pz = p
+
+    # --- Solve for joint 3 using the vertical (y) constraint.
+    # py = 0.0823*cos(theta3) + 0.093  =>  theta3 = arccos((py - 0.093)/0.0823)
+    theta3 = math.acos((py - 0.093) / 0.0823)
+
+    # --- Define constants for the planar chain.
+    # Let K = 0.0823*sin(theta3) comes from the effect of joint 3 rotation.
+    # L = 0.09465 is the translation from joint 4.
+    # D = 0.39225 is the translation from joint 2.
+    K = 0.0823 * math.sin(theta3)
+    L = 0.09465
+    D = 0.39225
+
+    # The projection of the TCP in the x-z plane must satisfy |(px, pz)| = r.
+    r = math.sqrt(px**2 + pz**2)
+
+    # --- Solve for joint 2 from the planar chain.
+    # In the 2D subchain (after joint 1) one can show that:
+    # r^2 = K^2 + L^2 + D^2 + 2*D*(L*cos(theta2) + K*sin(theta2))
+    # Define E = (r^2 - (K^2 + L^2 + D^2)) / (2*D) so that:
+    # L*cos(theta2) + K*sin(theta2) = E.
+    # Write the left-hand side as sqrt(L^2 + K^2) * cos(theta2 - alpha),
+    # with alpha = atan2(K, L). Then:
+    # cos(theta2 - alpha) = E / sqrt(L^2 + K^2),
+    # so that:
+    # theta2 = alpha + arccos(E / sqrt(L^2 + K^2)).
+    R_val = math.sqrt(L**2 + K**2)
+    E = (r**2 - (K**2 + L**2 + D**2)) / (2 * D)
+    alpha = math.atan2(K, L)
+    theta2 = alpha + math.acos(E / R_val)
+
+    # --- Compute the effective translation from joints 2, 3, and 4.
+    # After joint 2 the effective x and z contributions are:
+    p2_x = -K * math.cos(theta2) + L * math.sin(theta2)
+    p2_z = K * math.sin(theta2) + L * math.cos(theta2) + D
+
+    # --- Solve for joint 1 from the rotation in the x–z plane.
+    # The effect of joint 1 (rotation about Y) is to rotate p2 = (p2_x, p2_z) into (px, pz).
+    # Writing the polar angles (in the x–z plane) as:
+    #   ϕ = atan2(p2_z, p2_x) and δ = atan2(pz, px),
+    # the required joint 1 value is:
+    #   theta1 = ϕ - δ.
+    phi = math.atan2(p2_z, p2_x)
+    delta = math.atan2(pz, px)
+    theta1 = phi - delta
+
+    # --- Joint 4 does not affect the position (because the TCP offset is purely along y)
+    # so we assign it an arbitrary value (here 0).
+    theta4 = 0.0
+
+    return (theta1, theta2, theta3, theta4)
+
+------------------------------------------------
+
+Explanation:
+
+1. The vertical “y‐constraint” determines θ₃ uniquely:
+  θ₃ = arccos((py – 0.093)/0.0823).
+
+2. The combined effect of joints 2 and 4 (whose translations are along the local z axis) appears in the x–z plane. After some algebra one finds that the magnitude of the planar projection (r = √(px² + pz²)) relates to θ₂ by
+  r² = K² + L² + D² + 2·D·(L·cosθ₂ + K·sinθ₂).
+We solve this for θ₂ by writing L·cosθ₂ + K·sinθ₂ in the form R_val·cos(θ₂ – α).
+
+3. Finally, a rotation θ₁ will “reorient” the planar vector to match (px, pz); writing its polar angles ϕ (of the subchain) and δ (of the target) gives
+  θ₁ = ϕ – δ.
+
+4. Joint 4 is redundant for positioning so we set θ₄ = 0.
+
+This completes the closed‐form inverse kinematics solution for the 4‑DOF chain when only position is specified.

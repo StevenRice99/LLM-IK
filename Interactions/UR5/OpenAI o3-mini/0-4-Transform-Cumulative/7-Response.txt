@@ -1,0 +1,127 @@
+def inverse_kinematics(p: tuple[float, float, float],
+                       r: tuple[float, float, float]) -> tuple[float, float, float, float, float]:
+    """
+    Computes the closed-form analytical inverse kinematics for a 5-DOF serial manipulator.
+    The robot structure is:
+      - Joint 1 (Revolute about Z), at [0,0,0].
+      - Joint 2 (Revolute about Y), translated by [0, 0.13585, 0] from joint 1.
+      - Joint 3 (Revolute about Y), translated by [0, -0.1197, 0.425] from joint 2.
+      - Joint 4 (Revolute about Y), translated by [0, 0, 0.39225] from joint 3.
+      - Joint 5 (Revolute about Z), translated by [0, 0.093, 0] from joint 4.
+      - TCP, translated by [0, 0, 0.09465] from joint 5.
+      
+    The end-effector (TCP) orientation is assumed to have been specified via roll-pitch-yaw angles
+    (r = [roll, pitch, yaw]) that factor as:
+          R_target = R_z(yaw) · R_y(pitch) · R_x(roll)
+    and the achievable orientation of the robot is such that the overall rotation can be written as:
+          R_target = R_z(theta1) · R_y(beta) · R_z(theta5),
+    where beta = theta2 + theta3 + theta4.
+    
+    The solution proceeds by:
+      1. Computing R_target from the given RPY.
+      2. Removing the combined TCP offset (the sum of joint 5’s translation and the TCP offset)
+         to compute the “wrist center” (the origin of joint 5).
+      3. Solving for joint 1 (theta1) by “aiming” from the wrist center relative to the base.
+      4. Transforming the problem into the plane defined by joints 2 and 3 (which rotate about Y)
+         and solving a 2R inverse kinematics using the cosine law. (Here, the effective link lengths
+         are L1 = 0.425 and L2 = 0.39225. Note that the offset in joint 3’s Y translation is accounted for 
+         by the fixed location of joint 2.)
+      5. Determining the remaining joint (theta4) so that the sum beta = theta2+theta3+theta4 matches 
+         the desired arm rotation extracted from the orientation.
+      6. Finally, solving for joint 5 from the residual rotation.
+    
+    :param p: TCP target position as (x, y, z).
+    :param r: TCP target orientation (roll, pitch, yaw) in radians.
+    :return: A tuple (theta1, theta2, theta3, theta4, theta5) of joint angles in radians.
+    """
+    import math
+    import numpy as np
+
+    # --- Step 1. Compute the target rotation matrix from RPY ---
+    x_target, y_target, z_target = p
+    roll, pitch, yaw = r
+
+    # Construct individual rotation matrices.
+    R_x = np.array([[1, 0, 0],
+                    [0, math.cos(roll), -math.sin(roll)],
+                    [0, math.sin(roll), math.cos(roll)]])
+    R_y = np.array([[math.cos(pitch), 0, math.sin(pitch)],
+                    [0, 1, 0],
+                    [-math.sin(pitch), 0, math.cos(pitch)]])
+    R_z = np.array([[math.cos(yaw), -math.sin(yaw), 0],
+                    [math.sin(yaw),  math.cos(yaw), 0],
+                    [0, 0, 1]])
+    # Using the Rz * Ry * Rx convention.
+    R_target = R_z @ R_y @ R_x
+
+    # --- Step 2. Compute the wrist center (joint 5 origin) ---
+    # The offset from joint 5 to the TCP is twofold:
+    #  • Joint 5 translation: [0, 0.093, 0]
+    #  • TCP offset: [0, 0, 0.09465]
+    # We combine them as:
+    p_tool = np.array([0, 0.093, 0.09465])
+    p_target = np.array([x_target, y_target, z_target])
+    # Subtract the (rotated) tool offset to find the wrist center.
+    p_wrist = p_target - R_target @ p_tool
+
+    # --- Step 3. Solve for Joint 1 (rotation about Z) ---
+    # Define theta1 so that if p_wrist lies along the positive Y axis, theta1 = 0.
+    theta1 = math.atan2(p_wrist[0], p_wrist[1])
+
+    # --- Step 4. Determine the world-frame position of Joint 2 ---
+    # Joint 2 is fixed at [0, 0.13585, 0] in the base frame, but rotates with theta1:
+    p_joint2 = np.array([0, 0.13585, 0])
+    Rz_theta1 = np.array([[math.cos(theta1), -math.sin(theta1), 0],
+                           [math.sin(theta1),  math.cos(theta1), 0],
+                           [0, 0, 1]])
+    p_joint2_world = Rz_theta1 @ p_joint2
+
+    # --- Step 5. Formulate the planar (2R) subproblem for joints 2 and 3 ---
+    # Compute the vector from Joint 2 to the wrist center.
+    p_rel = p_wrist - p_joint2_world
+    # Since joints 2 and 3 rotate about Y, only the X and Z components form the effective 2D problem.
+    x_eff = p_rel[0]
+    z_eff = p_rel[2]
+    r_plane = math.sqrt(x_eff**2 + z_eff**2)
+
+    # The effective link lengths for the 2R subchain are:
+    #   L1 = 0.425  (from joint 2 to joint 3, considering translation [0, -0.1197, 0.425])
+    #   L2 = 0.39225 (from joint 3 to the wrist center, i.e. translation [0, 0, 0.39225])
+    L1 = 0.425
+    L2 = 0.39225
+
+    # Use the cosine law to solve for the "elbow" angle, which is joint 3.
+    cos_theta3 = (r_plane**2 - L1**2 - L2**2) / (2 * L1 * L2)
+    # Clamp cos_theta3 to avoid numerical errors.
+    cos_theta3 = max(min(cos_theta3, 1.0), -1.0)
+    theta3 = math.acos(cos_theta3)  # Elbow angle (selecting the elbow-down configuration)
+
+    # Compute an auxiliary angle (psi) that relates the geometry.
+    psi = math.atan2(L2 * math.sin(theta3), L1 + L2 * math.cos(theta3))
+    # Angle from Joint 2 to the wrist center in the plane.
+    gamma = math.atan2(x_eff, z_eff)
+    # Shoulder (Joint 2) angle.
+    theta2 = gamma - psi
+
+    # --- Step 6. Determine the required wrist (arm) rotation ---
+    # The rotations of joints 2, 3, and 4 (all about Y) add up to beta:
+    #      beta = theta2 + theta3 + theta4.
+    # In the full orientation of the robot the overall rotation is:
+    #      R_total = R_z(theta1) * R_y(beta) * R_z(theta5)
+    # To extract beta, first “undo” the base rotation by computing:
+    Rz_neg_theta1 = np.array([[math.cos(-theta1), -math.sin(-theta1), 0],
+                              [math.sin(-theta1),  math.cos(-theta1), 0],
+                              [0, 0, 1]])
+    R_rem = Rz_neg_theta1 @ R_target
+    # In the product form R_y(beta)*R_z(theta5) the (0,2) element equals sin(beta)
+    # and the (2,2) element equals cos(beta). Hence, beta can be extracted via:
+    beta = math.atan2(R_rem[0, 2], R_rem[2, 2])
+    # Solve for Joint 4:
+    theta4 = beta - (theta2 + theta3)
+
+    # --- Step 7. Solve for Joint 5 (rotation about Z) ---
+    # In the factorization R_rem = R_y(beta)*R_z(theta5), the second row is not affected by the Y rotation:
+    # Specifically, R_rem[1,0] = sin(theta5) and R_rem[1,1] = cos(theta5).
+    theta5 = math.atan2(R_rem[1, 0], R_rem[1, 1])
+
+    return (theta1, theta2, theta3, theta4, theta5)

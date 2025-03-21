@@ -1,0 +1,102 @@
+Below is one acceptable closed‐form solution. In this solution we first decouple the revolute–Z joint (joint1) using the procedure from EXISTING 1. Then we “bring” the TCP into the 2–link subchain’s (joints 2–3) plane by undoing the rotation and subtracting the fixed displacement from link1 to link2. In the subchain the forward kinematics (in the x–z plane) are
+
+  x = 0.425·sin(θ₂) + 0.39225·sin(θ₂+θ₃)
+  z = 0.425·cos(θ₂) + 0.39225·cos(θ₂+θ₃)
+
+while the overall TCP orientation (remember the full chain rotates as Rz(θ₁)·Ry(θ₂+θ₃)) can be used to extract the sum φ = θ₂+θ₃. (Here we use the same trick as in EXISTING 2 that computes φ = atan2(sin(φ), cos(φ)) from entries R00 and R02 computed from the input rpy.) Finally the first link in the subchain is “removed” so that
+
+  θ₂ = atan2(x_target – 0.39225·sin(φ), z_target – 0.39225·cos(φ))
+  θ₃ = φ – θ₂
+
+Below is the complete function.
+
+--------------------------------------------------
+def inverse_kinematics(p: tuple[float, float, float], r: tuple[float, float, float]) -> tuple[float, float, float]:
+    """
+    Gets the joint values needed to reach position "p" and orientation "r".
+    :param p: The position to reach in the form [x, y, z].
+    :param r: The orientation to reach in radians in the form [rx, ry, rz].
+    :return: A tuple (theta1, theta2, theta3) of joint values (in radians).
+    """
+    import math
+
+    # -----------------------------
+    # 1. Solve for Joint 1 (revolute about Z)
+    #
+    # The existing solution for joint1 is:
+    #   theta1 = atan2(-x, y)
+    #
+    x_b, y_b, z_b = p
+    theta1 = math.atan2(-x_b, y_b)
+
+    # -----------------------------
+    # 2. Transform TCP position into the coordinate frame of joint 2.
+    #
+    # After joint1 the chain has a fixed translation from Revolute 1 to Revolute 2:
+    #    [0, 0.13585, 0]
+    # In order to get the effective target for the 2-link subchain (joints 2 and 3)
+    # we first “undo” the rotation by joint1 and subtract this displacement.
+    #
+    cos_t1 = math.cos(theta1)
+    sin_t1 = math.sin(theta1)
+    # Rotate the TCP position by -theta1.
+    x_r = cos_t1 * x_b + sin_t1 * y_b
+    y_r = -sin_t1 * x_b + cos_t1 * y_b
+    z_r = z_b
+    # p_r is now expressed in joint1's (and hence joint2's) frame.
+    # The origin of the joint2 frame is shifted by [0, 0.13585, 0]
+    # so we subtract that offset.
+    x_target = x_r
+    # Note: In a proper chain, the y-coordinate in this frame should satisfy:
+    #       y_r - 0.13585 = -0.1197   (which is the y-offset in the second joint's chain)
+    # For the planar (x,z) inverse kinematics we use only x_target and z_target.
+    z_target = z_r
+
+    # -----------------------------
+    # 3. Use the desired TCP orientation to find the sum of joints 2 and 3.
+    #
+    # The full chain’s orientation is Rz(theta1)*Ry(theta2+theta3). By comparing with
+    # a rotation about Y we can extract:
+    #      phi = theta2 + theta3.
+    # Here we use the same approach as EXISTING 2.
+    rx, ry, rz = r
+    cx = math.cos(rx); sx = math.sin(rx)
+    cy = math.cos(ry); sy = math.sin(ry)
+    cz = math.cos(rz); sz = math.sin(rz)
+    # It turns out that for a rotation about Y the (0,0) and (0,2) entries are:
+    #      R00 = cos(phi) and R02 = sin(phi).
+    # So we compute:
+    R00 = cy * cz
+    R02 = sy
+    phi = math.atan2(R02, R00)
+    # Thus, we require that: theta2 + theta3 = phi.
+
+    # -----------------------------
+    # 4. Solve the planar 2–link inverse kinematics for joints 2 and 3.
+    #
+    # From the forward kinematics:
+    #   x_target = 0.425*sin(theta2) + 0.39225*sin(phi)
+    #   z_target = 0.425*cos(theta2) + 0.39225*cos(phi)
+    #
+    # Isolate the first term:
+    #    0.425*sin(theta2) = x_target - 0.39225*sin(phi)
+    #    0.425*cos(theta2) = z_target - 0.39225*cos(phi)
+    #
+    L1 = 0.425    # Length from joint2 to joint3 (only the effective magnitude in x–z)
+    L2 = 0.39225  # TCP offset from joint3 (along z in joint3's frame)
+    term_x = x_target - L2 * math.sin(phi)
+    term_z = z_target - L2 * math.cos(phi)
+    theta2 = math.atan2(term_x, term_z)
+    theta3 = phi - theta2
+
+    return (theta1, theta2, theta3)
+
+--------------------------------------------------
+
+Explanation:
+1. Joint 1 is computed from the base (x, y) coordinates as theta1 = atan2(-x, y).
+2. The TCP is “moved” into joint2’s coordinate frame by undoing the rotation by theta1 and subtracting the translation [0, 0.13585, 0] which positions revolute 2.
+3. The desired orientation r is used to compute φ = theta2 + theta3 using the relationship R00 = cy·cz and R02 = sy.
+4. With the effective 2–link geometry (with link lengths 0.425 and 0.39225) in the x–z plane, we solve for theta2 and then set theta3 = φ – theta2.
+
+This function meets the requirements for a closed–form analytical solution.

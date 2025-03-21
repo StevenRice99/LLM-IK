@@ -1,0 +1,117 @@
+import math
+
+def inverse_kinematics(p: tuple[float, float, float]) -> tuple[float, float, float, float, float]:
+    """
+    Computes the joint angles (in radians) for a 5-DOF serial manipulator that places the TCP
+    at the target position p = (x, y, z). The computation decouples the problem into two sub-chains:
+
+      Sub-chain 1 (Joints 1 and 2):
+        - These joints (with rotation axes along Y) primarily affect the x–z plane.
+        - Effective link lengths are: L1 = 0.425 and L2 = 0.39225.
+        - Using the law of cosines on the projected distance d = sqrt(x^2+z^2),
+          we compute:
+              cos(theta2) = (d^2 - L1^2 - L2^2) / (2 * L1 * L2)
+          and then obtain theta2. The sign of theta2 is adjusted based on a cross-product-like test.
+          Joint 1 is then computed as an offset from the angle toward the target in the x–z plane.
+
+      Sub-chain 2 (Joints 3, 4, and 5):
+        - These joints (with axes Y, Z, and Y respectively) resolve the remaining wrist geometry.
+        - They use the parameters: a = 0.0823 (TCP offset along y), L1_b = 0.093, L2_b = 0.09465.
+        - The wrist strategy is to first solve for joint 4 using:
+              cos(theta4) = (y - L1_b) / a
+          (with two possible solutions, corresponding to theta4 and -theta4).
+        - For each candidate for joint 4, joint 3 is obtained from the geometry in the x–z plane.
+          In particular, define:
+              A = L2_b    and    B = -a * sin(theta4)
+          so that the following equations hold:
+              A*sin(theta3) - a*sin(theta4)*cos(theta3) = x
+              A*cos(theta3) + a*sin(theta4)*sin(theta3) = z
+          These equations are solved by computing:
+              sin(theta3) = (A*x - B*z) / D    and    cos(theta3) = (A*z + B*x) / D
+          where D = A^2 + (a*sin(theta4))^2.
+        - Joint 5 is set to 0 for simplicity.
+    
+    It is assumed that all targets are reachable.
+
+    :param p: The target TCP position as an (x, y, z) tuple.
+    :return: A tuple (theta1, theta2, theta3, theta4, theta5) of joint angles in radians.
+    """
+    # Unpack target position
+    x, y, z = p
+
+    # ---------------------------
+    # Sub-chain 1: Solve for joints 1 and 2 (affecting the x-z position)
+    L1_a = 0.425      # Effective link length from the base to Revolute 2 (projected along z)
+    L2_a = 0.39225    # Effective link length from Revolute 2 to Revolute 3 (projected along z)
+    
+    # Compute the distance from the base to the target projection in x-z plane.
+    d = math.sqrt(x**2 + z**2)
+    
+    # Use the cosine law to compute angle for joint 2.
+    cos_theta2 = (d**2 - L1_a**2 - L2_a**2) / (2 * L1_a * L2_a)
+    # Clamp the value to avoid numerical issues.
+    cos_theta2 = max(min(cos_theta2, 1.0), -1.0)
+    theta2 = math.acos(cos_theta2)
+    
+    # Adjust the sign of theta2 based on a cross-product test to select the correct elbow configuration.
+    cross = x * (L1_a + L2_a * math.cos(theta2)) - z * (L2_a * math.sin(theta2))
+    if cross < 0:
+        theta2 = -theta2
+    
+    # Compute joint 1: the base rotation in the x-z plane.
+    alpha = math.atan2(x, z)
+    beta = math.atan2(L2_a * math.sin(theta2), L1_a + L2_a * math.cos(theta2))
+    theta1 = alpha - beta
+
+    # ---------------------------
+    # Sub-chain 2: Solve for joints 3, 4, and 5 (the wrist)
+    # Parameters for the wrist:
+    a    = 0.0823   # TCP offset along y
+    L1_b = 0.093    # Offset from Revolute 3 to 4 (affecting y)
+    L2_b = 0.09465  # Offset from Revolute 4 to 5 (affecting x-z)
+    
+    # Solve for joint 4 using the y-direction:
+    # (y_target - L1_b) = a * cos(theta4)   =>   cos(theta4) = (y - L1_b) / a
+    c_val = (y - L1_b) / a
+    c_val = max(min(c_val, 1.0), -1.0)
+    theta4_candidate = math.acos(c_val)
+    
+    # There are two possible solutions for joint 4.
+    wrist_candidates = []
+    for candidate in [theta4_candidate, -theta4_candidate]:
+        s_candidate = math.sin(candidate)
+        # Define constants for wrist geometry:
+        # Let A = L2_b and B = -a*sin(theta4)
+        A = L2_b
+        B = -a * s_candidate
+        D = A**2 + (a * s_candidate)**2  # Denominator for solving joint 3
+        
+        # Protect against division by zero.
+        if abs(D) < 1e-8:
+            continue
+        
+        # Solve for joint 3 (wrist swivel in the x-z plane).
+        sin_theta3 = (A * x - B * z) / D
+        cos_theta3 = (A * z + B * x) / D
+        norm = math.sqrt(sin_theta3**2 + cos_theta3**2)
+        if norm < 1e-8:
+            continue
+        sin_theta3 /= norm
+        cos_theta3 /= norm
+        theta3 = math.atan2(sin_theta3, cos_theta3)
+        
+        # Verify the solution by reconstructing x and z.
+        x_calc = A * math.sin(theta3) - a * s_candidate * math.cos(theta3)
+        z_calc = A * math.cos(theta3) + a * s_candidate * math.sin(theta3)
+        error = (x_calc - x)**2 + (z_calc - z)**2
+        
+        wrist_candidates.append((theta3, candidate, 0.0, error))
+    
+    # Select the wrist candidate with the smallest reconstruction error.
+    if not wrist_candidates:
+        raise ValueError("Target position is unreachable for the wrist sub-chain.")
+    best_solution = min(wrist_candidates, key=lambda tup: tup[3])
+    theta3, theta4, theta5, _ = best_solution
+
+    # Combine sub-chain solutions into the full 5-DOF solution.
+    return (theta1, theta2, theta3, theta4, theta5)

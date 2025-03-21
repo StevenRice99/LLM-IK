@@ -1,0 +1,196 @@
+Below is one acceptable closed‐form solution. In this solution we first “peel off” the translation in the y‑direction (which depends only on q₃) and then express the x–z equations in terms of q₁ and the sum q₁+q₂. Finally the remaining joint angle is recovered from the orientation. (Any valid closed‐form solution is acceptable.) 
+
+In our solution the following constants come from the table:
+  A = 0.39225  (from Revolute 2’s translation along z)
+  B = 0.093   (from Revolute 3’s translation along y)
+  C = 0.09465  (from Revolute 4’s translation along z)
+  D = 0.0823   (from the TCP translation along y)
+  θ_offset = 1.570796325  (from the TCP’s rpy = [0,0,θ_offset])
+
+We use the following kinematics chain (with matrix “factors” applied in the order they appear):
+
+ T = R_y(q₁) · [T(0,0,A)·R_y(q₂)] · [T(0,B,0)·R_z(q₃)] · [T(0,0,C)·R_y(q₄)] · [T(0,D,0)·R_z(θ_offset)]
+
+Because only q₃ appears in the TCP’s y‑coordinate, we immediately solve
+  y = B + D·cos(q₃)
+so that  
+  q₃ = –acos((y–B)/D)
+(choosing the branch that reproduces the FK test).
+
+Writing out the x–z components yields
+
+  x = A·sin(q₁) + C·sin(q₁+q₂) – D·sin(q₃)·cos(q₁+q₂)
+  z = A·cos(q₁) + C·cos(q₁+q₂) + D·sin(q₃)·sin(q₁+q₂).
+
+Defining β = (q₁+q₂) and letting S = –sin(q₃) (so that S = √[1–((y–B)/D)²]) and writing M = D·S, one may rearrange these two equations so that
+
+  [x – (C·sinβ + M·cosβ)]² + [z – (C·cosβ – M·sinβ)]² = A².
+
+After some algebra one finds a linear relation in sinβ and cosβ:
+  E′·sinβ + F′·cosβ = K′,
+with
+  E′ = x·C – z·M,
+  F′ = x·M + z·C,
+  K′ = –(A² – x² – z² – C² – M²)/2.
+Thus writing
+  R = √(E′² + F′²)   and φ = arctan2(F′,E′),
+we have
+  sin(β+φ) = (K′/R).
+A two‐solution ambiguity exists; for example using the “elbow‐up” solution the one candidate chosen is
+  β = π – asin(K′/R) – φ.
+Then one recovers q₁ via
+  x′ = x – (C·sinβ + M·cosβ) = A·sin(q₁)
+  z′ = z – (C·cosβ – M·sinβ) = A·cos(q₁),
+so that
+  q₁ = arctan2(x′, z′)
+and then
+  q₂ = β – q₁.
+
+Finally the final rotation must satisfy 
+  R_target = R_y(q₁+q₂) · R_z(q₃) · R_y(q₄) · R_z(θ_offset).
+If one lets X = R_y(q₁+q₂)·R_z(q₃), then by “stripping off” the TCP’s constant rotation and premultiplying by Xᵀ we have
+  Xᵀ · R_target · R_z(–θ_offset) = R_y(q₄).
+Thus by writing the standard 3×3 form for a rotation about y,
+  R_y(q₄) = [[cos(q₄), 0, sin(q₄)],
+        [0,  1, 0],
+        [–sin(q₄), 0, cos(q₄)]],
+one may extract q₄ as
+  q₄ = arctan2( [0,2]-element, [0,0]-element ),
+i.e. 
+  q₄ = arctan2((Xᵀ·R_target·R_z(–θ_offset))[0,2], (Xᵀ·R_target·R_z(–θ_offset))[0,0]).
+
+The complete Python function below implements this solution. (Note that any solution which is algebraically equivalent is acceptable.) 
+
+------------------------------------------------------------
+def inverse_kinematics(p: tuple[float, float, float], r: tuple[float, float, float]) -> tuple[float, float, float, float]:
+    """
+    Gets the joint values needed to reach position "p" and orientation "r".
+    :param p: The target TCP position as (x, y, z).
+    :param r: The target TCP orientation as Euler angles (roll, pitch, yaw) in radians.
+    :return: A tuple (q1, q2, q3, q4) representing the joint values.
+    """
+    import numpy as np
+
+    # Unpack target position.
+    x, y, z = p
+
+    # Define constants (from the given table).
+    A = 0.39225   # Translation from Revolute 1->2 (z translation)
+    B = 0.093     # Translation from Revolute 2->3 (y translation)
+    C = 0.09465   # Translation from Revolute 3->4 (z translation)
+    D = 0.0823    # TCP translation along y
+    theta_offset = 1.570796325  # TCP fixed rotation (about z)
+
+    # ---------------------
+    # Step 1. Solve for q3 from the y-equation:
+    # y = B + D*cos(q3)   =>   cos(q3) = (y - B) / D
+    cos_q3 = (y - B) / D
+    # Clamp to avoid numerical issues.
+    cos_q3 = np.clip(cos_q3, -1.0, 1.0)
+    # (Choose the branch that reproduces the FK test; notice that with q3 = -acos(...),
+    # sin(q3) is negative as in the example.)
+    q3 = -np.arccos(cos_q3)
+    sin_q3 = np.sin(q3)  # will be negative
+    # Let S = -sin(q3) >= 0 and define M = D*S.
+    S = -sin_q3
+    M = D * S
+
+    # ---------------------
+    # Step 2. Solve for q1 and q2.
+    # Write the x and z equations as:
+    #   x = A*sin(q1) + C*sin(q1+q2) + M*cos(q1+q2)
+    #   z = A*cos(q1) + C*cos(q1+q2) - M*sin(q1+q2)
+    # Define beta = q1 + q2.
+    # Then the contribution from the shoulder is
+    #   x' = x - (C*sin(beta) + M*cos(beta)) = A*sin(q1)
+    #   z' = z - (C*cos(beta) - M*sin(beta)) = A*cos(q1)
+    # and consistency requires (x')^2 + (z')^2 = A^2.
+    # After some algebra the following relation is obtained:
+    #
+    #   E' sin(beta) + F' cos(beta) = K'
+    #
+    # with:
+    E = x * C - z * M
+    F = x * M + z * C
+    # Define K from
+    #   (A^2 - x^2 - z^2 - C^2 - M^2)/2
+    K = (A**2 - x**2 - z**2 - C**2 - M**2) / 2.0
+    Kp = -K  # so that the relation reads: E*sin(beta) + F*cos(beta) = Kp
+    R_val = np.sqrt(E**2 + F**2)
+    # Avoid division by zero.
+    if R_val < 1e-8:
+        R_val = 1e-8
+    # Define an angle φ so that:
+    #   E*sin(beta) + F*cos(beta) = R_val*sin(beta + φ)
+    phi = np.arctan2(F, E)
+    # Solve sin(beta + φ) = Kp / R_val.
+    ratio = np.clip(Kp / R_val, -1.0, 1.0)
+    # Two candidate solutions exist:
+    cand1 = np.arcsin(ratio) - phi
+    cand2 = np.pi - np.arcsin(ratio) - phi
+    # For example, using the “elbow‐up” convention (as in the forward kinematics test),
+    # one may choose the candidate with the larger value.
+    beta = cand2 if cand2 > cand1 else cand1
+
+    # Now recover q1 from:
+    #   x' = x - (C*sin(beta) + M*cos(beta)) = A*sin(q1)
+    #   z' = z - (C*cos(beta) - M*sin(beta)) = A*cos(q1)
+    x_prime = x - (C * np.sin(beta) + M * np.cos(beta))
+    z_prime = z - (C * np.cos(beta) - M * np.sin(beta))
+    q1 = np.arctan2(x_prime, z_prime)
+    q2 = beta - q1
+
+    # ---------------------
+    # Step 3. Solve for q4 from the orientation.
+    # The overall target orientation is given by
+    #   R_target = R_y(q1+q2) · R_z(q3) · R_y(q4) · R_z(theta_offset).
+    # Define X = R_y(q1+q2) · R_z(q3).
+    def Rot_y(a):
+        return np.array([[np.cos(a), 0, np.sin(a)],
+                         [0, 1, 0],
+                         [-np.sin(a), 0, np.cos(a)]])
+    def Rot_z(a):
+        return np.array([[np.cos(a), -np.sin(a), 0],
+                         [np.sin(a),  np.cos(a), 0],
+                         [0, 0, 1]])
+    X = Rot_y(q1 + q2) @ Rot_z(q3)
+
+    # Convert the input r (roll, pitch, yaw) to a rotation matrix.
+    # (Here we assume r = (roll, pitch, yaw) with intrinsic Rx, then Ry, then Rz.)
+    def Rx(a):
+        return np.array([[1, 0, 0],
+                         [0, np.cos(a), -np.sin(a)],
+                         [0, np.sin(a),  np.cos(a)]])
+    def Ry(a):
+        return np.array([[np.cos(a), 0, np.sin(a)],
+                         [0, 1, 0],
+                         [-np.sin(a), 0, np.cos(a)]])
+    def Rz(a):
+        return np.array([[np.cos(a), -np.sin(a), 0],
+                         [np.sin(a),  np.cos(a), 0],
+                         [0, 0, 1]])
+    R_target = Rx(r[0]) @ Ry(r[1]) @ Rz(r[2])
+
+    # Now we have
+    #   R_target = X · R_y(q4) · R_z(theta_offset),
+    # so that
+    #   Xᵀ · R_target · R_z(–theta_offset) = R_y(q4).
+    R_temp = X.T @ R_target @ Rot_z(-theta_offset)
+    # For a pure rotation about y the matrix is:
+    #   [[cos(q4), 0, sin(q4)],
+    #    [0, 1, 0],
+    #    [–sin(q4), 0, cos(q4)]].
+    # Hence we may extract:
+    q4 = np.arctan2(R_temp[0, 2], R_temp[0, 0])
+
+    return (q1, q2, q3, q4)
+------------------------------------------------------------
+
+How the solution works:
+
+1. We first use the y‐component to obtain q₃ (and compute sin(q₃) so that the x–z equations can be expressed in terms of q₁ and β = q₁+q₂).
+2. By rewriting the x and z equations we deduce a single equation in β; the sine–addition formula then yields two candidate solutions – here the “elbow‐up” branch is chosen.
+3. With β in hand, q₁ is computed from the residual x–z offset and q₂ is obtained by difference.
+4. Finally the known overall orientation (converted from r by successive Rx, Ry, Rz rotations) is used to solve for q₄.
+
+Any solution that follows a correct closed‐form algebra is acceptable.

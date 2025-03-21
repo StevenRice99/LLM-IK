@@ -1,0 +1,126 @@
+To solve this problem, we need to determine the joint angles for a 5-DOF robotic arm to reach a specified target position and orientation. The solution involves both geometric and algebraic methods to decouple the position and orientation problems.
+
+### Approach
+1. **Positioning the Wrist Center**: The first three joints (q1, q2, q3) are responsible for positioning the wrist center (Revolute4's origin). The wrist center's position is derived from the target position by accounting for the offset from the wrist to the TCP.
+2. **Orientation Adjustment**: The last two joints (q4, q5) adjust the orientation of the TCP. This is achieved by solving for the Euler angles that match the desired orientation after accounting for the TCP's default orientation.
+3. **Geometric Calculations**: Using trigonometric identities and inverse kinematics, we solve for the joint angles that position the wrist center and adjust the orientation.
+
+### Solution Code
+```python
+import numpy as np
+
+def inverse_kinematics(p: tuple[float, float, float], r: tuple[float, float, float]) -> tuple[float, float, float, float, float]:
+    target_pos = np.array(p)
+    rx, ry, rz = r
+
+    # Compute the target rotation matrix R_target = R_z(rz) * R_y(ry) * R_x(rx)
+    R_x = np.array([
+        [1, 0, 0],
+        [0, np.cos(rx), -np.sin(rx)],
+        [0, np.sin(rx), np.cos(rx)]
+    ])
+    R_y = np.array([
+        [np.cos(ry), 0, np.sin(ry)],
+        [0, 1, 0],
+        [-np.sin(ry), 0, np.cos(ry)]
+    ])
+    R_z = np.array([
+        [np.cos(rz), -np.sin(rz), 0],
+        [np.sin(rz), np.cos(rz), 0],
+        [0, 0, 1]
+    ])
+    R_target = R_z @ R_y @ R_x
+
+    # Compute R_rhs = R_target * R_z(-pi/2)
+    R_rhs = R_target @ np.array([
+        [np.cos(-np.pi/2), -np.sin(-np.pi/2), 0],
+        [np.sin(-np.pi/2), np.cos(-np.pi/2), 0],
+        [0, 0, 1]
+    ])
+
+    # Extract Y-Z-Y Euler angles from R_rhs
+    def yzy_from_matrix(R):
+        beta = np.arccos(R[1, 1])
+        if not np.isclose(np.sin(beta), 0):
+            alpha = np.arctan2(R[2, 1]/np.sin(beta), -R[0, 1]/np.sin(beta))
+            gamma = np.arctan2(R[1, 2]/np.sin(beta), R[1, 0]/np.sin(beta))
+        else:
+            if np.isclose(R[1, 1], 1):
+                alpha = 0.0
+                gamma = np.arctan2(R[0, 0], R[0, 2])
+            else:
+                alpha = 0.0
+                gamma = np.arctan2(-R[0, 0], R[0, 2])
+        return alpha, beta, gamma
+
+    alpha, beta, gamma = yzy_from_matrix(R_rhs)
+    theta = alpha
+    q4 = beta
+    q5 = gamma
+
+    # Solve for q4 from the y-component equation
+    y_target = target_pos[1]
+    cos_q4 = (y_target + 0.0267) / 0.0823
+    q4_solutions = []
+    if np.abs(cos_q4) <= 1:
+        q4_1 = np.arccos(cos_q4)
+        q4_2 = -q4_1
+        q4_solutions = [q4_1, q4_2]
+    else:
+        return (0.0, 0.0, 0.0, 0.0, 0.0)
+
+    # Constants for the arm
+    A = 0.39225
+    B = 0.425
+
+    for q4 in q4_solutions:
+        # Compute the offset from wrist to TCP
+        O = np.array([
+            -0.0823 * np.sin(q4),
+            0.0823 * np.cos(q4),
+            0.09465
+        ])
+
+        # Compute O_world by applying R_y(theta)
+        O_world = np.array([
+            np.cos(theta) * O[0] + np.sin(theta) * O[2],
+            O[1],
+            -np.sin(theta) * O[0] + np.cos(theta) * O[2]
+        ])
+
+        # Desired wrist position
+        P_wrist_desired = target_pos - O_world
+        x_d = P_wrist_desired[0]
+        z_d = P_wrist_desired[2]
+
+        # Solve for q2
+        D = x_d**2 + z_d**2
+        cos_q2 = (D - A**2 - B**2) / (2 * A * B)
+        if np.abs(cos_q2) > 1:
+            continue
+
+        q2_1 = np.arccos(cos_q2)
+        q2_2 = -q2_1
+
+        for q2 in [q2_1, q2_2]:
+            C = B + A * np.cos(q2)
+            S = A * np.sin(q2)
+            phi = np.arctan2(S, C)
+            q1 = np.arctan2(x_d, z_d) - phi
+
+            # Compute q3
+            q3 = theta - q1 - q2
+
+            # Return the first valid solution
+            return (float(q1), float(q2), float(q3), float(q4), float(q5))
+
+    # Fallback if no solution found (should not happen)
+    return (0.0, 0.0, 0.0, 0.0, 0.0)
+```
+
+### Explanation
+1. **Rotation Matrices**: The target orientation is converted into a rotation matrix using the given Euler angles (roll, pitch, yaw).
+2. **Euler Angle Extraction**: The desired orientation is adjusted for the TCP's default orientation, and the resulting rotation matrix is decomposed into Y-Z-Y Euler angles to find the necessary joint angles for orientation.
+3. **Wrist Center Calculation**: The wrist center's position is derived by subtracting the offset (dependent on q4 and q5) from the target position.
+4. **Inverse Kinematics for Position**: Using geometric calculations, the joint angles q1 and q2 are determined to position the wrist center correctly. The third joint angle q3 is derived from the orientation solution.
+5. **Solution Selection**: The first valid solution is returned, ensuring the target is reachable as per the problem constraints.

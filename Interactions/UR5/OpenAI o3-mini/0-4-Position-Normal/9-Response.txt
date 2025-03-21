@@ -1,0 +1,103 @@
+def inverse_kinematics(p: tuple[float, float, float]) -> tuple[float, float, float, float, float]:
+    """
+    Computes a closed‐form inverse kinematics solution for a 5 DOF manipulator,
+    given a desired TCP position p = (x, y, z). This particular solution fixes
+    the redundant degrees of freedom by setting q4 = q5 = 0.
+    
+    Robot parameters (all units in meters, angles in radians):
+      • Revolute 1: origin [0, 0, 0]                 (axis Z)
+      • Revolute 2: origin [0, 0.13585, 0]           (axis Y)
+      • Revolute 3: origin [0, -0.1197, 0.425]         (axis Y)
+      • Revolute 4: origin [0, 0, 0.39225]            (axis Y)
+      • Revolute 5: origin [0, 0.093, 0]              (axis Z)
+      • TCP:        origin [0, 0, 0.09465]
+    
+    With all joints at zero, the TCP is at:
+         (0,
+          offset2 + offset3 + offset5,
+          offset3_z + offset4_z + tcp_z)
+       where
+         offset2   =  0.13585,
+         offset3   = -0.1197,
+         offset3_z =  0.425,
+         offset4_z =  0.39225,
+         offset5   =  0.093,
+         tcp_z     =  0.09465.
+       This evaluates to (0, 0.10915, 0.9119).
+
+    The IK procedure is as follows:
+      1. Compute the base rotation q1 from the desired (x,y) by aligning the given
+         TCP y-offset (0.10915) with the target’s direction. In particular, let R be
+         the distance sqrt(x² + y²), and let x_d = sqrt(R² - (0.10915)²). Then:
+              q1 = atan2(y, x) - atan2(0.10915, x_d).
+      
+      2. “Undo” the base rotation so that the remaining problem lies in an effective
+         plane with coordinates (x_d, z). For this 2R planar problem, we set:
+             d = offset3_z = 0.425,
+             L = offset4_z + tcp_z = 0.39225 + 0.09465 ≈ 0.4869.
+         Let D_target = sqrt(x_d² + z²), then the law of cosines gives:
+             cos(q3) = (D_target² - d² - L²) / (2*d*L).
+         Taking the inverse cosine gives q3.
+      
+      3. Define an intermediate angle φ = atan2(L*sin(q3), d + L*cos(q3)). Then,
+         the shoulder joint is:
+             q2 = atan2(x_d, z) - φ.
+      
+      4. Finally, set the redundant joints:
+             q4 = 0 and q5 = 0.
+    
+    :param p: The desired TCP position as a tuple (x, y, z).
+    :return: A tuple (q1, q2, q3, q4, q5) indicating joint angles in radians.
+    """
+    import math
+
+    # Unpack desired TCP position.
+    x, y, z = p
+
+    # Robot kinematic parameters
+    offset2   = 0.13585       # Translational offset along y from Revolute 1 to 2.
+    offset3   = -0.1197       # Translational offset along y from Revolute 2 to 3.
+    offset3_z = 0.425         # Translational offset along z from Revolute 2 to 3.
+    offset4_z = 0.39225       # Translational offset along z from Revolute 3 to 4.
+    offset5   = 0.093         # Translational offset along y from Revolute 4 to 5.
+    tcp_z     = 0.09465       # Translational offset along z from Revolute 5 to TCP.
+
+    # In the zero configuration, the TCP's y-offset relative to the base is:
+    base_y_offset = offset2 + offset3 + offset5  # = 0.13585 - 0.1197 + 0.093 = 0.10915
+
+    # -------------------------------
+    # Step 1: Solve for the base rotation q1.
+    R = math.sqrt(x * x + y * y)
+    # x_d is the effective x-coordinate in the zero configuration (after "undoing" q1).
+    # Because the zero configuration has a fixed y-offset of base_y_offset, we have:
+    #    x_d^2 + base_y_offset^2 = R^2.
+    temp_val = max(R * R - base_y_offset * base_y_offset, 0.0)
+    x_d = math.sqrt(temp_val)
+    # The rotation q1 aligns (x_d, base_y_offset) with (x,y):
+    q1 = math.atan2(y, x) - math.atan2(base_y_offset, x_d)
+
+    # -------------------------------
+    # Step 2: Solve the planar 2R subproblem in the (x_d,z) plane.
+    # Effective planar distance.
+    D_target = math.sqrt(x_d * x_d + z * z)
+    # Define the planar link lengths.
+    d = offset3_z            # 0.425
+    L = offset4_z + tcp_z      # 0.39225 + 0.09465 ≈ 0.4869
+
+    # Solve for the elbow angle q3 using the law of cosines.
+    cos_q3 = (D_target * D_target - d * d - L * L) / (2 * d * L)
+    # Clamp cos_q3 for numerical robustness.
+    cos_q3 = max(-1.0, min(1.0, cos_q3))
+    q3 = math.acos(cos_q3)
+
+    # Compute the intermediate angle phi.
+    phi = math.atan2(L * math.sin(q3), d + L * math.cos(q3))
+    # Solve for the shoulder joint angle q2.
+    q2 = math.atan2(x_d, z) - phi
+
+    # -------------------------------
+    # Step 3: Choose the remaining joints (redundant for positioning) as zero.
+    q4 = 0.0
+    q5 = 0.0
+
+    return (q1, q2, q3, q4, q5)

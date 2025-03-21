@@ -1,0 +1,135 @@
+Below is one complete analytical solution. In this solution we first “back‐out” the wrist center (the location of joint 4) by subtracting the known TCP offset (the combination of joint‐5 and tool translations) transformed by the desired RPY orientation. Then, we solve for the base (joint 1) by “aiming” from the wrist center toward the shoulder offset. (In our robot the shoulder – joint 2 – is fixed at [0,0.13585,0] in the base frame so that when the wrist center lies along the “+Y” direction one finds joint 1 = 0.) Next, treating the 2R part (joints 2 and 3) as a planar 2‐link arm (with effective link lengths 0.425 and 0.39225 reaching from the shoulder to the wrist center) we use the cosine–law to compute the “elbow” angle and then the shoulder angle from the “line-of-sight” to the wrist center. Finally, we “close” the arm by demanding that the overall arm rotation (joints 2+3+4) match the “arm angle” β that can be extracted from the desired end–effector rotation (when it is factored as a rotation about Z, then about Y, then about Z). The remaining joint (joint 5) is then computed by “subtracting” the obtained arm’s rotation from the target. (Note that the robot is only capable of the subset of 6DOF orientations that factor as Rz(θ₁)·Ry(β)·Rz(θ₅).)
+
+A complete Python solution follows:
+
+------------------------------------------------------------
+def inverse_kinematics(p: tuple[float, float, float], 
+                       r: tuple[float, float, float]) -> tuple[float, float, float, float, float]:
+    """
+    Gets the joint values required to reach TCP position p with RPY orientation r.
+    The robot’s chain is:
+      • Joint 1: Revolute about Z, located at the origin.
+      • Joint 2: Revolute about Y, with translation [0, 0.13585, 0] from joint1.
+      • Joint 3: Revolute about Y, with translation [0, -0.1197, 0.425] from joint2.
+      • Joint 4: Revolute about Y, with translation [0, 0, 0.39225] from joint3.
+      • Joint 5: Revolute about Z, with translation [0, 0.093, 0] from joint4.
+    The TCP is further translated by [0, 0, 0.09465] relative to joint 5.
+    
+    We assume that the target’s orientation is reachable – i.e. it is of the form
+         R_target = Rz(theta1) * Ry(beta) * Rz(theta5)
+    for some angles.
+    
+    The solution proceeds by:
+      1. Computing the desired 3×3 rotation R_target from r (using Rz*Ry*Rx with r = [roll, pitch, yaw]).
+      2. Subtracting the effect of the TCP offset (p_tool = [0, 0.093, 0.09465]) to obtain the wrist center (joint 4) position.
+      3. Solving for joint 1 as the “aiming” angle (here defined so that when the wrist center lies along the +Y axis, theta1 = 0).
+      4. Expressing the 2R (joints 2–3) problem from the shoulder (joint2 at Rz(theta1)*[0,0.13585,0]) to the wrist center.
+      5. Using the cosine law on the effective 2D problem (in the X–Z plane, which is preserved when rotating about Y) to compute the elbow (joint 3) and shoulder (joint 2) angles.
+      6. Setting joint 4 so that the total rotation from joints 2+3+4 matches β, where β is extracted from R_target.
+      7. Finally, computing joint 5 from the residual rotation.
+      
+    :param p: The target TCP position [x, y, z].
+    :param r: The target TCP orientation in RPY (roll, pitch, yaw), in radians.
+    :return: A tuple (theta1, theta2, theta3, theta4, theta5).
+    """
+    import math
+    import numpy as np
+
+    # --- Step A. Compute target rotation from roll-pitch-yaw (using Rz * Ry * Rx) ---
+    x_target, y_target, z_target = p
+    roll, pitch, yaw = r
+
+    R_x = np.array([[1, 0, 0],
+                    [0, math.cos(roll), -math.sin(roll)],
+                    [0, math.sin(roll), math.cos(roll)]])
+    R_y = np.array([[math.cos(pitch), 0, math.sin(pitch)],
+                    [0, 1, 0],
+                    [-math.sin(pitch), 0, math.cos(pitch)]])
+    R_z = np.array([[math.cos(yaw), -math.sin(yaw), 0],
+                    [math.sin(yaw),  math.cos(yaw), 0],
+                    [0, 0, 1]])
+    R_target = R_z @ R_y @ R_x
+
+    # --- Step B. Subtract TCP offset to get wrist center (joint 4) ---
+    # (TCP offset relative to joint 5: [0, 0.093, 0] then [0, 0, 0.09465] added gives total p_tool)
+    p_tool = np.array([0, 0.093, 0.09465])
+    p_target = np.array([x_target, y_target, z_target])
+    p_wrist = p_target - R_target @ p_tool
+
+    # --- Step C. Solve for joint 1 (rotation about Z) ---
+    # Define theta1 so that if p_wrist lies along the positive Y axis, theta1 = 0.
+    # (That is, use atan2(p_wrist_x, p_wrist_y).)
+    theta1 = math.atan2(p_wrist[0], p_wrist[1])
+    
+    # --- Step D. Compute position of joint 2 in the world frame ---
+    # Joint 2 is located at [0, 0.13585, 0] in the base, then rotated by Rz(theta1).
+    p_joint2 = np.array([0, 0.13585, 0])
+    Rz_theta1 = np.array([[math.cos(theta1), -math.sin(theta1), 0],
+                          [math.sin(theta1),  math.cos(theta1), 0],
+                          [0, 0, 1]])
+    p_joint2_world = Rz_theta1 @ p_joint2
+
+    # --- Step E. Compute the relative vector from joint 2 to the wrist center ---
+    p_rel = p_wrist - p_joint2_world
+    # Note: Joints 2 and 3 rotate about Y; this leaves the Y–component unchanged.
+    # We form an effective 2D problem in the X-Z plane.
+    x_eff = p_rel[0]
+    z_eff = p_rel[2]
+    r_plane = math.sqrt(x_eff**2 + z_eff**2)
+    
+    # --- Step F. Solve the 2R (planar) problem (from joint 2 to wrist center) ---
+    # In the “arm” the two (planar) link lengths are:
+    L1 = 0.425
+    L2 = 0.39225
+    # Cosine-law solution for the elbow (joint 3).
+    cos_angle = (r_plane**2 - L1**2 - L2**2) / (2 * L1 * L2)
+    cos_angle = max(min(cos_angle, 1.0), -1.0)  # clamp to [-1,1]
+    theta_elbow = math.acos(cos_angle)  # solution for joint 3 (elbow angle)
+    # There are two possible solutions (elbow up or down); here we pick one.
+    # Compute an auxiliary angle psi.
+    psi = math.atan2(L2 * math.sin(theta_elbow), L1 + L2 * math.cos(theta_elbow))
+    # Angle from joint 2 to target in the X-Z plane:
+    angle_to_target = math.atan2(x_eff, z_eff)
+    # Shoulder (joint 2) angle in the arm plane:
+    theta_shoulder = angle_to_target - psi
+    
+    theta2 = theta_shoulder
+    theta3 = theta_elbow
+
+    # --- Step G. Extract the desired overall arm rotation (β) from the target R ---
+    # Our robot’s achievable orientation factors as:
+    #   R_target = Rz(theta1) · Ry(β) · Rz(theta5)
+    # and from the matrix entries one may extract:
+    #   cos(β) = R_target[2,2]    and    sin(β) = sqrt(R_target[0,2]² + R_target[1,2]²)
+    beta = math.atan2(math.sqrt(R_target[0,2]**2 + R_target[1,2]**2), R_target[2,2])
+    
+    # --- Step H. Compute joint 4 so that the arm’s total rotation satisfies:
+    #   theta2 + theta3 + theta4 = β  →  theta4 = β - (theta2 + theta3)
+    theta4 = beta - (theta2 + theta3)
+    
+    # --- Step I. Solve for the remaining joint 5 (rotation about Z) ---
+    # Since R_target = Rz(theta1)*Ry(β)*Rz(theta5) then:
+    #   Rz(theta5) = (Rz(theta1)*Ry(β))ᵀ · R_target.
+    R_arm = Rz_theta1 @ np.array([[math.cos(beta), 0, math.sin(beta)],
+                                  [0, 1, 0],
+                                  [-math.sin(beta), 0, math.cos(beta)]])
+    R5_candidate = R_arm.T @ R_target
+    # For a pure rotation about Z the matrix looks like [[cos, -sin, 0],
+    #                                                      [sin,  cos, 0],
+    #                                                      [  0,    0, 1]].
+    # So, extract theta5 as:
+    theta5 = math.atan2(R5_candidate[1,0], R5_candidate[0,0])
+    
+    return (theta1, theta2, theta3, theta4, theta5)
+
+------------------------------------------------------------
+
+Explanation of key points:
+1. p_tool (=[0, 0.093, 0.09465]) represents the combined translation of joint 5’s origin and the TCP offset in that frame.
+2. By computing p_wrist = p – R_target·p_tool the IK decouples into a “position” problem (solved by joints 1–3) and an “orientation” (wrist) problem (solved by joints 4–5).
+3. Joint 1 is solved using a modified atan2 so that when the wrist center lies along the robot’s positive Y–axis the base angle is zero.
+4. The 2R planar subproblem for joints 2–3 is solved using the cosine law (using L1 = 0.425 and L2 = 0.39225).
+5. Joint 4 “closes” the arm to match β, the portion of R_target that must be achieved by the Y–rotations.
+6. Finally, joint 5 is extracted by “removing” the arm’s contribution from the target rotation.
+
+This function assumes all targets are reachable.

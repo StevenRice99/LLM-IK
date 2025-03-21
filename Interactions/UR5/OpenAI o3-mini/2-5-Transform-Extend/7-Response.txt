@@ -1,0 +1,63 @@
+def inverse_kinematics(p: tuple[float, float, float], r: tuple[float, float, float]) -> tuple[float, float, float, float]:
+    import numpy as np
+
+    # Unpack target TCP position and orientation (roll, pitch, yaw)
+    x, y, z = p
+    rx, ry, rz = r
+
+    # Build the target rotation matrix, assuming R_target = R_yaw * R_pitch * R_roll.
+    R_roll = np.array([[1, 0, 0],
+                       [0, np.cos(rx), -np.sin(rx)],
+                       [0, np.sin(rx),  np.cos(rx)]])
+    R_pitch = np.array([[ np.cos(ry), 0, np.sin(ry)],
+                        [         0, 1,         0],
+                        [-np.sin(ry), 0, np.cos(ry)]])
+    R_yaw = np.array([[np.cos(rz), -np.sin(rz), 0],
+                      [np.sin(rz),  np.cos(rz), 0],
+                      [         0,           0, 1]])
+    R_target = R_yaw @ R_pitch @ R_roll
+
+    # Constants from URDF data
+    # Link 2 translates by 0.39225 along z (A); however, the 3-DOF solution “backs off” by the offset on link 4.
+    # Link 4 has a fixed translation of 0.09465 along z.
+    B = 0.09465
+
+    # ----- Solve the 3-DOF sub-chain (joints 1-3) -----
+    # Compute the combined angle (theta_sum) from the target's z-axis components.
+    theta_sum = np.arctan2(R_target[0, 2], R_target[2, 2])
+    # "Back off" the joint 4 offset from x and z.
+    theta1 = np.arctan2(x - B * np.sin(theta_sum), z - B * np.cos(theta_sum))
+    theta2 = theta_sum - theta1
+    # The third joint (about Z) angle is derived from the target rotation matrix.
+    theta3 = np.arctan2(R_target[1, 0], R_target[1, 1])
+
+    # ----- Solve for the fourth joint (joint 4 rotates about Y) -----
+    # The full forward kinematics (ignoring translations not affecting orientation) is:
+    #   R_total = Ry(θ1) · Ry(θ2) · Rz(θ3) · Ry(θ4) · Rz(1.570796325)
+    # where the TCP fixed offset includes a rotation Rz(1.570796325).
+    # To isolate the effect of θ4, compute:
+    #   Ry(θ4) = (Ry(θ1) · Ry(θ2) · Rz(θ3))⁻¹ · R_target · Rz(–1.570796325)
+    fixed_tcp_rotation = 1.570796325
+
+    # Define rotation matrix functions about Y and Z.
+    def Ry(angle):
+        return np.array([
+            [ np.cos(angle), 0, np.sin(angle)],
+            [             0, 1,             0],
+            [-np.sin(angle), 0, np.cos(angle)]
+        ])
+    def Rz(angle):
+        return np.array([
+            [ np.cos(angle), -np.sin(angle), 0],
+            [ np.sin(angle),  np.cos(angle), 0],
+            [             0,              0, 1]
+        ])
+
+    # Compute the cumulative rotation from joints 1-3.
+    R_arm = Ry(theta1) @ Ry(theta2) @ Rz(theta3)
+    # Remove the arm rotation and the TCP fixed rotation.
+    R_temp = np.linalg.inv(R_arm) @ R_target @ Rz(-fixed_tcp_rotation)
+    # Extract joint 4 angle from the resulting rotation about Y.
+    theta4 = np.arctan2(R_temp[0, 2], R_temp[2, 2])
+    
+    return (theta1, theta2, theta3, theta4)

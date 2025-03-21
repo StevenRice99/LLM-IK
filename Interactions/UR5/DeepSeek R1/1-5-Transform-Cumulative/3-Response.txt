@@ -1,0 +1,84 @@
+To address the issues identified, the solution must correctly handle the geometric calculations for the first three joints and accurately decompose the remaining rotation for the last two joints. Here's the improved approach:
+
+```python
+import math
+import numpy as np
+
+def inverse_kinematics(p: tuple[float, float, float], r: tuple[float, float, float]) -> tuple[float, float, float, float, float]:
+    x_target, y_target, z_target = p
+    roll, pitch, yaw = r
+
+    # Compute target rotation matrix
+    cr, sr = np.cos(roll), np.sin(roll)
+    cp, sp = np.cos(pitch), np.sin(pitch)
+    cy, sy = np.cos(yaw), np.sin(yaw)
+    R_target = np.array([
+        [cy * cp, cy * sp * sr - sy * cr, cy * sp * cr + sy * sr],
+        [sy * cp, sy * sp * sr + cy * cr, sy * sp * cr - cy * sr],
+        [-sp, cp * sr, cp * cr]
+    ])
+
+    # Adjust for TCP's fixed orientation (R_tcp_inv)
+    R_tcp = np.array([[0, -1, 0], [1, 0, 0], [0, 0, 1]])  # 90° Z rotation
+    R_target_adj = R_target @ R_tcp.T
+
+    # Calculate theta_sum from adjusted rotation matrix
+    r13 = R_target_adj[0, 2]
+    r33 = R_target_adj[2, 2]
+    theta_sum = math.atan2(r13, r33)
+
+    # Adjust target position for TCP's offset (joint5 and TCP)
+    C_tcp = 0.09465 + 0.0823  # Combined length along theta_sum direction
+    pos3_x = x_target - C_tcp * math.sin(theta_sum)
+    pos3_z = z_target - C_tcp * math.cos(theta_sum)
+
+    # Solve for theta1 and theta2 using geometric approach
+    a, b = 0.425, 0.39225
+    x, z = pos3_x, pos3_z
+    d_sq = x**2 + z**2
+    cos_theta2 = (d_sq - a**2 - b**2) / (2 * a * b)
+    cos_theta2 = np.clip(cos_theta2, -1.0, 1.0)
+    theta2_1 = math.acos(cos_theta2)
+    theta2_2 = -theta2_1
+
+    solutions = []
+    for theta2 in [theta2_1, theta2_2]:
+        denom = a + b * math.cos(theta2)
+        num = b * math.sin(theta2)
+        theta1 = math.atan2(x * denom - z * num, z * denom + x * num)
+        x_calc = a * math.sin(theta1) + b * math.sin(theta1 + theta2)
+        z_calc = a * math.cos(theta1) + b * math.cos(theta1 + theta2)
+        error = math.hypot(x_calc - x, z_calc - z)
+        solutions.append((theta1, theta2, error))
+
+    # Select solution with minimum error
+    solutions.sort(key=lambda x: x[2])
+    theta1, theta2, _ = solutions[0]
+    theta3 = theta_sum - theta1 - theta2
+
+    # Compute remaining rotation after first three joints
+    R_y_sum = np.array([
+        [math.cos(theta_sum), 0, math.sin(theta_sum)],
+        [0, 1, 0],
+        [-math.sin(theta_sum), 0, math.cos(theta_sum)]
+    ])
+    R_remaining = R_y_sum.T @ R_target_adj
+
+    # Solve for theta4 (Z) and theta5 (Y)
+    theta5 = math.atan2(-R_remaining[2, 0], R_remaining[2, 2])
+    sin_theta4 = -R_remaining[0, 1]
+    cos_theta4 = R_remaining[1, 1]
+    theta4 = math.atan2(sin_theta4, cos_theta4)
+
+    return (theta1, theta2, theta3, theta4, theta5)
+```
+
+**Explanation:**
+
+1. **Position Adjustment:** The combined offset from joint4 to TCP is approximated along the direction determined by `theta_sum`, using the sum of Revolute5's and TCP's lengths. This simplifies the complex transformations into a single directional offset.
+
+2. **Geometric Solution for Theta1 and Theta2:** The code generates both possible solutions for `theta2` (positive and negative) and selects the one with the smallest positional error, ensuring a more robust solution.
+
+3. **Orientation Decomposition:** The remaining rotation matrix is decomposed into `theta4` (Z-axis) and `theta5` (Y-axis) using the correct matrix elements, considering the joint axes and their order.
+
+This approach improves the handling of multiple solutions and provides a more accurate decomposition of the orientation, leading to better alignment with the target position and orientation.

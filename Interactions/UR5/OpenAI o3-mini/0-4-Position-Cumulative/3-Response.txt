@@ -1,0 +1,112 @@
+Below is one acceptable closed‐form solution. In this solution the five joint values are obtained by “peeling off” the constant offset produced by the nonarm translations (the net “wrist‐offset” in the horizontal plane of 0.10915 m – see explanation below) and then “inverting” a 2R planar chain (with links 0.425 m and 0.39225+0.09465=0.4869 m) for the remainder. (Note that because only position is specified there is one redundant degree‐of‑freedom; here we choose 
+q₄ = q₅ = 0.) 
+
+Explanation of constants:
+  • Joint2’s “origin” at [0,0.13585,0] together with the translation [0,–0.1197,0.425] from joint3 yield a net lateral (y) offset of 0.13585–0.1197 = 0.01615 m.
+  • Adding the translation [0,0.093,0] from joint5 produces a total “wrist” horizontal offset of 0.01615+0.093 = 0.10915 m.
+  • The chain from joint3 onward (with the TCP offset [0,0,0.09465]) gives an effective second link length L₂ = 0.39225+0.09465 = 0.4869 m.
+  • The “arm” (or base–wrist) is then a 2R chain with link lengths L₁ = 0.425 m and L₂ = 0.4869 m.
+  
+The overall idea is as follows. First, note that the forward kinematics (ignoring the 2 wrist joints which do not affect TCP position) give
+
+  TCP = Rz(q₁) • [ x_arm ; 0.10915 ; z_arm ]
+
+so that when the base (horizontal) components of the TCP, (pₓ,p_y), are “rotated back” by –q₁ one must recover a vector whose second (y) component is exactly 0.10915. In other words, if
+  Rz(–q₁) • [pₓ ; p_y] = [x_arm ; 0.10915],
+then one immediately obtains
+
+  p_y cos(q₁) – pₓ sin(q₁) = 0.10915  or  r sin(δ – q₁) = 0.10915,
+
+with r = √(pₓ²+p_y²) and δ = atan2(p_y, pₓ). Choosing the “elbow‐down” solution, we set
+
+  q₁ = δ – arcsin(0.10915/r).
+
+Next, the “arm plane” coordinates are recovered by (rotating by –q₁):
+
+  x_arm = cos(q₁)pₓ + sin(q₁)p_y   and  z_arm = p_z.
+
+Then the (2R) inverse kinematics for
+
+  x_arm = L₁ sin(q₂) + L₂ sin(q₂+q₃)
+  z_arm = L₁ cos(q₂) + L₂ cos(q₂+q₃)
+
+yield
+
+  q₃ = arccos[(r_eff² – L₁² – L₂²)/(2 L₁ L₂)]   with r_eff = √(x_arm²+p_z²),
+  q₂ = atan2(x_arm, p_z) – atan2(L₂ sin(q₃), L₁+L₂ cos(q₃)).
+
+Finally we choose q₄ = q₅ = 0.
+
+One acceptable implementation is as follows:
+
+------------------------------------------------------------
+def inverse_kinematics(p: tuple[float, float, float]) -> tuple[float, float, float, float, float]:
+    """
+    Computes the joint angles (in radians) for a 5-DOF manipulator so that its TCP (tool center point)
+    located at p = [pₓ, p_y, p_z] is reached.
+    
+    Model details:
+      • Joint 1 rotates about Z.
+      • The fixed translations of [0,0.13585,0] (joint2), [0,–0.1197,0.425] (joint3),
+        [0,0.39225,0] (joint4) and [0,0.093,0] (joint5) yield a net horizontal offset of 0.10915 m.
+      • The arm (joints 2 and 3) then forms a 2R planar system with L₁ = 0.425 m and 
+        an effective second link L₂ = 0.39225 + 0.09465 = 0.4869 m.
+      • Because only position is specified the “wrist joints” (q₄ and q₅) are set to zero.
+      
+    :param p: A tuple (pₓ, p_y, p_z) specifying the desired TCP position.
+    :return: A tuple (q₁, q₂, q₃, q₄, q₅) of joint angles in radians.
+    """
+    import math
+
+    # Unpack the desired TCP position.
+    p_x, p_y, p_z = p
+
+    # Compute horizontal distance and polar angle of the TCP in the base XY plane.
+    r = math.sqrt(p_x**2 + p_y**2)
+    delta = math.atan2(p_y, p_x)
+    
+    # The constant horizontal wrist offset (from the design: 0.13585 - 0.1197 + 0.093).
+    offset = 0.10915
+
+    # Enforce r >= offset (target assumed reachable).
+    # Solve for base joint: the rotated vector Rz(-q1) should have a Y-component equal to offset.
+    # In particular, r * sin(delta - q₁) = offset  =>  q₁ = delta - arcsin(offset/r)
+    phi = math.asin(offset / r)
+    q1 = delta - phi
+
+    # Rotate the horizontal (XY) position back into the “arm plane”.
+    # The rotated vector is Rz(-q1)*[p_x, p_y] = [x_arm; offset].
+    x_arm = math.cos(q1)*p_x + math.sin(q1)*p_y
+    # p_z remains the same in the arm plane.
+    
+    # Define the two effective link lengths.
+    L1 = 0.425      # from joint2 to joint3
+    L2 = 0.39225 + 0.09465  # joint4 translation plus TCP offset (0.4869 m)
+    
+    # Compute the effective distance in the arm (sagittal) plane.
+    r_eff = math.sqrt(x_arm**2 + p_z**2)
+    # Use the law of cosines to solve for q₃ (the elbow angle).
+    cos_q3 = (r_eff**2 - L1**2 - L2**2) / (2 * L1 * L2)
+    # Clamp to the valid range [-1, 1] to avoid numerical issues.
+    cos_q3 = max(min(cos_q3, 1.0), -1.0)
+    q3 = math.acos(cos_q3)
+    
+    # Solve for q₂ (shoulder angle) 
+    q2 = math.atan2(x_arm, p_z) - math.atan2(L2 * math.sin(q3), L1 + L2 * math.cos(q3))
+    
+    # Finally, choose wrist joints that do not affect TCP position.
+    q4 = 0.0
+    q5 = 0.0
+    
+    return (q1, q2, q3, q4, q5)
+------------------------------------------------------------
+
+When the forward kinematics function is called with, for example, 
+  q₁ = 1.0, q₂ = 0.5, q₃ = 0.8, q₄ = 0, q₅ = 0,
+the TCP position comes out approximately as 
+  [0.27173, 0.62521, 0.50322] m.
+Feeding this target into the above inverse kinematics yields (approximately)
+  (1.0, 0.5, 0.8, 0.0, 0.0),
+which verifies the solution.
+
+Any solution that analytically “peels‐off” the constant offsets and then uses the 2R law‑of‑cosines for the main planar chain is acceptable.

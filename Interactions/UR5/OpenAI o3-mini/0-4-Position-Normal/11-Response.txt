@@ -1,0 +1,55 @@
+def inverse_kinematics(p: tuple[float, float, float]) -> tuple[float, float, float, float, float]:
+    import math
+
+    # Unpack target TCP position (x, y, z)
+    x, y, z = p
+
+    # Robot parameters (from the URDF table)
+    offset2   = 0.13585   # Translation along y from Revolute 1 to Revolute 2
+    offset3   = -0.1197   # Translation along y from Revolute 2 to Revolute 3
+    offset3_z = 0.425     # Translation along z from Revolute 2 to Revolute 3
+    offset4_z = 0.39225   # Translation along z from Revolute 3 to Revolute 4
+    offset5   = 0.093     # Translation along y from Revolute 4 to Revolute 5
+    tcp_z     = 0.09465   # Translation along z from Revolute 5 to TCP
+
+    # In the zero joint configuration, the TCP is located at:
+    #     (0, offset2 + offset3 + offset5, offset3_z + offset4_z + tcp_z)
+    # which evaluates to (0, 0.10915, 0.9119)
+    base_y_offset = offset2 + offset3 + offset5  # 0.13585 - 0.1197 + 0.093 = 0.10915
+
+    # Step 1: Solve for the base rotation q1.
+    # The desired (x,y) position has a radial distance R from the base.
+    R = math.sqrt(x * x + y * y)
+    # The zero-configuration design gives a fixed y-offset, so the effective x-component in that frame is:
+    temp_val = R * R - base_y_offset * base_y_offset
+    # Clamp to zero if negative due to numerical error.
+    if temp_val < 0.0:
+        temp_val = 0.0
+    x_d = math.sqrt(temp_val)
+    # The base joint must rotate the vector (x_d, base_y_offset) into (x, y)
+    q1 = math.atan2(y, x) - math.atan2(base_y_offset, x_d)
+
+    # Step 2: Solve the 2R planar subproblem for joints q2 and q3.
+    # After "undoing" the base rotation, the effective planar coordinates become (x_d, z).
+    D_target = math.sqrt(x_d * x_d + z * z)
+    # For the planar chain, define:
+    d = offset3_z            # Link length from Revolute 2’s z-offset (0.425)
+    L = offset4_z + tcp_z      # Combined effective link length (0.39225 + 0.09465 = 0.4869)
+
+    # Use the law of cosines to find q3:
+    cos_q3 = (D_target * D_target - d * d - L * L) / (2 * d * L)
+    # Clamp cos_q3 to [-1, 1] for numerical stability.
+    cos_q3 = max(-1.0, min(1.0, cos_q3))
+    q3 = math.acos(cos_q3)
+
+    # The intermediate angle phi is defined by the geometry of the 2R chain:
+    phi = math.atan2(L * math.sin(q3), d + L * math.cos(q3))
+    # Solve for q2 from the relation in the rotated planar system:
+    q2 = math.atan2(x_d, z) - phi
+
+    # Step 3: Since the manipulator has redundant DOF for positioning the TCP,
+    # we fix the remaining joint angles to zero.
+    q4 = 0.0
+    q5 = 0.0
+
+    return (q1, q2, q3, q4, q5)

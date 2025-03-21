@@ -1,0 +1,140 @@
+We can derive a solution by “decoupling” the 5‐DOF problem into a “planar” sub–problem for the arm and a “wrist” sub–problem for the remaining two joints. (In our case joints 2, 3 and 4 all rotate about Y so that their rotations add; moreover joint 5 rotates about Z so that the full rotation from “shoulder” to TCP is
+
+  R = Rz(θ₁) · Ry(θ₂+θ₃+θ₄) · Rz(θ₅).
+
+Because none of the “origin” rpy’s add extra rotation, if we denote the “local” translation vectors (from the URDF) and “group” the ones that affect position we obtain that the forward position‐kinematics can be written in closed‐form as
+
+  pₓ = cos(θ₁) · S – sin(θ₁) · 0.10915  
+  p_y = sin(θ₁) · S + cos(θ₁) · 0.10915  
+  p_z = 0.425·cos(θ₂) + 0.39225·cos(θ₂+θ₃) + 0.09465·cos(θ₂+θ₃+θ₄)
+
+with
+  S = 0.425·sin(θ₂) + 0.39225·sin(θ₂+θ₃) + 0.09465·sin(θ₂+θ₃+θ₄).
+
+One may “decouple” the problem as follows:
+
+1. Notice that (pₓ, p_y) = Rz(θ₁)·[S, 0.10915] so that (with r_xy = √(pₓ²+p_y²)) one obtains
+  θ₁ = φ – arcsin(0.10915/r_xy)
+where φ = atan2(p_y, pₓ) and S = √(r_xy²–0.10915²).
+
+2. For the wrist we “extract” the summed Y rotation γ and joint-5 rotation from the end–effector rotation. In fact if one assumes the desired orientation is given as a roll–pitch–yaw rotation (R_target = Rz(yaw) · Ry(pitch) · Rx(roll)) then writing
+  M = Rz(–θ₁)·R_target
+it can be shown that M must equal Ry(γ)·Rz(θ₅). (In our derivation the (0,2) element of Ry(γ)·Rz(θ₅) is sin(γ) and the (2,2) element is cos(γ), while the (1,0) and (1,1) elements give sin(θ₅) and cos(θ₅) respectively.) Thus we may take
+  γ = atan2(M[0,2], M[2,2])  and θ₅ = atan2(M[1,0], M[1,1]).
+
+3. After “removing” the final link (the wrist + TCP) we are left with a 2R planar arm with link lengths L₁ = 0.425 and L₂ = 0.39225 and target (in the “planar” space) given by
+  x_p = S – 0.09465·sin(γ)
+  z_p = p_z – 0.09465·cos(γ).
+The common 2R solution (see, e.g., the law of cosines) is then
+  θ₃ = acos((r₂² – L₁² – L₂²)/(2·L₁·L₂))  with r₂ = √(x_p² + z_p²)
+  δ = atan2(L₂·sin(θ₃), L₁ + L₂·cos(θ₃))
+  θ₂ = atan2(x_p, z_p) – δ.
+Finally, note that since γ = θ₂ + θ₃ + θ₄ then
+  θ₄ = γ – (θ₂ + θ₃).
+
+A complete Python implementation that follows this reasoning is given below. (There are, of course, two possible “elbow” solutions for θ₃, but here we choose the principal solution.) 
+
+Below is the completed inverse_kinematics method:
+
+------------------------------------------------
+def inverse_kinematics(p: tuple[float, float, float],
+                       r: tuple[float, float, float]) -> tuple[float, float, float, float, float]:
+    """
+    Gets the joint values (θ₁, θ₂, θ₃, θ₄, θ₅) needed to reach a target TCP position "p" and orientation "r".
+    "p" is given as (pₓ, p_y, p_z) in meters.
+    "r" is the desired orientation specified by roll, pitch, yaw (in radians).
+    """
+    import numpy as np
+
+    # Unpack target position and orientation (rpy)
+    p_x, p_y, p_z = p
+    roll, pitch, yaw = r
+
+    # Define basic rotation matrices.
+    def Rx(a):
+        return np.array([[1, 0, 0],
+                         [0, np.cos(a), -np.sin(a)],
+                         [0, np.sin(a),  np.cos(a)]])
+    def Ry(a):
+        return np.array([[ np.cos(a), 0, np.sin(a)],
+                         [         0, 1,         0],
+                         [-np.sin(a), 0, np.cos(a)]])
+    def Rz(a):
+        return np.array([[np.cos(a), -np.sin(a), 0],
+                         [np.sin(a),  np.cos(a), 0],
+                         [        0,          0, 1]])
+    
+    # Compute the target rotation matrix from roll, pitch, yaw.
+    # (Assuming that R_target = Rz(yaw) · Ry(pitch) · Rx(roll).)
+    R_target = Rz(yaw) @ Ry(pitch) @ Rx(roll)
+    
+    # ----------------------------------------------------------------
+    # (1) Solve for θ₁ from the x-y components.
+    r_xy = np.sqrt(p_x**2 + p_y**2)
+    phi = np.arctan2(p_y, p_x)
+    # Note: The fixed offsets from the URDF add up to 0.10915 in the y-direction:
+    offset_y = 0.10915  # 0.13585 - 0.1197 + 0.093
+    theta1 = phi - np.arcsin(offset_y / r_xy)
+    # Also define S (the projection along the “arm” direction):
+    S = np.sqrt(r_xy**2 - offset_y**2)
+    
+    # ----------------------------------------------------------------
+    # (2) Solve for the wrist parameters.
+    # Rotate the target rotation by –θ₁ to “cancel out” joint 1.
+    M = Rz(-theta1) @ R_target
+    # Since we want M = Ry(γ) · Rz(θ₅), we extract:
+    gamma = np.arctan2(M[0, 2], M[2, 2])  # γ = θ₂+θ₃+θ₄
+    theta5 = np.arctan2(M[1, 0], M[1, 1])
+    
+    # ----------------------------------------------------------------
+    # (3) Solve the 2R planar problem for joints 2 and 3.
+    # The TCP offset beyond joint 4 is L₃ = 0.09465.
+    L1 = 0.425     # link from joint 2 to joint 3
+    L2 = 0.39225   # link from joint 3 to joint 4
+    L3 = 0.09465   # combined offset from joint 5 and the TCP
+    
+    # Removing the L₃ contribution:
+    x_p = S - L3 * np.sin(gamma)
+    z_p = p_z - L3 * np.cos(gamma)
+    r2 = np.sqrt(x_p**2 + z_p**2)
+    
+    # Use the law of cosines to solve for joint 3.
+    cos_theta3 = (r2**2 - L1**2 - L2**2) / (2 * L1 * L2)
+    # Clip to account for numerical issues.
+    cos_theta3 = np.clip(cos_theta3, -1.0, 1.0)
+    theta3 = np.arccos(cos_theta3)
+    
+    # Compute an intermediate angle δ.
+    delta = np.arctan2(L2 * np.sin(theta3), L1 + L2 * np.cos(theta3))
+    
+    # Then solve for joint 2.
+    # By writing the 2R forward kinematics as:
+    #   x_p = L1*sin(θ₂) + L2*sin(θ₂+θ₃) 
+    #   z_p = L1*cos(θ₂) + L2*cos(θ₂+θ₃),
+    # it is equivalent to:
+    #   θ₂ + δ = atan2(x_p, z_p).
+    theta2 = np.arctan2(x_p, z_p) - delta
+    
+    # Finally, joint 4 must provide the remaining rotation so that:
+    #   γ = θ₂ + θ₃ + θ₄   =>   θ₄ = γ – (θ₂ + θ₃)
+    theta4 = gamma - (theta2 + theta3)
+    
+    return (theta1, theta2, theta3, theta4, theta5)
+
+------------------------------------------------
+
+Explanation of key steps:
+
+• First, note that the x–y portion of the target must equal Rz(θ₁) applied to the “arm–projection” [S, offset_y] (with offset_y coming from link 2 and link 4 constant translations). By comparing magnitudes and “rotating back” by –θ₁ we deduce that 
+  θ₁ = φ – arcsin(offset_y/r_xy).
+
+• Next, by “removing” joint 1’s effect from the target orientation (computing M = Rz(–θ₁)·R_target) we obtain a matrix that “must” equal Ry(γ)·Rz(θ₅). Its (0,2) and (2,2) elements let us extract γ and its (1,0),(1,1) entries yield θ₅.
+
+• Finally, the remaining translations (after “subtracting” the TCP offset L₃) yield a 2R planar chain (with links L₁ and L₂) whose forward kinematics appear as 
+  x_p = L₁·sin(θ₂) + L₂·sin(θ₂+θ₃)
+  z_p = L₁·cos(θ₂) + L₂·cos(θ₂+θ₃).
+A standard use of the law of cosines then gives θ₃ and an intermediate “offset” δ from which θ₂ is obtained; θ₄ follows so that θ₂ + θ₃ + θ₄ = γ.
+
+This closed–form solution now returns a 5–tuple (θ₁, θ₂, θ₃, θ₄, θ₅) in radians that (by construction) will produce the desired TCP position and orientation. 
+
+You can now use this function (for example by plugging the resulting joint values into your forward kinematics routine) to verify that it indeed reaches the target pose.

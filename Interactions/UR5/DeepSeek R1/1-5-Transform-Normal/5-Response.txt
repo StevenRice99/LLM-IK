@@ -1,0 +1,143 @@
+To solve this problem, we need to determine the joint angles for a 5-DOF robotic arm to reach a specified target position and orientation. The solution involves correctly computing the offset from the wrist to the TCP and using geometric and algebraic methods to decouple the position and orientation problems.
+
+### Approach
+1. **Orientation Adjustment**: The target orientation is adjusted to account for the TCP's default orientation (90-degree rotation around Z). This adjusted orientation is decomposed into Y-Z-Y Euler angles to determine the necessary joint angles for the last two joints (q4 and q5).
+2. **Positioning the Wrist Center**: The first three joints (q1, q2, q3) are responsible for positioning the wrist center (Revolute4's origin). The wrist center's position is derived from the target position by accounting for the offset from the wrist to the TCP, which depends on q4 and q5.
+3. **Geometric Calculations**: Using trigonometric identities and inverse kinematics, we solve for the joint angles that position the wrist center and adjust the orientation.
+
+### Solution Code
+```python
+import numpy as np
+
+def inverse_kinematics(p: tuple[float, float, float], r: tuple[float, float, float]) -> tuple[float, float, float, float, float]:
+    target_pos = np.array(p)
+    rx, ry, rz = r
+
+    # Compute the target rotation matrix R_target = R_z(rz) * R_y(ry) * R_x(rx)
+    R_x = np.array([
+        [1, 0, 0],
+        [0, np.cos(rx), -np.sin(rx)],
+        [0, np.sin(rx), np.cos(rx)]
+    ])
+    R_y = np.array([
+        [np.cos(ry), 0, np.sin(ry)],
+        [0, 1, 0],
+        [-np.sin(ry), 0, np.cos(ry)]
+    ])
+    R_z = np.array([
+        [np.cos(rz), -np.sin(rz), 0],
+        [np.sin(rz), np.cos(rz), 0],
+        [0, 0, 1]
+    ])
+    R_target = R_z @ R_y @ R_x
+
+    # Adjust for TCP's default orientation (R_z(pi/2))
+    R_target_adj = R_target @ np.array([
+        [np.cos(-np.pi/2), -np.sin(-np.pi/2), 0],
+        [np.sin(-np.pi/2), np.cos(-np.pi/2), 0],
+        [0, 0, 1]
+    ])
+
+    # Function to extract Y-Z-Y Euler angles from a rotation matrix
+    def yzy_from_matrix(R):
+        solutions = []
+        # Possible beta values (handle positive and negative)
+        beta_options = []
+        beta = np.arccos(R[1, 1])
+        if not np.isclose(beta, 0):
+            beta_options.append(beta)
+            beta_options.append(-beta)
+        else:
+            beta_options.append(0.0)
+
+        for beta in beta_options:
+            if not np.isclose(np.sin(beta), 0):
+                alpha = np.arctan2(R[2, 1]/np.sin(beta), -R[0, 1]/np.sin(beta))
+                gamma = np.arctan2(R[1, 2]/np.sin(beta), R[1, 0]/np.sin(beta))
+                solutions.append((alpha, beta, gamma))
+                solutions.append((alpha + np.pi, -beta, gamma + np.pi))
+            else:
+                # Handle singularities (beta = 0 or pi)
+                if np.isclose(R[1, 1], 1):
+                    alpha = 0.0
+                    gamma = np.arctan2(R[0, 0], R[0, 2])
+                else:
+                    alpha = 0.0
+                    gamma = np.arctan2(-R[0, 0], R[0, 2])
+                solutions.append((alpha, beta, gamma))
+                solutions.append((alpha + np.pi, beta, gamma + np.pi))
+        return solutions
+
+    # Get all possible Y-Z-Y solutions for R_rhs
+    yzy_solutions = yzy_from_matrix(R_target_adj)
+
+    # Constants for the arm
+    wrist_y = -0.1197 + 0.093  # Fixed Y-coordinate of Revolute4 in world frame
+    L1 = 0.425  # Distance from Revolute1 to Revolute2
+    L2 = 0.39225  # Distance from Revolute2 to Revolute3
+    L3 = 0.093  # Distance from Revolute3 to Revolute4
+
+    # Iterate through all possible Y-Z-Y solutions
+    for alpha, beta, gamma in yzy_solutions:
+        theta = alpha  # q1 + q2 + q3
+        q4 = beta
+        q5 = gamma
+
+        # Compute offset from Revolute4 to TCP
+        delta = q5 - q4
+        O_x = 0.0823 * np.sin(delta)
+        O_y = 0.0823 * np.cos(delta)
+        O_z = 0.09465
+
+        # Check if the y-coordinate constraint is satisfied
+        required_O_y = target_pos[1] - wrist_y
+        if not np.isclose(O_y, required_O_y, atol=1e-4):
+            continue
+
+        # Compute desired wrist position (Revolute4's origin)
+        wrist_x = target_pos[0] - O_x
+        wrist_z = target_pos[2] - O_z
+
+        # Solve for q1, q2, q3 using planar inverse kinematics
+        # Using the geometric approach for 3R planar arm
+        x = wrist_x
+        z = wrist_z
+        D = x**2 + z**2
+
+        # Check if the target is reachable
+        cos_q2 = (D - L1**2 - L2**2) / (2 * L1 * L2)
+        if abs(cos_q2) > 1:
+            continue
+
+        q2_1 = np.arccos(cos_q2)
+        q2_2 = -q2_1
+
+        for q2 in [q2_1, q2_2]:
+            # Calculate q1
+            A = L1 + L2 * np.cos(q2)
+            B = L2 * np.sin(q2)
+            q1 = np.arctan2(x, z) - np.arctan2(B, A)
+
+            # Calculate q3
+            q3 = theta - q1 - q2
+
+            # Check joint limits (simplified check, adjust as per actual limits)
+            if not (-6.2831853 <= q1 <= 6.2831853 and
+                    -6.2831853 <= q2 <= 6.2831853 and
+                    -6.2831853 <= q3 <= 6.2831853 and
+                    -6.2831853 <= q4 <= 6.2831853 and
+                    -6.2831853 <= q5 <= 6.2831853):
+                continue
+
+            # Return the first valid solution
+            return (float(q1), float(q2), float(q3), float(q4), float(q5))
+
+    # Fallback if no valid solution found (should not occur as per problem statement)
+    return (0.0, 0.0, 0.0, 0.0, 0.0)
+```
+
+### Explanation
+1. **Orientation Adjustment**: The target orientation is adjusted for the TCP's default orientation (90-degree rotation around Z). The adjusted orientation is decomposed into Y-Z-Y Euler angles to find possible solutions for q4 and q5.
+2. **Offset Calculation**: The offset from the wrist center to the TCP is computed based on the difference between q4 and q5, ensuring the correct y-coordinate constraint is met.
+3. **Wrist Center Positioning**: The wrist center's position is derived from the target position by subtracting the computed offset. The first three joint angles (q1, q2, q3) are solved using geometric inverse kinematics to position the wrist center.
+4. **Validation**: Each solution is checked against joint limits to ensure validity, and the first valid solution is returned. This approach ensures that all possible solutions are considered, addressing the issues in the previous implementation.

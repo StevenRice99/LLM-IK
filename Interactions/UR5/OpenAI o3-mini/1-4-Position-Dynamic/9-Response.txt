@@ -1,0 +1,74 @@
+def inverse_kinematics(p: tuple[float, float, float]) -> tuple[float, float, float, float]:
+    """
+    Computes the closed-form inverse kinematics for a 4-DOF serial manipulator
+    given a desired TCP position p = (x, y, z).
+
+    The robot’s chain is defined by:
+      - Revolute 1: Located at [0, 0, 0], rotates about Y.
+      - Fixed translation from Revolute 1 to Revolute 2: [0, -0.1197, 0.425].
+      - Revolute 2: Rotates about Y.
+      - Fixed translation from Revolute 2 to Revolute 3: [0, 0, 0.39225].
+      - Revolute 3: Rotates about Y.
+      - Fixed translation from Revolute 3 to Revolute 4: [0, 0.093, 0].
+      - Revolute 4: Rotates about Z.
+      - Fixed translation from Revolute 4 to TCP: [0, 0, 0.09465].
+
+    The inverse kinematics is decoupled as follows:
+      1. q1 rotates the TCP about Y. We select q1 = atan2(x, z).
+      2. Rotating the TCP by –q1 brings it into a plane where the x-coordinate is zero.
+         In that rotated frame the TCP becomes p' = (0, y, r), where r = sqrt(x² + z²).
+      3. Removing the fixed offset from the base to Joint 2 (i.e. [0, -0.1197, 0.425])
+         yields the effective target:
+             p_eff = [0, y + 0.1197, r – 0.425].
+         (For a reachable target, the modified y–coordinate p_eff[1] should equal 0.093.)
+      4. In the remaining planar 2-link chain the links have lengths:
+             L1 = 0.39225  (from Revolute 2 to Revolute 3)
+             L2 = 0.09465  (from Revolute 4 to the TCP).
+         Using the cosine–law the relation is:
+             cos(q3) = (p_eff_z² – L1² – L2²) / (2 * L1 * L2),
+         and hence q3 = acos( cos(q3) ).
+      5. The requirement that the chain’s lateral (x-axis) component vanish leads to:
+             tan(q2) = – (L2 sin(q3)) / (L1 + L2 cos(q3)),
+         so that q2 = atan2( –L2 sin(q3), L1 + L2 cos(q3) ).
+      6. Joint 4 does not affect the TCP position, so we choose q4 = 0.
+
+    Assumes that the input target is reachable.
+    
+    :param p: TCP target position as a tuple (x, y, z) in world coordinates.
+    :return: A tuple (q1, q2, q3, q4) of joint angles in radians.
+    """
+    import math
+
+    # Unpack the TCP target coordinates.
+    x, y, z = p
+
+    # (1) Compute q1 so that rotating about Y aligns the target into the plane with x=0.
+    q1 = math.atan2(x, z)
+    
+    # (2) Compute the projection r of the target onto the x-z plane.
+    r = math.sqrt(x**2 + z**2)
+    # In the rotated frame, the target becomes p' = (0, y, r).
+
+    # (3) Remove the fixed offset from the base to the second joint.
+    # Offset A = [0, -0.1197, 0.425] so that:
+    # p_eff = p' - A = [0, y + 0.1197, r - 0.425].
+    p_eff_y = y + 0.1197   # Should equal 0.093 for a reachable target.
+    p_eff_z = r - 0.425
+
+    # (4) Define the two link lengths for the remaining planar chain.
+    L1 = 0.39225  # Length from Joint 2 to Joint 3.
+    L2 = 0.09465  # Length from Joint 4 (TCP offset).
+
+    # Solve for q3 via the cosine law.
+    cos_q3 = (p_eff_z**2 - L1**2 - L2**2) / (2.0 * L1 * L2)
+    # Clamp cos_q3 to the range [-1, 1] to account for numerical precision.
+    cos_q3 = max(-1.0, min(1.0, cos_q3))
+    q3 = math.acos(cos_q3)
+
+    # (5) Solve for q2 so that the transformed chain has no x–component in the effective plane.
+    q2 = math.atan2(-L2 * math.sin(q3), L1 + L2 * math.cos(q3))
+    
+    # (6) Joint 4 does not affect TCP position; choose q4 = 0.
+    q4 = 0.0
+
+    return (q1, q2, q3, q4)

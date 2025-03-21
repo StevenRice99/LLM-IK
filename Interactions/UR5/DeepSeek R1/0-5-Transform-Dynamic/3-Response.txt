@@ -1,0 +1,90 @@
+To solve this problem, we need to compute the inverse kinematics for a 6-DOF robotic arm to reach a target position and orientation. The solution involves determining the joint angles for all six revolute joints such that the end effector (TCP) reaches the desired position and orientation. The approach involves separating the problem into positioning the wrist center using the first three joints and orienting the TCP using the last three joints.
+
+### Approach
+1. **Compute the Target Orientation Matrix**: Convert the given Euler angles (roll, pitch, yaw) into a rotation matrix representing the desired orientation of the TCP.
+2. **Determine the Wrist Center Position**: Adjust the target position by subtracting the TCP's offset (transformed by the target orientation) to find the wrist center position.
+3. **Solve for the First Joint (θ₁)**: Calculate the angle using the x and y coordinates of the wrist center to align the arm in the correct direction.
+4. **Solve for the Second and Third Joints (θ₂, θ₃)**: Use geometric methods to position the wrist center in the plane after considering the first joint's rotation.
+5. **Solve for the Last Three Joints (θ₄, θ₅, θ₆)**: Use the target orientation and position to determine the angles for the spherical wrist, ensuring the correct orientation of the TCP.
+
+### Solution Code
+```python
+import math
+import numpy as np
+
+def inverse_kinematics(p: tuple[float, float, float], r: tuple[float, float, float]) -> tuple[float, float, float, float, float, float]:
+    target_p = np.array(p)
+    target_roll, target_pitch, target_yaw = r
+
+    # Compute the target rotation matrix (ZYX Euler angles)
+    cr, cp, cy = math.cos(target_roll), math.cos(target_pitch), math.cos(target_yaw)
+    sr, sp, sy = math.sin(target_roll), math.sin(target_pitch), math.sin(target_yaw)
+    R_target = np.array([
+        [cy * cp, cy * sp * sr - sy * cr, cy * sp * cr + sy * sr],
+        [sy * cp, sy * sp * sr + cy * cr, sy * sp * cr - cy * sr],
+        [-sp, cp * sr, cp * cr]
+    ])
+
+    # Calculate wrist center position by subtracting TCP offset transformed by R_target
+    tcp_offset = np.array([0, 0.0823, 0])
+    wrist_center = target_p - R_target @ tcp_offset
+
+    # Solve for theta1 using wrist center's x and y
+    x_wrist, y_wrist, z_wrist = wrist_center
+    theta1 = math.atan2(y_wrist, x_wrist)
+
+    # Project to the plane after theta1 rotation and adjust for joint2's y offset
+    r_xy = math.hypot(x_wrist, y_wrist)
+    x_target = r_xy
+    z_target = z_wrist - 0.13585  # Joint2's y offset in the rotated frame becomes Z after theta1
+
+    # Solve for theta2 and theta3 using geometric approach
+    a, b = 0.425, 0.39225
+    d_sq = x_target**2 + z_target**2
+    cos_theta3 = (d_sq - a**2 - b**2) / (2 * a * b)
+    cos_theta3 = max(min(cos_theta3, 1.0), -1.0)
+    theta3 = math.acos(cos_theta3)
+    theta2 = math.atan2(x_target, z_target) - math.atan2(b * math.sin(theta3), a + b * math.cos(theta3))
+
+    # Adjust for possible elbow-up configuration
+    alt_theta3 = -theta3
+    alt_theta2 = math.atan2(x_target, z_target) - math.atan2(b * math.sin(alt_theta3), a + b * math.cos(alt_theta3))
+    x_alt = a * math.sin(alt_theta2) + b * math.sin(alt_theta2 + alt_theta3)
+    z_alt = a * math.cos(alt_theta2) + b * math.cos(alt_theta2 + alt_theta3)
+    if (abs(x_alt - x_target) + abs(z_alt - z_target)) < (abs(a * math.sin(theta2) + b * math.sin(theta2 + theta3) - x_target) + abs(a * math.cos(theta2) + b * math.cos(theta2 + theta3) - z_target)):
+        theta2, theta3 = alt_theta2, alt_theta3
+
+    # Solve for theta4, theta5, theta6 using orientation decomposition
+    R_theta1 = np.array([
+        [math.cos(theta1), -math.sin(theta1), 0],
+        [math.sin(theta1), math.cos(theta1), 0],
+        [0, 0, 1]
+    ])
+    R_theta2_theta3 = np.array([
+        [math.cos(theta2 + theta3), 0, math.sin(theta2 + theta3)],
+        [0, 1, 0],
+        [-math.sin(theta2 + theta3), 0, math.cos(theta2 + theta3)]
+    ])
+    R_base = R_theta1 @ R_theta2_theta3
+    R_wrist = R_base.T @ R_target
+
+    # Extract Euler angles (YZX convention for Y, Z, Y axes)
+    theta5 = math.acos(R_wrist[1, 1])
+    if math.sin(theta5) < 1e-6:
+        theta4 = 0.0
+        theta6 = math.atan2(-R_wrist[0, 2], R_wrist[2, 2])
+    else:
+        theta4 = math.atan2(R_wrist[2, 1], -R_wrist[0, 1])
+        theta6 = math.atan2(R_wrist[1, 2], R_wrist[1, 0])
+
+    return (theta1, theta2, theta3, theta4, theta5, theta6)
+```
+
+### Explanation
+1. **Orientation Matrix**: The target orientation is converted from Euler angles to a rotation matrix using the ZYX convention.
+2. **Wrist Center Calculation**: The wrist center is found by adjusting the target position to account for the TCP's offset transformed by the target orientation.
+3. **First Joint (θ₁)**: The angle is determined using the arctangent of the wrist center's x and y coordinates.
+4. **Second and Third Joints (θ₂, θ₃)**: These angles are computed using geometric relationships in the plane defined by the first joint's rotation, considering the link lengths and possible configurations (elbow-up and elbow-down).
+5. **Last Three Joints (θ₄, θ₅, θ₆)**: The angles are derived by decomposing the rotation matrix from the base to the wrist, considering the spherical wrist's orientation capabilities.
+
+This approach ensures that the robotic arm reaches the desired position and orientation by systematically solving each joint angle while considering the kinematic chain and geometric constraints.

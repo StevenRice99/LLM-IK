@@ -1,0 +1,73 @@
+To solve the inverse kinematics for the 6-DOF serial manipulator, we break the problem into three parts: solving the first joint, the next two joints for positioning, and the last three joints for orientation. Here's the step-by-step solution:
+
+1. **Joint 1 (θ₁)**: Compute using the desired position's x and y components to align the arm in the correct direction in the XY plane.
+2. **Joints 2 and 3 (θ₂, θ₃)**: Solve for these using the projected position in the plane after θ₁ is applied, considering the link lengths.
+3. **Joints 4, 5, and 6 (θ₄, θ₅, θ₆)**: Determine these based on the desired orientation, adjusting for the wrist structure and TCP offset.
+
+```python
+import math
+import numpy as np
+
+def inverse_kinematics(p: tuple[float, float, float], r: tuple[float, float, float]) -> tuple[float, float, float, float, float, float]:
+    x, y, z = p
+    target_roll, target_pitch, target_yaw = r
+
+    # Solve theta1 using existing code 1 logic
+    theta1 = math.atan2(-x, y)
+
+    # Project position to the plane after theta1 rotation
+    r_xy = math.hypot(x, y)
+    x_target = r_xy
+    z_target = z
+
+    # Solve theta2 and theta3 using existing code 2 logic
+    a = 0.425
+    b = 0.39225
+    d_sq = x_target**2 + z_target**2
+    d = math.sqrt(d_sq)
+    cos_theta2 = (d_sq - a**2 - b**2) / (2 * a * b)
+    cos_theta2 = max(min(cos_theta2, 1.0), -1.0)
+    theta2_1 = math.acos(cos_theta2)
+    theta2_2 = -theta2_1
+    solutions_23 = []
+    for theta2 in [theta2_1, theta2_2]:
+        theta3 = math.atan2(x_target - b * math.sin(theta2), z_target - b * math.cos(theta2))
+        x_calc = a * math.sin(theta3) + b * math.sin(theta2 + theta3)
+        z_calc = a * math.cos(theta3) + b * math.cos(theta2 + theta3)
+        if math.isclose(x_calc, x_target, abs_tol=1e-5) and math.isclose(z_calc, z_target, abs_tol=1e-5):
+            solutions_23.append((theta2, theta3))
+    if not solutions_23:
+        theta2 = math.atan2(x_target, z_target) - math.atan2(b * math.sin(theta2_1), a + b * math.cos(theta2_1))
+        theta3 = theta2_1
+        solutions_23.append((theta2, theta3))
+    theta2, theta3 = solutions_23[0]
+
+    # Solve theta4, theta5, theta6 using existing code 3 logic
+    cr, cp, cy = map(math.cos, (target_roll, target_pitch, target_yaw))
+    sr, sp, sy = map(math.sin, (target_roll, target_pitch, target_yaw))
+    R_target = np.array([
+        [cy * cp, cy * sp * sr - sy * cr, cy * sp * cr + sy * sr],
+        [sy * cp, sy * sp * sr + cy * cr, sy * sp * cr - cy * sr],
+        [-sp, cp * sr, cp * cr]
+    ])
+    R_tcp = np.array([[0, -1, 0], [1, 0, 0], [0, 0, 1]])
+    R_tcp_inv = R_tcp.T
+    R_desired = R_target @ R_tcp_inv
+
+    R_shoulder = np.array([
+        [math.cos(theta1), -math.sin(theta1), 0],
+        [math.sin(theta1), math.cos(theta1), 0],
+        [0, 0, 1]
+    ]) @ np.array([
+        [math.cos(theta2 + theta3), 0, math.sin(theta2 + theta3)],
+        [0, 1, 0],
+        [-math.sin(theta2 + theta3), 0, math.cos(theta2 + theta3)]
+    ])
+    R_wrist = R_shoulder.T @ R_desired
+
+    theta5 = math.acos(R_wrist[1, 1])
+    theta4 = math.atan2(R_wrist[2, 1], -R_wrist[0, 1])
+    theta6 = math.atan2(R_wrist[1, 2], R_wrist[1, 0])
+
+    return (theta1, theta2, theta3, theta4, theta5, theta6)
+```

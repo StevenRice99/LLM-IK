@@ -1,0 +1,93 @@
+def inverse_kinematics(p: tuple[float, float, float], r: tuple[float, float, float]) -> tuple[float, float, float, float]:
+    """
+    Computes a closed‐form inverse kinematics solution for a 4-DOF serial manipulator.
+    
+    The manipulator is defined by:
+      - Revolute 1 rotates about Z and is preceded by no translation.
+      - Revolute 2 rotates about Y after translation [0, 0.13585, 0].
+      - Revolute 3 rotates about Y after translation [0, -0.1197, 0.425] from Joint2.
+      - Revolute 4 rotates about Y after translation [0, 0, 0.39225] from Joint3.
+      - The TCP is offset by [0, 0.093, 0] from Joint4.
+    
+    The TCP pose is decoupled so that:
+      - The overall TCP transformation is: 
+            TCP = Rz(q1) · (Translation_offset + PlanarArm(q2, q3)) · Translation_TCP · Ry(q4)
+      - Its orientation simplifies to: R_TCP = Rz(q1) · Ry(q2 + q3 + q4)
+    
+    Given a desired target position p = [p_x, p_y, p_z] and orientation r = [roll, pitch, yaw],
+    the inverse kinematics are solved as follows:
+      1. Compute target_sum = q2+q3+q4 from the rotation matrix built from r.
+      2. Solve for q1 from the x–y projection after compensating the known offset.
+      3. Solve the planar 2R arm (in the plane of Lx and p_z) to get q2 and q3.
+      4. Compute q4 = target_sum - (q2 + q3).
+      
+    Returns:
+      A tuple (q1, q2, q3, q4) representing the joint angles in radians.
+    """
+    import math
+
+    # Unpack the target position and orientation.
+    p_x, p_y, p_z = p
+    roll, pitch, yaw = r
+
+    #----------------------------------------------------------------------
+    # Step 1: Extract the effective orientation (q2+q3+q4) from the desired rpy.
+    # Construct elements of the rotation matrix using a roll-pitch-yaw convention.
+    cr = math.cos(roll)
+    sr = math.sin(roll)
+    cp = math.cos(pitch)
+    sp = math.sin(pitch)
+    cy = math.cos(yaw)
+    sy = math.sin(yaw)
+    #
+    # For our purposes, we only need R[0,0] and R[0,2]:
+    R00 = cy * cp
+    R02 = cy * sp * cr + sy * sr
+    # This sum must equal q2 + q3 + q4:
+    target_sum = math.atan2(R02, R00)
+
+    #----------------------------------------------------------------------
+    # Step 2: Solve for q1.
+    # There are fixed translations before the planar chain:
+    #   - From Revolute 1 to Revolute 2: [0, 0.13585, 0]
+    #   - An inherent offset at Revolute 2: [0, -0.1197, 0.425] (only its y contributes here)
+    #   - TCP offset: [0, 0.093, 0]
+    # The net constant offset along the robot’s local y (after q1) is:
+    offset = 0.13585 - 0.1197 + 0.093  # = 0.10915
+    # The x-y magnitude of TCP position is:
+    r_xy = math.sqrt(p_x**2 + p_y**2)
+    # With r_xy^2 = Lx^2 + offset^2, the effective extension Lx is:
+    Lx = math.sqrt(max(r_xy**2 - offset**2, 0))
+    #
+    # Viewing the x-y transformation as:
+    #    p_x + i p_y = e^(i·q1) · (Lx + i·offset)
+    # we deduce:
+    q1 = math.atan2(p_y, p_x) - math.atan2(offset, Lx)
+
+    #----------------------------------------------------------------------
+    # Step 3: Solve for q2 and q3 using the 2R planar arm in the (p_z, Lx) plane.
+    #
+    # The planar equations are:
+    #      p_z = a*cos(q2) + b*cos(q2 + q3)
+    #      Lx  = a*sin(q2) + b*sin(q2 + q3)
+    # where a = 0.425 and b = 0.39225.
+    a = 0.425
+    b = 0.39225
+    #
+    # The effective distance in the (p_z, Lx) plane:
+    r2 = math.sqrt(p_z**2 + Lx**2)
+    #
+    # Using the law of cosines for q3:
+    cos_q3 = (r2**2 - a**2 - b**2) / (2 * a * b)
+    cos_q3 = max(min(cos_q3, 1.0), -1.0)
+    q3 = math.acos(cos_q3)  # Select the elbow-up solution.
+    #
+    # Joint q2 is given by:
+    q2 = math.atan2(Lx, p_z) - math.atan2(b * math.sin(q3), a + b * math.cos(q3))
+    
+    #----------------------------------------------------------------------
+    # Step 4: Solve for q4.
+    # Since target_sum = q2 + q3 + q4, we have:
+    q4 = target_sum - (q2 + q3)
+    
+    return (q1, q2, q3, q4)

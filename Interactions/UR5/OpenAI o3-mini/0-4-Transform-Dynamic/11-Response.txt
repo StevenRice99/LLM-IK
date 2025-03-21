@@ -1,0 +1,105 @@
+def inverse_kinematics(p: tuple[float, float, float], r: tuple[float, float, float]) -> tuple[float, float, float, float, float]:
+    """
+    Computes the joint values [q1, q2, q3, q4, q5] needed to achieve the desired TCP
+    position p (x, y, z) and orientation r (roll, pitch, yaw in radians).
+
+    Robot structure:
+      • Joint 1: Origin [0, 0, 0], rotates about Z.
+      • Joint 2: Offset [0, 0.13585, 0] from Joint 1, rotates about Y.
+      • Joint 3: Relative displacement from Joint 2 is [0, -0.1197, 0.425] (link length a = 0.425), rotates about Y.
+      • Joint 4: Relative displacement from Joint 3 is [0, 0, 0.39225] (link length b = 0.39225), rotates about Y.
+      • Joint 5: Relative displacement from Joint 4 is [0, 0.093, 0], rotates about Z.
+      • TCP: Offset [0, 0, 0.09465] in the final link’s frame.
+
+    The inverse kinematics decouples the problem as follows:
+      1. Compute q1 from the global TCP position.
+      2. Transform the TCP position into Joint 2’s frame by removing the effect of q1 
+         and subtracting the fixed offset [0, 0.13585, 0].
+      3. Compute the target orientation matrix from the provided (roll, pitch, yaw)
+         and express it in Joint 2’s frame.
+      4. Extract the effective planar rotation (theta_sum) from the transformed orientation.
+      5. Subtract the TCP offset (along the TCP’s local z-axis) to compute the wrist center.
+      6. Solve the 2‐link planar inverse kinematics (with link lengths a and b) for q2 and q3.
+      7. Set q4 so that q2 + q3 + q4 equals the extracted planar angle theta_sum.
+      8. Decouple the wrist to compute q5.
+    
+    For this implementation, we assume the target is guaranteed to be reachable.
+    
+    :param p: Target TCP position (x, y, z)
+    :param r: Target TCP orientation (roll, pitch, yaw) in radians
+    :return: Tuple (q1, q2, q3, q4, q5) of joint angles in radians
+    """
+    import math
+    import numpy as np
+
+    # 1. Compute Joint 1 (base rotation about Z) from global TCP position.
+    x, y, z = p
+    q1 = math.atan2(-x, y)
+
+    # 2. Transform the TCP position into Joint 2’s coordinate frame.
+    # Joint 2 is offset from the base by [0, 0.13585, 0].
+    Rz = np.array([[math.cos(q1), -math.sin(q1), 0],
+                   [math.sin(q1),  math.cos(q1), 0],
+                   [0,             0,            1]])
+    joint2_offset = np.array([0, 0.13585, 0])
+    # Global position of Joint 2.
+    p_joint2 = Rz @ joint2_offset
+    # Compute the effective TCP position relative to Joint 2.
+    p_eff = np.array(p) - p_joint2
+    # Remove the base rotation to express the TCP in Joint 2’s frame.
+    p_sub = Rz.T @ p_eff
+    # For the 2D (planar) IK, we use the x (lateral) and z (vertical) components.
+    x_eff = p_sub[0]
+    z_eff = p_sub[2]
+
+    # 3. Compute the target orientation matrix from (roll, pitch, yaw).
+    roll, pitch, yaw = r
+    R_x = np.array([[1, 0, 0],
+                    [0, math.cos(roll), -math.sin(roll)],
+                    [0, math.sin(roll),  math.cos(roll)]])
+    R_y = np.array([[math.cos(pitch), 0, math.sin(pitch)],
+                    [0, 1, 0],
+                    [-math.sin(pitch), 0, math.cos(pitch)]])
+    R_z_target = np.array([[math.cos(yaw), -math.sin(yaw), 0],
+                           [math.sin(yaw),  math.cos(yaw), 0],
+                           [0, 0, 1]])
+    R_target_global = R_z_target @ R_y @ R_x
+    # Express the target orientation in Joint 2’s frame.
+    R_target = Rz.T @ R_target_global
+
+    # 4. Extract the effective planar rotation angle (theta_sum) from the target orientation.
+    # Here the TCP’s z-axis (in Joint 2 frame) is taken from the third column of R_target.
+    # The planar angle is computed assuming the arm “points” along +z in its local frame.
+    theta_sum = math.atan2(R_target[0, 2], R_target[2, 2])
+
+    # 5. Remove the TCP offset along the final link’s local z-axis.
+    # TCP offset (from joint 5 to TCP) is 0.09465.
+    C_tcp = 0.09465
+    pos_x = x_eff - C_tcp * math.sin(theta_sum)
+    pos_z = z_eff - C_tcp * math.cos(theta_sum)
+
+    # 6. Solve the 2-link planar IK for joints 2 and 3.
+    # Link lengths:
+    a = 0.425    # from Joint 2 to Joint 3 (effective)
+    b = 0.39225  # from Joint 3 to Joint 4 (effective)
+    d_sq = pos_x**2 + pos_z**2
+    cos_q3 = (d_sq - a**2 - b**2) / (2 * a * b)
+    # Clamp the cosine value to the valid range [-1, 1] for robustness.
+    cos_q3 = max(min(cos_q3, 1.0), -1.0)
+    q3 = math.acos(cos_q3)
+    # Compute q2 from the geometry.
+    q2 = math.atan2(pos_x, pos_z) - math.atan2(b * math.sin(q3), a + b * math.cos(q3))
+
+    # 7. Determine Joint 4 (arm “wrist” joint about Y) so that q2 + q3 + q4 equals theta_sum.
+    q4 = theta_sum - q2 - q3
+
+    # 8. Decouple the wrist to compute Joint 5 (rotation about Z).
+    # First, form the rotation matrix corresponding to the cumulative arm rotation theta_sum.
+    R_y_sum = np.array([[math.cos(theta_sum),  0, math.sin(theta_sum)],
+                        [0,                   1, 0],
+                        [-math.sin(theta_sum), 0, math.cos(theta_sum)]])
+    # Remove the arm's rotational effect:
+    R_remain = R_y_sum.T @ R_target
+    q5 = math.atan2(R_remain[1, 0], R_remain[0, 0])
+
+    return (q1, q2, q3, q4, q5)

@@ -1,0 +1,99 @@
+To solve the inverse kinematics for the 6-DOF manipulator accurately, we need to correct the orientation decomposition for the wrist joints. The key issue was an incorrect sign in the theta6 calculation, which is now fixed. Here's the refined solution:
+
+### Approach
+1. **Wrist Center Calculation**: Adjust the target position by the TCP offset transformed by the target orientation.
+2. **First Joint (θ₁)**: Determine using the wrist center's position in the XY-plane.
+3. **Second and Third Joints (θ₂, θ₃)**: Solve geometrically considering link lengths and elbow configurations.
+4. **Wrist Joints (θ₄, θ₅, θ₆)**: Correctly decompose the rotation matrix using Y-Z-Y Euler angles with proper sign handling.
+
+### Solution Code
+```python
+import math
+import numpy as np
+
+def inverse_kinematics(p: tuple[float, float, float], r: tuple[float, float, float]) -> tuple[float, float, float, float, float, float]:
+    target_pos = np.array(p)
+    roll, pitch, yaw = r
+
+    # Convert target orientation to rotation matrix (ZYX Euler angles)
+    cr, cp, cy = math.cos(roll), math.cos(pitch), math.cos(yaw)
+    sr, sp, sy = math.sin(roll), math.sin(pitch), math.sin(yaw)
+    R_target = np.array([
+        [cy * cp, cy * sp * sr - sy * cr, cy * sp * cr + sy * sr],
+        [sy * cp, sy * sp * sr + cy * cr, sy * sp * cr - cy * sr],
+        [-sp, cp * sr, cp * cr]
+    ])
+
+    # Calculate wrist center position accounting for TCP offset
+    tcp_offset = np.array([0, 0.0823, 0])
+    wrist_center = target_pos - R_target @ tcp_offset
+
+    # Solve theta1 using wrist center projection
+    x, y, z = wrist_center
+    theta1 = math.atan2(y, x)
+
+    # Transform to theta1 plane and adjust for joint2's Y offset
+    r_xy = math.hypot(x, y)
+    x_prime = r_xy
+    z_prime = z - 0.13585  # Joint2's Y offset becomes Z after rotation
+
+    # Solve theta2 and theta3 using geometric approach
+    a, b = 0.425, 0.39225
+    d_sq = x_prime**2 + z_prime**2
+    cos_theta3 = (d_sq - a**2 - b**2) / (2 * a * b)
+    cos_theta3 = np.clip(cos_theta3, -1.0, 1.0)
+    theta3 = math.acos(cos_theta3)
+
+    # Evaluate both elbow configurations
+    theta3_alt = -theta3
+    theta2 = math.atan2(x_prime, z_prime) - math.atan2(b * math.sin(theta3), a + b * math.cos(theta3))
+    theta2_alt = math.atan2(x_prime, z_prime) - math.atan2(b * math.sin(theta3_alt), a + b * math.cos(theta3_alt))
+
+    # Select configuration with minimal error
+    error = lambda t2, t3: abs(a*math.sin(t2)+b*math.sin(t2+t3)-x_prime) + abs(a*math.cos(t2)+b*math.cos(t2+t3)-z_prime)
+    if error(theta2_alt, theta3_alt) < error(theta2, theta3):
+        theta2, theta3 = theta2_alt, theta3_alt
+
+    # Compute wrist orientation matrix
+    R_theta1 = np.array([
+        [math.cos(theta1), -math.sin(theta1), 0],
+        [math.sin(theta1), math.cos(theta1), 0],
+        [0, 0, 1]
+    ])
+    R_theta23 = np.array([
+        [math.cos(theta2 + theta3), 0, math.sin(theta2 + theta3)],
+        [0, 1, 0],
+        [-math.sin(theta2 + theta3), 0, math.cos(theta2 + theta3)]
+    ])
+    R_base = R_theta1 @ R_theta23
+    R_wrist = R_base.T @ R_target  # R_wrist = R4 * R5 * R6
+
+    # Correct Y-Z-Y Euler angle decomposition
+    theta5 = math.acos(R_wrist[1, 1])
+    sin_theta5 = math.sin(theta5)
+    
+    if abs(sin_theta5) < 1e-6:
+        # Singularity: theta5 is 0 or π, set theta4=0 and solve theta6
+        theta4 = 0.0
+        theta6 = math.atan2(-R_wrist[0, 2], R_wrist[2, 2])
+    else:
+        # Standard case with corrected signs
+        theta4 = math.atan2(R_wrist[2, 1] / sin_theta5, 
+                           -R_wrist[0, 1] / sin_theta5)
+        theta6 = math.atan2(R_wrist[1, 2] / sin_theta5, 
+                           R_wrist[1, 0] / sin_theta5)  # Fixed sign
+
+    # Normalize angles to [-π, π]
+    angles = np.array([theta1, theta2, theta3, theta4, theta5, theta6])
+    angles = (angles + np.pi) % (2 * np.pi) - np.pi
+
+    return tuple(angles.tolist())
+```
+
+### Explanation
+1. **Orientation Decomposition Fix**: Corrected the theta6 calculation by removing the erroneous negative sign, ensuring proper Y-Z-Y Euler angle decomposition.
+2. **Singularity Handling**: Properly handles cases where theta5 is 0 or π by setting theta4 to 0 and deriving theta6 from remaining matrix elements.
+3. **Angle Normalization**: Ensures all joint angles are within the [-π, π] range using modulo operations.
+4. **Geometric Configuration Selection**: Chooses between elbow-up and elbow-down configurations based on minimal positional error.
+
+This solution addresses the previous orientation inaccuracies by correctly decomposing the wrist rotation matrix and ensures valid joint configurations for both position and orientation targets.

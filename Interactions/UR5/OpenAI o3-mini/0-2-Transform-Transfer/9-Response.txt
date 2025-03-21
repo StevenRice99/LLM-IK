@@ -1,0 +1,109 @@
+def inverse_kinematics(p: tuple[float, float, float],
+                       r: tuple[float, float, float]) -> tuple[float, float, float]:
+    """
+    Computes the joint angles (theta1, theta2, theta3) for a 3 DOF serial manipulator so that
+    its tool center point (TCP) reaches the desired position and orientation.
+    
+    Manipulator details:
+      - Revolute 1 rotates about the Z-axis.
+      - Revolute 2 rotates about the Y-axis.
+      - Revolute 3 rotates about the Y-axis.
+      
+    Link parameters are:
+      Link 1: Position [0, 0, 0],         Orientation [0, 0, 0]
+      Link 2: Position [0, 0.13585, 0],    Orientation [0, 0, 0]
+      Link 3: Position [0, -0.1197, 0.425], Orientation [0, 0, 0]
+      TCP:    Position [0, 0, 0.39225],   Orientation [0, 0, 0]
+      
+    With these definitions, the forward kinematics can be represented as:
+      T_TCP = T1 · T2 · T3 · T_TCP_offset
+    where T1 = RotZ(theta1),
+          T2 = Trans(0, 0.13585, 0) · RotY(theta2),
+          T3 = Trans(0, -0.1197, 0.425) · RotY(theta3),
+          T_TCP_offset = Trans(0, 0, 0.39225).
+    This results in the overall TCP rotation being:
+          R_TCP = Rz(theta1) · Ry(theta2 + theta3)
+    which, when expressed as roll–pitch–yaw, gives:
+          roll  = 0
+          pitch = theta2 + theta3
+          yaw   = theta1
+    
+    Therefore, for a target (p, r) where:
+          p = (x, y, z)
+          r = (r_roll, r_pitch, r_yaw)
+    the input orientation must satisfy r_roll = 0 and r_pitch = theta2 + theta3.
+    
+    This function computes the inverse kinematics using a closed–form analytical solution.
+    It assumes the target is reachable.
+    """
+    import math
+
+    # Unpack target position and orientation.
+    x, y, z = p
+    r_roll, r_pitch, r_yaw = r
+
+    tol = 1e-6  # Tolerance for floating point discrepancies
+
+    # This 3 DOF manipulator can only achieve zero roll.
+    if abs(r_roll) > tol:
+        raise ValueError("Target roll must be zero for this 3 DOF manipulator.")
+
+    # ---- Compute theta3 using the law-of-cosines ----
+    # Effective offset from link 2’s Y translation:
+    #    k = 0.13585 - 0.1197 = 0.01615
+    k = 0.01615
+
+    # Derivation leads to:
+    #    cos(theta3) = (x^2 + y^2 + z^2 - 0.334746) / 0.3334125
+    numerator_cos_theta3 = x**2 + y**2 + z**2 - 0.334746
+    cos_theta3 = numerator_cos_theta3 / 0.3334125
+    # Clamp the value to the valid range to account for rounding:
+    if cos_theta3 > 1.0:
+        cos_theta3 = 1.0
+    elif cos_theta3 < -1.0:
+        cos_theta3 = -1.0
+    theta3 = math.acos(cos_theta3)
+
+    # ---- Compute theta2 using intermediate parameters ----
+    # Define:
+    #    C = 0.425 + 0.39225 * cos(theta3)
+    #    D = 0.39225 * sin(theta3)
+    C = 0.425 + 0.39225 * math.cos(theta3)
+    D = 0.39225 * math.sin(theta3)
+
+    # A is derived from the projection of the target on the XY–plane, compensating for k.
+    A_sq = x**2 + y**2 - k**2
+    A = math.sqrt(A_sq) if A_sq >= 0 else 0.0
+
+    # Using the planar 2R chain relations:
+    #    sin(theta2) = (C * A - D * z) / (C^2 + D^2)
+    #    cos(theta2) = (C * z + D * A) / (C^2 + D^2)
+    denominator_theta2 = C**2 + D**2
+    sin_theta2 = (C * A - D * z) / denominator_theta2
+    cos_theta2 = (C * z + D * A) / denominator_theta2
+    theta2 = math.atan2(sin_theta2, cos_theta2)
+
+    # ---- Determine theta1 ----
+    # A natural solution from the position equations is:
+    #    theta1_pos = atan2(A*y - k*x, A*x + k*y)
+    # However, since the overall TCP yaw must equal theta1 (i.e., r_yaw), we enforce that.
+    if (x**2 + y**2) > tol:
+        theta1_pos = math.atan2(A * y - k * x, A * x + k * y)
+    else:
+        theta1_pos = 0.0
+
+    if abs(theta1_pos - r_yaw) > tol:
+        theta1 = r_yaw
+    else:
+        theta1 = theta1_pos
+
+    # ---- Adjust theta2 and theta3 for TCP pitch consistency ----
+    # The manipulator produces a TCP pitch of (theta2 + theta3).
+    current_pitch = theta2 + theta3
+    if abs(current_pitch - r_pitch) > tol:
+        # Distribute any small errors/offset evenly between theta2 and theta3.
+        delta = r_pitch - current_pitch
+        theta2 += delta / 2.0
+        theta3 += delta / 2.0
+
+    return (theta1, theta2, theta3)

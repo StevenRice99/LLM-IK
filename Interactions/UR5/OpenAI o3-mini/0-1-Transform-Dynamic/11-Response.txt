@@ -1,0 +1,68 @@
+def inverse_kinematics(p: tuple[float, float, float], r: tuple[float, float, float]) -> tuple[float, float]:
+    """
+    Computes the joint angles (theta1, theta2) for a 2-DOF serial manipulator whose 
+    TCP forward kinematics are defined by:
+    
+        TCP = Rz(theta1) * ( [0, 0.13585, 0] + (Ry(theta2) * [0, -0.1197, 0.425]) )
+    
+    Here the revolute joints rotate about:
+      - Joint 1: Z-axis (producing rotation of the entire sub-chain).
+      - Joint 2: Y-axis (applied after translating by [0, 0.13585, 0]).
+      
+    When the local TCP offset [0, -0.1197, 0.425] is rotated by Ry(theta2), we obtain:
+        [0.425*sin(theta2),  -0.1197,  0.425*cos(theta2)]
+    Adding the translation [0, 0.13585, 0] produces the intermediate point (in joint-1’s frame):
+        w = [0.425*sin(theta2), 0.13585 - 0.1197, 0.425*cos(theta2)]
+          = [A, B, 0.425*cos(theta2)]
+    where
+        A = 0.425*sin(theta2),
+        B = 0.01615   (since 0.13585 - 0.1197 = 0.01615).
+    
+    The base rotation Rz(theta1) then maps this point to the final TCP position:
+        [p_x, p_y, p_z] = Rz(theta1) * [A, B, 0.425*cos(theta2)]
+    Notice that p_z is independent of theta1:
+        p_z = 0.425*cos(theta2)   -->   theta2 = arccos(p_z/0.425)
+    
+    To solve for theta1, note that the (p_x, p_y) components result from rotating [A, B]:
+        [p_x, p_y] = Rz(theta1) * [A, B]
+    If we let:
+        φ = atan2(p_y, p_x)    and    δ = atan2(B, A)
+    then it must be that:
+        φ = theta1 + δ    -->    theta1 = φ - δ
+    
+    The target TCP orientation is given as an rpy tuple r = [roll, pitch, yaw].
+    By convention for this manipulator, the desired orientation is assumed to satisfy:
+        roll  = 0,   pitch = theta2,   yaw = theta1.
+    Therefore, we select the branch for theta2 based on the sign of r[1] (the desired pitch).
+    
+    :param p: A tuple (p_x, p_y, p_z) representing the target TCP position.
+    :param r: A tuple (roll, pitch, yaw) representing the target TCP orientation in radians.
+    :return: A tuple (theta1, theta2) representing the computed joint angles in radians.
+    """
+    import math
+
+    # Unpack the target TCP position and desired rpy orientation.
+    p_x, p_y, p_z = p
+    desired_pitch = r[1]  # This is intended to equal theta2.
+
+    # Compute theta2 from the vertical (z) position:
+    # Given that: p_z = 0.425*cos(theta2)  -->  theta2 = arccos( p_z/0.425 )
+    ratio = p_z / 0.425
+    # Clamp the ratio to the valid domain of arccos due to numerical precision.
+    ratio = max(min(ratio, 1.0), -1.0)
+    theta2_candidate = math.acos(ratio)
+    # Select the branch of theta2 consistent with the desired pitch.
+    theta2 = theta2_candidate if desired_pitch >= 0 else -theta2_candidate
+
+    # Calculate intermediary values for the horizontal plane.
+    A = 0.425 * math.sin(theta2)  # Contribution from the rotated TCP x offset.
+    B = 0.13585 - 0.1197          # Equals 0.01615, the net y offset after the fixed translation.
+    
+    # Determine the intrinsic angle δ of the vector [A, B].
+    delta = math.atan2(B, A)
+    # Determine the angle φ of the (p_x, p_y) projection.
+    phi = math.atan2(p_y, p_x)
+    # Solve for theta1.
+    theta1 = phi - delta
+
+    return (theta1, theta2)

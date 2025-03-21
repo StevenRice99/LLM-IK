@@ -1,0 +1,131 @@
+def inverse_kinematics(p: tuple[float, float, float],
+                       r: tuple[float, float, float]) -> tuple[float, float, float, float]:
+    """
+    Computes a closed‐form analytical inverse kinematics solution for a 4-dof serial manipulator.
+    
+    The robot is defined as:
+      • Revolute 1: Origin [0, 0, 0], rotation about Y.
+      • Revolute 2: After translation [0, 0, 0.39225], rotation about Y.
+      • Revolute 3: After translation [0, 0.093, 0], rotation about Z.
+      • Revolute 4: After translation [0, 0, 0.09465], rotation about Y.
+      • TCP: Fixed translation [0, 0.0823, 0] with a fixed rotation about Z of 90°.
+      
+    The approach is:
+      1. Compute joint 1 (q1) from the x–z projection of the target position.
+      2. Remove the 0.093 m y-offset (due to Revolute 3) to set up a planar sub-problem with effective link lengths
+         L1 = 0.0823 (from TCP offset) and L2 = 0.09465.
+      3. Solve for joint 3 (q3; rotation about Z at Revolute 3) using the cosine law, yielding two candidates.
+      4. For each candidate q3, solve a 2×2 linear system for joint 2 (q2; rotation about Y at Revolute 2)
+         using the x–z coordinates.
+      5. Compute joint 4 (q4; rotation about Y at Revolute 4) from the residual rotation so that
+         R_23 * RotY(q4) * R_tcp equals the target orientation.
+      6. Choose the candidate set (q2, q3, q4) that minimizes the orientation error.
+    
+    :param p: Desired TCP position as (x, y, z).
+    :param r: Desired TCP orientation as (roll, pitch, yaw) (radians).
+    :return: A 4-tuple (q1, q2, q3, q4) of joint angles in radians.
+    """
+    import math
+    import numpy as np
+
+    # ----- Step 1. Compute Joint 1 -----
+    x, y, z = p
+    q1 = math.atan2(x, z)
+    
+    # ----- Step 2. Set up the wrist (Joints 2–4) -----
+    # The effective y offset removes the fixed 0.093 m translation.
+    px, py, pz = p
+    y_offset = py - 0.093
+    if abs(y_offset) > 0.0823:
+        raise ValueError("Target y-coordinate unreachable.")
+    
+    # Two candidate solutions for joint 3 (rotation about Z) using the cosine law:
+    # cos(q3) = y_offset / 0.0823, so:
+    cos_val = y_offset / 0.0823
+    # Clamp cos_val to [-1, 1] to avoid numerical issues.
+    cos_val = max(min(cos_val, 1.0), -1.0)
+    q3_candidate = math.acos(cos_val)
+    q3_candidates = [q3_candidate, -q3_candidate]
+    
+    # ----- Build the target rotation matrix R_target from roll, pitch, yaw (ZYX order) -----
+    roll, pitch, yaw = r
+    cr, sr = math.cos(roll), math.sin(roll)
+    cp, sp = math.cos(pitch), math.sin(pitch)
+    cy, sy = math.cos(yaw), math.sin(yaw)
+    R_target = np.array([
+        [cy * cp,         cy * sp * sr - sy * cr,     cy * sp * cr + sy * sr],
+        [sy * cp,         sy * sp * sr + cy * cr,     sy * sp * cr - cy * sr],
+        [   -sp,                      cp * sr,              cp * cr      ]
+    ])
+    
+    # The TCP includes a fixed rotation of 90° about Z.
+    R_tcp = np.array([[0, -1, 0],
+                      [1,  0, 0],
+                      [0,  0, 1]])
+    R_tcp_inv = R_tcp.T  # inverse of a rotation matrix is its transpose
+
+    # ----- Helper functions: Rotation about Y and Z -----
+    def rotY(theta: float) -> np.ndarray:
+        return np.array([
+            [math.cos(theta), 0, math.sin(theta)],
+            [0, 1, 0],
+            [-math.sin(theta), 0, math.cos(theta)]
+        ])
+    
+    def rotZ(theta: float) -> np.ndarray:
+        return np.array([
+            [math.cos(theta), -math.sin(theta), 0],
+            [math.sin(theta),  math.cos(theta), 0],
+            [0, 0, 1]
+        ])
+    
+    # Effective link lengths for the planar sub-problem.
+    L1 = 0.0823   # TCP offset after Revolute 3
+    L2 = 0.09465  # Translation due to Revolute 4
+
+    # ----- Step 3. Loop over candidate values for joint 3 to solve for joints 2 and 4 -----
+    solutions = []
+    for q3 in q3_candidates:
+        sin_q3 = math.sin(q3)
+        # Solve for joint 2 (q2) via a 2x2 linear system obtained from the planar geometry.
+        # Coefficients derived from the effective link lengths:
+        A = -L1 * sin_q3
+        B = L2
+        C =  L1 * sin_q3
+        D = L2
+        det = B * D - A * C
+        if abs(det) < 1e-6:
+            continue  # Skip near-singular cases
+        sin_q2 = (D * x - A * z) / det
+        cos_q2 = (-C * x + B * z) / det
+        q2 = math.atan2(sin_q2, cos_q2)
+        
+        # Compute the composite rotation from joints 2 and 3.
+        R2 = rotY(q2)
+        R3 = rotZ(q3)
+        R_23 = R2 @ R3
+        
+        # ----- Step 4. Solve for Joint 4 (q4) -----
+        # Desired relationship: R_23 * rotY(q4) * R_tcp = R_target.
+        # Rearranged: rotY(q4) = inv(R_23) * R_target * inv(R_tcp)
+        R_desired = R_target @ R_tcp_inv
+        R_remaining = np.linalg.inv(R_23) @ R_desired
+        # For a rotation about Y, we extract q4 from the (0,2) and (0,0) elements.
+        q4 = math.atan2(R_remaining[0, 2], R_remaining[0, 0])
+        
+        # Compute the achieved overall orientation for error evaluation.
+        R4 = rotY(q4)
+        R_achieved = R_23 @ R4 @ R_tcp
+        error = np.linalg.norm(R_achieved - R_target)
+        solutions.append((q2, q3, q4, error))
+    
+    if not solutions:
+        return (q1, 0.0, 0.0, 0.0)
+    
+    # Select the candidate with minimum orientation error.
+    solutions.sort(key=lambda sol: sol[3])
+    best_q2, best_q3, best_q4, _ = solutions[0]
+    
+    # ----- Step 5. Return the full solution: q1 (Revolute 1), q2 (Revolute 2),
+    #           q3 (Revolute 3), q4 (Revolute 4) -----
+    return (q1, best_q2, best_q3, best_q4)

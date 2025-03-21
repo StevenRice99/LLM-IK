@@ -1,0 +1,101 @@
+def inverse_kinematics(p: tuple[float, float, float]) -> tuple[float, float, float, float, float]:
+    """
+    Computes a set of joint angles [θ₁, θ₂, θ₃, θ₄, θ₅] (in radians)
+    that yield a TCP at position p based on the following kinematics:
+    
+      • p₃ = [0.425·sin(θ₂)·cos(θ₁) – 0.01615·sin(θ₁),
+              0.425·sin(θ₂)·sin(θ₁) + 0.01615·cos(θ₁),
+              0.425·cos(θ₂)]
+              
+      • TCP = p₃ + [0.09465·sin(θ₄), 0.093, 0.39225 + 0.09465·cos(θ₄)]
+      
+    We choose the extra degrees of freedom by setting θ₃ = 0 and θ₅ = 0.
+    
+    The strategy is to “subtract” the wrist offset (the second term in TCP)
+    from the target position to obtain the virtual target p₁ = p – wrist_offset.
+    Then, we solve p₁ = p₃ using a closed‐form solution similar to Existing code 1.
+    
+    :param p: Desired TCP position (x, y, z)
+    :return: A tuple of joint angles (θ₁, θ₂, θ₃, θ₄, θ₅)
+    """
+    import math
+
+    # Unpack target position.
+    x, y, z = p
+
+    # Define constants based on the manipulator's geometry.
+    L_a     = 0.425    # effective link length from revolute 3 (p₃) computation.
+    offset_y = 0.01615  # offset in the x-y plane (0.13585-0.1197)
+    
+    # Constants for the wrist (sub-chain from revolute 4 to TCP).
+    d_y   = 0.093     # translation in y (from revolute 5)
+    d_z   = 0.39225   # translation in z (from revolute 4)
+    L_d   = 0.09465   # TCP offset along z (after revolute 5)
+
+    #---------------------------------------------------------
+    # First, compute the wrist joint θ₄.
+    # The TCP position is given as:
+    #    p = p₃ + [ L_d*sin(θ₄),  d_y,  d_z + L_d*cos(θ₄) ]
+    #
+    # Subtracting the wrist contribution:
+    #    p₁ = p - [ L_d*sin(θ₄),  d_y,  d_z + L_d*cos(θ₄) ]
+    #
+    # To ensure that p₁ matches the length of p₃ (which has magnitude √(L_a²+offset_y²)),
+    # we require that:
+    #    [x - L_d*sin(θ₄)]² + [y - d_y]² + [z - d_z - L_d*cos(θ₄)]² = L_a² + offset_y².
+    #
+    # After algebraic manipulation, one obtains a relation of the form:
+    #    x·sin(θ₄) + (z - d_z)·cos(θ₄) = K,
+    # where K is given by:
+    K = ((x**2 + (y - d_y)**2 + (z - d_z)**2 + L_d**2) - (L_a**2 + offset_y**2)) / (2 * L_d)
+
+    # Define R and φ to convert the left side into R*cos(θ₄ - φ):
+    R_val = math.sqrt(x**2 + (z - d_z)**2)
+    phi = math.atan2(x, z - d_z)
+    # Thus, we have R_val*cos(θ₄ - φ) = K, so:
+    #    cos(θ₄ - φ) = K / R_val.
+    # We choose the “+” branch of the inverse cosine.
+    ratio = K / R_val  # (Assumed to be within [-1, 1] as target is reachable.)
+    theta4 = phi + math.acos(ratio)
+
+    #---------------------------------------------------------
+    # Now, subtract the wrist offset to obtain the virtual target (p₁)
+    # that must be reached by joints 1 and 2 (p₃):
+    x1 = x - L_d * math.sin(theta4)
+    y1 = y - d_y
+    z1 = z - d_z - L_d * math.cos(theta4)
+
+    #---------------------------------------------------------
+    # Next, solve for θ₂ using the z–component of p₁.
+    # p₁ (from p₃) is:
+    #   [ L_a*sin(θ₂)*cos(θ₁) - offset_y*sin(θ₁),
+    #     L_a*sin(θ₂)*sin(θ₁) + offset_y*cos(θ₁),
+    #     L_a*cos(θ₂) ]
+    #
+    # The third component gives:
+    #    z1 = L_a*cos(θ₂)   →   θ₂ = acos(z1 / L_a)
+    theta2 = math.acos(z1 / L_a)
+
+    #---------------------------------------------------------
+    # Next, solve for θ₁ from the x– and y–components.
+    # Let A = L_a*sin(θ₂) and B = offset_y.
+    A = L_a * math.sin(theta2)
+    B = offset_y
+    # We have:
+    #    x1 = A*cos(θ₁) - B*sin(θ₁)
+    #    y1 = A*sin(θ₁) + B*cos(θ₁)
+    #
+    # Multiplying these equations appropriately yields:
+    #    C = (A*x1 + B*y1) / (A²+B²)  and  S = (-B*x1 + A*y1) / (A²+B²)
+    denom = A**2 + B**2
+    C = (A * x1 + B * y1) / denom
+    S = (-B * x1 + A * y1) / denom
+    theta1 = math.atan2(S, C)
+
+    #---------------------------------------------------------
+    # With p₁ solved, we choose the redundant joint angles arbitrarily.
+    # Here we set:
+    theta3 = 0.0  # redundant joint in the p₃ sub-chain
+    theta5 = 0.0  # wrist rotation has no effect on TCP position.
+
+    return (theta1, theta2, theta3, theta4, theta5)

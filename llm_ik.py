@@ -1939,7 +1939,7 @@ class Solver:
                               "Run API | No content returned in the message.")
                 return False
             # Get the message.
-            s = message.content.strip()
+            s = message.content.strip().replace("\u2003", " ")
             if len(s) < 1:
                 logging.error(f"{self.model} | {self.robot.name} | {lower + 1} to {upper + 1} | {solving} | {mode} | "
                               "Run API | Returned content was whitespace.")
@@ -2323,7 +2323,8 @@ class Solver:
             # Otherwise, indicate there was an invalid response.
             logging.info(f"{self.model} | {self.robot.name} | {lower + 1} to {upper + 1} | {solving} | {mode} | Handle "
                          "Interactions | No Python code or functions found; creating message indicating this.")
-            s = ("<ERROR>\nYou did not respond with valid code to solve the inverse kinematics or a valid command.\n"
+            s = ("<ERROR>\nYou did not respond with valid code to solve the inverse kinematics or a valid command. "
+                 'Ensure code is contained within a Python code block like:\n```python\nprint(\n"Hello world!")\n```\n'
                  "</ERROR>")
             os.makedirs(root, exist_ok=True)
             with open(os.path.join(root, f"{total}-{MESSAGE_FEEDBACK}.txt"), "w", encoding="utf-8",

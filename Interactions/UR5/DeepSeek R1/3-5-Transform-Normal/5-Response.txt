@@ -1,0 +1,82 @@
+To solve this problem, we need to determine the joint angles (q1, q2, q3) for a 3-DOF manipulator that positions and orients the tool center point (TCP) at a given target. The solution involves correcting the rotation matrix multiplication order to ensure accurate orientation calculation.
+
+### Approach
+1. **Position Analysis**:
+   - **q2 Calculation**: Solve for q2 using the y-component of the target position, considering the link offsets.
+   - **q1 Calculation**: Correct the equations for x and z components to handle sign errors and ensure accurate calculation of q1.
+
+2. **Orientation Analysis**:
+   - **Rotation Matrices**: Correct the order of matrix multiplication for the inverse transformations to properly compute the required rotation matrix for q3.
+   - **q3 Calculation**: Use the derived joint angles q1 and q2 to compute the required rotation matrix and solve for q3.
+
+### Solution Code
+```python
+import numpy as np
+
+def inverse_kinematics(p: tuple[float, float, float], r: tuple[float, float, float]) -> tuple[float, float, float]:
+    x_target, y_target, z_target = p
+    rx_target, ry_target, rz_target = r
+
+    # Solve for q2 using the y-coordinate equation
+    y_offset = y_target - 0.093
+    if abs(y_offset) > 0.0823:
+        raise ValueError("Target y is out of reach")
+    q2 = np.arccos(y_offset / 0.0823)
+    q2_solutions = [q2, -q2]
+
+    solutions = []
+    for q2 in q2_solutions:
+        # Solve for q1 using x and z coordinates
+        A = -0.0823 * np.sin(q2)
+        B = 0.09465
+        denominator = A**2 + B**2
+        if np.isclose(denominator, 0):
+            continue
+
+        cos_q1_num = A * x_target + B * z_target
+        sin_q1_num = B * x_target - A * z_target
+        cos_q1 = cos_q1_num / denominator
+        sin_q1 = sin_q1_num / denominator
+        q1 = np.arctan2(sin_q1, cos_q1)
+
+        # Compute R_target from target orientation
+        cx, sx = np.cos(rx_target), np.sin(rx_target)
+        cy, sy = np.cos(ry_target), np.sin(ry_target)
+        cz, sz = np.cos(rz_target), np.sin(rz_target)
+        Rx = np.array([[1, 0, 0], [0, cx, -sx], [0, sx, cx]])
+        Ry = np.array([[cy, 0, sy], [0, 1, 0], [-sy, 0, cy]])
+        Rz = np.array([[cz, -sz, 0], [sz, cz, 0], [0, 0, 1]])
+        R_target = Rz @ Ry @ Rx
+
+        # Compute required R_Y(q3)
+        R_Yq1 = np.array([[np.cos(q1), 0, np.sin(q1)], [0, 1, 0], [-np.sin(q1), 0, np.cos(q1)]])
+        R_Zq2 = np.array([[np.cos(q2), -np.sin(q2), 0], [np.sin(q2), np.cos(q2), 0], [0, 0, 1]])
+        R_z_pi2_inv = np.array([[0, 1, 0], [-1, 0, 0], [0, 0, 1]])
+
+        # Corrected order of matrix multiplication
+        R_required = R_Zq2.T @ R_Yq1.T @ R_target @ R_z_pi2_inv
+
+        # Extract q3 from R_required
+        cos_q3 = R_required[0, 0]
+        sin_q3 = R_required[0, 2]
+        q3 = np.arctan2(sin_q3, cos_q3)
+
+        solutions.append((q1, q2, q3))
+
+    # Select the valid solution within joint limits
+    valid_solutions = [sol for sol in solutions if all(-6.2831853 <= angle <= 6.2831853 for angle in sol)]
+    if valid_solutions:
+        return min(valid_solutions, key=lambda x: sum(abs(np.array(x))))
+    return (0.0, 0.0, 0.0)
+```
+
+### Explanation
+1. **Position Calculation**:
+   - **q2** is derived from the y-component of the target position, adjusted for the link offset.
+   - **q1** is computed using corrected equations for x and z components, ensuring accurate calculation.
+
+2. **Orientation Calculation**:
+   - The target rotation matrix is constructed from the given Euler angles (roll, pitch, yaw) and adjusted for the TCP's orientation offset.
+   - The corrected order of matrix multiplication (R_Zq2.T @ R_Yq1.T instead of R_Yq1.T @ R_Zq2.T) ensures the inverse transformations are applied correctly, leading to accurate computation of q3.
+
+This approach addresses the critical error in matrix multiplication order, ensuring the correct orientation is achieved by properly deriving the required rotation matrix for q3.

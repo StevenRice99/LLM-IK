@@ -1,0 +1,111 @@
+To solve this problem, we need to determine the joint angles for a 4-DOF robotic arm to reach a specified target position and orientation. The solution involves breaking down the problem into two main parts: solving for the first joint angle and then solving for the remaining three joint angles using existing sub-solutions. The key adjustments involve correctly transforming the target position and orientation into the coordinate system of the second joint to ensure accurate calculations for the subsequent joints.
+
+### Approach
+1. **Calculate the First Joint Angle (theta1):** The first joint (Revolute 1) rotates around the Z-axis. Using the target position's x and y coordinates, we compute theta1 to align the target position into a plane where the subsequent joints can reach it.
+2. **Transform the Target Position:** After determining theta1, we transform the target position into the coordinate system relative to the second joint. This involves rotating the target position by theta1 and adjusting for the offset of the second link.
+3. **Adjust the Target Orientation:** The target orientation is adjusted by rotating it by -theta1 around the Z-axis to express it in the local frame of the second joint.
+4. **Solve for Remaining Joints (theta2, theta3, theta4):** Using the transformed position and orientation, we apply an existing solution for a 3-DOF planar arm to compute the remaining joint angles, ensuring the solution minimizes position and orientation errors.
+
+### Solution Code
+```python
+import math
+import numpy as np
+
+def inverse_kinematics(p: tuple[float, float, float], r: tuple[float, float, float]) -> tuple[float, float, float, float]:
+    x_target_world, y_target_world, z_target_world = p
+    roll_target, pitch_target, yaw_target = r
+
+    # Compute theta1 using the existing_code_1 logic
+    theta1 = math.atan2(-x_target_world, y_target_world)
+
+    # Transform target position to Revolute2's frame
+    cos_theta1 = math.cos(theta1)
+    sin_theta1 = math.sin(theta1)
+    x_rot = x_target_world * cos_theta1 + y_target_world * sin_theta1
+    y_rot = -x_target_world * sin_theta1 + y_target_world * cos_theta1
+    z_rot = z_target_world
+
+    # Subtract Revolute2's position in Revolute1's frame (0, 0.13585, 0)
+    x_transformed = x_rot
+    y_transformed = y_rot - 0.13585
+    z_transformed = z_rot
+
+    # The planar arm (joints 2-4) operates in the X-Z plane of Revolute2's frame
+    # Project the transformed position onto this plane (ignore y_transformed as it's accounted for by theta1)
+    x_planar = math.hypot(x_transformed, y_transformed)
+    z_planar = z_transformed
+
+    # Transform the target orientation into Revolute2's frame
+    adjusted_yaw = (yaw_target - theta1) % (2 * math.pi)
+
+    # Compute the target_sum for the planar arm's orientation
+    cr, sr = math.cos(roll_target), math.sin(roll_target)
+    cp, sp = math.cos(pitch_target), math.sin(pitch_target)
+    cy, sy = math.cos(adjusted_yaw), math.sin(adjusted_yaw)
+    R = np.array([
+        [cy * cp, cy * sp * sr - sy * cr, cy * sp * cr + sy * sr],
+        [sy * cp, sy * sp * sr + cy * cr, sy * sp * cr - cy * sr],
+        [-sp, cp * sr, cp * cr]
+    ])
+    cos_theta = R[0, 0]
+    sin_theta = R[0, 2]
+    target_sum = math.atan2(sin_theta, cos_theta)
+
+    # Solve for theta2, theta3, theta4 using existing_code_2 logic with adjusted position and orientation
+    L1 = 0.425
+    L2 = 0.39225
+    x_target = x_planar
+    z_target = z_planar
+
+    d_sq = x_target ** 2 + z_target ** 2
+    cos_theta2 = (d_sq - L1 ** 2 - L2 ** 2) / (2 * L1 * L2)
+    cos_theta2 = np.clip(cos_theta2, -1.0, 1.0)
+    theta2 = math.acos(cos_theta2)
+    theta2_alt = -theta2
+
+    solutions = []
+    for t2 in [theta2, theta2_alt]:
+        C = L1 + L2 * math.cos(t2)
+        D = L2 * math.sin(t2)
+        denom = C ** 2 + D ** 2
+        if denom < 1e-6:
+            continue
+        sin_t1 = (C * x_target - D * z_target) / denom
+        cos_t1 = (D * x_target + C * z_target) / denom
+        if abs(sin_t1) > 1.0 or abs(cos_t1) > 1.0:
+            continue
+        t1 = math.atan2(sin_t1, cos_t1)
+        t3_base = (target_sum - t1 - t2) % (2 * math.pi)
+        t3_candidates = [t3_base - 2 * math.pi, t3_base, t3_base + 2 * math.pi]
+        for t3 in t3_candidates:
+            if -2 * math.pi <= t3 <= 2 * math.pi:
+                solutions.append((t1, t2, t3))
+
+    best_error = float('inf')
+    best_sol = (0.0, 0.0, 0.0)
+    for sol in solutions:
+        t1, t2, t3 = sol
+        if not (-2 * math.pi <= t1 <= 2 * math.pi and -2 * math.pi <= t2 <= 2 * math.pi and (-2 * math.pi <= t3 <= 2 * math.pi)):
+            continue
+        x = L1 * math.sin(t1) + L2 * math.sin(t1 + t2)
+        z = L1 * math.cos(t1) + L2 * math.cos(t1 + t2)
+        pos_error = math.hypot(x - x_target, z - z_target)
+        orient_sum = (t1 + t2 + t3) % (2 * math.pi)
+        target_orient = target_sum % (2 * math.pi)
+        orient_error = min(abs(orient_sum - target_orient), 2 * math.pi - abs(orient_sum - target_orient))
+        total_error = pos_error + orient_error
+        if total_error < best_error:
+            best_error = total_error
+            best_sol = sol
+
+    theta2, theta3, theta4 = best_sol
+    return (theta1, theta2, theta3, theta4)
+```
+
+### Explanation
+1. **Theta1 Calculation:** The first joint angle (theta1) is computed using `atan2(-x, y)` to align the target position in the x-y plane of the first joint's frame.
+2. **Position Transformation:** The target position is rotated into the first joint's frame and adjusted for the offset of the second link. This ensures the subsequent joints can accurately reach the target in their local coordinate system.
+3. **Orientation Adjustment:** The target orientation is adjusted by subtracting theta1 from the yaw component, converting it into the local frame of the second joint.
+4. **Remaining Joint Angles:** Using the transformed position and orientation, the solution for the remaining three joints is derived using a planar inverse kinematics approach, considering the link lengths and orientation constraints. The best solution is selected based on minimizing position and orientation errors.
+
+This approach ensures that the target position and orientation are correctly transformed into the relevant coordinate systems, allowing the existing sub-solutions to function accurately and reach the desired targets.

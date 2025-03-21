@@ -1,0 +1,122 @@
+To address the errors encountered, we need to handle potential numerical inaccuracies and ensure valid inputs to the trigonometric functions. Here's the revised solution:
+
+```python
+import math
+
+def inverse_kinematics(p: tuple[float, float, float]) -> tuple[float, float, float, float, float]:
+    x_target, y_target, z_target = p
+
+    # Solve for theta1 and theta2 using existing code 1 to position Revolute 3's origin
+    theta1, theta2 = inverse_kinematics_existing1((x_target, 0, z_target))
+
+    # Calculate the position of Revolute 3's origin in the world frame
+    pos_revolute3_x = 0.425 * math.sin(theta1) + 0.39225 * math.sin(theta1 + theta2)
+    pos_revolute3_z = 0.425 * math.cos(theta1) + 0.39225 * math.cos(theta1 + theta2)
+    pos_revolute3_y = -0.1197
+
+    # Compute displacement from Revolute 3's origin to the target in world frame
+    dx = x_target - pos_revolute3_x
+    dy = y_target - pos_revolute3_y  # Original pos_revolute3_y is -0.1197
+    dz = z_target - pos_revolute3_z
+
+    # Rotate displacement into Revolute 3's local frame (considering theta1 + theta2 rotation around Y-axis)
+    total_angle = theta1 + theta2
+    cos_ta = math.cos(total_angle)
+    sin_ta = math.sin(total_angle)
+    dx_local = dx * cos_ta + dz * sin_ta
+    dz_local = -dx * sin_ta + dz * cos_ta
+    dy_local = dy  # Y-axis remains unchanged under Y-rotation
+
+    # Solve for theta3, theta4, theta5 using existing code 2 with the local displacement
+    theta3, theta4, theta5 = inverse_kinematics_existing2((dx_local, dy_local, dz_local))
+
+    return (theta1, theta2, theta3, theta4, theta5)
+
+def inverse_kinematics_existing1(p):
+    x, y, z = p
+    L1 = 0.425
+    L2 = 0.39225
+    d = math.hypot(x, z)
+    
+    # Handle potential numerical inaccuracies in acos input
+    numerator = d**2 - L1**2 - L2**2
+    denominator = 2 * L1 * L2
+    cos_theta2 = numerator / denominator
+    cos_theta2 = max(min(cos_theta2, 1.0), -1.0)  # Clamp to valid range
+    
+    theta2 = math.acos(cos_theta2)
+    
+    # Determine solution quadrant using cross product check
+    cross_product = x * (L1 + L2 * math.cos(theta2)) - z * (L2 * math.sin(theta2))
+    if cross_product < 0:
+        theta2 = -theta2
+    
+    alpha = math.atan2(x, z)
+    beta = math.atan2(L2 * math.sin(theta2), L1 + L2 * math.cos(theta2))
+    theta1 = alpha - beta
+    return (theta1, theta2)
+
+def inverse_kinematics_existing2(p):
+    x_target, y_target, z_target = p
+    a = 0.0823
+    L1 = 0.093
+    L2 = 0.09465
+
+    # Handle numerical stability for y-component calculation
+    y_component = y_target - L1
+    c2 = y_component / a
+    c2 = max(min(c2, 1.0), -1.0)  # Clamp to valid range
+    
+    s2 = math.sqrt(1 - c2**2)
+    theta2_options = [math.acos(c2), -math.acos(c2)]
+    
+    best_solution = None
+    min_error = float('inf')
+    
+    for theta2 in theta2_options:
+        current_s2 = math.sin(theta2)
+        A = L2
+        B = -a * current_s2
+        denominator = A**2 + (a * current_s2)**2
+        
+        if abs(denominator) < 1e-10:
+            continue
+            
+        sin_theta1 = (A * x_target - B * z_target) / denominator
+        cos_theta1 = (A * z_target + B * x_target) / denominator
+        
+        # Normalize to handle numerical inaccuracies
+        norm = math.hypot(sin_theta1, cos_theta1)
+        if norm < 1e-6:
+            continue
+            
+        sin_theta1 /= norm
+        cos_theta1 /= norm
+        
+        theta1 = math.atan2(sin_theta1, cos_theta1)
+        
+        # Calculate achieved position
+        x_achieved = L2 * sin_theta1 - a * current_s2 * cos_theta1
+        z_achieved = L2 * cos_theta1 + a * current_s2 * sin_theta1
+        
+        error = (x_achieved - x_target)**2 + (z_achieved - z_target)**2
+        
+        if error < min_error:
+            min_error = error
+            best_solution = (theta1, theta2, 0.0)
+    
+    if best_solution is None:
+        # Fallback to zero position if numerical issues persist
+        best_solution = (0.0, math.acos(max(min(c2, 1.0), -1.0)), 0.0)
+    
+    return best_solution
+```
+
+**Key Improvements:**
+1. **Numerical Stability:** Added clamping of values passed to `math.acos()` to prevent domain errors
+2. **Error Handling:** Implemented normalization of trigonometric inputs and fallback solutions
+3. **Kinematic Chain Correction:** Fixed displacement calculation for the Y-component accounting for Revolute 3's base position
+4. **Solution Validation:** Added error checking and normalization in the existing2 solution branch
+5. **Geometric Consistency:** Maintained proper coordinate transformations between joint frames
+
+This version should handle edge cases better while maintaining the original kinematic structure and solution approach.

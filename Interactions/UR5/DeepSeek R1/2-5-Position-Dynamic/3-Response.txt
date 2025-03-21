@@ -1,0 +1,96 @@
+To solve this problem, we need to determine the joint angles for a 4-DOF robotic manipulator to reach a specified target position. The solution involves decomposing the problem into two main parts: determining the first joint angle and then solving for the remaining three angles using the transformed target position.
+
+### Approach
+1. **First Joint (Theta1)**: The first joint rotates around the Y-axis. The angle for this joint is determined using the arctangent function to align the projection of the target position onto the X-Z plane.
+2. **Transformation to Revolute 2's Frame**: After determining Theta1, the target position is transformed into the coordinate system relative to the second joint (Revolute 2). This involves rotating the target position by -Theta1 and adjusting for the translation from the base to Revolute 2.
+3. **Remaining Joints (Theta2, Theta3, Theta4)**: Using the transformed target position, we solve for the remaining three joints. This involves geometric calculations to handle the planar sub-problem formed by the subsequent joints and links, considering the Z-axis rotation of Revolute 3.
+
+### Solution Code
+```python
+import math
+
+def inverse_kinematics(p: tuple[float, float, float]) -> tuple[float, float, float, float]:
+    x, y, z = p
+    
+    # Solve for theta1 using the first existing method
+    theta1 = math.atan2(x, z)
+    
+    # Transform the target position into Revolute 2's frame
+    cos_theta1 = math.cos(theta1)
+    sin_theta1 = math.sin(theta1)
+    x_rot = x * cos_theta1 + z * sin_theta1
+    z_rot = -x * sin_theta1 + z * cos_theta1
+    x_target = x_rot
+    y_target = y
+    z_target = z_rot - 0.39225  # Adjust for Revolute 2's z offset
+    
+    # Parameters from the problem details
+    L1 = 0.093   # Revolute 3's y offset
+    L2 = 0.09465 # Revolute 4's z offset
+    a = 0.0823   # TCP's y offset
+    
+    # Compute intermediate variables
+    C = y_target - L1
+    D_sq = x_target ** 2 + z_target ** 2
+    D = math.sqrt(D_sq)
+    
+    A = L2
+    B = a
+    
+    # Check if the target is reachable
+    numerator = C**2 + D_sq - A**2 - B**2
+    denominator = 2 * A * B
+    if denominator == 0 or abs(numerator) > abs(denominator):
+        raise ValueError('Target position is unreachable')
+    
+    cos_theta4 = numerator / denominator
+    if abs(cos_theta4) > 1:
+        raise ValueError('Target position is unreachable')
+    
+    theta4_options = [math.acos(cos_theta4), -math.acos(cos_theta4)]
+    
+    best_solution = None
+    min_error = float('inf')
+    
+    for theta4 in theta4_options:
+        K = A + B * math.cos(theta4)
+        L = B * math.sin(theta4)
+        
+        denominator_theta3 = C**2 + D_sq
+        if denominator_theta3 == 0:
+            continue
+        
+        cos_theta3 = (K * C + L * D) / denominator_theta3
+        sin_theta3 = (K * D - L * C) / denominator_theta3
+        
+        if abs(cos_theta3**2 + sin_theta3**2 - 1) > 1e-6:
+            continue
+        
+        theta3 = math.atan2(sin_theta3, cos_theta3)
+        
+        # Compute theta2
+        theta2 = math.atan2(z_target, x_target)
+        
+        # Calculate the position for error checking
+        x_curr = (A * math.sin(theta3) + B * math.sin(theta3 + theta4)) * math.cos(theta2)
+        y_curr = L1 + A * math.cos(theta3) + B * math.cos(theta3 + theta4)
+        z_curr = (A * math.sin(theta3) + B * math.sin(theta3 + theta4)) * math.sin(theta2)
+        
+        error = (x_curr - x_target)**2 + (y_curr - y_target)**2 + (z_curr - z_target)**2
+        
+        if error < min_error:
+            min_error = error
+            best_solution = (theta2, theta3, theta4)
+    
+    if best_solution is None:
+        raise ValueError('Target position is unreachable')
+    
+    theta2_sub, theta3_sub, theta4_sub = best_solution
+    
+    return (theta1, theta2_sub, theta3_sub, theta4_sub)
+```
+
+### Explanation
+1. **Theta1 Calculation**: The first joint angle (Theta1) is calculated using the arctangent of the target's X and Z coordinates, aligning the manipulator in the direction of the target's projection on the X-Z plane.
+2. **Coordinate Transformation**: The target position is transformed into the coordinate system of the second joint (Revolute 2) by rotating it by -Theta1 and adjusting for the vertical offset of Revolute 2.
+3. **Planar Sub-Problem**: The remaining joints (Theta2, Theta3, Theta4) are solved using geometric relationships derived from the transformed target position. This involves solving for the angles that position the end-effector correctly, considering the link lengths and offsets from the URDF model. The solution iterates over possible angles to minimize the positional error, ensuring the target is reachable. The Z-axis rotation of Revolute 3 is accounted for in the geometric calculations, ensuring accurate positioning.

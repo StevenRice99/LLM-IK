@@ -1,0 +1,127 @@
+To solve this problem, we need to determine the joint angles for a 5-DOF robotic arm to position its Tool Center Point (TCP) at a given target position while considering the orientation constraints imposed by the robot's structure. The solution involves breaking down the problem into two parts: positioning the third joint using the first two joints and then adjusting the remaining joints to reach the target from there, considering both position and orientation constraints.
+
+### Approach
+1. **First Two Joints (Theta1 and Theta2):** Use the provided inverse kinematics solution for the first two joints to position the third joint's origin in the x-z plane of the world frame.
+2. **Displacement Calculation:** Compute the displacement from the third joint's origin to the target position in the world frame.
+3. **Coordinate Transformation:** Rotate this displacement into the coordinate frame of the third joint to account for the rotations applied by the first two joints.
+4. **Last Three Joints (Theta3, Theta4, Theta5):** Solve for these angles considering both position and orientation constraints, ensuring the TCP reaches the target with the correct orientation.
+
+### Solution Code
+```python
+import math
+
+def inverse_kinematics(p: tuple[float, float, float]) -> tuple[float, float, float, float, float]:
+    x_target, y_target, z_target = p
+
+    # Solve for theta1 and theta2 to position Revolute 3's origin in x-z plane
+    theta1, theta2 = inverse_kinematics_existing1((x_target, 0, z_target))
+
+    # Calculate Revolute 3's origin in world frame
+    pos_revolute3_x = 0.425 * math.sin(theta1) + 0.39225 * math.sin(theta1 + theta2)
+    pos_revolute3_z = 0.425 * math.cos(theta1) + 0.39225 * math.cos(theta1 + theta2)
+    pos_revolute3_y = -0.1197
+
+    # Compute displacement from Revolute 3 to target in world frame
+    dx = x_target - pos_revolute3_x
+    dy = y_target - pos_revolute3_y
+    dz = z_target - pos_revolute3_z
+
+    # Rotate displacement into Revolute 3's local frame (Y rotation by theta1 + theta2)
+    total_angle = theta1 + theta2
+    cos_ta = math.cos(total_angle)
+    sin_ta = math.sin(total_angle)
+    dx_local = dx * cos_ta + dz * sin_ta
+    dz_local = -dx * sin_ta + dz * cos_ta
+    dy_local = dy
+
+    # Solve for theta3, theta4 considering position constraints, theta5=0 for orientation
+    theta3, theta4 = solve_last_two_joints(dx_local, dy_local, dz_local)
+    theta5 = 0.0  # Maintain TCP orientation constraint
+
+    return (theta1, theta2, theta3, theta4, theta5)
+
+def inverse_kinematics_existing1(p):
+    x, y, z = p
+    L1 = 0.425
+    L2 = 0.39225
+    d = math.hypot(x, z)
+    
+    # Clamp cos_theta2 to valid range
+    numerator = d**2 - L1**2 - L2**2
+    denominator = 2 * L1 * L2
+    cos_theta2 = numerator / denominator
+    cos_theta2 = max(min(cos_theta2, 1.0), -1.0)
+    
+    theta2 = math.acos(cos_theta2)
+    
+    # Determine solution quadrant
+    cross_product = x * (L1 + L2 * math.cos(theta2)) - z * (L2 * math.sin(theta2))
+    if cross_product < 0:
+        theta2 = -theta2
+    
+    alpha = math.atan2(x, z)
+    beta = math.atan2(L2 * math.sin(theta2), L1 + L2 * math.cos(theta2))
+    theta1 = alpha - beta
+    return (theta1, theta2)
+
+def solve_last_two_joints(dx_local, dy_local, dz_local):
+    # Constants from URDF
+    L4 = 0.093
+    a = 0.0823
+    L5 = 0.09465
+
+    # Solve for theta4 from dy_local equation
+    c4 = (dy_local - L4) / a
+    c4 = max(min(c4, 1.0), -1.0)
+    theta4_pos = math.acos(c4)
+    theta4_neg = -theta4_pos
+    theta4_options = [theta4_pos, theta4_neg]
+
+    best_error = float('inf')
+    best_solution = None
+
+    for theta4 in theta4_options:
+        s4 = math.sin(theta4)
+        
+        # Coefficients for theta3 equations
+        A = -a * s4
+        B = L5
+        
+        denominator = A**2 + B**2
+        if abs(denominator) < 1e-9:
+            continue
+        
+        # Solve linear system for cosθ3 and sinθ3
+        cos_theta3 = (A * dx_local + B * dz_local) / denominator
+        sin_theta3 = (B * dx_local - A * dz_local) / denominator
+        
+        # Normalize to handle numerical inaccuracies
+        norm = math.hypot(cos_theta3, sin_theta3)
+        if norm < 1e-6:
+            continue
+        cos_theta3 /= norm
+        sin_theta3 /= norm
+        
+        # Calculate achieved position components
+        x_achieved = A * cos_theta3 + B * sin_theta3
+        z_achieved = -A * sin_theta3 + B * cos_theta3
+        error = (x_achieved - dx_local)**2 + (z_achieved - dz_local)**2
+        
+        if error < best_error:
+            best_error = error
+            theta3 = math.atan2(sin_theta3, cos_theta3)
+            best_solution = (theta3, theta4)
+
+    if best_solution is None:
+        raise ValueError("Target unreachable for last three joints")
+
+    return best_solution
+```
+
+### Explanation
+1. **First Two Joints:** The function `inverse_kinematics_existing1` calculates the angles for the first two joints to position the third joint's origin in the x-z plane.
+2. **Displacement Calculation:** The displacement from the third joint's origin to the target is computed in the world frame.
+3. **Coordinate Transformation:** This displacement is rotated into the third joint's local frame to account for the rotations from the first two joints.
+4. **Last Three Joints:** The function `solve_last_two_joints` solves for theta3 and theta4 using the transformed displacement. Theta5 is set to zero to maintain the TCP's fixed orientation relative to its parent link, as specified in the URDF. This ensures the correct orientation while reaching the target position.
+
+This approach efficiently decouples the problem into manageable parts, leveraging existing solutions for sub-chains and ensuring both position and orientation constraints are met.

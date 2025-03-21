@@ -1,0 +1,86 @@
+To solve this problem, we need to determine the joint angles for a 4-DOF robot manipulator to reach a specified target position and orientation. The key challenge is correctly computing the joint angles to match both the position and orientation of the target, especially addressing orientation discrepancies observed in previous attempts.
+
+### Approach
+1. **Orientation Analysis**:
+   - **Theta_sum Calculation**: The sum of the first three joint angles (θ₁ + θ₂ + θ₃) is derived from the target's roll (r_x) and pitch (r_y) angles using trigonometric identities.
+   - **Theta4 Calculation**: The fourth joint angle (θ₄) is computed using elements from the target's rotation matrix, ensuring the correct orientation.
+
+2. **Position Analysis**:
+   - **Geometric Transformations**: Using the derived θ_sum, solve for the individual joint angles θ₁, θ₂, and θ₃ by considering the geometric configuration of the robot links.
+   - **Multiple Solutions**: Generate possible solutions by considering both positive and negative configurations for the second joint angle (θ₂).
+
+3. **Solution Selection**:
+   - **Orientation Matching**: Select the solution where the computed θ₄ is closest to the target's yaw (r_z) modulo 2π to ensure correct orientation.
+
+### Solution Code
+```python
+import math
+
+def inverse_kinematics(p: tuple[float, float, float], r: tuple[float, float, float]) -> tuple[float, float, float, float]:
+    r_x, r_y, r_z = r
+    x_target, y_target, z_target = p
+
+    # Calculate theta_sum from target's roll and pitch
+    sin_ry = math.sin(r_y)
+    cos_rx = math.cos(r_x)
+    cos_ry = math.cos(r_y)
+    denominator_theta_sum = cos_rx * cos_ry
+    theta_sum = math.atan2(sin_ry, denominator_theta_sum)
+
+    # Calculate theta4 from target's rotation matrix elements
+    sin_theta4 = math.sin(r_x) * math.sin(r_y) * math.cos(r_z) + math.cos(r_x) * math.sin(r_z)
+    cos_theta4 = math.cos(r_x) * math.cos(r_z) - math.sin(r_x) * math.sin(r_y) * math.sin(r_z)
+    theta4 = math.atan2(sin_theta4, cos_theta4)
+
+    # Position calculations
+    C = 0.09465 * math.sin(theta_sum)
+    D_val = 0.09465 * math.cos(theta_sum)
+    A = 0.425
+    B = 0.39225
+
+    numerator = (x_target - C)**2 + (z_target - D_val)**2 - A**2 - B**2
+    denominator = 2 * A * B
+    K = numerator / denominator
+    K = max(min(K, 1.0), -1.0)
+
+    try:
+        t2 = math.acos(K)
+    except ValueError:
+        raise ValueError("Unreachable target position")
+
+    solutions = []
+    for current_t2 in [t2, -t2]:
+        M = A + B * math.cos(current_t2)
+        N = B * math.sin(current_t2)
+        denom = M**2 + N**2
+        if denom < 1e-9:
+            continue
+        sin_t1 = (M * (x_target - C) - N * (z_target - D_val)) / denom
+        cos_t1 = (M * (z_target - D_val) + N * (x_target - C)) / denom
+        t1 = math.atan2(sin_t1, cos_t1)
+        t3 = theta_sum - t1 - current_t2
+        solutions.append((t1, current_t2, t3, theta4))
+
+    if not solutions:
+        raise ValueError("No valid solution found")
+
+    # Select solution with theta4 closest to target's r_z modulo 2π
+    best_solution = min(solutions, key=lambda sol: min(abs(sol[3] - r_z), 
+                                                       abs(sol[3] - r_z + 2*math.pi), 
+                                                       abs(sol[3] - r_z - 2*math.pi)))
+    return best_solution
+```
+
+### Explanation
+1. **Orientation Calculation**:
+   - **Theta_sum**: Derived using `atan2` to ensure the correct quadrant based on the target's roll and pitch angles.
+   - **Theta4**: Computed from the target's rotation matrix elements to match the desired yaw, ensuring the end-effector's orientation aligns with the target.
+
+2. **Position Calculation**:
+   - **Geometric Transformations**: The position of the end-effector is adjusted based on θ_sum. The equations derived from the robot's link lengths and geometry are solved to find valid joint configurations.
+   - **Multiple Solutions**: By considering both positive and negative values for θ₂, the algorithm explores different configurations (e.g., elbow-up and elbow-down).
+
+3. **Solution Selection**:
+   - The solution with θ₄ closest to the target's yaw (modulo 2π) is selected to ensure the correct orientation, addressing previous discrepancies.
+
+This approach ensures accurate computation of joint angles, leveraging both orientation and position analysis to achieve the desired end-effector configuration.

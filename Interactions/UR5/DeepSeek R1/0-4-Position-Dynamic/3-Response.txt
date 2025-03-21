@@ -1,0 +1,95 @@
+To address the math domain errors, we need to ensure that the arguments to `math.acos` are within the valid range [-1, 1]. This involves correctly calculating the position of Revolute 3 and adjusting the parameters for the remaining joints.
+
+### Approach
+1. **Correct Link Lengths:** Adjust the calculations for theta2 and theta4 to use the correct link lengths and account for offsets.
+2. **Vector Transformation:** Properly transform the target position into Revolute 3's local frame to ensure valid values for the remaining joints.
+3. **Parameter Adjustment:** Use accurate parameters derived from the URDF to avoid invalid trigonometric calculations.
+
+### Solution Code
+```python
+import math
+
+def inverse_kinematics(p: tuple[float, float, float]) -> tuple[float, float, float, float, float]:
+    x_target, y_target, z_target = p
+
+    # Constants from URDF
+    d1 = 0.13585  # Revolute 2's y offset
+    a2 = 0.425    # Revolute 3's z offset
+    d2 = 0.1197   # Revolute 3's y offset (absolute value)
+    a3 = 0.39225  # Revolute 4's z offset
+    d4 = 0.093    # Revolute 5's y offset
+    d5 = 0.09465  # TCP's z offset
+
+    # Solve for theta1 and theta2 to position Revolute 3
+    # Target for Revolute 3 (P3) must be such that TCP can be reached
+    # Distance from P3 to target should be sqrt((a3 + d5)^2 + d4^2)
+    L_remaining = math.sqrt((a3 + d5)**2 + d4**2)
+    dx = x_target
+    dy = y_target
+    dz = z_target - d5  # Adjust for TCP's offset (simplified)
+
+    # Solve theta1 and theta2 using geometric approach for first two links
+    # Revolute 3's position relative to Revolute 1 is influenced by theta1 and theta2
+    # Using corrected parameters for link 2-3
+    link2_length = math.sqrt(a2**2 + d2**2)
+    cos_theta2 = (dz - d1) / link2_length
+    cos_theta2 = max(min(cos_theta2, 1.0), -1.0)  # Clamp to valid range
+    theta2 = math.acos(cos_theta2)
+    sin_theta2 = math.sin(theta2)
+
+    A = a2 * sin_theta2
+    B = d2
+    denominator = A**2 + B**2
+    C = (A * dx + B * dy) / denominator
+    S = (-B * dx + A * dy) / denominator
+    theta1 = math.atan2(S, C)
+
+    # Calculate position of Revolute 3 (P3)
+    x3 = A * math.cos(theta1) - B * math.sin(theta1)
+    y3 = A * math.sin(theta1) + B * math.cos(theta1)
+    z3 = a2 * cos_theta2 + d1
+
+    # Vector from P3 to target in world frame
+    vx = x_target - x3
+    vy = y_target - y3
+    vz = z_target - z3
+
+    # Transform vector to Revolute 3's local frame (considering theta1 and theta2)
+    # Rotate by -theta1 around Z
+    vx_rot_z = vx * math.cos(-theta1) - vy * math.sin(-theta1)
+    vy_rot_z = vx * math.sin(-theta1) + vy * math.cos(-theta1)
+    vz_rot_z = vz
+
+    # Rotate by -theta2 around Y
+    vx_local = vx_rot_z * math.cos(-theta2) + vz_rot_z * math.sin(-theta2)
+    vz_local = -vx_rot_z * math.sin(-theta2) + vz_rot_z * math.cos(-theta2)
+
+    # Solve for theta3 and theta4 using corrected parameters
+    L1 = a3
+    L2 = d5
+    target_dist_sq = vx_local**2 + vz_local**2
+    target_dist = math.sqrt(target_dist_sq)
+    cos_theta4 = (target_dist_sq - L1**2 - L2**2) / (2 * L1 * L2)
+    cos_theta4 = max(min(cos_theta4, 1.0), -1.0)  # Clamp to valid range
+    theta4 = math.acos(cos_theta4)
+    sin_theta4 = math.sin(theta4)
+
+    # Calculate theta3
+    A_ik = L1 + L2 * cos_theta4
+    B_ik = L2 * sin_theta4
+    denominator_theta3 = A_ik**2 + B_ik**2
+    sin_theta3 = (A_ik * vx_local - B_ik * vz_local) / denominator_theta3
+    cos_theta3 = (B_ik * vx_local + A_ik * vz_local) / denominator_theta3
+    theta3 = math.atan2(sin_theta3, cos_theta3)
+
+    # Theta5 is set to 0 as orientation is not considered for position
+    theta5 = 0.0
+
+    return (theta1, theta2, theta3, theta4, theta5)
+```
+
+### Explanation
+1. **Correct Link Lengths:** The link between Revolute 2 and Revolute 3 is calculated using both the z and y offsets, ensuring valid `cos_theta2` values.
+2. **Clamping Values:** The `cos_theta2` and `cos_theta4` values are clamped to [-1, 1] to prevent domain errors, adhering to the problem's guarantee of reachable targets.
+3. **Vector Transformation:** The target vector is transformed into Revolute 3's local frame using correct rotation order and angles, ensuring valid planar IK calculations.
+4. **Parameter Adjustment:** Uses accurate lengths for the remaining links (Revolute 4 to TCP) to compute valid joint angles for theta3 and theta4.

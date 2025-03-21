@@ -1,0 +1,53 @@
+To fix the domain error in the inverse kinematics calculation, we need to correctly adjust the target position by accounting for the TCP's offset and ensure the argument to `math.acos` remains within the valid range. Here's the revised solution:
+
+```python
+import math
+
+def inverse_kinematics(p: tuple[float, float, float]) -> tuple[float, float, float, float]:
+    x_target, y_target, z_target = p
+    
+    # Fixed TCP offset components from Revolute3 to TCP
+    offset_xz = 0.18765  # Combined X-Z offset (0.093 + 0.09465)
+    
+    # Adjust target to account for TCP offset in X-Z plane
+    d_target = math.hypot(x_target, z_target)
+    if d_target == 0:
+        x_adj, z_adj = 0.0, 0.0
+    else:
+        scale = offset_xz / d_target
+        x_adj = x_target - x_target * scale
+        z_adj = z_target - z_target * scale
+    
+    # Solve for theta1 and theta2 using adjusted X-Z target
+    L1 = 0.425
+    L2 = 0.39225
+    d = math.hypot(x_adj, z_adj)
+    
+    # Ensure the argument to acos is within valid range
+    cos_theta2 = (d**2 - L1**2 - L2**2) / (2 * L1 * L2)
+    cos_theta2 = max(min(cos_theta2, 1.0), -1.0)  # Clamp to valid range
+    theta2 = math.acos(cos_theta2)
+    
+    # Determine theta2 sign using cross product
+    cross = x_adj * (L1 + L2 * math.cos(theta2)) - z_adj * (L2 * math.sin(theta2))
+    if cross < 0:
+        theta2 = -theta2
+    
+    alpha = math.atan2(x_adj, z_adj)
+    beta = math.atan2(L2 * math.sin(theta2), L1 + L2 * math.cos(theta2))
+    theta1 = alpha - beta
+    
+    # Calculate theta3 to align TCP offset with target direction
+    theta_total = math.atan2(x_target, z_target)
+    theta3 = theta_total - (theta1 + theta2)
+    
+    # Theta4 doesn't affect position; set to 0
+    theta4 = 0.0
+    
+    return (theta1, theta2, theta3, theta4)
+```
+
+**Key Fixes:**
+1. **TCP Offset Adjustment:** The target position is adjusted by subtracting the TCP's X-Z offset in the direction of the original target vector. This ensures the adjusted position (`x_adj`, `z_adj`) is within the reachable workspace of the first two links.
+2. **Clamping `cos_theta2`:** Ensures the argument to `math.acos` stays within [-1, 1], preventing domain errors.
+3. **Theta3 Calculation:** Computes the third joint angle to align the TCP's offset with the target direction after solving for the first two joints.

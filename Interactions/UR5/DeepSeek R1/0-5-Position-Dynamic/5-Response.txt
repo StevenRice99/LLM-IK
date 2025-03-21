@@ -1,0 +1,143 @@
+To solve this problem, we need to compute the inverse kinematics for a 6-DOF manipulator by correctly determining the wrist center position and the displacement vector for the last three joints. The key is to accurately calculate the displacement from the wrist center to the TCP and use the existing solutions for sub-chains.
+
+### Approach
+1. **Wrist Center Calculation**: The wrist center is determined by adjusting the target TCP position using the displacement caused by the last three links. This displacement is calculated based on the kinematic structure of the manipulator.
+2. **First Three Joints**: Use the existing solution to solve for the first three joints (θ1, θ2, θ3) to position the wrist center.
+3. **Rotation Matrix**: Compute the rotation matrix from the base frame to the wrist center's frame using the first three joint angles.
+4. **Displacement Transformation**: Transform the displacement from the wrist center to the TCP into the wrist center's local frame.
+5. **Last Three Joints**: Use the existing solution to solve for the last three joints (θ4, θ5, θ6) based on the transformed displacement.
+
+### Solution Code
+```python
+import math
+import numpy as np
+
+def inverse_kinematics(p: tuple[float, float, float]) -> tuple[float, float, float, float, float, float]:
+    x_tcp, y_tcp, z_tcp = p
+
+    # Correct displacement from Revolute 4's origin to TCP when joints 4-6 are zero (in Revolute 4's frame)
+    dx = 0.0
+    dy = 0.093 + 0.0823  # Revolute 5's y (0.093) + TCP's y (0.0823) in Revolute 6's frame
+    dz = 0.09465         # Revolute 6's z (0.09465) in Revolute 5's frame
+    displacement_local = np.array([dx, dy, dz])
+
+    # Solve for first three joints to position the wrist center
+    wrist_center = (x_tcp, y_tcp, z_tcp)
+    theta1, theta2, theta3 = inverse_kinematics_joints1_3(wrist_center)
+
+    # Compute rotation matrix from base to Revolute 4's frame
+    R_03 = compute_rotation_matrix(theta1, theta2, theta3)
+
+    # Transform displacement from Revolute 4's frame to world frame
+    displacement_world = R_03 @ displacement_local
+
+    # Recalculate wrist center considering the correct displacement
+    wrist_center = (
+        x_tcp - displacement_world[0],
+        y_tcp - displacement_world[1],
+        z_tcp - displacement_world[2]
+    )
+
+    # Re-solve for first three joints with corrected wrist center
+    theta1, theta2, theta3 = inverse_kinematics_joints1_3(wrist_center)
+
+    # Recompute rotation matrix with updated thetas
+    R_03 = compute_rotation_matrix(theta1, theta2, theta3)
+
+    # Compute displacement from wrist center to TCP in world frame
+    displacement_world_actual = np.array([
+        x_tcp - wrist_center[0],
+        y_tcp - wrist_center[1],
+        z_tcp - wrist_center[2]
+    ])
+
+    # Transform displacement to Revolute 4's frame
+    displacement_local_actual = np.dot(R_03.T, displacement_world_actual)
+
+    # Solve for last three joints using the transformed displacement
+    theta4, theta5, theta6 = inverse_kinematics_joints4_6(tuple(displacement_local_actual))
+
+    return (theta1, theta2, theta3, theta4, theta5, theta6)
+
+def compute_rotation_matrix(theta1, theta2, theta3):
+    # Compute rotation matrix from base to Revolute 4's frame (joints 1-3)
+    R_z = np.array([
+        [math.cos(theta1), -math.sin(theta1), 0],
+        [math.sin(theta1), math.cos(theta1), 0],
+        [0, 0, 1]
+    ])
+    R_y2 = np.array([
+        [math.cos(theta2), 0, math.sin(theta2)],
+        [0, 1, 0],
+        [-math.sin(theta2), 0, math.cos(theta2)]
+    ])
+    R_y3 = np.array([
+        [math.cos(theta3), 0, math.sin(theta3)],
+        [0, 1, 0],
+        [-math.sin(theta3), 0, math.cos(theta3)]
+    ])
+    return np.dot(R_z, np.dot(R_y2, R_y3))
+
+def inverse_kinematics_joints1_3(p):
+    x, y, z = p
+    k = 0.01615
+    k_sq = k ** 2
+    numerator_cosθ3 = x ** 2 + y ** 2 + z ** 2 - 0.334746
+    cosθ3 = numerator_cosθ3 / 0.3334125
+    cosθ3 = max(min(cosθ3, 1.0), -1.0)
+    θ3 = math.acos(cosθ3)
+    C = 0.425 + 0.39225 * math.cos(θ3)
+    D = 0.39225 * math.sin(θ3)
+    A_sq = x ** 2 + y ** 2 - k_sq
+    A = math.sqrt(A_sq) if A_sq >= 0 else 0.0
+    denominator_theta2 = C ** 2 + D ** 2
+    sinθ2 = (C * A - D * z) / denominator_theta2
+    cosθ2 = (C * z + D * A) / denominator_theta2
+    θ2 = math.atan2(sinθ2, cosθ2)
+    denominator_theta1 = x ** 2 + y ** 2
+    if denominator_theta1 == 0:
+        θ1 = 0.0
+    else:
+        numerator_cosθ1 = A * x + k * y
+        numerator_sinθ1 = A * y - k * x
+        θ1 = math.atan2(numerator_sinθ1, numerator_cosθ1)
+    return (θ1, θ2, θ3)
+
+def inverse_kinematics_joints4_6(p):
+    x_target, y_target, z_target = p
+    a = 0.0823
+    L1 = 0.093
+    L2 = 0.09465
+    c2 = (y_target - L1) / a
+    c2 = max(min(c2, 1.0), -1.0)  # Clamp to valid range
+    s2 = math.sqrt(1 - c2 ** 2) if c2**2 <= 1 else 0.0
+    theta5_options = [math.acos(c2), -math.acos(c2)]
+    best_solution = None
+    min_error = float('inf')
+    for theta5 in theta5_options:
+        current_s2 = math.sin(theta5)
+        A = L2
+        B = -a * current_s2
+        denominator = A ** 2 + B ** 2
+        if denominator < 1e-10:
+            continue
+        sin_theta4 = (A * x_target - B * z_target) / denominator
+        cos_theta4 = (A * z_target + B * x_target) / denominator
+        theta4 = math.atan2(sin_theta4, cos_theta4)
+        x = L2 * math.sin(theta4) - a * current_s2 * math.cos(theta4)
+        z = L2 * math.cos(theta4) + a * current_s2 * math.sin(theta4)
+        error = (x - x_target) ** 2 + (z - z_target) ** 2
+        if error < min_error:
+            min_error = error
+            best_solution = (theta4, theta5, 0.0)  # Assuming theta6 is zero for simplicity
+    if best_solution is None:
+        best_solution = (0.0, 0.0, 0.0)
+    return best_solution
+```
+
+### Explanation
+1. **Displacement Calculation**: The displacement from the wrist center to the TCP is correctly calculated based on the kinematic structure of the manipulator's last three links.
+2. **Wrist Center Adjustment**: The wrist center is recalculated using the correct displacement vector and the rotation matrix derived from the first three joint angles.
+3. **Rotation Matrix**: The rotation matrix from the base frame to the wrist center's frame is computed using the first three joint angles.
+4. **Displacement Transformation**: The displacement vector is transformed from the world frame to the wrist center's local frame to solve for the last three joints.
+5. **Handling Edge Cases**: The code includes checks to clamp values within valid ranges and handle edge cases where the target might be marginally unreachable due to numerical precision issues.

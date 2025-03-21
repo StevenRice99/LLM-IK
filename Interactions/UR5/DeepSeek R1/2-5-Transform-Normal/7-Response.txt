@@ -1,0 +1,114 @@
+To solve this problem, we need to determine the joint angles for a 4-DOF manipulator to reach a target position and orientation. The key insight is to decouple the problem into position and orientation components, solving for the first three joints to position the end-effector and the fourth joint to adjust the orientation.
+
+### Approach
+1. **Position Analysis**:
+   - **Theta3 Calculation**: Compute θ₃ using the target's y-coordinate, considering both positive and negative solutions.
+   - **Circle Intersection**: The wrist position (Revolute4's origin) must lie on a circle around the target position with a radius equal to the TCP's offset. This allows solving for the first two joints (θ₁, θ₂) using geometric inverse kinematics.
+
+2. **Orientation Analysis**:
+   - **Theta4 Calculation**: After positioning the wrist, compute θ₄ to align the end-effector's orientation with the target using rotation matrices.
+
+### Solution Code
+```python
+import numpy as np
+from numpy import cos, sin, arctan2, arccos, sqrt, pi
+
+def inverse_kinematics(p: tuple[float, float, float], r: tuple[float, float, float]) -> tuple[float, float, float, float]:
+    x_target, y_target, z_target = p
+    roll, pitch, yaw = r
+
+    # Compute theta3 from y-coordinate
+    y_wrist = y_target - 0.093  # Adjust for Revolute3's y offset
+    cos_theta3 = y_wrist / 0.0823
+    cos_theta3 = np.clip(cos_theta3, -1.0, 1.0)
+    theta3_pos = arccos(cos_theta3)
+    theta3_neg = -theta3_pos
+    theta3_options = [theta3_pos, theta3_neg]
+
+    # Link lengths for Revolute2 and Revolute4
+    L1, L2 = 0.39225, 0.09465
+    radius = 0.0823  # TCP's X-Z offset magnitude
+
+    for theta3 in theta3_options:
+        # Parameterize theta4 to find wrist positions on the circle
+        for theta4 in np.linspace(0, 2*pi, 36):  # Sample 36 points
+            # Calculate wrist position based on theta4
+            x_wrist = x_target - radius * sin(theta4)
+            z_wrist = z_target - radius * cos(theta4)
+
+            # Two-link IK for theta1 and theta2
+            D_sq = x_wrist**2 + z_wrist**2
+            D = sqrt(D_sq)
+            if D < abs(L1 - L2) or D > (L1 + L2):
+                continue
+
+            cos_theta2 = (D_sq - L1**2 - L2**2) / (2 * L1 * L2)
+            cos_theta2 = np.clip(cos_theta2, -1.0, 1.0)
+            theta2 = arccos(cos_theta2)
+            theta2_ops = [theta2, -theta2]
+
+            for theta2 in theta2_ops:
+                gamma = arctan2(z_wrist, x_wrist)
+                numerator = L2 * sin(theta2)
+                denominator = L1 + L2 * cos(theta2)
+                delta = arctan2(numerator, denominator)
+                theta1 = gamma - delta
+
+                # Compute orientation matrices
+                R_desired = euler_to_rotation_matrix(roll, pitch, yaw)
+                R1 = rotation_y(theta1)
+                R2 = rotation_y(theta2)
+                R3 = rotation_z(theta3)
+                R_left = R1 @ R2 @ R3
+
+                # Compute required rotation for theta4
+                R_tcp = rotation_z(pi/2)  # TCP's fixed orientation
+                M = np.linalg.inv(R_left) @ R_desired @ np.linalg.inv(R_tcp)
+
+                # Extract theta4 from rotation matrix
+                computed_theta4 = arctan2(M[2, 0], M[2, 2])
+
+                # Check if computed theta4 matches the parameterized value
+                if not np.isclose(computed_theta4, theta4, atol=1e-3):
+                    continue
+
+                # Verify position
+                x_wrist_calc = L1 * sin(theta1) + L2 * sin(theta2)
+                z_wrist_calc = L1 * cos(theta1) + L2 * cos(theta2)
+                x_tcp = x_wrist_calc + radius * sin(computed_theta4)
+                z_tcp = z_wrist_calc + radius * cos(computed_theta4)
+                if np.isclose(x_tcp, x_target, atol=1e-3) and np.isclose(z_tcp, z_target, atol=1e-3):
+                    return (theta1, theta2, theta3, computed_theta4)
+
+    # Fallback (as per problem statement, target is reachable)
+    return (0.0, 0.0, 0.0, 0.0)
+
+def euler_to_rotation_matrix(roll, pitch, yaw):
+    R_x = np.array([[1, 0, 0],
+                    [0, cos(roll), -sin(roll)],
+                    [0, sin(roll), cos(roll)]])
+    R_y = np.array([[cos(pitch), 0, sin(pitch)],
+                    [0, 1, 0],
+                    [-sin(pitch), 0, cos(pitch)]])
+    R_z = np.array([[cos(yaw), -sin(yaw), 0],
+                    [sin(yaw), cos(yaw), 0],
+                    [0, 0, 1]])
+    return R_z @ R_y @ R_x  # XYZ fixed angles
+
+def rotation_y(theta):
+    return np.array([[cos(theta), 0, sin(theta)],
+                     [0, 1, 0],
+                     [-sin(theta), 0, cos(theta)]])
+
+def rotation_z(theta):
+    return np.array([[cos(theta), -sin(theta), 0],
+                     [sin(theta), cos(theta), 0],
+                     [0, 0, 1]])
+```
+
+### Explanation
+1. **Theta3 Calculation**: The third joint angle (θ₃) is derived from the target's y-coordinate using the inverse cosine function, considering both positive and negative solutions.
+2. **Circle Intersection**: The wrist position must lie on a circle around the target position with a radius equal to the TCP's offset. This allows solving for the first two joints (θ₁, θ₂) using geometric inverse kinematics.
+3. **Orientation Handling**: The fourth joint angle (θ₄) is computed using rotation matrices to align the end-effector's orientation with the target. The solution is verified by checking if the computed θ₄ matches the parameterized value and if the resulting position is accurate.
+
+This approach efficiently decouples the position and orientation problems, ensuring accurate and reachable solutions for the 4-DOF manipulator.

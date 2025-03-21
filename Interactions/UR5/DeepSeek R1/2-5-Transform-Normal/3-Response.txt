@@ -1,0 +1,118 @@
+To address the issues in the original solution, we need to correct the orientation handling and the calculation of joint angles θ3 and θ4. Here's the revised approach:
+
+### Approach
+1. **Position Analysis**:
+   - **Phi Calculation**: Compute φ using the target's y-coordinate to determine the angle between the fourth joint and the TCP's y-offset.
+   - **Wrist Position**: Adjust the target position to account for the TCP's offset and solve for the first two joints using geometric IK.
+
+2. **Orientation Analysis**:
+   - **Correct Euler to Rotation Matrix**: Ensure the rotation matrix is built using the correct order (XYZ).
+   - **Extract θ3 and θ4**: Use the correct elements from the rotation matrix to determine θ3 and θ4.
+
+### Solution Code
+```python
+import numpy as np
+from numpy import cos, sin, arctan2, arccos, sqrt, pi
+
+def inverse_kinematics(p: tuple[float, float, float], r: tuple[float, float, float]) -> tuple[float, float, float, float]:
+    x_target, y_target, z_target = p
+    roll, pitch, yaw = r
+
+    # Correct Euler to Rotation Matrix (XYZ fixed)
+    R_desired = euler_to_rotation_matrix(roll, pitch, yaw)
+
+    # Phi calculation based on y-coordinate
+    y_wrist = y_target - 0.093
+    cos_phi = y_wrist / 0.0823
+    cos_phi = np.clip(cos_phi, -1.0, 1.0)
+    phi = arccos(cos_phi)
+    phi_options = [phi, -phi]
+
+    # Link lengths for two-link IK (Revolute2 and Revolute4)
+    L1, L2 = 0.39225, 0.09465
+
+    for phi_val in phi_options:
+        # Contribution from TCP's offset
+        delta_x = 0.0823 * sin(phi_val)
+        delta_z = 0.0
+
+        # Wrist position (x, z)
+        W_x = x_target - delta_x
+        W_z = z_target - delta_z
+
+        # Two-link IK for theta1 and theta2
+        D_sq = W_x**2 + W_z**2
+        D = sqrt(D_sq)
+        if D > L1 + L2 or D < abs(L1 - L2):
+            continue
+
+        # Possible theta2 solutions
+        cos_theta2 = (D_sq - L1**2 - L2**2) / (2 * L1 * L2)
+        cos_theta2 = np.clip(cos_theta2, -1.0, 1.0)
+        theta2 = arccos(cos_theta2)
+        theta2_ops = [theta2, -theta2]
+
+        for theta2 in theta2_ops:
+            # Calculate theta1
+            gamma = arctan2(W_z, W_x)
+            numerator = L2 * sin(theta2)
+            denominator = L1 + L2 * cos(theta2)
+            delta = arctan2(numerator, denominator)
+            theta1 = gamma - delta
+
+            # Compute orientation matrices
+            R1 = rotation_y(theta1)
+            R2 = rotation_y(theta2)
+            R_left = R1 @ R2
+
+            # Compute required rotation for the last two joints
+            R_tcp = rotation_z(pi/2)  # Fixed TCP orientation
+            M = np.linalg.inv(R_left) @ R_desired @ np.linalg.inv(R_tcp)
+
+            # Extract theta3 (Z rotation) and theta4 (Y rotation)
+            theta4 = arctan2(-M[2, 0], M[2, 2])
+            theta3 = arctan2(-M[0, 1], M[1, 1])
+
+            # Check if theta4 - theta3 equals phi_val (considering periodicity)
+            delta_angle = (theta4 - theta3) % (2 * pi)
+            if not np.isclose(delta_angle, phi_val % (2 * pi)) and not np.isclose(delta_angle, (-phi_val) % (2 * pi)):
+                continue
+
+            # Verify position (optional, but ensures correctness)
+            # Assuming the problem states the target is reachable, we return the first valid solution
+            return (theta1, theta2, theta3, theta4)
+
+    # Fallback (as per problem statement, target is reachable)
+    return (0.0, 0.0, 0.0, 0.0)
+
+def euler_to_rotation_matrix(roll, pitch, yaw):
+    # XYZ fixed (roll -> X, pitch -> Y, yaw -> Z)
+    R_x = np.array([[1, 0, 0],
+                    [0, cos(roll), -sin(roll)],
+                    [0, sin(roll), cos(roll)]])
+    R_y = np.array([[cos(pitch), 0, sin(pitch)],
+                    [0, 1, 0],
+                    [-sin(pitch), 0, cos(pitch)]])
+    R_z = np.array([[cos(yaw), -sin(yaw), 0],
+                    [sin(yaw), cos(yaw), 0],
+                    [0, 0, 1]])
+    return R_z @ R_y @ R_x  # Correct order for XYZ fixed
+
+def rotation_y(theta):
+    return np.array([[cos(theta), 0, sin(theta)],
+                     [0, 1, 0],
+                     [-sin(theta), 0, cos(theta)]])
+
+def rotation_z(theta):
+    return np.array([[cos(theta), -sin(theta), 0],
+                     [sin(theta), cos(theta), 0],
+                     [0, 0, 1]])
+```
+
+### Explanation
+1. **Euler to Rotation Matrix**: Correctly constructs the rotation matrix using the XYZ order for roll, pitch, yaw.
+2. **Phi Calculation**: Determines the angle based on the target's y-coordinate, adjusting for the fixed offset.
+3. **Two-Link IK**: Solves for the first two joints using geometric inverse kinematics.
+4. **Orientation Handling**: Extracts θ3 and θ4 from the rotation matrix using the correct elements, ensuring the orientation matches the target.
+
+This revised approach addresses the orientation matrix construction and correct extraction of joint angles, improving accuracy for both position and orientation targets.

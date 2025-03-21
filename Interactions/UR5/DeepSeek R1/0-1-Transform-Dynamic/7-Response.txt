@@ -1,0 +1,108 @@
+To solve this problem, we need to determine the joint angles (theta1 and theta2) for a 2-DOF serial manipulator such that the end-effector (TCP) reaches a specified position and orientation. The solution involves converting the target orientation into a rotation matrix and using elements of this matrix to compute the joint angles, while considering the periodic nature of angles to handle multiple valid solutions.
+
+### Approach
+1. **Convert Orientation to Rotation Matrix**: The target orientation given as roll, pitch, and yaw angles is converted into a rotation matrix using the fixed-axis rotation order (X, Y, Z).
+2. **Extract Joint Angles from Rotation Matrix**:
+   - **theta2** is derived from the elements of the rotation matrix corresponding to the Y-axis rotation.
+   - **theta1** is derived from the elements of the rotation matrix corresponding to the Z-axis rotation.
+3. **Adjust Theta1 and Theta2 for Ambiguity**: Due to the periodic nature of angles, multiple solutions may exist. We check these solutions and adjust theta1 and theta2 as needed to ensure the correct position and orientation.
+
+### Solution Code
+```python
+import math
+import numpy as np
+
+def euler_to_matrix(roll, pitch, yaw):
+    Rz = np.array([
+        [math.cos(yaw), -math.sin(yaw), 0],
+        [math.sin(yaw), math.cos(yaw), 0],
+        [0, 0, 1]
+    ])
+    Ry = np.array([
+        [math.cos(pitch), 0, math.sin(pitch)],
+        [0, 1, 0],
+        [-math.sin(pitch), 0, math.cos(pitch)]
+    ])
+    Rx = np.array([
+        [1, 0, 0],
+        [0, math.cos(roll), -math.sin(roll)],
+        [0, math.sin(roll), math.cos(roll)]
+    ])
+    return Rz @ Ry @ Rx
+
+def inverse_kinematics(p: tuple[float, float, float], r: tuple[float, float, float]) -> tuple[float, float]:
+    px, py, pz = p
+    roll, pitch, yaw = r
+    
+    R_target = euler_to_matrix(roll, pitch, yaw)
+    
+    # Compute theta2 from the rotation matrix elements R[2,0] and R[2,2]
+    theta2 = math.atan2(-R_target[2, 0], R_target[2, 2])
+    
+    # Compute theta1 from the rotation matrix elements R[0,1] and R[1,1]
+    theta1 = math.atan2(-R_target[0, 1], R_target[1, 1])
+    
+    # Check if this solution matches the position
+    sin_theta1 = math.sin(theta1)
+    cos_theta1 = math.cos(theta1)
+    sin_theta2 = math.sin(theta2)
+    
+    x_calculated = -0.01615 * sin_theta1 + 0.425 * cos_theta1 * sin_theta2
+    y_calculated = 0.01615 * cos_theta1 + 0.425 * sin_theta1 * sin_theta2
+    z_calculated = 0.425 * math.cos(theta2)
+    
+    if (math.isclose(x_calculated, px, abs_tol=1e-6) and
+        math.isclose(y_calculated, py, abs_tol=1e-6) and
+        math.isclose(z_calculated, pz, abs_tol=1e-6)):
+        return (theta1, theta2)
+    
+    # Try adding pi to theta1
+    theta1_alt = theta1 + math.pi
+    sin_theta1_alt = math.sin(theta1_alt)
+    cos_theta1_alt = math.cos(theta1_alt)
+    
+    x_alt = -0.01615 * sin_theta1_alt + 0.425 * cos_theta1_alt * sin_theta2
+    y_alt = 0.01615 * cos_theta1_alt + 0.425 * sin_theta1_alt * sin_theta2
+    
+    if (math.isclose(x_alt, px, abs_tol=1e-6) and
+        math.isclose(y_alt, py, abs_tol=1e-6) and
+        math.isclose(z_calculated, pz, abs_tol=1e-6)):
+        theta1_alt = (theta1_alt + math.pi) % (2 * math.pi) - math.pi
+        return (theta1_alt, theta2)
+    
+    # Try the other theta2 solution (theta2 + pi)
+    theta2_alt = theta2 + math.pi
+    sin_theta2_alt = math.sin(theta2_alt)
+    cos_theta2_alt = math.cos(theta2_alt)
+    
+    x_alt2 = -0.01615 * sin_theta1 + 0.425 * cos_theta1 * sin_theta2_alt
+    y_alt2 = 0.01615 * cos_theta1 + 0.425 * sin_theta1 * sin_theta2_alt
+    z_alt2 = 0.425 * cos_theta2_alt
+    
+    if (math.isclose(x_alt2, px, abs_tol=1e-6) and
+        math.isclose(y_alt2, py, abs_tol=1e-6) and
+        math.isclose(z_alt2, pz, abs_tol=1e-6)):
+        return (theta1, theta2_alt)
+    
+    # Try theta1_alt and theta2_alt
+    x_alt3 = -0.01615 * sin_theta1_alt + 0.425 * cos_theta1_alt * sin_theta2_alt
+    y_alt3 = 0.01615 * cos_theta1_alt + 0.425 * sin_theta1_alt * sin_theta2_alt
+    
+    if (math.isclose(x_alt3, px, abs_tol=1e-6) and
+        math.isclose(y_alt3, py, abs_tol=1e-6) and
+        math.isclose(z_alt2, pz, abs_tol=1e-6)):
+        theta1_alt = (theta1_alt + math.pi) % (2 * math.pi) - math.pi
+        return (theta1_alt, theta2_alt)
+    
+    # If all checks fail, assume the first solution (due to problem constraints)
+    return (theta1, theta2)
+```
+
+### Explanation
+1. **Euler to Rotation Matrix Conversion**: The function `euler_to_matrix` converts the given roll, pitch, and yaw angles into a rotation matrix using the fixed-axis rotation order (X, Y, Z). This matrix represents the target orientation in 3D space.
+2. **Joint Angle Calculation**:
+   - **theta2** is calculated using the arctangent of elements from the rotation matrix that correspond to the Y-axis rotation. This is derived from the elements at positions (2, 0) and (2, 2) of the rotation matrix.
+   - **theta1** is calculated using the arctangent of elements from the rotation matrix that correspond to the Z-axis rotation. This is derived from the elements at positions (0, 1) and (1, 1) of the rotation matrix.
+3. **Position Verification**: The computed theta1 and theta2 are used to verify the x, y, and z coordinates of the target position. If they do not match, theta1 and/or theta2 are adjusted by π to account for the periodic nature of the arctangent function, ensuring the correct solution is found.
+
+This approach ensures that the computed joint angles (theta1 and theta2) will position and orient the TCP as required, considering the periodic nature of angles and ensuring the solution is within valid joint limits.

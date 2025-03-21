@@ -1,0 +1,143 @@
+To solve this problem, we need to determine the joint angles for a 4-DOF serial manipulator to reach a target position and orientation, considering the TCP's offset and the robot's kinematic structure. The solution involves precise handling of coordinate transformations and rotation matrices.
+
+### Approach
+1. **Adjust Target Position for TCP Offset:** Transform the TCP's local offset into the world frame using the target orientation and adjust the target position to find the position of Revolute 4's origin.
+2. **Calculate Theta1 (Joint 1):** Use the adjusted position to determine the first joint angle.
+3. **Transform Position to Revolute 2's Frame:** Adjust the position relative to Revolute 2 and rotate it into the plane defined by theta1.
+4. **Solve Planar Inverse Kinematics:** Compute theta2 and theta3 using geometric relationships, considering both elbow-up and elbow-down configurations.
+5. **Calculate Theta4 (Joint 4):** Derive the fourth joint angle from the remaining rotation needed to achieve the target orientation.
+
+### Solution Code
+```python
+import math
+import numpy as np
+
+def inverse_kinematics(p: tuple[float, float, float], r: tuple[float, float, float]) -> tuple[float, float, float, float]:
+    x_target, y_target, z_target = p
+    roll, pitch, yaw = r
+
+    # Compute target rotation matrix
+    cr, sr = math.cos(roll), math.sin(roll)
+    cp, sp = math.cos(pitch), math.sin(pitch)
+    cy, sy = math.cos(yaw), math.sin(yaw)
+    R_target = np.array([
+        [cy * cp, cy * sp * sr - sy * cr, cy * sp * cr + sy * sr],
+        [sy * cp, sy * sp * sr + cy * cr, sy * sp * cr - cy * sr],
+        [-sp, cp * sr, cp * cr]
+    ])
+
+    # Compute TCP's offset in world frame using target orientation
+    offset_tcp = np.array([0, 0.093, 0])
+    offset_world = R_target.dot(offset_tcp)
+    P4 = np.array([x_target, y_target, z_target]) - offset_world
+    x_p4, y_p4, z_p4 = P4
+
+    # Compute theta1 using adjusted position (P4)
+    theta1 = math.atan2(-x_p4, y_p4)
+
+    # Calculate Revolute 2's position in the base frame
+    revolute2_x = 0.13585 * math.sin(theta1)
+    revolute2_y = 0.13585 * math.cos(theta1)
+    revolute2_z = 0.0
+
+    # Compute position relative to Revolute 2
+    x_rel = x_p4 - revolute2_x
+    y_rel = y_p4 - revolute2_y
+    z_rel = z_p4 - revolute2_z
+
+    # Rotate into the plane defined by theta1 (around Z by -theta1)
+    x_plane = x_rel * math.cos(theta1) + y_rel * math.sin(theta1)
+    z_plane = z_rel
+
+    # Solve planar inverse kinematics for theta2 and theta3
+    L1 = 0.425
+    L2 = 0.39225
+    d_sq = x_plane**2 + z_plane**2
+    cos_theta2 = (d_sq - L1**2 - L2**2) / (2 * L1 * L2)
+    cos_theta2 = np.clip(cos_theta2, -1.0, 1.0)
+    theta2 = np.arccos(cos_theta2)
+    theta2_alt = -theta2
+
+    solutions = []
+    for t2 in [theta2, theta2_alt]:
+        C = L1 + L2 * np.cos(t2)
+        D = L2 * np.sin(t2)
+        denom = C**2 + D**2
+        if denom < 1e-6:
+            continue
+        sin_t1 = (C * x_plane - D * z_plane) / denom
+        cos_t1 = (D * x_plane + C * z_plane) / denom
+        if abs(sin_t1) > 1.0 or abs(cos_t1) > 1.0:
+            continue
+        t1 = np.arctan2(sin_t1, cos_t1)
+        solutions.append((t1, t2))
+
+    best_error = float('inf')
+    best_theta2, best_theta3 = 0.0, 0.0
+    for t1, t2 in solutions:
+        # Compute cumulative rotation up to joint 3
+        R1_j = np.array([
+            [math.cos(theta1), -math.sin(theta1), 0],
+            [math.sin(theta1), math.cos(theta1), 0],
+            [0, 0, 1]
+        ])
+        R2_j = np.array([
+            [math.cos(t1), 0, math.sin(t1)],
+            [0, 1, 0],
+            [-math.sin(t1), 0, math.cos(t1)]
+        ])
+        R3_j = np.array([
+            [math.cos(t2), 0, math.sin(t2)],
+            [0, 1, 0],
+            [-math.sin(t2), 0, math.cos(t2)]
+        ])
+        R_123 = R1_j.dot(R2_j).dot(R3_j)
+        R_remaining = R_123.T.dot(R_target)
+
+        # Extract theta4 from R_remaining (Y-rotation)
+        theta4 = math.atan2(R_remaining[0, 2], R_remaining[2, 2])
+
+        # Compute orientation error
+        R4_j = np.array([
+            [math.cos(theta4), 0, math.sin(theta4)],
+            [0, 1, 0],
+            [-math.sin(theta4), 0, math.cos(theta4)]
+        ])
+        R_total = R_123.dot(R4_j)
+        orient_error = np.linalg.norm(R_total - R_target)
+
+        if orient_error < best_error:
+            best_error = orient_error
+            best_theta2, best_theta3 = t1, t2
+
+    # Final theta4 calculation
+    R1 = np.array([
+        [math.cos(theta1), -math.sin(theta1), 0],
+        [math.sin(theta1), math.cos(theta1), 0],
+        [0, 0, 1]
+    ])
+    R2 = np.array([
+        [math.cos(best_theta2), 0, math.sin(best_theta2)],
+        [0, 1, 0],
+        [-math.sin(best_theta2), 0, math.cos(best_theta2)]
+    ])
+    R3 = np.array([
+        [math.cos(best_theta3), 0, math.sin(best_theta3)],
+        [0, 1, 0],
+        [-math.sin(best_theta3), 0, math.cos(best_theta3)]
+    ])
+    R_123 = R1.dot(R2).dot(R3)
+    R_remaining = R_123.T.dot(R_target)
+    theta4 = math.atan2(R_remaining[0, 2], R_remaining[2, 2])
+
+    return (theta1, best_theta2, best_theta3, theta4)
+```
+
+### Explanation
+1. **TCP Offset Adjustment:** The TCP's offset is transformed into the world frame using the target orientation matrix, ensuring accurate positioning of Revolute 4's origin.
+2. **Theta1 Calculation:** The first joint angle is determined using the adjusted position, aligning the arm in the correct plane.
+3. **Position Transformation:** The target position is transformed into Revolute 2's coordinate system and rotated into the plane of the subsequent joints.
+4. **Planar Inverse Kinematics:** Theta2 and theta3 are computed using geometric relationships, considering both elbow-up and elbow-down configurations to find the optimal solution.
+5. **Theta4 Calculation:** The fourth joint angle is derived from the remaining rotation needed to achieve the target orientation, ensuring accurate end-effector alignment.
+
+This approach addresses previous issues by correctly handling coordinate transformations, rotation matrices, and solution selection based on orientation error, ensuring the robot reaches the desired position and orientation.

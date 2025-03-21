@@ -1,0 +1,84 @@
+To solve this problem, we need to determine the joint angles for a 4-DOF serial manipulator to reach a target position and orientation. The solution involves correcting the calculation of the third joint angle using the target y-coordinate and adjusting the position and orientation calculations to account for all joints.
+
+### Approach
+1. **Theta3 Calculation**: The third joint angle (theta3) is derived directly from the target y-coordinate using the geometric relationship between the joint's offset and the TCP's position.
+2. **Position Calculation**: The first two joint angles (theta1 and theta2) are calculated using the target x and z coordinates, adjusted for the contributions from the third and fourth joints.
+3. **Orientation Adjustment**: The target orientation is adjusted to account for the TCP's local rotation, and the fourth joint angle (theta4) is derived from the resulting rotation matrix.
+
+### Solution Code
+```python
+import numpy as np
+
+def inverse_kinematics(p: tuple[float, float, float], r: tuple[float, float, float]) -> tuple[float, float, float, float]:
+    x_target, y_target, z_target = p
+    rx, ry, rz = r
+
+    # Compute the target rotation matrix from the given orientation
+    R_roll = np.array([[1, 0, 0], [0, np.cos(rx), -np.sin(rx)], [0, np.sin(rx), np.cos(rx)]])
+    R_pitch = np.array([[np.cos(ry), 0, np.sin(ry)], [0, 1, 0], [-np.sin(ry), 0, np.cos(ry)]])
+    R_yaw = np.array([[np.cos(rz), -np.sin(rz), 0], [np.sin(rz), np.cos(rz), 0], [0, 0, 1]])
+    R_target = R_yaw @ R_pitch @ R_roll
+
+    # Adjust for the TCP's local orientation (R_tcp_local_inv is inverse of 90-degree Z rotation)
+    R_tcp_local_inv = np.array([[0, 1, 0], [-1, 0, 0], [0, 0, 1]])
+    R_total = R_target @ R_tcp_local_inv
+
+    # Calculate theta3 from y_target considering the third joint's offset and TCP's y
+    y_offset = 0.093  # Revolute 3's y position
+    tcp_y = 0.0823    # TCP's y position in link4's frame
+    cos_theta3 = (y_target - y_offset) / tcp_y
+    cos_theta3 = np.clip(cos_theta3, -1.0, 1.0)
+    theta3 = np.arccos(cos_theta3)
+    # Determine the correct sign for theta3 based on the target orientation's z-component
+    if R_total[2, 1] < 0:
+        theta3 = -theta3
+
+    # Parameters for the manipulator's link lengths
+    A = 0.39225  # Revolute 2's z position
+    B = 0.09465   # Revolute 4's z position
+    C = 0.0823    # TCP's y position in link4's frame
+
+    # Calculate the effective contribution from theta3 to x and z
+    sin_theta3 = np.sin(theta3)
+    term_x = C * sin_theta3
+    term_z = C * np.sin(theta3)  # Adjusted based on orientation contribution
+
+    # Calculate theta_sum using elements from the adjusted rotation matrix (R_total)
+    r13 = R_total[0, 2]
+    r33 = R_total[2, 2]
+    theta_sum = np.arctan2(r13, r33)
+
+    # Solve for theta1 and theta2 based on the target position with theta3 contribution
+    sin_S = np.sin(theta_sum)
+    cos_S = np.cos(theta_sum)
+    numerator_sin = x_target - B * sin_S + term_x * cos_S
+    numerator_cos = z_target - B * cos_S - term_z * sin_S
+    theta1 = np.arctan2(numerator_sin, numerator_cos)
+    theta2 = theta_sum - theta1
+
+    # Compute the rotation matrix after the first two joints (theta1 + theta2)
+    theta_sum_current = theta1 + theta2
+    cos_theta_sum = np.cos(theta_sum_current)
+    sin_theta_sum = np.sin(theta_sum_current)
+    R_Y_theta_sum = np.array([
+        [cos_theta_sum, 0, sin_theta_sum],
+        [0, 1, 0],
+        [-sin_theta_sum, 0, cos_theta_sum]
+    ])
+    R_Y_theta_sum_T = R_Y_theta_sum.T  # Transpose to invert the rotation
+
+    # Compute the remaining rotation matrix M
+    M = R_Y_theta_sum_T @ R_total
+
+    # Solve for theta4 (Y-axis) from matrix M
+    theta4 = np.arctan2(-M[2, 0], M[2, 2])
+
+    return (theta1, theta2, theta3, theta4)
+```
+
+### Explanation
+1. **Theta3 Calculation**: The third joint angle is derived from the target y-coordinate using the geometric relationship between the joint's offset and the TCP's position. The sign of theta3 is determined based on the orientation matrix to ensure correctness.
+2. **Position Calculation**: The first two joint angles are calculated using the target x and z coordinates, adjusted for contributions from the third and fourth joints. This adjustment ensures accurate positioning by considering the geometric effects of all joints.
+3. **Orientation Adjustment**: The target orientation matrix is adjusted to account for the TCP's local rotation. The fourth joint angle is derived from the decomposed rotation matrix, ensuring the correct orientation is achieved.
+
+This approach addresses the key issues in previous solutions by accurately calculating theta3 from the y-coordinate and adjusting the position and orientation calculations to account for all joint contributions.

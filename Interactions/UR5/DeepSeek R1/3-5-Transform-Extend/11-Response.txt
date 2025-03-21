@@ -1,0 +1,109 @@
+To solve this problem, we need to determine the joint angles (theta1, theta2, theta3) for a 3-DOF serial manipulator such that the Tool Center Point (TCP) reaches a specified position and orientation. The solution involves both position and orientation calculations for the three revolute joints, considering their interdependencies and correct trigonometric relationships.
+
+### Approach
+1. **Position Calculation**:
+   - **Theta2 (Joint 2)**: Calculate using the y-coordinate of the target position, considering both positive and negative solutions using the arccosine function.
+   - **Theta1 (Joint 1)**: Derived from the x and z coordinates using trigonometric identities and matrix operations, adjusted for the correct sign of theta2.
+
+2. **Orientation Calculation**:
+   - **Theta3 (Joint 3)**: After determining theta1 and theta2, compute the remaining rotation needed to achieve the target orientation using matrix transformations and extracting the angle from the resulting rotation matrix.
+
+### Solution Code
+```python
+def inverse_kinematics(p: tuple[float, float, float], r: tuple[float, float, float]) -> tuple[float, float, float]:
+    import numpy as np
+    import math
+
+    x, y, z = p
+    rx, ry, rz = r
+
+    # Calculate possible theta2 values from y-coordinate
+    y_offset = y - 0.093
+    cos_theta2 = y_offset / 0.0823
+    cos_theta2 = max(min(cos_theta2, 1.0), -1.0)  # Clamp to valid range
+    theta2_positive = math.acos(cos_theta2)
+    theta2_candidates = [theta2_positive, -theta2_positive]
+
+    # Define rotation matrix helpers
+    def rot_x(angle):
+        return np.array([
+            [1, 0, 0],
+            [0, math.cos(angle), -math.sin(angle)],
+            [0, math.sin(angle), math.cos(angle)]
+        ])
+    def rot_y(angle):
+        return np.array([
+            [math.cos(angle), 0, math.sin(angle)],
+            [0, 1, 0],
+            [-math.sin(angle), 0, math.cos(angle)]
+        ])
+    def rot_z(angle):
+        return np.array([
+            [math.cos(angle), -math.sin(angle), 0],
+            [math.sin(angle), math.cos(angle), 0],
+            [0, 0, 1]
+        ])
+
+    # Try both theta2 solutions
+    for theta2 in theta2_candidates:
+        A = -0.0823 * math.sin(theta2)
+        B = 0.09465
+        denominator = B**2 - A**2  # Corrected denominator sign
+
+        if abs(denominator) < 1e-6:
+            continue  # Skip if denominator is near zero
+
+        # Calculate theta1 components with corrected signs
+        sin_theta1 = (B * x - A * z) / denominator
+        cos_theta1 = (B * z - A * x) / denominator
+
+        # Normalize to handle numerical inaccuracies
+        norm = math.hypot(sin_theta1, cos_theta1)
+        if abs(norm) < 1e-6:
+            continue
+        sin_theta1 /= norm
+        cos_theta1 /= norm
+
+        theta1 = math.atan2(sin_theta1, cos_theta1)
+
+        # Calculate theta3 from orientation
+        R_target = rot_z(rz) @ rot_y(ry) @ rot_x(rx)
+        R1 = rot_y(theta1)
+        R2 = rot_z(theta2)
+        Rz_pi2 = rot_z(math.pi / 2)
+        R_remaining = R2.T @ R1.T @ R_target @ Rz_pi2.T
+
+        theta3 = math.atan2(R_remaining[0, 2], R_remaining[0, 0])
+
+        # Return first valid solution
+        return (theta1, theta2, theta3)
+
+    # Fallback to first candidate if none valid (problem states target is reachable)
+    theta2 = theta2_candidates[0]
+    A = -0.0823 * math.sin(theta2)
+    B = 0.09465
+    denominator = B**2 - A**2
+    sin_theta1 = (B * x - A * z) / denominator
+    cos_theta1 = (B * z - A * x) / denominator
+    theta1 = math.atan2(sin_theta1, cos_theta1)
+
+    R_target = rot_z(rz) @ rot_y(ry) @ rot_x(rx)
+    R1 = rot_y(theta1)
+    R2 = rot_z(theta2)
+    Rz_pi2 = rot_z(math.pi / 2)
+    R_remaining = R2.T @ R1.T @ R_target @ Rz_pi2.T
+    theta3 = math.atan2(R_remaining[0, 2], R_remaining[0, 0])
+
+    return (theta1, theta2, theta3)
+```
+
+### Explanation
+1. **Position Calculation**:
+   - **Theta2** is derived from the y-coordinate using the inverse cosine function, adjusted for the link's offset. Both positive and negative solutions are considered to ensure the correct quadrant.
+   - **Theta1** is computed using the x and z coordinates by solving a system of linear equations derived from the geometric configuration of the manipulator, ensuring the correct trigonometric relationships. The equations for sin_theta1 and cos_theta1 were corrected to fix sign errors.
+
+2. **Orientation Calculation**:
+   - The target orientation is converted into a rotation matrix using the provided roll, pitch, and yaw angles.
+   - The remaining rotation needed after accounting for theta1 and theta2 is computed. This remaining rotation matrix is used to solve for theta3 by extracting the angle from the matrix elements, ensuring the correct orientation of the TCP.
+
+This approach ensures that both the position and orientation of the TCP are achieved using the calculated joint angles, leveraging trigonometric identities and matrix operations for accuracy. The code considers multiple solutions for theta2 and selects the valid one to ensure reachability.

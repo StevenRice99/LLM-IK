@@ -1,0 +1,127 @@
+To solve this problem, we need to compute the inverse kinematics for a 6-DOF manipulator by correctly determining the wrist center position and the orientation for the last three joints. The key is to accurately calculate the displacement from the wrist center to the TCP and decompose the rotation matrix into the correct Euler angles for the robot's joint axes.
+
+### Approach
+1. **Wrist Center Calculation**: The wrist center is determined by adjusting the target TCP position using the displacement caused by the last three links. This displacement is calculated based on the kinematic structure of the manipulator.
+2. **First Three Joints**: Use a geometric approach to solve for the first three joints (θ1, θ2, θ3) to position the wrist center.
+3. **Rotation Matrix**: Compute the rotation matrix from the base frame to the wrist center's frame using the first three joint angles.
+4. **Displacement Transformation**: Transform the displacement from the wrist center to the TCP into the wrist center's local frame.
+5. **Last Three Joints**: Decompose the rotation matrix into Y-Z-Y Euler angles to solve for the last three joints (θ4, θ5, θ6).
+
+### Solution Code
+```python
+import math
+import numpy as np
+
+def inverse_kinematics(p: tuple[float, float, float]) -> tuple[float, float, float, float, float, float]:
+    x_tcp, y_tcp, z_tcp = p
+
+    # Robot dimensions from URDF
+    d1 = 0.13585  # Revolute 2 y-offset
+    a2 = 0.425    # Revolute 3 z-offset
+    a3 = 0.39225  # Revolute 4 z-offset
+    d5 = 0.093    # Revolute 5 y-offset
+    d6 = 0.09465  # Revolute 6 z-offset
+    tcp_offset = 0.0823  # TCP y-offset
+
+    # Displacement from Revolute 4 to TCP in Revolute 4's frame (when joints 4-6 are zero)
+    displacement_local = np.array([0, d5 + tcp_offset, d6])
+
+    # Initial solve for first three joints to get approximate R03
+    wrist_center_guess = (x_tcp, y_tcp, z_tcp)
+    theta1, theta2, theta3 = solve_position(wrist_center_guess, d1, a2, a3)
+
+    # Compute initial rotation matrix
+    R03 = compute_orientation_matrix(theta1, theta2, theta3)
+
+    # Transform displacement to world frame
+    displacement_world = R03 @ displacement_local
+
+    # Correct wrist center position
+    wrist_center = (
+        x_tcp - displacement_world[0],
+        y_tcp - displacement_world[1],
+        z_tcp - displacement_world[2]
+    )
+
+    # Re-solve for first three joints with corrected wrist center
+    theta1, theta2, theta3 = solve_position(wrist_center, d1, a2, a3)
+    R03 = compute_orientation_matrix(theta1, theta2, theta3)
+
+    # Calculate required orientation for TCP (from URDF: RPY [0,0,π/2])
+    R_tcp = np.array([
+        [0, -1, 0],
+        [1, 0, 0],
+        [0, 0, 1]
+    ])
+
+    # Compute required orientation for last three joints
+    R36 = R03.T @ R_tcp
+
+    # Solve for last three joints using Y-Z-Y Euler angles
+    theta4, theta5, theta6 = yzy_euler_angles(R36)
+
+    return (theta1, theta2, theta3, theta4, theta5, theta6)
+
+def solve_position(p, d1, a2, a3):
+    x, y, z = p
+    # Calculate theta1
+    theta1 = math.atan2(y, x)
+    
+    # Adjust for shoulder offset
+    x_proj = math.hypot(x, y)
+    z_adj = z - d1
+    
+    # Law of cosines for theta3
+    D = (x_proj**2 + z_adj**2 - a2**2 - a3**2) / (2 * a2 * a3)
+    D = np.clip(D, -1.0, 1.0)
+    theta3 = math.acos(D)
+    
+    # Calculate theta2
+    alpha = math.atan2(z_adj, x_proj)
+    beta = math.atan2(a3 * math.sin(theta3), a2 + a3 * math.cos(theta3))
+    theta2 = alpha - beta
+    
+    return theta1, theta2, theta3
+
+def compute_orientation_matrix(theta1, theta2, theta3):
+    Rz = np.array([
+        [math.cos(theta1), -math.sin(theta1), 0],
+        [math.sin(theta1), math.cos(theta1), 0],
+        [0, 0, 1]
+    ])
+    Ry2 = np.array([
+        [math.cos(theta2), 0, math.sin(theta2)],
+        [0, 1, 0],
+        [-math.sin(theta2), 0, math.cos(theta2)]
+    ])
+    Ry3 = np.array([
+        [math.cos(theta3), 0, math.sin(theta3)],
+        [0, 1, 0],
+        [-math.sin(theta3), 0, math.cos(theta3)]
+    ])
+    return Rz @ Ry2 @ Ry3
+
+def yzy_euler_angles(R):
+    # Decompose rotation matrix into Y-Z-Y Euler angles
+    epsilon = 1e-6
+    if abs(R[1,1] - 1.0) < epsilon:
+        theta5 = 0.0
+        theta4 = math.atan2(R[2,0], R[0,0])
+        theta6 = 0.0
+    elif abs(R[1,1] + 1.0) < epsilon:
+        theta5 = math.pi
+        theta4 = math.atan2(-R[2,0], R[0,0])
+        theta6 = 0.0
+    else:
+        theta5 = math.acos(R[1,1])
+        theta4 = math.atan2(R[2,1]/math.sin(theta5), -R[0,1]/math.sin(theta5))
+        theta6 = math.atan2(R[1,2]/math.sin(theta5), R[1,0]/math.sin(theta5))
+    return theta4, theta5, theta6
+```
+
+### Explanation
+1. **Wrist Center Calculation**: The displacement from Revolute 4 to TCP is calculated based on the URDF parameters. This displacement is transformed to the world frame using the rotation matrix from the first three joints to find the correct wrist center.
+2. **First Three Joints**: A geometric approach using the law of cosines and trigonometric functions is employed to solve for the first three joints, ensuring the wrist center is accurately positioned.
+3. **Rotation Matrix**: The rotation matrix from the base frame to Revolute 4's frame is computed using the first three joint angles.
+4. **Orientation Handling**: The required orientation for the TCP is derived from the URDF's fixed orientation (90-degree rotation around Z). The rotation matrix for the last three joints is decomposed into Y-Z-Y Euler angles to ensure the correct orientation is achieved.
+5. **Numerical Stability**: Clipping and checks for numerical stability are included to handle edge cases and ensure valid solutions.

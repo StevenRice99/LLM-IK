@@ -1,0 +1,101 @@
+To solve the inverse kinematics for the given 4-DOF manipulator, we first determine the joint angles that position the end-effector (TCP) at the target position and orientation. The solution involves geometric analysis and trigonometric equations.
+
+### Approach
+1. **Position Analysis**:
+   - **Phi Calculation**: Compute the angle `phi` using the target's y-coordinate to determine the contribution of the fourth joint.
+   - **Wrist Position**: Calculate the wrist position (before the fourth joint) by subtracting the TCP's offset from the target position.
+   - **Two-Link IK**: Solve for the first two joint angles (θ₁, θ₂) using the wrist position with the two-link inverse kinematics equations.
+
+2. **Orientation Analysis**:
+   - **Third Joint (θ₃)**: Determine θ₃ using the target orientation and the previously found angles.
+   - **Fourth Joint (θ₄)**: Calculate θ₄ based on the derived `phi` and θ₃.
+
+### Solution Code
+```python
+import numpy as np
+from numpy import cos, sin, arctan2, arccos, sqrt, pi
+
+def inverse_kinematics(p: tuple[float, float, float], r: tuple[float, float, float]) -> tuple[float, float, float, float]:
+    x_target, y_target, z_target = p
+    roll, pitch, yaw = r
+
+    # Calculate phi from the y-coature
+    y_wrist = y_target - 0.093
+    cos_phi = (y_wrist) / 0.0823
+    phi = arccos(np.clip(cos_phi, -1.0, 1.0))
+    phi_options = [phi, -phi]
+
+    # Link lengths
+    L1, L2 = 0.39225, 0.09465
+
+    for phi_val in phi_options:
+        # Wrist position components affected by phi
+        Vx = 0.0823 * sin(phi_val)
+        Vz = 0.0
+
+        # Adjusted target for wrist
+        W_x = x_target - Vx
+        W_z = z_target - Vz
+
+        # Two-link IK for theta1 and theta2
+        D_sq = W_x**2 + W_z**2
+        D = sqrt(D_sq)
+        if D > L1 + L2 or D < abs(L1 - L2):
+            continue
+
+        cos_theta2 = (D_sq - L1**2 - L2**2) / (2 * L1 * L2)
+        theta2 = arccos(np.clip(cos_theta2, -1.0, 1.0))
+        theta2_ops = [theta2, -theta2]
+
+        for theta2 in theta2_ops:
+            gamma = arctan2(W_z, W_x)
+            denominator = L1 + L2 * cos(theta2)
+            numerator = L2 * sin(theta2)
+            delta = arctan2(numerator, denominator)
+            theta1 = gamma - delta
+
+            # Calculate theta3 and theta4 using orientation
+            R_desired = euler_to_rotation_matrix(roll, pitch, yaw)
+            R_left = rotation_y(theta1) @ rotation_y(theta2)
+            M = np.linalg.inv(R_left) @ R_desired @ rotation_z(-pi/2)
+
+            # Extract theta4 from M
+            theta4 = arctan2(M[0, 2], M[2, 2])
+            theta3 = theta4 - phi_val
+
+            # Check joint limits (assumed within limits as per problem statement)
+            return (theta1, theta2, theta3, theta4)
+
+    # Fallback (as per problem statement, target is reachable)
+    return (0.0, 0.0, 0.0, 0.0)
+
+def euler_to_rotation_matrix(roll, pitch, yaw):
+    R_x = np.array([[1, 0, 0],
+                    [0, cos(roll), -sin(roll)],
+                    [0, sin(roll), cos(roll)]])
+    R_y = np.array([[cos(pitch), 0, sin(pitch)],
+                    [0, 1, 0],
+                    [-sin(pitch), 0, cos(pitch)]])
+    R_z = np.array([[cos(yaw), -sin(yaw), 0],
+                    [sin(yaw), cos(yaw), 0],
+                    [0, 0, 1]])
+    return R_z @ R_y @ R_x
+
+def rotation_y(theta):
+    return np.array([[cos(theta), 0, sin(theta)],
+                     [0, 1, 0],
+                     [-sin(theta), 0, cos(theta)]])
+
+def rotation_z(theta):
+    return np.array([[cos(theta), -sin(theta), 0],
+                     [sin(theta), cos(theta), 0],
+                     [0, 0, 1]])
+```
+
+### Explanation
+1. **Phi Calculation**: The angle `phi` is derived from the target's y-coordinate, adjusting for the fixed offset in the manipulator's structure.
+2. **Wrist Position**: The wrist position is computed by removing the contribution of the fourth joint and TCP from the target position.
+3. **Two-Link IK**: Using geometric inverse kinematics, the first two joint angles (θ₁, θ₂) are determined to position the wrist.
+4. **Orientation Handling**: The remaining angles (θ₃, θ₄) are calculated using the desired orientation, ensuring the end-effector's rotation matches the target. This involves matrix transformations and solving for the angles that align the orientation matrices.
+
+This approach efficiently decouples the position and orientation problems, leveraging geometric and algebraic methods to find the joint angles.

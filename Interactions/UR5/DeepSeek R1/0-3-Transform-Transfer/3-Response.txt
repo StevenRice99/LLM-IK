@@ -1,0 +1,79 @@
+To solve this problem, we need to determine the joint angles (q1, q2, q3, q4) for a 4-DOF robotic arm to reach a specified position and orientation. The key challenge is correctly accounting for both the position and orientation constraints, particularly the yaw (q1) and pitch (sum of q2, q3, q4).
+
+### Approach
+1. **Calculate q1 Based on Position and Orientation**: The first joint (q1) controls the yaw. We adjust the target position by rotating it using the target yaw to align the subsequent joints in the correct plane.
+2. **Solve for q2 and q3**: Using the transformed position, we solve for q2 and q3 using geometric relationships similar to the existing position-only solution but considering the orientation constraints.
+3. **Adjust for Elbow Configuration**: Consider both possible configurations (elbow up and elbow down) for q3 to ensure the correct solution is chosen.
+4. **Calculate q4**: The fourth joint (q4) is determined to achieve the target pitch by compensating for the sum of q2 and q3.
+
+### Solution Code
+```python
+import numpy as np
+
+def inverse_kinematics(p: tuple[float, float, float], r: tuple[float, float, float]) -> tuple[float, float, float, float]:
+    x_target, y_target, z_target = p
+    target_yaw = r[2]
+    target_pitch = r[1]
+
+    # Calculate q1 based on target yaw
+    q1 = target_yaw
+
+    # Transform target position to the frame after q1 rotation
+    cos_q1 = np.cos(q1)
+    sin_q1 = np.sin(q1)
+    x_rot = x_target * cos_q1 + y_target * sin_q1
+    y_rot = -x_target * sin_q1 + y_target * cos_q1
+    z_rot = z_target
+
+    # Solve for q3
+    numerator = x_rot**2 + y_rot**2 + z_rot**2 - 0.346395
+    denominator = 0.3341625
+    cos_q3 = numerator / denominator
+    cos_q3 = np.clip(cos_q3, -1.0, 1.0)
+    q3_pos = np.arccos(cos_q3)
+    q3_neg = -q3_pos
+
+    # Solve for q2 for both q3 configurations
+    solutions = []
+    for q3 in [q3_pos, q3_neg]:
+        A = 0.425 + 0.39225 * np.cos(q3)
+        B = 0.39225 * np.sin(q3)
+        S_squared = x_rot**2 + y_rot**2 - 0.10915**2
+        S = np.sqrt(S_squared) if S_squared >= 0 else 0.0
+        C = z_rot
+
+        numerator_q2 = S * A - C * B
+        denominator_q2 = S * B + C * A
+        q2 = np.arctan2(numerator_q2, denominator_q2)
+        solutions.append((q2, q3))
+
+    # Choose the solution that matches the target pitch when combined with q4
+    best_error = float('inf')
+    best_joints = None
+    for q2, q3 in solutions:
+        q4 = target_pitch - (q2 + q3)
+        q4 = (q4 + np.pi) % (2 * np.pi) - np.pi  # Normalize to [-pi, pi]
+
+        # Check if within joint limits (assuming limits are [-2pi, 2pi])
+        if -6.2831853 <= q4 <= 6.2831853:
+            error = abs((q2 + q3 + q4) - target_pitch)
+            if error < best_error:
+                best_error = error
+                best_joints = (q1, q2, q3, q4)
+
+    if best_joints is not None:
+        return best_joints
+
+    # Fallback if no valid solution found (though problem states all targets are reachable)
+    q2, q3 = solutions[0]
+    q4 = target_pitch - (q2 + q3)
+    return (q1, q2, q3, q4)
+```
+
+### Explanation
+1. **Yaw Calculation (q1)**: The target yaw directly sets q1, aligning the base rotation with the desired orientation.
+2. **Position Transformation**: The target position is rotated by q1 to simplify the subsequent 2D kinematic problem in the x-z plane.
+3. **Elbow Configurations**: Both possible solutions for q3 (positive and negative) are considered to handle different arm configurations.
+4. **Pitch Adjustment (q4)**: The fourth joint angle is calculated to achieve the target pitch by compensating for the sum of q2 and q3, ensuring the total pitch matches the target.
+
+This approach ensures that both position and orientation constraints are met by considering geometric relationships and multiple joint configurations.

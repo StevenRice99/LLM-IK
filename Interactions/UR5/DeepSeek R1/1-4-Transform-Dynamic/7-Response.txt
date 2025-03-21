@@ -1,0 +1,85 @@
+To address the unreachable error and correctly compute the joint angles, we need to properly account for the robot's link offsets and adjust the target position and orientation transformations.
+
+### Approach
+1. **Position Adjustment:** 
+   - Compute the first joint angle (θ₁) using the target's x and z coordinates.
+   - Transform the target position into the coordinate frame after θ₁ rotation and adjust for the link offsets.
+   
+2. **Orientation Handling:** 
+   - Use the transformed position and orientation to solve for the remaining joints (θ₂, θ₃, θ₄) using geometric and matrix transformations.
+
+### Solution Code
+```python
+import numpy as np
+import math
+
+def inverse_kinematics(p: tuple[float, float, float], r: tuple[float, float, float]) -> tuple[float, float, float, float]:
+    x_target, y_target, z_target = p
+    rx, ry, rz = r
+
+    # Compute theta1 using the existing code 1 approach
+    theta1 = math.atan2(x_target, z_target)
+
+    # Adjust the target position to the coordinate frame after theta1 rotation and link offsets
+    cos_theta1 = math.cos(theta1)
+    sin_theta1 = math.sin(theta1)
+    # Rotate target position to Revolute2's frame (after theta1 rotation)
+    x_rot = x_target * cos_theta1 + z_target * sin_theta1
+    z_rot = -x_target * sin_theta1 + z_target * cos_theta1
+    # Adjust for Revolute2's position (0, -0.1197, 0.425) in its parent frame
+    x_adj = x_rot - 0.0  # Revolute2's x is 0
+    y_adj = y_target + 0.1197  # Revolute2's y is -0.1197 in parent frame
+    z_adj = z_rot - 0.425  # Revolute2's z is 0.425
+
+    # The remaining position to reach after Revolute2 (Revolute3, Revolute4, TCP)
+    # Revolute3's position: [0, 0, 0.39225], Revolute4's: [0, 0.093, 0], TCP: [0, 0, 0.09465]
+    # The effective length from Revolute2 to TCP is 0.39225 + 0.093 + 0.09465 = 0.5799
+    # However, since Revolute4's axis is Z, the orientation affects the final position
+
+    # Compute the target orientation matrix
+    R_roll = np.array([[1, 0, 0], [0, np.cos(rx), -np.sin(rx)], [0, np.sin(rx), np.cos(rx)]])
+    R_pitch = np.array([[np.cos(ry), 0, np.sin(ry)], [0, 1, 0], [-np.sin(ry), 0, np.cos(ry)]])
+    R_yaw = np.array([[np.cos(rz), -np.sin(rz), 0], [np.sin(rz), np.cos(rz), 0], [0, 0, 1]])
+    R_target = R_yaw @ R_pitch @ R_roll
+
+    # Compute R_123 = R1 * R2 * R3
+    # Use existing code 2 approach to solve theta2, theta3, theta4
+    r13 = R_target[0, 2]
+    r33 = R_target[2, 2]
+    theta_sum = math.atan2(r13, r33)
+
+    A = 0.39225  # Revolute3's z offset
+    B = 0.093 + 0.09465  # Revolute4's y offset + TCP's z offset
+
+    sin_S = math.sin(theta_sum)
+    cos_S = math.cos(theta_sum)
+    numerator_sin = x_adj - B * sin_S
+    numerator_cos = z_adj - B * cos_S
+    theta2 = math.atan2(numerator_sin, numerator_cos)
+    theta3 = theta_sum - theta2
+
+    # Compute theta4 from the orientation matrix
+    R1 = np.array([[math.cos(theta1), 0, math.sin(theta1)],
+                   [0, 1, 0],
+                   [-math.sin(theta1), 0, math.cos(theta1)]])
+    R2 = np.array([[math.cos(theta2), 0, math.sin(theta2)],
+                   [0, 1, 0],
+                   [-math.sin(theta2), 0, math.cos(theta2)]])
+    R3 = np.array([[math.cos(theta3), 0, math.sin(theta3)],
+                   [0, 1, 0],
+                   [-math.sin(theta3), 0, math.cos(theta3)]])
+    R123 = R1 @ R2 @ R3
+    R4 = R123.T @ R_target
+    theta4 = math.atan2(R4[1, 0], R4[0, 0])
+
+    return (theta1, theta2, theta3, theta4)
+```
+
+### Explanation
+1. **Theta1 Calculation:** The first joint angle is determined using the arctangent of the target's x and z coordinates, aligning the arm in the correct plane.
+2. **Position Adjustment:** The target position is transformed into the coordinate frame after θ₁ rotation, adjusting for Revolute 2's offsets. This isolates the problem to a planar (x-z) problem for the remaining joints.
+3. **Orientation Handling:** The target orientation is decomposed into a rotation matrix. The sum of the first three joint angles (θ_sum) is derived from this matrix to align the end-effector's orientation.
+4. **Theta2 and Theta3:** These angles are computed using geometric relationships to achieve the adjusted target position.
+5. **Theta4 Calculation:** The fourth joint angle is derived by aligning the cumulative rotation of the first three joints with the target orientation.
+
+This approach ensures proper handling of link offsets and coordinate transformations, allowing the end-effector to reach the desired position and orientation.

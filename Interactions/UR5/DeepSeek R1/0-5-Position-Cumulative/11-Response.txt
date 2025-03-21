@@ -1,0 +1,120 @@
+To solve this problem, we need to compute the inverse kinematics for a 6-DOF manipulator to reach a target position with a fixed orientation. The solution involves determining the joint angles for the first three joints to position the wrist center correctly and then solving for the last three joints to achieve the desired orientation.
+
+### Approach
+1. **Wrist Center Calculation**: Adjust the target position based on the fixed orientation and link lengths to find the wrist center position.
+2. **First Three Joints (θ1, θ2, θ3)**: Use geometric relationships and trigonometric calculations to position the wrist center, considering multiple possible configurations (elbow up/down).
+3. **Last Three Joints (θ4, θ5, θ6)**: Decompose the rotation matrix to achieve the desired orientation using YZY Euler angles, handling both singular and non-singular cases.
+
+### Solution Code
+```python
+import math
+import numpy as np
+
+def inverse_kinematics(p: tuple[float, float, float]) -> tuple[float, float, float, float, float, float]:
+    x_tcp, y_tcp, z_tcp = p
+
+    # Constants for the last three links and TCP
+    a = 0.0823  # TCP's y-offset from Revolute 6
+    L1 = 0.093   # Revolute 5's y-offset from Revolute 4
+    L2 = 0.09465 # Revolute 6's z-offset from Revolute 5
+
+    # Compute wrist center (Revolute 4's position) considering fixed orientation
+    x_wc = x_tcp + (L1 + a)
+    y_wc = y_tcp
+    z_wc = z_tcp - L2
+
+    # Solve first three joints (theta1, theta2, theta3)
+    k = 0.01615  # Net Y offset from Revolute 1 to Revolute 3
+    k_sq = k ** 2
+    x, y, z = x_wc, y_wc, z_wc
+
+    # Corrected numerator for cosθ3 (0.425^2 + 0.39225^2 = 0.334485)
+    numerator_cosθ3 = x**2 + y**2 + z**2 - 0.334485
+    denominator_cosθ3 = 2 * 0.425 * 0.39225  # 0.3334125
+    cosθ3 = numerator_cosθ3 / denominator_cosθ3
+    cosθ3 = max(min(cosθ3, 1.0), -1.0)
+    θ3_options = [math.acos(cosθ3), -math.acos(cosθ3)] if abs(cosθ3) <= 1.0 else []
+
+    valid_solutions = []
+    for θ3 in θ3_options:
+        C = 0.425 + 0.39225 * math.cos(θ3)
+        D = 0.39225 * math.sin(θ3)
+        A_sq = x**2 + y**2 - k_sq
+        if A_sq < 0:
+            continue
+        A = math.sqrt(A_sq)
+        denominator_theta2 = C**2 + D**2
+        if denominator_theta2 < 1e-6:
+            continue
+        sinθ2 = (C * A - D * z) / denominator_theta2
+        cosθ2 = (C * z + D * A) / denominator_theta2
+        θ2 = math.atan2(sinθ2, cosθ2)
+        denominator_theta1 = x**2 + y**2
+        if denominator_theta1 == 0:
+            θ1 = 0.0
+        else:
+            numerator_cosθ1 = A * x + k * y
+            numerator_sinθ1 = A * y - k * x
+            θ1 = math.atan2(numerator_sinθ1, numerator_cosθ1)
+        valid_solutions.append((θ1, θ2, θ3))
+
+    if not valid_solutions:
+        return (0.0, 0.0, 0.0, 0.0, 0.0, 0.0)
+
+    # Select the first valid solution for the first three joints
+    θ1, θ2, θ3 = valid_solutions[0]
+
+    # Compute rotation matrix R_03 (Z-Y-Y composition)
+    R_z = np.array([
+        [math.cos(θ1), -math.sin(θ1), 0],
+        [math.sin(θ1), math.cos(θ1), 0],
+        [0, 0, 1]
+    ])
+    R_y_2 = np.array([
+        [math.cos(θ2), 0, math.sin(θ2)],
+        [0, 1, 0],
+        [-math.sin(θ2), 0, math.cos(θ2)]
+    ])
+    R_y_3 = np.array([
+        [math.cos(θ3), 0, math.sin(θ3)],
+        [0, 1, 0],
+        [-math.sin(θ3), 0, math.cos(θ3)]
+    ])
+    R_03 = R_z @ R_y_2 @ R_y_3
+
+    # Desired rotation matrix (90 degrees around Z)
+    R_desired = np.array([
+        [0, -1, 0],
+        [1, 0, 0],
+        [0, 0, 1]
+    ])
+
+    # Compute R_36 = R_03^T @ R_desired
+    R_03_T = np.transpose(R_03)
+    R_36 = R_03_T @ R_desired
+
+    # Decompose R_36 into YZY Euler angles (theta4, theta5, theta6)
+    theta5 = math.acos(R_36[2, 2])
+    valid_wrist = []
+    for t5 in [theta5, -theta5]:
+        if abs(t5) < 1e-6:
+            theta4 = 0.0
+            theta6 = math.atan2(R_36[0, 1], R_36[0, 0])
+        else:
+            sin_t5 = math.sin(t5)
+            theta4 = math.atan2(R_36[1, 2] / sin_t5, R_36[0, 2] / sin_t5)
+            theta6 = math.atan2(R_36[2, 1] / sin_t5, -R_36[2, 0] / sin_t5)
+        valid_wrist.append((theta4, t5, theta6))
+
+    if valid_wrist:
+        theta4, theta5, theta6 = valid_wrist[0]
+    else:
+        theta4, theta5, theta6 = 0.0, 0.0, 0.0
+
+    return (θ1, θ2, θ3, theta4, theta5, theta6)
+```
+
+### Explanation
+1. **Wrist Center Calculation**: The wrist center is computed by adjusting the target TCP position based on the fixed orientation and link lengths. The displacement from the wrist center to the TCP is calculated considering the fixed rotation, leading to the correct wrist center coordinates.
+2. **First Three Joints**: Using geometric relationships and trigonometric calculations, the angles for the first three joints are determined to position the wrist center correctly. The corrected parameters ensure accurate computation of the joint angles.
+3. **Last Three Joints**: The fixed orientation (90-degree rotation around Z) is achieved by decomposing the required rotation matrix into YZY Euler angles. This involves computing the rotation matrix from the first three joints and then solving for the wrist angles to achieve the desired orientation, handling both singular and non-singular cases.

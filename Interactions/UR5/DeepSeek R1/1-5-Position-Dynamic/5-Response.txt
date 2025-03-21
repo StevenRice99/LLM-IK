@@ -1,0 +1,132 @@
+To solve this problem, we need to determine the joint angles for a 5-DOF robotic arm to position its Tool Center Point (TCP) at a given target position while maintaining the required orientation. The solution involves breaking down the problem into two parts: positioning the third joint using the first two joints and then adjusting the remaining joints to reach the target from there, considering both position and orientation constraints.
+
+### Approach
+1. **First Two Joints (Theta1 and Theta2):** Use the provided inverse kinematics solution for the first two joints to position the third joint's origin in the x-z plane of the world frame.
+2. **Displacement Calculation:** Compute the displacement from the third joint's origin to the target position in the world frame.
+3. **Coordinate Transformation:** Rotate this displacement into the coordinate frame of the third joint to account for the rotations applied by the first two joints.
+4. **Last Three Joints (Theta3, Theta4, Theta5):** Solve for these angles considering both position and orientation constraints, ensuring the TCP reaches the target with the correct orientation.
+
+### Solution Code
+```python
+import math
+
+def inverse_kinematics(p: tuple[float, float, float]) -> tuple[float, float, float, float, float]:
+    x_target, y_target, z_target = p
+
+    # Solve for theta1 and theta2 to position Revolute 3's origin in x-z plane
+    theta1, theta2 = inverse_kinematics_existing1((x_target, 0, z_target))
+
+    # Calculate Revolute 3's origin in world frame
+    pos_revolute3_x = 0.425 * math.sin(theta1) + 0.39225 * math.sin(theta1 + theta2)
+    pos_revolute3_z = 0.425 * math.cos(theta1) + 0.39225 * math.cos(theta1 + theta2)
+    pos_revolute3_y = -0.1197
+
+    # Compute displacement from Revolute 3 to target in world frame
+    dx = x_target - pos_revolute3_x
+    dy = y_target - pos_revolute3_y
+    dz = z_target - pos_revolute3_z
+
+    # Rotate displacement into Revolute 3's local frame (Y rotation by theta1 + theta2)
+    total_angle = theta1 + theta2
+    cos_ta = math.cos(total_angle)
+    sin_ta = math.sin(total_angle)
+    dx_local = dx * cos_ta + dz * sin_ta
+    dz_local = -dx * sin_ta + dz * cos_ta
+    dy_local = dy
+
+    # Solve for theta3, theta4, theta5 considering orientation constraints
+    theta3, theta4, theta5 = inverse_kinematics_last_three((dx_local, dy_local, dz_local))
+
+    return (theta1, theta2, theta3, theta4, theta5)
+
+def inverse_kinematics_existing1(p):
+    x, y, z = p
+    L1 = 0.425
+    L2 = 0.39225
+    d = math.hypot(x, z)
+    
+    # Clamp cos_theta2 to valid range
+    numerator = d**2 - L1**2 - L2**2
+    denominator = 2 * L1 * L2
+    cos_theta2 = numerator / denominator
+    cos_theta2 = max(min(cos_theta2, 1.0), -1.0)
+    
+    theta2 = math.acos(cos_theta2)
+    
+    # Determine solution quadrant
+    cross_product = x * (L1 + L2 * math.cos(theta2)) - z * (L2 * math.sin(theta2))
+    if cross_product < 0:
+        theta2 = -theta2
+    
+    alpha = math.atan2(x, z)
+    beta = math.atan2(L2 * math.sin(theta2), L1 + L2 * math.cos(theta2))
+    theta1 = alpha - beta
+    return (theta1, theta2)
+
+def inverse_kinematics_last_three(p):
+    dx_local, dy_local, dz_local = p
+    a = 0.0823  # TCP's Y offset
+    L4 = 0.093   # Revolute4's Y offset
+    L5 = 0.09465 # Revolute5's Z offset
+
+    # Solve for phi = theta4 - theta5 based on dy_local
+    target_y = dy_local
+    numerator = target_y - L4
+    denominator = a
+    if abs(denominator) < 1e-9:
+        raise ValueError("Target unreachable")
+    c_phi = numerator / denominator
+    c_phi = max(min(c_phi, 1.0), -1.0)
+    phi = math.acos(c_phi)
+    phi_options = [phi, -phi]
+
+    best_solution = None
+    min_error = float('inf')
+
+    for phi in phi_options:
+        # Calculate coefficients for theta3 equations
+        A = -a * math.sin(phi)
+        B = L5
+
+        # Solve for theta3 using system of equations
+        denominator = A**2 + B**2
+        if abs(denominator) < 1e-9:
+            continue
+
+        sin_theta3 = (B * dx_local - A * dz_local) / denominator
+        cos_theta3 = (A * dx_local + B * dz_local) / denominator
+
+        # Normalize to handle numerical inaccuracies
+        norm = math.hypot(sin_theta3, cos_theta3)
+        if norm < 1e-6:
+            continue
+        sin_theta3 /= norm
+        cos_theta3 /= norm
+
+        theta3 = math.atan2(sin_theta3, cos_theta3)
+
+        # Calculate achieved position
+        x_achieved = A * cos_theta3 + B * sin_theta3
+        z_achieved = -A * sin_theta3 + B * cos_theta3
+        error = (x_achieved - dx_local)**2 + (z_achieved - dz_local)**2
+
+        if error < min_error:
+            min_error = error
+            # Assume theta5 = 0 to satisfy orientation constraint
+            theta4 = phi
+            theta5 = 0.0
+            best_solution = (theta3, theta4, theta5)
+
+    if best_solution is None:
+        raise ValueError("Target unreachable for last three joints")
+
+    return best_solution
+```
+
+### Explanation
+1. **First Two Joints:** The function `inverse_kinematics_existing1` calculates the angles for the first two joints to position the third joint's origin in the x-z plane.
+2. **Displacement Calculation:** The displacement from the third joint's origin to the target is computed in the world frame.
+3. **Coordinate Transformation:** This displacement is rotated into the third joint's local frame to account for the rotations from the first two joints.
+4. **Last Three Joints:** The function `inverse_kinematics_last_three` solves for the angles considering both position and orientation constraints. It uses the y-component to determine the required angle difference between theta4 and theta5, then solves for theta3 using the x and z components while assuming theta5 is zero to maintain the orientation constraint.
+
+This approach ensures that the TCP reaches the target position while maintaining the required orientation, addressing both position and orientation constraints in the inverse kinematics solution.

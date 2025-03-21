@@ -1,0 +1,120 @@
+To solve this problem, we need to determine the joint angles for a 4-DOF robotic arm to reach a specified target position and orientation. The key adjustments involve correctly computing the first joint angle (theta1) to ensure the target position lies in the correct plane for the subsequent joints to reach it, and accurately transforming the target position and orientation into the coordinate system of the second joint.
+
+### Approach
+1. **Calculate Theta1 Using Law of Cosines:** The first joint angle (theta1) is computed by solving a geometric equation that accounts for the offset of the second link, ensuring the target position lies in the X-Z plane of the second joint's frame.
+2. **Transform Target Position:** For each valid theta1, the target position is rotated and translated into the second joint's coordinate system.
+3. **Adjust Target Orientation:** The target orientation's yaw component is adjusted by subtracting theta1 to express it in the local frame of the second joint.
+4. **Solve Planar Inverse Kinematics:** The remaining three joints are solved using geometric relationships, considering both elbow-up and elbow-down configurations.
+5. **Evaluate Solutions:** All possible solutions are evaluated based on position and orientation errors to select the optimal joint angles.
+
+### Solution Code
+```python
+import math
+import numpy as np
+
+def inverse_kinematics(p: tuple[float, float, float], r: tuple[float, float, float]) -> tuple[float, float, float, float]:
+    x_target, y_target, z_target = p
+    roll, pitch, yaw = r
+
+    # Compute possible theta1 solutions using law of cosines
+    L = 0.13585  # Revolute2's y offset
+    D = math.hypot(x_target, y_target)
+    if D < 1e-6:
+        theta1_candidates = [0.0]
+    else:
+        cos_alpha = L / D
+        if abs(cos_alpha) > 1.0:
+            return (0.0, 0.0, 0.0, 0.0)  # Unreachable (per problem statement)
+        alpha = math.acos(cos_alpha)
+        base_angle = math.atan2(-x_target, y_target)
+        theta1_candidates = [base_angle + alpha, base_angle - alpha]
+
+    best_error = float('inf')
+    best_solution = (0.0, 0.0, 0.0, 0.0)
+
+    for theta1 in theta1_candidates:
+        # Transform target to Revolute2's frame
+        cos_t1 = math.cos(theta1)
+        sin_t1 = math.sin(theta1)
+        x_rot = x_target * cos_t1 + y_target * sin_t1
+        y_rot = -x_target * sin_t1 + y_target * cos_t1 - L
+        z_rot = z_target
+
+        # Check if projection is valid (y_rot should be near zero)
+        if abs(y_rot) > 1e-6:
+            continue
+
+        x_planar = x_rot
+        z_planar = z_rot
+
+        # Transform orientation to Revolute2's frame
+        adjusted_yaw = (yaw - theta1) % (2 * math.pi)
+
+        # Compute target orientation sum (existing_code_2 logic)
+        cr, sr = math.cos(roll), math.sin(roll)
+        cp, sp = math.cos(pitch), math.sin(pitch)
+        cy, sy = math.cos(adjusted_yaw), math.sin(adjusted_yaw)
+        R = np.array([
+            [cy * cp, cy * sp * sr - sy * cr, cy * sp * cr + sy * sr],
+            [sy * cp, sy * sp * sr + cy * cr, sy * sp * cr - cy * sr],
+            [-sp, cp * sr, cp * cr]
+        ])
+        target_sum = math.atan2(R[0, 2], R[0, 0])
+
+        # Solve planar arm (joints 2-4)
+        L1, L2 = 0.425, 0.39225
+        x_arm, z_arm = x_planar, z_planar
+
+        d_sq = x_arm**2 + z_arm**2
+        cos_theta2 = (d_sq - L1**2 - L2**2) / (2 * L1 * L2)
+        cos_theta2 = np.clip(cos_theta2, -1.0, 1.0)
+        theta2 = math.acos(cos_theta2)
+        theta2_alt = -theta2
+
+        solutions = []
+        for t2 in [theta2, theta2_alt]:
+            C = L1 + L2 * math.cos(t2)
+            D = L2 * math.sin(t2)
+            denom = C**2 + D**2
+            if denom < 1e-6:
+                continue
+            sin_theta1_arm = (C * x_arm - D * z_arm) / denom
+            cos_theta1_arm = (D * x_arm + C * z_arm) / denom
+            if abs(sin_theta1_arm) > 1.0 or abs(cos_theta1_arm) > 1.0:
+                continue
+            theta1_arm = math.atan2(sin_theta1_arm, cos_theta1_arm)
+            theta3 = (target_sum - theta1_arm - t2) % (2 * math.pi)
+            solutions.append((theta1_arm, t2, theta3))
+            solutions.append((theta1_arm, t2, theta3 - 2 * math.pi))
+            solutions.append((theta1_arm, t2, theta3 + 2 * math.pi))
+
+        # Evaluate solutions
+        for sol in solutions:
+            t1_arm, t2, t3 = sol
+            if not all(-2*math.pi <= angle <= 2*math.pi for angle in (t1_arm, t2, t3)):
+                continue
+
+            # Position error
+            x_actual = L1 * math.sin(t1_arm) + L2 * math.sin(t1_arm + t2)
+            z_actual = L1 * math.cos(t1_arm) + L2 * math.cos(t1_arm + t2)
+            pos_error = math.hypot(x_actual - x_arm, z_actual - z_arm)
+
+            # Orientation error
+            orient_sum = (t1_arm + t2 + t3) % (2 * math.pi)
+            orient_error = min(abs(orient_sum - target_sum), 2*math.pi - abs(orient_sum - target_sum))
+
+            total_error = pos_error + orient_error
+            if total_error < best_error:
+                best_error = total_error
+                best_solution = (theta1, t1_arm, t2, t3)
+
+    return best_solution
+```
+
+### Explanation
+1. **Theta1 Calculation:** Using the law of cosines, we compute two possible theta1 values that account for the second link's offset, ensuring the target position lies in the correct plane.
+2. **Position Transformation:** For each theta1 candidate, the target position is rotated and translated into the second joint's coordinate system, ensuring the Y component is zero.
+3. **Orientation Adjustment:** The target orientation's yaw is adjusted by subtracting theta1 to express it in the local frame of the second joint.
+4. **Planar Arm Solution:** The inverse kinematics for the remaining three joints is solved using geometric relationships, considering both elbow-up and elbow-down configurations. The best solution is selected based on minimizing combined position and orientation errors.
+
+This approach ensures accurate transformation of the target position and orientation into the relevant coordinate systems, allowing the robotic arm to reach the desired configuration.

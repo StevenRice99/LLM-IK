@@ -1,0 +1,89 @@
+To solve this problem, we need to determine the joint angles for a 4-DOF robotic manipulator to reach a specified target position. The solution involves decomposing the problem into two main parts: determining the first joint angle and then solving for the remaining angles using the transformed target position, while accounting for the kinematic structure of the manipulator.
+
+### Approach
+1. **First Joint (Theta1)**: The first joint rotates around the Y-axis. The angle for this joint is determined using the arctangent function to align the projection of the target position onto the X-Z plane.
+2. **Transformation to Revolute 2's Frame**: After determining Theta1, the target position is transformed into the coordinate system relative to the second joint (Revolute 2). This involves rotating the target position by -Theta1 and adjusting for the translation from the base to Revolute 2.
+3. **Remaining Joints (Theta2, Theta3)**: Using the transformed target position, we solve for the remaining joints. Theta4 is set to zero as it does not affect the position of the end-effector, given the kinematic structure and the problem constraints.
+
+### Solution Code
+```python
+import math
+
+def inverse_kinematics(p: tuple[float, float, float]) -> tuple[float, float, float, float]:
+    x, y, z = p
+    
+    # Solve for theta1 using the first existing method
+    theta1 = math.atan2(x, z)
+    
+    # Transform the target position into Revolute 2's frame
+    cos_theta1 = math.cos(theta1)
+    sin_theta1 = math.sin(theta1)
+    x_rot = x * cos_theta1 + z * sin_theta1
+    z_rot = -x * sin_theta1 + z * cos_theta1
+    x_target = x_rot
+    y_target = y
+    z_target = z_rot - 0.39225  # Adjust for Revolute 2's z offset
+    
+    # Parameters from the problem details
+    L1 = 0.093   # Revolute 3's y offset
+    a = 0.0823   # TCP's y offset
+    
+    # Compute theta3 based on y_target
+    cos_theta3 = (y_target - L1) / a
+    if abs(cos_theta3) > 1:
+        raise ValueError('Target position is unreachable')
+    cos_theta3 = max(min(cos_theta3, 1.0), -1.0)  # Clamp to valid range
+    theta3_options = [math.acos(cos_theta3), -math.acos(cos_theta3)]
+    
+    best_solution = None
+    min_error = float('inf')
+    
+    for theta3 in theta3_options:
+        sin_theta3 = math.sin(theta3)
+        
+        # Coefficients for the linear system
+        A = -a * sin_theta3
+        B = 0.09465
+        C = a * sin_theta3
+        D = 0.09465
+        
+        denominator = A * C - B * D
+        if abs(denominator) < 1e-9:
+            continue
+        
+        # Solve for cos(theta2) and sin(theta2)
+        cos_theta2 = (C * x_target - B * z_target) / denominator
+        sin_theta2 = (-D * x_target + A * z_target) / denominator
+        
+        # Check if cos^2 + sin^2 is approximately 1
+        if abs(cos_theta2**2 + sin_theta2**2 - 1) > 1e-6:
+            continue
+        
+        theta2 = math.atan2(sin_theta2, cos_theta2)
+        
+        # Calculate the position for error checking
+        x_curr = A * math.cos(theta2) + B * math.sin(theta2)
+        z_curr = C * math.sin(theta2) + D * math.cos(theta2)
+        error = (x_curr - x_target)**2 + (z_curr - z_target)**2
+        
+        if error < min_error:
+            min_error = error
+            best_solution = (theta2, theta3)
+    
+    if best_solution is None:
+        raise ValueError('Target position is unreachable')
+    
+    theta2_sub, theta3_sub = best_solution
+    theta4_sub = 0.0  # Theta4 does not affect position, set to 0
+    
+    return (theta1, theta2_sub, theta3_sub, theta4_sub)
+```
+
+### Explanation
+1. **Theta1 Calculation**: The first joint angle (Theta1) is calculated using the arctangent of the target's X and Z coordinates, aligning the manipulator in the direction of the target's projection on the X-Z plane.
+2. **Coordinate Transformation**: The target position is transformed into the coordinate system of the second joint (Revolute 2) by rotating it by -Theta1 and adjusting for the vertical offset of Revolute 2.
+3. **Theta3 Calculation**: The third joint angle (Theta3) is derived from the Y component of the transformed target position using the inverse cosine function.
+4. **Theta2 Calculation**: The second joint angle (Theta2) is determined by solving a system of linear equations derived from the X and Z components of the transformed target position.
+5. **Theta4 Handling**: The fourth joint angle (Theta4) is set to zero as it does not influence the position of the end-effector in this configuration, allowing the solution to focus on the necessary angles for positioning.
+
+This approach ensures that the manipulator reaches the target position by solving the necessary joint angles while adhering to the kinematic constraints of the robot.

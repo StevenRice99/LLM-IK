@@ -1,0 +1,108 @@
+To solve the inverse kinematics for the 4-DOF manipulator, we need to determine the joint angles (theta1, theta2, theta3, theta4) that position the end-effector (TCP) at the target coordinates (x, y, z). The solution involves solving a system of equations derived from the forward kinematics of the robot.
+
+### Approach
+1. **Calculate Theta4:** Use trigonometric identities to solve for theta4 based on the target position and link lengths.
+2. **Calculate Phi (theta1 + theta2):** Determine the combined angle phi using the target's Z-coordinate and theta4.
+3. **Calculate Theta3:** Solve for theta3 using the target's Y-coordinate and the derived phi.
+4. **Calculate Theta1 and Theta2:** Resolve the individual angles theta1 and theta2 from phi using geometric considerations.
+
+### Solution Code
+```python
+import math
+
+def inverse_kinematics(p: tuple[float, float, float]) -> tuple[float, float, float, float]:
+    x_target, y_target, z_target = p
+
+    # Constants from the URDF
+    A = 0.39225  # Revolute 2's Z offset
+    B = 0.093     # Revolute 3's Y offset
+    C = 0.09465   # Revolute 4's Z offset
+    D = 0.0823     # TCP's Y offset (after rotation)
+
+    # Compute K, M, N for theta4 equation
+    K = A**2 + B**2 - D**2 - (z_target - C)**2 - x_target**2 - y_target**2
+    M = 2 * D * (z_target - C)
+    N = -2 * D * x_target
+
+    # Solve for theta4
+    R = math.sqrt(M**2 + N**2)
+    if R < 1e-9:
+        raise ValueError("Target position is unreachable")
+
+    rhs = -K / R
+    if abs(rhs) > 1:
+        raise ValueError("Target position is unreachable")
+
+    phi_theta4 = math.atan2(N, M)
+    theta4_1 = math.asin(rhs) - phi_theta4
+    theta4_2 = math.pi - math.asin(rhs) - phi_theta4
+
+    theta4_candidates = [theta4_1, theta4_2]
+
+    valid_solutions = []
+
+    for theta4 in theta4_candidates:
+        # Compute cos_phi and sin_phi
+        cos_phi = (z_target - C - D * math.sin(theta4)) / A
+        if abs(cos_phi) > 1:
+            continue
+        sin_phi = math.sqrt(1 - cos_phi**2)
+        phi = math.atan2(sin_phi, cos_phi)
+
+        # Check the other possible phi (negative sin)
+        phi_neg = math.atan2(-sin_phi, cos_phi)
+        phi_candidates = [phi, phi_neg]
+
+        for phi_val in phi_candidates:
+            # Solve for theta3
+            P = A * math.sin(phi_val)
+            Q = B
+            R_prime = math.sqrt(P**2 + Q**2)
+            if R_prime < 1e-9:
+                continue
+
+            rhs_theta3 = y_target / R_prime
+            if abs(rhs_theta3) > 1:
+                continue
+
+            alpha = math.atan2(Q, P)
+            theta3_1 = math.asin(rhs_theta3) - alpha
+            theta3_2 = math.pi - math.asin(rhs_theta3) - alpha
+
+            for theta3 in [theta3_1, theta3_2]:
+                # Check if the solution satisfies the original equation
+                lhs = P * math.sin(theta3) + Q * math.cos(theta3)
+                if abs(lhs - y_target) > 1e-6:
+                    continue
+
+                # Check x equation
+                x4_calculated = A * math.sin(phi_val) * math.cos(theta3) - B * math.sin(theta3)
+                x4_expected = x_target + D * math.cos(theta4)
+                if abs(x4_calculated - x4_expected) > 1e-6:
+                    continue
+
+                # Solve for theta1 and theta2 (phi = theta1 + theta2)
+                # Choose theta1 = atan2(x_part, z_part)
+                x_part = A * math.sin(phi_val) * math.cos(theta3) - B * math.sin(theta3)
+                z_part = A * math.cos(phi_val) + C
+                theta1 = math.atan2(x_part - (x_target + D * math.cos(theta4)), z_part - (z_target - D * math.sin(theta4)))
+                theta2 = phi_val - theta1
+
+                valid_solutions.append((theta1, theta2, theta3, theta4))
+
+    if not valid_solutions:
+        raise ValueError("No valid solution found")
+
+    # Select the first valid solution (additional criteria can be applied)
+    theta1, theta2, theta3, theta4 = valid_solutions[0]
+
+    return (theta1, theta2, theta3, theta4)
+```
+
+### Explanation
+1. **Theta4 Calculation:** Theta4 is determined by solving a trigonometric equation derived from the target coordinates and link lengths, ensuring the solution is within feasible limits.
+2. **Phi Calculation:** The combined angle phi (theta1 + theta2) is computed using the target's Z-coordinate and the previously found theta4.
+3. **Theta3 Calculation:** Theta3 is solved using the target's Y-coordinate and the derived phi, ensuring the solution satisfies the original kinematic equations.
+4. **Theta1 and Theta2 Resolution:** The individual angles are resolved from phi using geometric considerations, ensuring the solution meets the target X and Z coordinates.
+
+This approach systematically solves the inverse kinematics by breaking down the problem into manageable steps, ensuring each joint angle is computed accurately based on the target position.

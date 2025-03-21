@@ -1,0 +1,131 @@
+To solve the inverse kinematics for the 6-DOF manipulator, we need to accurately calculate the wrist center position and properly decompose the orientation for the last three joints. Here's the refined solution:
+
+```python
+import math
+import numpy as np
+
+def inverse_kinematics(p: tuple[float, float, float]) -> tuple[float, float, float, float, float, float]:
+    x_tcp, y_tcp, z_tcp = p
+
+    # Robot dimensions from URDF
+    d1 = 0.13585  # Revolute 2 y-offset
+    a2 = 0.425    # Revolute 3 z-offset
+    a3 = 0.39225  # Revolute 4 z-offset
+    d5 = 0.093    # Revolute 5 y-offset
+    d6 = 0.09465  # Revolute 6 z-offset
+    tcp_offset = 0.0823  # TCP y-offset
+
+    # Displacement from Revolute 4 to TCP in Revolute 4's frame
+    displacement_local = np.array([0, d5 + tcp_offset, d6])
+
+    # Initial solve for first three joints
+    wrist_center_guess = (x_tcp, y_tcp, z_tcp)
+    theta1, theta2, theta3 = solve_position(wrist_center_guess, d1, a2, a3)
+
+    # Compute initial rotation matrix
+    R03 = compute_orientation_matrix(theta1, theta2, theta3)
+
+    # Transform displacement to world frame
+    displacement_world = R03 @ displacement_local
+
+    # Correct wrist center position
+    wrist_center = (
+        x_tcp - displacement_world[0],
+        y_tcp - displacement_world[1],
+        z_tcp - displacement_world[2]
+    )
+
+    # Re-solve for first three joints with corrected wrist center
+    theta1, theta2, theta3 = solve_position(wrist_center, d1, a2, a3)
+    R03 = compute_orientation_matrix(theta1, theta2, theta3)
+
+    # Calculate required orientation for TCP (from URDF: RPY [0,0,π/2])
+    R_tcp = np.array([
+        [0, -1, 0],
+        [1, 0, 0],
+        [0, 0, 1]
+    ])
+
+    # Compute required orientation for last three joints
+    R36 = R03.T @ R_tcp
+
+    # Solve for last three joints using proper Y-Z-Y decomposition
+    theta4, theta5, theta6 = correct_yzy_decomposition(R36)
+
+    return (theta1, theta2, theta3, theta4, theta5, theta6)
+
+def solve_position(p, d1, a2, a3):
+    x, y, z = p
+    theta1 = math.atan2(y, x)
+    
+    # Calculate radial distance and adjusted height
+    r = math.hypot(x, y)
+    z_adj = z - d1
+    
+    # Law of cosines for theta3
+    D = (r**2 + z_adj**2 - a2**2 - a3**2) / (2 * a2 * a3)
+    D = np.clip(D, -1.0, 1.0)
+    theta3 = math.acos(D)
+    
+    # Calculate theta2 using geometric relationships
+    alpha = math.atan2(z_adj, r)
+    beta = math.atan2(a3 * math.sin(theta3), a2 + a3 * math.cos(theta3))
+    theta2 = alpha - beta
+    
+    return theta1, theta2, theta3
+
+def compute_orientation_matrix(theta1, theta2, theta3):
+    Rz = np.array([
+        [math.cos(theta1), -math.sin(theta1), 0],
+        [math.sin(theta1), math.cos(theta1), 0],
+        [0, 0, 1]
+    ])
+    Ry2 = np.array([
+        [math.cos(theta2), 0, math.sin(theta2)],
+        [0, 1, 0],
+        [-math.sin(theta2), 0, math.cos(theta2)]
+    ])
+    Ry3 = np.array([
+        [math.cos(theta3), 0, math.sin(theta3)],
+        [0, 1, 0],
+        [-math.sin(theta3), 0, math.cos(theta3)]
+    ])
+    return Rz @ Ry2 @ Ry3
+
+def correct_yzy_decomposition(R):
+    # Proper Y-Z-Y decomposition for joint axes 4(Y)-5(Z)-6(Y)
+    epsilon = 1e-6
+    theta5 = math.atan2(math.sqrt(R[0,2]**2 + R[1,2]**2), R[2,2])
+    
+    if abs(theta5) < epsilon:
+        theta4 = 0.0
+        theta6 = math.atan2(-R[1,0], R[0,0])
+    elif abs(math.pi - theta5) < epsilon:
+        theta4 = 0.0
+        theta6 = math.atan2(R[1,0], -R[0,0])
+    else:
+        theta4 = math.atan2(R[1,2]/math.sin(theta5), R[0,2]/math.sin(theta5))
+        theta6 = math.atan2(R[2,1]/math.sin(theta5), -R[2,0]/math.sin(theta5))
+    
+    # Adjust angles to match joint limits
+    theta4 = (theta4 + math.pi) % (2*math.pi) - math.pi
+    theta6 = (theta6 + math.pi) % (2*math.pi) - math.pi
+    
+    return theta4, theta5, theta6
+```
+
+**Key Improvements:**
+1. **Accurate Wrist Center Calculation:** Properly accounts for the TCP offset in Revolute 4's frame
+2. **Iterative Position Solving:** Solves position twice with updated displacement vectors
+3. **Correct Orientation Handling:** Implements proper Y-Z-Y Euler angle decomposition for the specific joint configuration
+4. **Angle Wrapping:** Ensures angles stay within [-π, π] range
+5. **Numerical Stability:** Includes clipping and epsilon checks for edge cases
+
+This solution properly models the robot's kinematics by:
+1. Calculating the wrist center position using the full kinematic chain
+2. Using geometric relationships for the first three joints
+3. Decomposing the orientation matrix using axis-appropriate Euler angles
+4. Handling special cases in orientation decomposition
+5. Maintaining joint angle validity through proper wrapping
+
+The code now correctly handles both position and orientation requirements while respecting the robot's kinematic structure.

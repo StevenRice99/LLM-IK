@@ -1,0 +1,97 @@
+To solve this problem, we need to determine the joint angles for a 4-DOF robotic arm to reach a specified target position and orientation. The solution involves breaking down the problem into two main parts: solving for the first joint angle and then solving for the remaining three joint angles using existing sub-solutions.
+
+### Approach
+1. **Solve for the First Joint (theta1):** The first joint (Revolute 1) rotates around the Z-axis. By using the target position's x and y coordinates, we can compute theta1 to align the target position into a plane where the subsequent joints can reach it.
+2. **Transform the Target Position and Orientation:** After determining theta1, we transform the target position and orientation into the coordinate system relative to the second joint. This involves adjusting the position by the offset of the second link and rotating the orientation by theta1.
+3. **Solve for Remaining Joints (theta2, theta3, theta4):** Using the transformed position and orientation, we apply an existing solution for a 3-DOF planar arm to compute the remaining joint angles. This involves solving the inverse kinematics for a planar arm with the given link lengths and adjusting for orientation.
+
+### Solution Code
+```python
+import math
+import numpy as np
+
+def inverse_kinematics(p: tuple[float, float, float], r: tuple[float, float, float]) -> tuple[float, float, float, float]:
+    x_target_world, y_target_world, z_target_world = p
+    roll_target, pitch_target, yaw_target = r
+
+    # Compute theta1 using existing_code_1 logic
+    theta1 = math.atan2(-x_target_world, y_target_world)
+
+    # Transform target position to frame after joint 1 and link 2
+    y_prime = math.hypot(x_target_world, y_target_world)
+    y_transformed = y_prime - 0.13585  # Subtract link 2's y offset
+    x_transformed = 0.0
+    z_transformed = z_target_world
+
+    # Transform orientation: adjust yaw by -theta1
+    adjusted_yaw = yaw_target - theta1
+    cr, sr = math.cos(roll_target), math.sin(roll_target)
+    cp, sp = math.cos(pitch_target), math.sin(pitch_target)
+    cy, sy = math.cos(adjusted_yaw), math.sin(adjusted_yaw)
+    R = np.array([
+        [cy * cp, cy * sp * sr - sy * cr, cy * sp * cr + sy * sr],
+        [sy * cp, sy * sp * sr + cy * cr, sy * sp * cr - cy * sr],
+        [-sp, cp * sr, cp * cr]
+    ])
+    cos_theta = R[0, 0]
+    sin_theta = R[0, 2]
+    target_sum = math.atan2(sin_theta, cos_theta)
+
+    # Solve for theta2, theta3, theta4 using existing_code_2 logic
+    L1 = 0.425
+    L2 = 0.39225
+    x_target = x_transformed
+    z_target = z_transformed
+
+    d_sq = x_target ** 2 + z_target ** 2
+    cos_theta2 = (d_sq - L1 ** 2 - L2 ** 2) / (2 * L1 * L2)
+    cos_theta2 = np.clip(cos_theta2, -1.0, 1.0)
+    theta2 = math.acos(cos_theta2)
+    theta2_alt = -theta2
+
+    solutions = []
+    for t2 in [theta2, theta2_alt]:
+        C = L1 + L2 * math.cos(t2)
+        D = L2 * math.sin(t2)
+        denom = C ** 2 + D ** 2
+        if denom < 1e-6:
+            continue
+        sin_t1 = (C * x_target - D * z_target) / denom
+        cos_t1 = (D * x_target + C * z_target) / denom
+        if abs(sin_t1) > 1.0 or abs(cos_t1) > 1.0:
+            continue
+        t1 = math.atan2(sin_t1, cos_t1)
+        t3_base = (target_sum - t1 - t2) % (2 * math.pi)
+        t3_candidates = [t3_base - 2 * math.pi, t3_base, t3_base + 2 * math.pi]
+        for t3 in t3_candidates:
+            if -2 * math.pi <= t3 <= 2 * math.pi:
+                solutions.append((t1, t2, t3))
+
+    best_error = float('inf')
+    best_sol = (0.0, 0.0, 0.0)
+    for sol in solutions:
+        t1, t2, t3 = sol
+        if not (-2 * math.pi <= t1 <= 2 * math.pi and -2 * math.pi <= t2 <= 2 * math.pi and (-2 * math.pi <= t3 <= 2 * math.pi)):
+            continue
+        x = L1 * math.sin(t1) + L2 * math.sin(t1 + t2)
+        z = L1 * math.cos(t1) + L2 * math.cos(t1 + t2)
+        pos_error = math.hypot(x - x_target, z - z_target)
+        orient_sum = (t1 + t2 + t3) % (2 * math.pi)
+        target_orient = target_sum % (2 * math.pi)
+        orient_error = min(abs(orient_sum - target_orient), 2 * math.pi - abs(orient_sum - target_orient))
+        total_error = pos_error + orient_error
+        if total_error < best_error:
+            best_error = total_error
+            best_sol = sol
+
+    theta2, theta3, theta4 = best_sol
+    return (theta1, theta2, theta3, theta4)
+```
+
+### Explanation
+1. **Theta1 Calculation:** The first joint angle (theta1) is computed using the `atan2` function to align the target position in the x-y plane.
+2. **Position Transformation:** The target position is transformed into the coordinate system after the first joint and adjusted for the second link's offset.
+3. **Orientation Adjustment:** The target orientation is adjusted by subtracting theta1 from the yaw component to account for the rotation from the first joint.
+4. **Remaining Joint Angles:** Using the transformed position and orientation, the solution for the remaining three joints is derived using a planar inverse kinematics approach, considering the link lengths and orientation constraints. The best solution is selected based on minimizing position and orientation errors.
+
+This approach efficiently combines geometric transformations and existing sub-solutions to solve the inverse kinematics for the 4-DOF robotic arm.

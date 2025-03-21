@@ -1,0 +1,109 @@
+To solve the inverse kinematics for the 4-DOF manipulator, we first determine the first joint angle (θ₁) using the target's x and z coordinates. Then, we transform the target position and orientation into the coordinate frame of the second joint. Finally, we solve for the remaining joint angles (θ₂, θ₃, θ₄) by considering the geometric relationships and orientation constraints.
+
+```python
+import math
+import numpy as np
+
+def inverse_kinematics(p: tuple[float, float, float], r: tuple[float, float, float]) -> tuple[float, float, float, float]:
+    x, y, z = p
+    target_roll, target_pitch, target_yaw = r
+
+    # Solve theta1 using the direction of x and z in the target position
+    theta1 = math.atan2(x, z)
+
+    # Transform target position to Revolute 2's frame
+    rev2_origin_x = 0.39225 * math.sin(theta1)
+    rev2_origin_z = 0.39225 * math.cos(theta1)
+    dx = x - rev2_origin_x
+    dz = z - rev2_origin_z
+    px = dx * math.cos(theta1) - dz * math.sin(theta1)
+    pz = dx * math.sin(theta1) + dz * math.cos(theta1)
+    py = y  # Y remains unchanged as Revolute 1 rotates around Y
+
+    # Transform target orientation to Revolute 2's frame
+    cr, cp, cy = math.cos(target_roll), math.cos(target_pitch), math.cos(target_yaw)
+    sr, sp, sy = math.sin(target_roll), math.sin(target_pitch), math.sin(target_yaw)
+    R_target = np.array([
+        [cy*cp, cy*sp*sr - sy*cr, cy*sp*cr + sy*sr],
+        [sy*cp, sy*sp*sr + cy*cr, sy*sp*cr - cy*sr],
+        [-sp, cp*sr, cp*cr]
+    ])
+    R_revolute1_inv = np.array([
+        [math.cos(theta1), 0, math.sin(theta1)],
+        [0, 1, 0],
+        [-math.sin(theta1), 0, math.cos(theta1)]
+    ])
+    R_target_revolute2 = R_revolute1_inv @ R_target
+
+    # Solve for theta2, theta3, theta4 using geometric approach
+    solutions = []
+    R_tcp = np.array([[0, -1, 0], [1, 0, 0], [0, 0, 1]])
+    R_tcp_inv = R_tcp.T
+
+    # Position equations derived from forward kinematics
+    # pz = 0.09465 + 0.0823*cos(theta4)
+    # px = 0.0823*sin(theta4)*cos(theta3)
+    # py = 0.093 + 0.0823*sin(theta4)*sin(theta3)
+    cos_theta4 = (pz - 0.09465) / 0.0823
+    if abs(cos_theta4) > 1:
+        return (theta1, 0.0, 0.0, 0.0)  # Unreachable, but per problem statement, assume reachable
+    theta4_pos = math.acos(cos_theta4)
+    theta4_neg = -theta4_pos
+    theta4_candidates = [theta4_pos, theta4_neg]
+
+    for theta4 in theta4_candidates:
+        sin_theta4 = math.sin(theta4)
+        if abs(sin_theta4) < 1e-6:
+            continue  # Singularity, skip
+
+        # Solve for theta3
+        cos_theta3 = px / (0.0823 * sin_theta4)
+        sin_theta3 = (py - 0.093) / (0.0823 * sin_theta4)
+        theta3 = math.atan2(sin_theta3, cos_theta3)
+
+        # Solve for theta2 using orientation
+        R3 = np.array([
+            [math.cos(theta3), -math.sin(theta3), 0],
+            [math.sin(theta3), math.cos(theta3), 0],
+            [0, 0, 1]
+        ])  # Revolute 3 (Z)
+        R4 = np.array([
+            [math.cos(theta4), 0, math.sin(theta4)],
+            [0, 1, 0],
+            [-math.sin(theta4), 0, math.cos(theta4)]
+        ])  # Revolute 4 (Y)
+        R_remaining = R3 @ R4 @ R_tcp
+        R_desired = R_target_revolute2 @ R_tcp_inv
+        R2_needed = R_desired @ np.linalg.inv(R_remaining)
+
+        # Extract theta2 from R2_needed (Y rotation)
+        cos_theta2 = R2_needed[0, 0]
+        sin_theta2 = R2_needed[0, 2]
+        theta2 = math.atan2(sin_theta2, cos_theta2)
+
+        # Check if the position is achievable with this theta2
+        # Compute expected position based on theta2, theta3, theta4
+        expected_px = 0.0823 * sin_theta4 * math.cos(theta3)
+        expected_py = 0.093 + 0.0823 * sin_theta4 * math.sin(theta3)
+        expected_pz = 0.09465 + 0.0823 * math.cos(theta4)
+        pos_error = math.hypot(px - expected_px, py - expected_py, pz - expected_pz)
+
+        # Check orientation error
+        R2 = np.array([
+            [math.cos(theta2), 0, math.sin(theta2)],
+            [0, 1, 0],
+            [-math.sin(theta2), 0, math.cos(theta2)]
+        ])
+        R_achieved = R2 @ R3 @ R4 @ R_tcp
+        orientation_error = np.linalg.norm(R_achieved - R_target_revolute2)
+        total_error = pos_error + orientation_error
+        solutions.append((theta2, theta3, theta4, total_error))
+
+    if not solutions:
+        return (theta1, 0.0, 0.0, 0.0)
+
+    # Select the solution with the least error
+    solutions.sort(key=lambda x: x[3])
+    best = solutions[0]
+    return (theta1, best[0], best[1], best[2])
+```

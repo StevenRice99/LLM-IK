@@ -1,0 +1,90 @@
+To solve the inverse kinematics for the 4-DOF manipulator, we need to accurately account for the TCP offset and consider both possible elbow configurations. Here's the refined solution:
+
+```python
+import math
+
+def inverse_kinematics(p: tuple[float, float, float]) -> tuple[float, float, float, float]:
+    x_target, y_target, z_target = p
+    
+    # Constants from URDF
+    L1 = 0.425       # Revolute1 to Revolute2
+    L2 = 0.39225     # Revolute2 to Revolute3
+    L3 = 0.093       # Revolute4 Y offset
+    tcp_offset = 0.09465  # TCP Z offset
+    
+    # Combined offset in X-Z plane from Revolute3 to TCP
+    total_offset = math.hypot(L3, tcp_offset)
+    
+    # Calculate target direction and magnitude
+    D = math.hypot(x_target, z_target)
+    if D < 1e-6:  # Handle edge case for straight line
+        theta1 = 0.0
+        theta2 = 0.0
+        theta3 = 0.0
+    else:
+        # Calculate required direction for TCP offset
+        gamma = math.atan2(x_target, z_target)
+        
+        # Adjust target position to account for TCP offset
+        x_adj = x_target - total_offset * math.sin(gamma)
+        z_adj = z_target - total_offset * math.cos(gamma)
+        
+        # Solve 2-link IK for both elbow configurations
+        d = math.hypot(x_adj, z_adj)
+        cos_theta2 = (d**2 - L1**2 - L2**2) / (2 * L1 * L2)
+        cos_theta2 = max(min(cos_theta2, 1.0), -1.0)
+        theta2_positive = math.acos(cos_theta2)
+        theta2_negative = -theta2_positive
+        
+        # Calculate possible theta1 values
+        alpha = math.atan2(x_adj, z_adj)
+        
+        # For positive theta2
+        beta_pos = math.atan2(L2 * math.sin(theta2_positive), L1 + L2 * math.cos(theta2_positive))
+        theta1_pos = alpha - beta_pos
+        
+        # For negative theta2
+        beta_neg = math.atan2(L2 * math.sin(theta2_negative), L1 + L2 * math.cos(theta2_negative))
+        theta1_neg = alpha - beta_neg
+        
+        # Calculate resulting TCP positions for both configurations
+        def calculate_position(theta1, theta2):
+            x3 = L1 * math.sin(theta1) + L2 * math.sin(theta1 + theta2)
+            z3 = L1 * math.cos(theta1) + L2 * math.cos(theta1 + theta2)
+            tcp_x = x3 + total_offset * math.sin(theta1 + theta2)
+            tcp_z = z3 + total_offset * math.cos(theta1 + theta2)
+            return math.hypot(tcp_x - x_target, tcp_z - z_target)
+        
+        # Select configuration with minimum error
+        error_pos = calculate_position(theta1_pos, theta2_positive)
+        error_neg = calculate_position(theta1_neg, theta2_negative)
+        
+        if error_pos < error_neg:
+            theta1 = theta1_pos
+            theta2 = theta2_positive
+        else:
+            theta1 = theta1_neg
+            theta2 = theta2_negative
+        
+        # Calculate theta3 to align TCP orientation
+        theta3 = gamma - (theta1 + theta2)
+        
+        # Normalize angles to [-π, π]
+        theta1 = (theta1 + math.pi) % (2 * math.pi) - math.pi
+        theta2 = (theta2 + math.pi) % (2 * math.pi) - math.pi
+        theta3 = (theta3 + math.pi) % (2 * math.pi) - math.pi
+    
+    # Theta4 doesn't affect position
+    theta4 = 0.0
+    
+    return (theta1, theta2, theta3, theta4)
+```
+
+**Key Improvements:**
+1. **Elbow Configuration Selection:** Explicitly calculates both possible elbow configurations (up/down) and selects the one that minimizes positioning error.
+2. **3D Offset Handling:** Properly accounts for both Y and Z offsets from Revolute4 to TCP using vector math.
+3. **Angle Normalization:** Ensures all joint angles stay within [-π, π] range.
+4. **Edge Case Handling:** Special case for targets aligned with the base Z-axis.
+5. **Error Minimization:** Selects the configuration that results in the smallest TCP position error.
+
+This solution should handle all reachable targets within the manipulator's workspace while properly accounting for the kinematic chain and TCP offset.

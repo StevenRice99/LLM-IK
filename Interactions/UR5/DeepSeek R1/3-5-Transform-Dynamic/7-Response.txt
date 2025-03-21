@@ -1,0 +1,123 @@
+To solve this problem, we need to determine the joint angles (theta1, theta2, theta3) for a 3-DOF serial manipulator such that the Tool Center Point (TCP) reaches a specified position and orientation in the world frame. The solution involves solving the inverse kinematics problem by considering both position and orientation components, ensuring the correct selection of joint configurations based on orientation error.
+
+### Approach
+1. **Position Analysis**:
+   - **Theta2 (Revolute 2)**: Calculate using the y-coordinate of the target position. The y-coordinate is influenced by the cosine of theta2 due to the link lengths and joint configuration. Both positive and negative solutions for theta2 are considered.
+   - **Theta1 (Revolute 1)**: Determine using the x and z coordinates of the target position by solving a system of linear equations derived from the geometric configuration of the manipulator.
+
+2. **Orientation Analysis**:
+   - **Theta3 (Revolute 3)**: Compute using the target orientation and the previously determined theta1 and theta2. This involves matrix transformations to align the end-effector's orientation with the target.
+
+3. **Solution Selection**:
+   - Evaluate both possible solutions (positive and negative theta2) by computing the resulting orientation for each and selecting the one with the smallest orientation error relative to the target.
+
+### Solution Code
+```python
+import math
+import numpy as np
+
+def inverse_kinematics(p: tuple[float, float, float], r: tuple[float, float, float]) -> tuple[float, float, float]:
+    px, py, pz = p
+    target_roll, target_pitch, target_yaw = r
+
+    # Calculate possible theta2 values based on y-coordinate
+    y_offset = py - 0.093
+    if abs(y_offset) > 0.0823:
+        raise ValueError("Target position is unreachable based on y-coordinate.")
+    cos_theta2 = y_offset / 0.0823
+    theta2_pos = math.acos(cos_theta2)
+    theta2_neg = -theta2_pos
+    possible_theta2 = [theta2_pos, theta2_neg]
+
+    solutions = []
+
+    # Target rotation matrix
+    cr, cp, cy = math.cos(target_roll), math.cos(target_pitch), math.cos(target_yaw)
+    sr, sp, sy = math.sin(target_roll), math.sin(target_pitch), math.sin(target_yaw)
+    R_target = np.array([
+        [cy * cp, cy * sp * sr - sy * cr, cy * sp * cr + sy * sr],
+        [sy * cp, sy * sp * sr + cy * cr, sy * sp * cr - cy * sr],
+        [-sp, cp * sr, cp * cr]
+    ])
+
+    # TCP's fixed rotation (R_z(pi/2)) and its inverse
+    R_tcp = np.array([[0, -1, 0], [1, 0, 0], [0, 0, 1]])
+    R_tcp_inv = R_tcp.T  # Inverse of R_tcp
+
+    for theta2 in possible_theta2:
+        sin_theta2 = math.sin(theta2)
+
+        # Solve for theta1 using x and z coordinates
+        A = -0.0823 * sin_theta2
+        B = 0.09465
+        C = 0.0823 * sin_theta2
+        D = 0.09465
+        det = B * D - A * C
+
+        if abs(det) < 1e-6:
+            continue  # Skip singular configurations
+
+        sin_theta1 = (D * px - A * pz) / det
+        cos_theta1 = (-C * px + B * pz) / det
+        theta1 = math.atan2(sin_theta1, cos_theta1)
+
+        # Compute rotation matrices for joints
+        R1 = np.array([
+            [math.cos(theta1), 0, math.sin(theta1)],
+            [0, 1, 0],
+            [-math.sin(theta1), 0, math.cos(theta1)]
+        ])
+        R2 = np.array([
+            [math.cos(theta2), -math.sin(theta2), 0],
+            [math.sin(theta2), math.cos(theta2), 0],
+            [0, 0, 1]
+        ])
+
+        # Compute desired rotation without TCP's fixed rotation
+        R_desired = R_target @ R_tcp_inv
+
+        # Solve for R3
+        R_total = R1 @ R2
+        R3 = np.linalg.inv(R_total) @ R_desired
+
+        # Extract theta3 from R3 (Y rotation)
+        cos_theta3 = R3[0, 0]
+        sin_theta3 = R3[0, 2]
+        theta3 = math.atan2(sin_theta3, cos_theta3)
+
+        # Compute the achieved orientation to compare with target
+        R3_actual = np.array([
+            [math.cos(theta3), 0, math.sin(theta3)],
+            [0, 1, 0],
+            [-math.sin(theta3), 0, math.cos(theta3)]
+        ])
+        R_achieved = R_total @ R3_actual @ R_tcp
+
+        # Calculate orientation error
+        orientation_error = np.linalg.norm(R_achieved - R_target)
+
+        solutions.append((theta1, theta2, theta3, orientation_error))
+
+    if not solutions:
+        return (0.0, 0.0, 0.0)
+
+    # Select the solution with the minimum orientation error
+    solutions.sort(key=lambda x: x[3])
+    best_solution = solutions[0][:3]
+
+    return best_solution
+```
+
+### Explanation
+1. **Position Calculation**:
+   - **Theta2** is derived from the y-coordinate of the target position using the cosine of the angle, adjusted by the link length. Both positive and negative solutions for theta2 are considered to account for different kinematic configurations.
+   - **Theta1** is computed by solving a system of linear equations derived from the x and z coordinates, ensuring the correct geometric transformations.
+
+2. **Orientation Calculation**:
+   - The target orientation (given as roll, pitch, yaw) is converted into a rotation matrix. The TCP's fixed rotation (90 degrees around Z) is accounted for by adjusting the desired rotation matrix.
+   - The combined rotation from the three joints is computed and compared to the desired rotation to solve for theta3.
+
+3. **Solution Selection**:
+   - Both possible solutions (positive and negative theta2) are evaluated by computing the resulting orientation error. The solution with the smallest error is selected to ensure the correct orientation is achieved.
+
+This approach efficiently decouples the position and orientation problems, considering multiple kinematic configurations and selecting the optimal solution based on orientation error, ensuring the correct position and orientation are reached.

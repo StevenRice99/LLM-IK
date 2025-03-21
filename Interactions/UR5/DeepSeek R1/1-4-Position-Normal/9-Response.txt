@@ -1,0 +1,76 @@
+To solve the inverse kinematics for the 4-DOF manipulator, we need to determine the joint angles (q1, q2, q3, q4) such that the Tool Center Point (TCP) reaches the target position (x, y, z). The solution involves geometric analysis and trigonometric calculations, considering the structure of the manipulator and the offsets of each link.
+
+### Approach
+1. **Joint 1 (q1)**: Calculate the angle to align the manipulator with the target's projection in the XZ-plane.
+2. **Joints 2 and 3 (q2, q3)**: Treat the structure as a planar 2R robot (Revolute 2 and Revolute 3) to solve for these angles using the law of cosines and geometric inverse kinematics. The third link (Revolute 4 and TCP) is considered as part of the end effector.
+3. **Joint 4 (q4)**: Since the fourth joint does not affect the position, it is set to zero.
+
+### Solution Code
+```python
+import numpy as np
+
+def inverse_kinematics(p: tuple[float, float, float]) -> tuple[float, float, float, float]:
+    x_target, y_target, z_target = p
+    L1 = 0.425  # Revolute1 to Revolute2
+    L2 = 0.39225  # Revolute2 to Revolute3
+    L3 = np.hypot(0.093, 0.09465)  # Distance from Revolute3 to TCP
+    gamma = np.arctan2(0.093, 0.09465)  # Fixed angle from Revolute3 to TCP
+
+    # Compute direction to target and effective distance
+    theta = np.arctan2(x_target, z_target)
+    D = np.hypot(x_target, z_target)
+    D_eff = D - L3 * np.cos(gamma)  # Project TCP offset onto the direction
+
+    # Solve for q2 using law of cosines with adjusted link length
+    a = L1
+    b = np.hypot(L2, L3 * np.sin(gamma))  # Effective length from Revolute2 to TCP
+    cos_q2 = (D_eff**2 - a**2 - b**2) / (2 * a * b)
+    cos_q2 = np.clip(cos_q2, -1.0, 1.0)
+    q2 = np.arccos(cos_q2)
+
+    # Two possible solutions for q2 (elbow up/down)
+    q2_1 = q2
+    q2_2 = -q2
+
+    # Calculate corresponding q1 for both solutions
+    alpha_1 = np.arctan2(b * np.sin(q2_1), a + b * np.cos(q2_1))
+    q1_1 = theta - alpha_1
+
+    alpha_2 = np.arctan2(b * np.sin(q2_2), a + b * np.cos(q2_2))
+    q1_2 = theta - alpha_2
+
+    # Calculate actual positions for both solutions
+    def compute_position(q1, q2):
+        x_r3 = L1 * np.sin(q1) + L2 * np.sin(q1 + q2)
+        z_r3 = L1 * np.cos(q1) + L2 * np.cos(q1 + q2)
+        dx = x_target - x_r3
+        dz = z_target - z_r3
+        beta = np.arctan2(dx, dz) - (q1 + q2)
+        return beta
+
+    beta_1 = compute_position(q1_1, q2_1)
+    beta_2 = compute_position(q1_2, q2_2)
+
+    # Choose solution with minimal q3 magnitude
+    if abs(beta_1) <= abs(beta_2):
+        q1, q2, q3 = q1_1, q2_1, beta_1
+    else:
+        q1, q2, q3 = q1_2, q2_2, beta_2
+
+    # Adjust q3 by the fixed gamma angle
+    q3 -= gamma
+
+    # Normalize angles to [-π, π]
+    q1 = (q1 + np.pi) % (2 * np.pi) - np.pi
+    q2 = (q2 + np.pi) % (2 * np.pi) - np.pi
+    q3 = (q3 + np.pi) % (2 * np.pi) - np.pi
+
+    return (q1, q2, q3, 0.0)
+```
+
+### Explanation
+1. **Joint 1 (q1)**: The angle is calculated to align the manipulator with the target's direction in the XZ-plane.
+2. **Joints 2 and 3 (q2, q3)**: The effective length from Revolute 2 to the TCP is computed considering the offset from Revolute 3 to the TCP. The law of cosines is used to solve for q2, and the corresponding q1 is adjusted based on the geometric configuration. The remaining angle q3 is determined to align the TCP with the target.
+3. **Joint 4 (q4)**: Set to zero as it does not affect the position.
+
+This approach ensures that the TCP reaches the target position by accurately modeling the geometric relationships and considering both possible configurations (elbow up and down) for the manipulator.

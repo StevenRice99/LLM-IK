@@ -1,0 +1,73 @@
+To solve this problem, we need to determine the joint angles (theta1, theta2, theta3) for a 3-DOF serial manipulator such that the Tool Center Point (TCP) reaches a specified position and orientation. The solution involves decoupling the problem into orientation and position components, leveraging existing solutions for sub-chains where possible.
+
+### Approach
+1. **Orientation Handling**: The orientation of the TCP is determined by the first joint (theta1) and the sum of the second and third joints (theta2 + theta3). The first joint angle (theta1) is directly derived from the target orientation's yaw component (rz). The sum of the second and third joint angles (theta_sum) is derived from the target orientation's pitch component (ry).
+
+2. **Position Handling**: The position of the TCP is adjusted to account for the first joint's rotation. The remaining position problem is solved using a planar 2R manipulator inverse kinematics solution for the second and third joints. This involves transforming the target position into the coordinate system of the second joint and applying the existing solution for the planar sub-chain.
+
+### Solution Code
+```python
+import math
+
+def inverse_kinematics(p: tuple[float, float, float], r: tuple[float, float, float]) -> tuple[float, float, float]:
+    x_target, y_target, z_target = p
+    rx, ry, rz = r
+
+    # Solve for theta1 from the orientation (rz)
+    theta1 = rz
+
+    # Adjust the target position to Revolute2's frame
+    x_remaining = x_target - 0.13585 * math.sin(theta1)
+    y_remaining = y_target - 0.13585 * math.cos(theta1)
+    z_remaining = z_target
+
+    # Rotate the remaining position by -theta1 to get into Revolute2's frame
+    x_revolute2 = x_remaining * math.cos(theta1) + y_remaining * math.sin(theta1)
+    z_revolute2 = z_remaining
+
+    # Parameters for the planar 2R arm (Revolute2 and Revolute3)
+    a = 0.425
+    b = 0.39225
+    theta_sum = ry  # theta2 + theta3
+
+    # Solve for theta2 and theta3 using the planar solution
+    d_sq = x_revolute2 ** 2 + (z_revolute2 - 0.425) ** 2  # Adjusting for Revolute3's origin
+    d = math.sqrt(d_sq)
+    cos_theta2 = (d_sq - a ** 2 - b ** 2) / (2 * a * b)
+    cos_theta2 = max(min(cos_theta2, 1.0), -1.0)
+    theta2_1 = math.acos(cos_theta2)
+    theta2_2 = -theta2_1
+
+    solutions = []
+    for theta2 in [theta2_1, theta2_2]:
+        theta3 = theta_sum - theta2
+        # Calculate the expected position based on theta2 and theta_sum
+        x_calc = a * math.sin(theta2) + b * math.sin(theta_sum)
+        z_calc = a * math.cos(theta2) + b * math.cos(theta_sum) + 0.425  # Adding Revolute3's origin z
+        if math.isclose(x_calc, x_revolute2, abs_tol=1e-5) and math.isclose(z_calc, z_revolute2, abs_tol=1e-5):
+            solutions.append((theta2, theta3))
+
+    if solutions:
+        # Select the first valid solution within joint limits
+        for theta2, theta3 in solutions:
+            if -6.2831853 <= theta2 <= 6.2831853 and -6.2831853 <= theta3 <= 6.2831853:
+                return (theta1, theta2, theta3)
+        theta2, theta3 = solutions[0]
+    else:
+        # Fallback to geometric solution if no valid solutions found
+        term_x = x_revolute2 - b * math.sin(theta_sum)
+        term_z = z_revolute2 - 0.425 - b * math.cos(theta_sum)
+        theta2 = math.atan2(term_x, term_z)
+        theta3 = theta_sum - theta2
+
+    return (theta1, theta2, theta3)
+```
+
+### Explanation
+1. **Orientation Handling**: The first joint angle (theta1) is set to the target yaw (rz). The sum of the second and third joint angles (theta_sum) is set to the target pitch (ry).
+
+2. **Position Adjustment**: The target position is adjusted to account for the first joint's rotation and transformed into the coordinate system of the second joint.
+
+3. **Planar Solution**: The adjusted position is used with a planar inverse kinematics solution to determine the second and third joint angles (theta2 and theta3). This involves solving a 2R manipulator problem using the law of cosines and verifying solutions against the target position.
+
+This approach efficiently combines orientation and position handling, leveraging existing solutions for sub-chains to simplify the problem.

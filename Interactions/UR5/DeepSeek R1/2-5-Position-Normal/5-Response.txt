@@ -1,0 +1,96 @@
+To solve this problem, we need to determine the joint angles (q1, q2, q3, q4) for a 4-DOF manipulator to position the Tool Center Point (TCP) at a given target coordinate (x, y, z). The solution involves a detailed geometric decomposition and trigonometric calculations to account for the contributions of each joint to the TCP's position.
+
+### Approach
+1. **Solve for q3 using the Y-coordinate**: The Y-coordinate of the TCP is influenced by the third joint (q3) and fixed offsets. We use trigonometric identities to express the Y-coordinate in terms of q3 and solve for possible values of q3.
+2. **Solve for q1 and q2 using X and Z coordinates**: The first two joints (q1 and q2) form a planar arm in the XZ plane. We use geometric relationships and trigonometric identities to solve for these angles based on the remaining X and Z components after accounting for q3.
+3. **Check for valid solutions**: For each candidate solution of q3, we check if the derived q1 and q2 values result in the correct X and Z coordinates of the TCP.
+
+### Solution Code
+```python
+def inverse_kinematics(p: tuple[float, float, float]) -> tuple[float, float, float, float]:
+    import numpy as np
+
+    x_target, y_target, z_target = p
+    L = 0.093 + 0.0823  # Sum of Revolute3 and TCP Y offsets
+    link2_length = 0.39225
+
+    # Solve for q3
+    rhs = (link2_length ** 2 - (z_target - 0.09465) ** 2 - x_target ** 2 - y_target ** 2 - L ** 2)
+    K = rhs / (2 * L) if rhs / (2 * L) != 0 else 0  # Avoid division by zero
+
+    # Solve x*sin(q3) - y*cos(q3) = K
+    norm = np.hypot(x_target, y_target)
+    if np.isclose(norm, 0):
+        # Handle case where x and y are zero
+        if np.isclose(K, 0):
+            q3_candidates = [0.0, np.pi]  # Any q3 satisfies, choose 0 and pi
+        else:
+            return (0.0, 0.0, 0.0, 0.0)  # No solution
+    else:
+        alpha = np.arctan2(-y_target, x_target)
+        q3_0 = alpha + np.arcsin(K / norm)
+        q3_1 = alpha + np.pi - np.arcsin(K / norm)
+        q3_candidates = [q3_0, q3_1]
+
+    valid_solutions = []
+    for q3 in q3_candidates:
+        s3 = np.sin(q3)
+        c3 = np.cos(q3)
+
+        # Compute theta (q1 + q2)
+        z_arm = z_target - 0.09465
+        cos_theta = z_arm / link2_length
+        if abs(cos_theta) > 1:
+            continue  # Invalid theta
+        theta = np.arccos(cos_theta)
+        theta_candidates = [theta, -theta]
+
+        for theta in theta_candidates:
+            sin_theta = np.sin(theta)
+            x_arm = (x_target + L * s3) / (link2_length * c3) if not np.isclose(c3, 0) else 0
+            z_arm_val = z_arm / link2_length
+
+            A = x_arm
+            B = z_arm_val
+            cos_q2 = (A**2 + B**2 - 2) / 2
+            if cos_q2 < -1 or cos_q2 > 1:
+                continue
+            q2 = np.arccos(cos_q2)
+            q2_candidates = [q2, -q2]
+
+            for q2 in q2_candidates:
+                C = 1 + np.cos(q2)
+                D = np.sin(q2)
+                denominator = 2 * (1 + np.cos(q2))
+                if np.isclose(denominator, 0):
+                    continue
+
+                sin_q1 = (C * A + D * B) / denominator
+                cos_q1 = (C * B - D * A) / denominator
+                if abs(sin_q1) > 1 or abs(cos_q1) > 1:
+                    continue
+
+                q1 = np.arctan2(sin_q1, cos_q1)
+
+                # Verify the solution
+                x_check = link2_length * (np.sin(q1) + np.sin(q1 + q2)) * c3 - L * s3
+                y_check = link2_length * (np.sin(q1) + np.sin(q1 + q2)) * s3 + L * c3
+                z_check = link2_length * np.cos(q1 + q2) + 0.09465
+
+                if (np.isclose(x_check, x_target, atol=1e-4) and
+                    np.isclose(y_check, y_target, atol=1e-4) and
+                    np.isclose(z_check, z_target, atol=1e-4)):
+                    valid_solutions.append((q1, q2, q3, 0.0))
+
+    if valid_solutions:
+        return valid_solutions[0]  # Return first valid solution
+
+    return (0.0, 0.0, 0.0, 0.0)
+```
+
+### Explanation
+1. **q3 Calculation**: The Y-coordinate is adjusted using trigonometric identities to solve for possible values of q3, considering the contributions from the third joint and fixed offsets.
+2. **q1 and q2 Solution**: Using the remaining X and Z components, we solve for the planar arm formed by the first two joints. This involves geometric relationships and trigonometric identities to determine the angles that position the TCP correctly.
+3. **Validation**: Each candidate solution is checked against the target coordinates to ensure accuracy, ensuring that the derived joint angles result in the correct TCP position.
+
+This approach ensures that all joint angles are derived using a combination of geometric decomposition and trigonometric calculations, providing a closed-form solution to the inverse kinematics problem.

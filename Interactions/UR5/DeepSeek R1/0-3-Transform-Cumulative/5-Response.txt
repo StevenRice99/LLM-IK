@@ -1,0 +1,122 @@
+To solve this problem, we need to determine the joint angles for a 4-DOF serial manipulator to reach a target position and orientation, considering the TCP's offset and the robot's kinematic structure.
+
+### Approach
+1. **Adjust Target Position:** The target position is adjusted by subtracting the TCP's offset transformed by the target orientation. This gives the position of Revolute 4's origin (P4).
+2. **Compute Theta1 (Joint 1):** Calculate the first joint angle using the x and y components of the adjusted position (P4).
+3. **Transform Position to Revolute 2's Frame:** Adjust the position relative to Revolute 2 and rotate it into the plane defined by theta1.
+4. **Solve Planar Inverse Kinematics:** Use the transformed position to solve for theta2 and theta3, considering the link lengths.
+5. **Compute Theta4 (Joint 4):** Determine theta4 to match the target orientation using the remaining rotation matrix.
+
+### Solution Code
+```python
+import math
+import numpy as np
+
+def inverse_kinematics(p: tuple[float, float, float], r: tuple[float, float, float]) -> tuple[float, float, float, float]:
+    x_target, y_target, z_target = p
+    roll, pitch, yaw = r
+
+    # Compute target rotation matrix
+    cr, sr = math.cos(roll), math.sin(roll)
+    cp, sp = math.cos(pitch), math.sin(pitch)
+    cy, sy = math.cos(yaw), math.sin(yaw)
+    R_target = np.array([
+        [cy * cp, cy * sp * sr - sy * cr, cy * sp * cr + sy * sr],
+        [sy * cp, sy * sp * sr + cy * cr, sy * sp * cr - cy * sr],
+        [-sp, cp * sr, cp * cr]
+    ])
+
+    # Compute TCP's offset in world frame using target orientation
+    offset_tcp = np.array([0, 0.093, 0])
+    offset_world = R_target.dot(offset_tcp)
+    P4 = np.array([x_target, y_target, z_target]) - offset_world
+    x_p4, y_p4, z_p4 = P4
+
+    # Compute theta1 using adjusted position (P4)
+    theta1 = math.atan2(-x_p4, y_p4)
+
+    # Calculate Revolute 2's position in the base frame
+    revolute2_x = 0.13585 * math.sin(theta1)
+    revolute2_y = 0.13585 * math.cos(theta1)
+    revolute2_z = 0.0
+
+    # Compute position relative to Revolute 2
+    x_rel = x_p4 - revolute2_x
+    y_rel = y_p4 - revolute2_y
+    z_rel = z_p4 - revolute2_z
+
+    # Rotate into the plane defined by theta1 (around Z by -theta1)
+    x_plane = x_rel * math.cos(theta1) + y_rel * math.sin(theta1)
+    z_plane = z_rel
+
+    # Solve planar inverse kinematics for theta2 and theta3
+    L1 = 0.425
+    L2 = 0.39225
+    d_sq = x_plane**2 + z_plane**2
+    cos_theta2 = (d_sq - L1**2 - L2**2) / (2 * L1 * L2)
+    cos_theta2 = np.clip(cos_theta2, -1.0, 1.0)
+    theta2 = np.arccos(cos_theta2)
+    theta2_alt = -theta2
+
+    solutions = []
+    for t2 in [theta2, theta2_alt]:
+        C = L1 + L2 * np.cos(t2)
+        D = L2 * np.sin(t2)
+        denom = C**2 + D**2
+        if denom < 1e-6:
+            continue
+        sin_t1 = (C * x_plane - D * z_plane) / denom
+        cos_t1 = (D * x_plane + C * z_plane) / denom
+        if abs(sin_t1) > 1.0 or abs(cos_t1) > 1.0:
+            continue
+        t1 = np.arctan2(sin_t1, cos_t1)
+        solutions.append((t1, t2))
+
+    best_error = float('inf')
+    best_theta2 = 0.0
+    best_theta3 = 0.0
+    for t1, t2 in solutions:
+        x = L1 * np.sin(t1) + L2 * np.sin(t1 + t2)
+        z = L1 * np.cos(t1) + L2 * np.cos(t1 + t2)
+        error = np.hypot(x - x_plane, z - z_plane)
+        if error < best_error:
+            best_error = error
+            best_theta2 = t1
+            best_theta3 = t2
+
+    theta2 = best_theta2
+    theta3 = best_theta3
+
+    # Compute theta4 from remaining rotation
+    R1 = np.array([
+        [math.cos(theta1), -math.sin(theta1), 0],
+        [math.sin(theta1), math.cos(theta1), 0],
+        [0, 0, 1]
+    ])
+    R2 = np.array([
+        [math.cos(theta2), 0, math.sin(theta2)],
+        [0, 1, 0],
+        [-math.sin(theta2), 0, math.cos(theta2)]
+    ])
+    R3 = np.array([
+        [math.cos(theta3), 0, math.sin(theta3)],
+        [0, 1, 0],
+        [-math.sin(theta3), 0, math.cos(theta3)]
+    ])
+    R_123 = R1.dot(R2).dot(R3)
+    R_remaining = R_123.T.dot(R_target)  # R_remaining should be RY(theta4)
+
+    # Extract theta4 from R_remaining
+    theta4 = math.atan2(R_remaining[0, 2], R_remaining[2, 2])
+
+    return (theta1, theta2, theta3, theta4)
+```
+
+### Explanation
+1. **Adjust Target Position:** The target position is adjusted by transforming the TCP's offset using the target orientation matrix, giving the position of Revolute 4's origin (P4).
+2. **Theta1 Calculation:** The first joint angle is determined using the arctangent of the adjusted position's x and y components.
+3. **Position Transformation:** The target position is transformed into the coordinate system relative to Revolute 2 and rotated into the plane defined by theta1.
+4. **Planar Inverse Kinematics:** The remaining joint angles (theta2 and theta3) are solved using a planar approach to reach the transformed position.
+5. **Theta4 Calculation:** The fourth joint angle is computed to match the target orientation by solving the remaining rotation matrix.
+
+This approach ensures that both the position and orientation of the TCP are accurately reached by considering the kinematic chain and transforming the TCP's offset correctly.

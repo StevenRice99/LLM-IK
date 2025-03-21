@@ -1,0 +1,91 @@
+To solve this problem, we need to determine the joint angles for a 4-DOF serial manipulator to reach a target position and orientation. The solution involves correctly decomposing the rotation matrix to account for all joint contributions and adjusting the position calculation to include the effects of the third and fourth joints.
+
+### Approach
+1. **Orientation Decomposition**: The target orientation is adjusted for the TCP's local rotation, and the rotation matrix is decomposed to solve for the third and fourth joint angles (theta3 and theta4).
+2. **Position Calculation**: The first two joint angles (theta1 and theta2) are calculated using the target position, considering the contributions from theta3 and theta4 derived from the orientation.
+
+### Solution Code
+```python
+import numpy as np
+
+def inverse_kinematics(p: tuple[float, float, float], r: tuple[float, float, float]) -> tuple[float, float, float, float]:
+    x_target, y_target, z_target = p
+    rx, ry, rz = r
+
+    # Compute the target rotation matrix from the given orientation
+    R_roll = np.array([[1, 0, 0], [0, np.cos(rx), -np.sin(rx)], [0, np.sin(rx), np.cos(rx)]])
+    R_pitch = np.array([[np.cos(ry), 0, np.sin(ry)], [0, 1, 0], [-np.sin(ry), 0, np.cos(ry)]])
+    R_yaw = np.array([[np.cos(rz), -np.sin(rz), 0], [np.sin(rz), np.cos(rz), 0], [0, 0, 1]])
+    R_target = R_yaw @ R_pitch @ R_roll
+
+    # Adjust for the TCP's local orientation (R_tcp_local_inv is inverse of 90-degree Z rotation)
+    R_tcp_local_inv = np.array([[0, 1, 0], [-1, 0, 0], [0, 0, 1]])
+    R_total = R_target @ R_tcp_local_inv
+
+    # Decompose R_total into R_Y(theta_sum) * R_Z(theta3) * R_Y(theta4)
+    # Calculate theta_sum from the R_total elements
+    r13 = R_total[0, 2]
+    r33 = R_total[2, 2]
+    theta_sum = np.arctan2(r13, r33)
+
+    # Compute N = R_Y(theta_sum).T @ R_total = R_Z(theta3) * R_Y(theta4)
+    cos_theta_sum = np.cos(theta_sum)
+    sin_theta_sum = np.sin(theta_sum)
+    R_Y_theta_sum_T = np.array([
+        [cos_theta_sum, 0, -sin_theta_sum],
+        [0, 1, 0],
+        [sin_theta_sum, 0, cos_theta_sum]
+    ])
+    N = R_Y_theta_sum_T @ R_total
+
+    # Solve for theta4 and theta3 from N
+    theta4 = np.arctan2(-N[2, 0], N[2, 2])
+    theta3 = np.arctan2(-N[0, 1], N[1, 1])
+
+    # Calculate the effective contribution from the fourth joint and TCP
+    dx = 0.0823 * np.sin(theta4) * np.cos(theta3)
+    dz_joint4 = 0.09465 + 0.0823 * np.cos(theta4)
+    y_contribution = 0.093 + 0.0823 * np.sin(theta4) * np.sin(theta3)
+
+    # Check if the y contribution matches the target (with a small tolerance)
+    if not np.isclose(y_contribution, y_target, atol=1e-4):
+        # Flip the sign of theta3 and recalculate
+        theta3 = -theta3
+        dx = 0.0823 * np.sin(theta4) * np.cos(theta3)
+        y_contribution = 0.093 + 0.0823 * np.sin(theta4) * np.sin(theta3)
+        if not np.isclose(y_contribution, y_target, atol=1e-4):
+            theta4 = -theta4
+            dx = 0.0823 * np.sin(theta4) * np.cos(theta3)
+            dz_joint4 = 0.09465 + 0.0823 * np.cos(theta4)
+            y_contribution = 0.093 + 0.0823 * np.sin(theta4) * np.sin(theta3)
+
+    # Calculate the position components from joint2
+    # The position from joint2 is [0, 0, 0.39225] + R_Y(theta2) * [dx, 0.093, dz_joint4]
+    # Project into the XZ plane considering theta2
+    # We need to solve for theta1 and theta2 such that:
+    # x_target = (0.39225 + dz_joint4 * np.sin(theta2) + dx * np.cos(theta2)) * np.sin(theta1) + (dz_joint4 * np.cos(theta2) - dx * np.sin(theta2)) * np.cos(theta1)
+    # z_target = (0.39225 + dz_joint4 * np.sin(theta2) + dx * np.cos(theta2)) * np.cos(theta1) - (dz_joint4 * np.cos(theta2) - dx * np.sin(theta2)) * np.sin(theta1)
+    # This can be simplified to a rotation by theta1 of a point (A, B) where:
+    A = dz_joint4 * np.sin(theta2) + dx * np.cos(theta2)
+    B = dz_joint4 * np.cos(theta2) - dx * np.sin(theta2) + 0.39225
+
+    # Solve for theta1 using the arctan2 of the target coordinates
+    theta1 = np.arctan2(x_target, z_target) - np.arctan2(A, B)
+    # Calculate the required magnitude
+    magnitude = np.sqrt(A**2 + B**2)
+    if not np.isclose(np.sqrt(x_target**2 + z_target**2), magnitude, atol=1e-4):
+        theta1 += np.pi
+        theta1 = np.arctan2(np.sin(theta1), np.cos(theta1))  # Normalize angle
+
+    # Calculate theta2 using theta_sum = theta1 + theta2
+    theta2 = theta_sum - theta1
+
+    return (theta1, theta2, theta3, theta4)
+```
+
+### Explanation
+1. **Orientation Adjustment**: The target rotation matrix is adjusted for the TCP's local rotation, and the resulting matrix is decomposed to solve for the third and fourth joint angles using trigonometric relationships.
+2. **Position Calculation**: The position equations are derived considering the contributions of the third and fourth joints. The first two joint angles are solved using geometric relationships and trigonometric functions to ensure the correct position is reached.
+3. **Error Handling**: The solution includes checks to ensure the calculated y-co contribution matches the target, adjusting the sign of theta3 and theta4 if necessary to handle multiple potential solutions.
+
+This approach ensures that both the position and orientation of the end-effector are accurately achieved by considering the contributions of all four joints in a closed-form solution.

@@ -1,0 +1,106 @@
+To solve this problem, we need to determine the joint angles for a 4-DOF manipulator to reach a target position and orientation. The solution involves decoupling the problem into position and orientation components, leveraging geometric and algebraic methods to find the joint angles accurately.
+
+### Approach
+1. **Position Analysis**:
+   - **Y Component Calculation**: Compute possible values for the third (θ₃) and fourth (θ₄) joints based on the target's y-coordinate.
+   - **Wrist Position**: Adjust the target position to account for the TCP's offset and solve for the first two joints (θ₁, θ₂) using geometric inverse kinematics.
+
+2. **Orientation Analysis**:
+   - **Rotation Matrices**: Construct the desired rotation matrix from the target orientation and decompose it to find the remaining joint angles that align the robot's orientation with the target.
+
+### Solution Code
+```python
+import numpy as np
+from numpy import cos, sin, arctan2, arccos, sqrt, pi
+
+def inverse_kinematics(p: tuple[float, float, float], r: tuple[float, float, float]) -> tuple[float, float, float, float]:
+    x_target, y_target, z_target = p
+    roll, pitch, yaw = r
+
+    # Desired rotation matrix accounting for TCP's fixed Z rotation
+    R_desired = euler_to_rotation_matrix(roll, pitch, yaw)
+    R_target = R_desired @ rotation_z(-pi/2)
+
+    # Calculate possible theta3 and theta4 combinations from Y-coordinate
+    y_wrist = y_target - 0.093
+    if abs(y_wrist) > 0.0823:
+        return (0.0, 0.0, 0.0, 0.0)  # Shouldn't happen per problem statement
+
+    # Generate theta3 candidates with increased resolution
+    theta3_candidates = np.linspace(-pi, pi, 72)
+    for theta3 in theta3_candidates:
+        cos_t3 = cos(theta3)
+        if abs(cos_t3) < 1e-6:
+            continue
+
+        # Calculate possible theta4 values
+        cos_t4 = y_wrist / (0.0823 * cos_t3)
+        cos_t4 = np.clip(cos_t4, -1.0, 1.0)
+        theta4_options = [arccos(cos_t4), -arccos(cos_t4)]
+
+        for theta4 in theta4_options:
+            # Calculate wrist position components
+            x_offset = 0.0823 * sin(theta4) * cos(theta3)
+            z_offset = 0.0823 * cos(theta4) * cos(theta3)
+            x_wrist = x_target - x_offset
+            z_wrist = z_target - z_offset
+
+            # Solve two-link IK for theta1 and theta2
+            L1, L2 = 0.39225, 0.09465
+            D_sq = x_wrist**2 + z_wrist**2
+            D = sqrt(D_sq)
+            if not (abs(L1 - L2) <= D <= (L1 + L2)):
+                continue
+
+            # Calculate theta2 possibilities
+            cos_theta2 = (D_sq - L1**2 - L2**2) / (2 * L1 * L2)
+            cos_theta2 = np.clip(cos_theta2, -1.0, 1.0)
+            theta2 = arccos(cos_theta2)
+            theta2_options = [theta2, -theta2]
+
+            for theta2 in theta2_options:
+                # Calculate theta1
+                gamma = arctan2(z_wrist, x_wrist)
+                numerator = L2 * sin(theta2)
+                denominator = L1 + L2 * cos(theta2)
+                delta = arctan2(numerator, denominator)
+                theta1 = gamma - delta
+
+                # Verify orientation match
+                R_combined = (rotation_y(theta1) @ rotation_y(theta2) 
+                              @ rotation_z(theta3) @ rotation_y(theta4))
+                if np.allclose(R_combined, R_target, atol=1e-3):
+                    return (theta1, theta2, theta3, theta4)
+
+    # Fallback (shouldn't be reached for valid targets)
+    return (0.0, 0.0, 0.0, 0.0)
+
+def euler_to_rotation_matrix(roll, pitch, yaw):
+    R_x = np.array([[1, 0, 0],
+                    [0, cos(roll), -sin(roll)],
+                    [0, sin(roll), cos(roll)]])
+    R_y = np.array([[cos(pitch), 0, sin(pitch)],
+                    [0, 1, 0],
+                    [-sin(pitch), 0, cos(pitch)]])
+    R_z = np.array([[cos(yaw), -sin(yaw), 0],
+                    [sin(yaw), cos(yaw), 0],
+                    [0, 0, 1]])
+    return R_z @ R_y @ R_x
+
+def rotation_y(theta):
+    return np.array([[cos(theta), 0, sin(theta)],
+                     [0, 1, 0],
+                     [-sin(theta), 0, cos(theta)]])
+
+def rotation_z(theta):
+    return np.array([[cos(theta), -sin(theta), 0],
+                     [sin(theta), cos(theta), 0],
+                     [0, 0, 1]])
+```
+
+### Explanation
+1. **Y Component Calculation**: The target's y-coordinate is used to compute possible values for θ₃ and θ₄, ensuring the TCP's Y offset is correctly accounted for.
+2. **Wrist Position Adjustment**: The target position is adjusted to find the wrist position, which is then used to solve for the first two joints (θ₁, θ₂) using geometric inverse kinematics.
+3. **Orientation Verification**: The computed joint angles are used to construct the robot's orientation matrix, which is compared to the target orientation to ensure alignment.
+
+This approach efficiently decouples the position and orientation problems, leveraging trigonometric and geometric methods to find valid joint angles that meet both position and orientation requirements.

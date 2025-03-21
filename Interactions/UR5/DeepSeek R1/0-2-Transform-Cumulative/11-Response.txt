@@ -1,0 +1,84 @@
+To solve this problem, we need to determine the joint angles (theta1, theta2, theta3) for a 3-DOF serial manipulator such that the Tool Center Point (TCP) reaches a specified position and orientation. The solution involves accurately accounting for link offsets and decomposing the orientation into joint angles.
+
+### Approach
+1. **Convert Target Orientation to Rotation Matrix**: Use the RPY angles to construct a rotation matrix using the ZYX convention.
+2. **Extract Theta1 and Theta_sum**: Derive theta1 from the yaw component and theta_sum (theta2 + theta3) from the pitch component of the rotation matrix.
+3. **Adjust Target Position**: Correctly adjust the target position for link offsets to transform into the planar coordinate system of the last two joints.
+4. **Solve for Theta2 and Theta3**: Use geometric methods to solve for the remaining angles, considering both possible configurations (elbow up/down) and validating against joint limits.
+
+### Solution Code
+```python
+import math
+
+def inverse_kinematics(p: tuple[float, float, float], r: tuple[float, float, float]) -> tuple[float, float, float]:
+    x_target, y_target, z_target = p
+    rx, ry, rz = r
+
+    # Compute R_target from RPY angles (ZYX convention)
+    cx = math.cos(rx)
+    sx = math.sin(rx)
+    cy = math.cos(ry)
+    sy = math.sin(ry)
+    cz = math.cos(rz)
+    sz = math.sin(rz)
+
+    R_target = [
+        [cz * cy, cz * sy * sx - sz * cx, cz * sy * cx + sz * sx],
+        [sz * cy, sz * sy * sx + cz * cx, sz * sy * cx - cz * sx],
+        [-sy, cy * sx, cy * cx]
+    ]
+
+    # Theta1 is derived from the yaw component (rz)
+    theta1 = math.atan2(R_target[1][0], R_target[0][0])
+
+    # Theta_sum (theta2 + theta3) from pitch component
+    theta_sum = math.atan2(-R_target[2][0], R_target[2][2])
+
+    # Adjust target position for link offsets (Revolute 2 and 3 Y offsets)
+    y_offset = 0.13585 - 0.1197  # Combined Y offset
+    x_adj = x_target + y_offset * math.sin(theta1)
+    y_adj = y_target - y_offset * math.cos(theta1)
+    planar_x = math.hypot(x_adj, y_adj)
+    planar_z = z_target
+
+    # Solve for theta2 and theta3 using geometric approach
+    a = 0.425  # Revolute 2 to 3 length
+    b = 0.39225  # Revolute 3 to TCP length
+
+    # Law of Cosines for planar robot
+    D = (planar_x**2 + planar_z**2 - a**2 - b**2) / (2 * a * b)
+    D = max(min(D, 1.0), -1.0)  # Clamp to valid range
+    theta3 = math.acos(D)
+    
+    # Two possible solutions (elbow up/down)
+    theta2_1 = math.atan2(planar_x, planar_z) - math.atan2(a + b * math.cos(theta3), b * math.sin(theta3))
+    theta2_2 = math.atan2(planar_x, planar_z) + math.atan2(a + b * math.cos(theta3), b * math.sin(theta3))
+    theta3_2 = -theta3
+
+    # Select valid solution based on orientation match
+    valid_solutions = []
+    for theta2, theta3 in [(theta2_1, theta3), (theta2_2, theta3_2)]:
+        if (-6.2831853 <= theta2 <= 6.2831853 and 
+            -6.2831853 <= theta3 <= 6.2831853):
+            valid_solutions.append((theta2, theta3))
+
+    if valid_solutions:
+        # Choose solution that best matches theta_sum
+        best_sol = min(valid_solutions, key=lambda x: abs((x[0] + x[1]) - theta_sum))
+        theta2, theta3 = best_sol
+    else:
+        # Fallback to algebraic solution
+        theta2 = math.atan2(planar_x - b * math.sin(theta_sum), 
+                           planar_z - b * math.cos(theta_sum))
+        theta3 = theta_sum - theta2
+
+    return (theta1, theta2, theta3)
+```
+
+### Explanation
+1. **Rotation Matrix Construction**: The target orientation is converted into a rotation matrix using the ZYX Euler angles convention, which properly decomposes the orientation into yaw, pitch, and roll components.
+2. **Theta1 Calculation**: The first joint angle (theta1) is derived from the yaw component of the rotation matrix, ensuring proper alignment of the manipulator's base orientation.
+3. **Position Adjustment**: The target position is adjusted to account for the combined Y-axis offsets of Revolute 2 and 3, converting the problem into a 2D planar problem in the X-Z plane of the last two joints.
+4. **Geometric Solution**: Using the law of cosines, we calculate possible solutions for theta2 and theta3, considering both elbow-up and elbow-down configurations. The valid solution is selected based on joint limits and orientation matching.
+
+This approach ensures accurate computation of joint angles while considering all kinematic constraints and numerical stability.

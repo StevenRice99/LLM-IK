@@ -1,0 +1,109 @@
+To solve the inverse kinematics for the 4-DOF manipulator, we need to accurately compute joint angles considering both position and orientation while properly handling coordinate transformations and link offsets.
+
+### Approach
+1. **Coordinate Transformation:** 
+   - Transform the target position into the coordinate system of the first joint after accounting for its rotation and link offsets.
+   
+2. **Orientation Decomposition:** 
+   - Decompose the target orientation to isolate Y-axis rotations (joints 1-3) and Z-axis rotation (joint 4).
+   
+3. **Geometric Position Solving:** 
+   - Use geometric methods to solve for the first three joints based on adjusted target positions.
+   
+4. **Orientation Alignment:** 
+   - Compute the fourth joint angle after aligning cumulative rotations from the first three joints.
+
+### Solution Code
+```python
+import numpy as np
+import math
+
+def inverse_kinematics(p: tuple[float, float, float], r: tuple[float, float, float]) -> tuple[float, float, float, float]:
+    x_tcp, y_tcp, z_tcp = p
+    rx, ry, rz = r
+
+    # ========== ORIENTATION HANDLING ==========
+    # Compute target rotation matrix from Euler angles (ZYX convention)
+    R_roll = np.array([[1, 0, 0], 
+                       [0, math.cos(rx), -math.sin(rx)], 
+                       [0, math.sin(rx), math.cos(rx)]])
+    
+    R_pitch = np.array([[math.cos(ry), 0, math.sin(ry)], 
+                        [0, 1, 0], 
+                        [-math.sin(ry), 0, math.cos(ry)]])
+    
+    R_yaw = np.array([[math.cos(rz), -math.sin(rz), 0], 
+                      [math.sin(rz), math.cos(rz), 0], 
+                      [0, 0, 1]])
+    
+    R_target = R_yaw @ R_pitch @ R_roll
+
+    # Extract theta4 from rotation matrix (Z-axis rotation component)
+    theta4 = math.atan2(R_target[1, 0], R_target[0, 0])
+
+    # Calculate total Y-axis rotation needed (theta1 + theta2 + theta3)
+    r13 = R_target[0, 2]
+    r33 = R_target[2, 2]
+    theta_sum = math.atan2(r13, r33)
+
+    # ========== POSITION CALCULATION ==========
+    # Transform target position to Revolute2's coordinate system
+    # Revolute2 offset: [0, -0.1197, 0.425] from base
+    # TCP offset: [0, 0.093, 0.09465] from Revolute4
+    effective_length = 0.093 + 0.09465  # Total offset from Revolute4 to TCP
+    
+    # Subtract TCP offset contribution based on theta_sum
+    x_adj = x_tcp - effective_length * math.sin(theta_sum)
+    z_adj = z_tcp - effective_length * math.cos(theta_sum)
+    y_adj = y_tcp + 0.1197  # Account for Revolute2's y-offset
+
+    # Arm segment lengths (Revolute2 to Revolute3: 0.39225)
+    L1 = 0.425  # Revolute2's z-offset from base
+    L2 = 0.39225  # Revolute3's z-offset from Revolute2
+
+    # Solve 2R planar inverse kinematics for theta1 and theta2
+    dx = math.sqrt(x_adj**2 + z_adj**2)
+    if not (abs(L1 - L2) <= dx <= L1 + L2):
+        raise ValueError("Target position unreachable")
+
+    # Law of cosines solution (elbow down)
+    cos_theta2 = (dx**2 - L1**2 - L2**2) / (2 * L1 * L2)
+    cos_theta2 = np.clip(cos_theta2, -1.0, 1.0)
+    theta2 = -math.acos(cos_theta2)
+
+    # Calculate theta1 using geometric relationships
+    alpha = math.atan2(z_adj, x_adj)
+    beta = math.atan2(L2 * math.sin(-theta2), L1 + L2 * math.cos(-theta2))
+    theta1 = alpha - beta
+
+    # Calculate theta3 using theta_sum relationship
+    theta3 = theta_sum - theta1 - theta2
+
+    # Wrap angles to [-π, π]
+    theta1 = (theta1 + math.pi) % (2*math.pi) - math.pi
+    theta2 = (theta2 + math.pi) % (2*math.pi) - math.pi
+    theta3 = (theta3 + math.pi) % (2*math.pi) - math.pi
+    theta4 = (theta4 + math.pi) % (2*math.pi) - math.pi
+
+    return (theta1, theta2, theta3, theta4)
+```
+
+### Explanation
+1. **Orientation Handling:** 
+   - Constructs the target rotation matrix from Euler angles (ZYX convention).
+   - Extracts θ₄ (Z rotation) directly from the matrix elements.
+   - Calculates θ_sum (sum of Y rotations) using matrix elements to determine total Y-axis rotation needed.
+
+2. **Position Adjustment:** 
+   - Adjusts the target position by subtracting the TCP offset contribution based on θ_sum.
+   - Accounts for Revolute2's vertical offset (-0.1197 in Y-axis).
+
+3. **Geometric Solving:** 
+   - Uses law of cosines to solve for θ₂ (elbow-down configuration).
+   - Calculates θ₁ using geometric relationships between adjusted position and link lengths.
+   - Derives θ₃ from θ_sum relationship to complete Y-axis rotations.
+
+4. **Angle Wrapping:** 
+   - Ensures all angles stay within [-π, π] range for consistency.
+
+This solution properly handles coordinate transformations, link offsets, and orientation decomposition to provide accurate joint angles for reaching target positions and orientations.

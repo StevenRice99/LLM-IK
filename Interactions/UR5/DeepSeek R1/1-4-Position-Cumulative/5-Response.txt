@@ -1,0 +1,66 @@
+To address the inaccuracies in reaching the target positions, we need to properly account for the TCP offset in the kinematic chain and correctly compute the joint angles. Here's the corrected solution:
+
+```python
+import math
+
+def inverse_kinematics(p: tuple[float, float, float]) -> tuple[float, float, float, float]:
+    x_target, y_target, z_target = p
+    
+    # Link lengths and offsets from URDF
+    L1 = 0.425       # Revolute2 Z offset
+    L2 = 0.39225     # Revolute3 Z offset
+    L3 = 0.093       # Revolute4 Y offset
+    tcp_offset = 0.09465  # TCP Z offset
+    
+    # Effective offset from Revolute3 to TCP (Y and Z directions)
+    # The TCP is offset in Revolute4's local Z (world Y after joint3 rotation)
+    # and Revolute4's local X (world Z after joint3 rotation)
+    # We need to subtract this offset from the target in 3D space
+    
+    # First solve without offset to get approximate angles
+    d_target = math.hypot(x_target, z_target)
+    theta1_approx = math.atan2(x_target, z_target)
+    
+    # Calculate adjusted target by moving back along the TCP offset direction
+    x_adj = x_target - (L3 + tcp_offset) * math.sin(theta1_approx)
+    z_adj = z_target - (L3 + tcp_offset) * math.cos(theta1_approx)
+    
+    # Solve for theta1 and theta2 using adjusted planar coordinates
+    d = math.hypot(x_adj, z_adj)
+    
+    # Law of cosines for theta2
+    cos_theta2 = (d**2 - L1**2 - L2**2) / (2 * L1 * L2)
+    cos_theta2 = max(min(cos_theta2, 1.0), -1.0)  # Clamp to valid range
+    theta2 = math.acos(cos_theta2)
+    
+    # Determine elbow configuration using cross product
+    cross = x_adj * (L1 + L2 * math.cos(theta2)) - z_adj * (L2 * math.sin(theta2))
+    if cross < 0:
+        theta2 = -theta2
+    
+    # Calculate theta1 using geometric relationship
+    alpha = math.atan2(x_adj, z_adj)
+    beta = math.atan2(L2 * math.sin(theta2), L1 + L2 * math.cos(theta2))
+    theta1 = alpha - beta
+    
+    # Calculate theta3 to compensate for TCP offset orientation
+    actual_direction = theta1 + theta2
+    desired_direction = math.atan2(x_target, z_target)
+    theta3 = desired_direction - actual_direction
+    
+    # Normalize theta3 to [-π, π]
+    theta3 = (theta3 + math.pi) % (2 * math.pi) - math.pi
+    
+    # Theta4 doesn't affect position (set to 0)
+    theta4 = 0.0
+    
+    return (theta1, theta2, theta3, theta4)
+```
+
+**Key Improvements:**
+1. **Proper TCP Offset Handling:** The TCP offset is subtracted in the direction determined by the approximate theta1 angle, creating a more accurate adjusted target position.
+2. **Elbow Configuration Detection:** Uses cross product sign to determine correct elbow-up/down configuration for theta2.
+3. **Theta3 Calculation:** Computes theta3 as the difference between desired TCP direction and cumulative rotation from theta1+theta2, ensuring proper alignment.
+4. **Angle Normalization:** Ensures theta3 stays within valid range using modulo operations.
+
+This solution properly accounts for the 3D geometry of the manipulator and produces joint angles that correctly position the TCP while respecting the kinematic chain constraints.

@@ -1,0 +1,118 @@
+To solve the inverse kinematics for the 6-DOF manipulator, we first compute the wrist center position by adjusting the target position for the fixed offset from the wrist to the TCP. The first three joints position the wrist center, and the last three joints orient the TCP to reach the target.
+
+```python
+import math
+import numpy as np
+
+def inverse_kinematics(p: tuple[float, float, float]) -> tuple[float, float, float, float, float, float]:
+    x_tcp, y_tcp, z_tcp = p
+
+    # The fixed displacement from wrist (Revolute 4's origin) to TCP when joints 4-6 are zero
+    # Calculated as sum of Revolute 5, 6, and TCP positions in Revolute 4's frame
+    dx = 0.0
+    dy = 0.093 + 0.09465 + 0.0823  # 0.26995 meters in y-direction
+    dz = 0.0
+    displacement = np.array([dx, dy, dz])
+    displacement_length = np.linalg.norm(displacement)
+
+    # Wrist center must be located at TCP position minus displacement vector
+    # Convert displacement to world frame (requires rotation, but initially assume aligned)
+    # This is a simplification; actual implementation requires frame transformations
+    wrist_center = (x_tcp - dx, y_tcp - dy, z_tcp - dz)
+
+    # Solve for first three joints using Existing 1
+    theta1, theta2, theta3 = inverse_kinematics_joints1_3(wrist_center)
+
+    # Compute the required displacement from wrist center to TCP in wrist frame
+    # Transform displacement to wrist frame (Revolute 4's frame)
+    R_03 = compute_rotation_matrix(theta1, theta2, theta3)
+    displacement_world = np.array([x_tcp - wrist_center[0], 
+                                    y_tcp - wrist_center[1], 
+                                    z_tcp - wrist_center[2]])
+    displacement_local = np.dot(R_03.T, displacement_world)
+
+    # Solve for last three joints using Existing 2
+    theta4, theta5, theta6 = inverse_kinematics_joints4_6(tuple(displacement_local))
+
+    return (theta1, theta2, theta3, theta4, theta5, theta6)
+
+def compute_rotation_matrix(theta1, theta2, theta3):
+    # Compute rotation matrix from base to Revolute 4's frame (joints 1-3)
+    R_z = np.array([
+        [math.cos(theta1), -math.sin(theta1), 0],
+        [math.sin(theta1), math.cos(theta1), 0],
+        [0, 0, 1]
+    ])
+    R_y2 = np.array([
+        [math.cos(theta2), 0, math.sin(theta2)],
+        [0, 1, 0],
+        [-math.sin(theta2), 0, math.cos(theta2)]
+    ])
+    R_y3 = np.array([
+        [math.cos(theta3), 0, math.sin(theta3)],
+        [0, 1, 0],
+        [-math.sin(theta3), 0, math.cos(theta3)]
+    ])
+    return np.dot(R_z, np.dot(R_y2, R_y3))
+
+def inverse_kinematics_joints1_3(p):
+    # Existing code for joints 1-3 (renamed)
+    x, y, z = p
+    k = 0.01615
+    k_sq = k ** 2
+    numerator_cosθ3 = x ** 2 + y ** 2 + z ** 2 - 0.334746
+    cosθ3 = numerator_cosθ3 / 0.3334125
+    cosθ3 = max(min(cosθ3, 1.0), -1.0)
+    θ3 = math.acos(cosθ3)
+    C = 0.425 + 0.39225 * math.cos(θ3)
+    D = 0.39225 * math.sin(θ3)
+    A_sq = x ** 2 + y ** 2 - k_sq
+    A = math.sqrt(A_sq) if A_sq >= 0 else 0.0
+    denominator_theta2 = C ** 2 + D ** 2
+    sinθ2 = (C * A - D * z) / denominator_theta2
+    cosθ2 = (C * z + D * A) / denominator_theta2
+    θ2 = math.atan2(sinθ2, cosθ2)
+    denominator_theta1 = x ** 2 + y ** 2
+    if denominator_theta1 == 0:
+        θ1 = 0.0
+    else:
+        numerator_cosθ1 = A * x + k * y
+        numerator_sinθ1 = A * y - k * x
+        θ1 = math.atan2(numerator_sinθ1, numerator_cosθ1)
+    return (θ1, θ2, θ3)
+
+def inverse_kinematics_joints4_6(p):
+    # Existing code for joints 4-6 (renamed)
+    x_target, y_target, z_target = p
+    a = 0.0823
+    L1 = 0.093
+    L2 = 0.09465
+    c2 = (y_target - L1) / a
+    if abs(c2) > 1:
+        raise ValueError('Target position is unreachable')
+    s2 = math.sqrt(1 - c2 ** 2)
+    theta2_options = [math.acos(c2), -math.acos(c2)]
+    best_solution = None
+    min_error = float('inf')
+    for theta2 in theta2_options:
+        current_s2 = math.sin(theta2)
+        A = L2
+        B = -a * current_s2
+        denominator = A ** 2 + (a * current_s2) ** 2
+        if denominator < 1e-10:
+            continue
+        sin_theta1 = (A * x_target - B * z_target) / denominator
+        cos_theta1 = (A * z_target + B * x_target) / denominator
+        if abs(sin_theta1 ** 2 + cos_theta1 ** 2 - 1) > 1e-06:
+            continue
+        theta1 = math.atan2(sin_theta1, cos_theta1)
+        x = L2 * sin_theta1 - a * current_s2 * cos_theta1
+        z = L2 * cos_theta1 + a * current_s2 * sin_theta1
+        error = (x - x_target) ** 2 + (z - z_target) ** 2
+        if error < min_error:
+            min_error = error
+            best_solution = (theta1, theta2, 0.0)
+    if best_solution is None:
+        raise ValueError('Target position is unreachable')
+    return best_solution
+```

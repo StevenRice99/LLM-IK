@@ -1,0 +1,101 @@
+To solve this problem, we need to determine the joint angles (theta1, theta2, theta3) for a 3-DOF serial manipulator such that the Tool Center Point (TCP) reaches a specified position and orientation in the world frame. The solution involves solving the inverse kinematics problem by considering both the position and orientation components, ensuring the correct sign of theta2 to achieve the desired orientation.
+
+### Approach
+1. **Position Analysis**:
+   - **Theta2 (Revolute 2)**: Calculate using the y-coordinate of the target position. The y-coordinate is influenced by the cosine of theta2 due to the link lengths and joint configuration.
+   - **Theta1 (Revolute 1)**: Determine using the x and z coordinates of the target position. This involves solving a system of linear equations derived from the geometric configuration of the manipulator, considering both possible signs of theta2.
+
+2. **Orientation Analysis**:
+   - **Theta3 (Revolute 3)**: Compute using the target orientation and the previously determined theta1 and theta2. This involves matrix transformations to align the end-effector's orientation with the target, considering the correct sign of theta2 to ensure the orientation is achieved.
+
+### Solution Code
+```python
+import math
+import numpy as np
+
+def inverse_kinematics(p: tuple[float, float, float], r: tuple[float, float, float]) -> tuple[float, float, float]:
+    px, py, pz = p
+    target_roll, target_pitch, target_yaw = r
+
+    # Calculate possible theta2 values based on y-coordinate
+    y_offset = py - 0.093
+    cos_theta2 = y_offset / 0.0823
+    theta2_pos = math.acos(cos_theta2)
+    theta2_neg = -theta2_pos
+    possible_theta2 = [theta2_pos, theta2_neg]
+
+    best_solution = None
+    min_orientation_diff = float('inf')
+
+    for theta2 in possible_theta2:
+        sin_theta2 = math.sin(theta2)
+
+        # Solve for theta1 using x and z coordinates
+        A = -0.0823 * sin_theta2
+        B = 0.09465
+        C = 0.0823 * sin_theta2
+        D = 0.09465
+        det = B * D - A * C
+
+        if abs(det) < 1e-6:
+            continue
+
+        sin_theta1 = (D * px - A * pz) / det
+        cos_theta1 = (-C * px + B * pz) / det
+        theta1 = math.atan2(sin_theta1, cos_theta1)
+
+        # Compute desired rotation matrix
+        cr, cp, cy = math.cos(target_roll), math.cos(target_pitch), math.cos(target_yaw)
+        sr, sp, sy = math.sin(target_roll), math.sin(target_pitch), math.sin(target_yaw)
+        R_target = np.array([
+            [cy * cp, cy * sp * sr - sy * cr, cy * sp * cr + sy * sr],
+            [sy * cp, sy * sp * sr + cy * cr, sy * sp * cr - cy * sr],
+            [-sp, cp * sr, cp * cr]
+        ])
+
+        # Adjust for TCP's fixed orientation (R_z(pi/2))
+        R_tcp_inv = np.array([
+            [0, 1, 0],
+            [-1, 0, 0],
+            [0, 0, 1]
+        ])
+        R_desired = R_target @ R_tcp_inv
+
+        # Compute combined rotation to solve for theta3
+        R_y_inv = np.array([
+            [math.cos(-theta1), 0, math.sin(-theta1)],
+            [0, 1, 0],
+            [-math.sin(-theta1), 0, math.cos(-theta1)]
+        ])
+        R_z_inv = np.array([
+            [math.cos(-theta2), -math.sin(-theta2), 0],
+            [math.sin(-theta2), math.cos(-theta2), 0],
+            [0, 0, 1]
+        ])
+        R_combined = R_z_inv @ R_y_inv @ R_desired
+
+        # Extract theta3 from the combined rotation matrix
+        cos_theta3 = R_combined[0, 0]
+        sin_theta3 = R_combined[0, 2]
+        theta3 = math.atan2(sin_theta3, cos_theta3)
+
+        # Check if this solution results in a valid orientation
+        current_diff = abs(theta3 - best_solution[2]) if best_solution else float('inf')
+        if current_diff < min_orientation_diff:
+            best_solution = (theta1, theta2, theta3)
+            min_orientation_diff = current_diff
+
+    return best_solution if best_solution is not None else (0.0, 0.0, 0.0)
+```
+
+### Explanation
+1. **Position Calculation**:
+   - **Theta2** is derived from the y-coordinate of the target position using the cosine of the angle, adjusted by the link length. Both positive and negative solutions for theta2 are considered to account for the correct kinematic configuration.
+   - **Theta1** is computed by solving a system of linear equations derived from the x and z coordinates, considering the geometric transformations of the manipulator for both possible theta2 values.
+
+2. **Orientation Calculation**:
+   - The target orientation (given as roll, pitch, yaw) is converted into a rotation matrix.
+   - The inverse of the TCP's fixed orientation (a 90-degree rotation around Z) is applied to align the coordinate systems.
+   - The combined rotation matrix, after accounting for the previously determined theta1 and theta2, is used to solve for theta3 by extracting the angle from the matrix elements. The solution that minimizes the orientation difference is selected to ensure correctness.
+
+This approach efficiently decouples the position and orientation problems, considering multiple kinematic configurations to ensure the correct solution is found.

@@ -1,0 +1,70 @@
+To solve this problem, we need to determine the joint angles for a 4-DOF serial manipulator to reach a target position and orientation. The solution involves correcting the calculation of the cumulative rotation matrix and adjusting the position calculation to account for the orientation of the end-effector.
+
+### Approach
+1. **Rotation Matrix Adjustment**: The target orientation is adjusted by the inverse of the TCP's local rotation to correctly compute the cumulative rotation matrix up to the fourth joint.
+2. **Position Calculation**: The position of the end-effector is calculated using the adjusted cumulative rotation matrix to ensure the correct orientation is considered.
+3. **Joint Angles Calculation**: The joint angles are derived from the adjusted rotation matrix, ensuring both position and orientation are accurately achieved.
+
+### Solution Code
+```python
+import numpy as np
+
+def inverse_kinematics(p: tuple[float, float, float], r: tuple[float, float, float]) -> tuple[float, float, float, float]:
+    x_target, y_target, z_target = p
+    rx, ry, rz = r
+
+    # Compute the target rotation matrix from the given orientation
+    R_roll = np.array([[1, 0, 0], [0, np.cos(rx), -np.sin(rx)], [0, np.sin(rx), np.cos(rx)]])
+    R_pitch = np.array([[np.cos(ry), 0, np.sin(ry)], [0, 1, 0], [-np.sin(ry), 0, np.cos(ry)]])
+    R_yaw = np.array([[np.cos(rz), -np.sin(rz), 0], [np.sin(rz), np.cos(rz), 0], [0, 0, 1]])
+    R_target = R_yaw @ R_pitch @ R_roll
+
+    # Adjust for the TCP's local orientation (R_tcp_local_inv is inverse of 90-degree Z rotation)
+    R_tcp_local_inv = np.array([[0, 1, 0], [-1, 0, 0], [0, 0, 1]])
+    R_total = R_target @ R_tcp_local_inv
+
+    # Calculate theta_sum using elements from the adjusted rotation matrix (R_total)
+    r13 = R_total[0, 2]
+    r33 = R_total[2, 2]
+    theta_sum = np.arctan2(r13, r33)
+
+    # Parameters for the manipulator's link lengths including TCP offset
+    A = 0.39225  # Revolute 2's z position
+    B = 0.09465 + 0.0823  # Revolute 4's z position plus TCP's y offset
+
+    # Solve for theta1 and theta2 based on the target position
+    sin_S = np.sin(theta_sum)
+    cos_S = np.cos(theta_sum)
+    numerator_sin = x_target - B * sin_S
+    numerator_cos = z_target - B * cos_S
+    theta1 = np.arctan2(numerator_sin, numerator_cos)
+    theta2 = theta_sum - theta1
+
+    # Compute the rotation matrix after the first two joints (theta1 + theta2)
+    theta_sum_current = theta1 + theta2
+    cos_theta_sum = np.cos(theta_sum_current)
+    sin_theta_sum = np.sin(theta_sum_current)
+    R_Y_theta_sum = np.array([
+        [cos_theta_sum, 0, sin_theta_sum],
+        [0, 1, 0],
+        [-sin_theta_sum, 0, cos_theta_sum]
+    ])
+    R_Y_theta_sum_T = R_Y_theta_sum.T  # Transpose to invert the rotation
+
+    # Compute the remaining rotation matrix M
+    M = R_Y_theta_sum_T @ R_total
+
+    # Solve for theta3 (Z-axis) and theta4 (Y-axis) from matrix M
+    theta3 = np.arctan2(-M[0, 1], M[1, 1])
+    theta4 = np.arctan2(-M[2, 0], M[2, 2])
+
+    return (theta1, theta2, theta3, theta4)
+```
+
+### Explanation
+1. **Rotation Matrix Adjustment**: The target orientation matrix is adjusted by the inverse of the TCP's local rotation (a 90-degree Z rotation) to correctly represent the cumulative rotation up to the fourth joint.
+2. **Theta Sum Calculation**: The sum of the first two joint angles (theta_sum) is derived from the adjusted rotation matrix to ensure correct orientation alignment.
+3. **Position Calculation**: The position of the end-effector is calculated using the adjusted cumulative rotation matrix, considering the link lengths and TCP offset.
+4. **Joint Angles Derivation**: The remaining joint angles (theta3 and theta4) are derived from the decomposed rotation matrix, ensuring the correct orientation is achieved.
+
+This approach ensures that both the position and orientation of the end-effector are accurately reached by considering the cumulative effect of all joint rotations.

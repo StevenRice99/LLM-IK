@@ -1,0 +1,158 @@
+To solve this problem, we need to determine the joint angles for a 5-DOF serial manipulator to reach a target position. The key insight is to correctly model the forward kinematics up to the fourth joint and then compute the fourth joint angle to account for the TCP's offset. The fifth joint's rotation does not affect the position, so it is set to zero.
+
+### Approach
+1. **Adjust Target Position**: The target position is adjusted to account for the fixed Y and Z offsets from the fourth joint to the TCP.
+2. **Solve for Joints 1-3**: Use geometric and trigonometric relationships to compute the first three joint angles, considering both possible solutions for the third joint angle (positive and negative).
+3. **Compute Joint 4**: Calculate the fourth joint angle based on the remaining displacement from the fourth joint's origin to the target, considering the rotation around the Y-axis.
+4. **Select Best Solution**: Evaluate both possible solutions (positive and negative third joint angles) and select the one that minimizes the error between the computed and target positions.
+
+### Solution Code
+```python
+import numpy as np
+
+def inverse_kinematics(p: tuple[float, float, float]) -> tuple[float, float, float, float, float]:
+    x_target, y_target, z_target = p
+
+    # Consider both possible solutions for q3 (positive and negative)
+    numerator = x_target**2 + (y_target - 0.093)**2 + z_target**2 - 0.346395
+    denominator = 0.3341625
+    cos_q3 = numerator / denominator
+    cos_q3 = np.clip(cos_q3, -1.0, 1.0)
+    q3_pos = np.arccos(cos_q3)
+    q3_neg = -q3_pos
+
+    solutions = []
+    for q3 in [q3_pos, q3_neg]:
+        A = 0.425 + 0.39225 * np.cos(q3)
+        B = 0.39225 * np.sin(q3)
+        S_squared = x_target**2 + (y_target - 0.093)**2 - 0.10915**2
+        S = np.sqrt(S_squared) if S_squared >= 0 else 0.0
+        C = z_target
+        numerator_q2 = S * A - C * B
+        denominator_q2 = S * B + C * A
+        q2 = np.arctan2(numerator_q2, denominator_q2)
+        phi = np.arctan2(0.10915, S) if S != 0 else np.pi / 2
+        q1 = np.arctan2(y_target - 0.093, x_target) - phi
+        q1 = (q1 + np.pi) % (2 * np.pi) - np.pi
+
+        # Compute P4's position using forward kinematics
+        term1 = 0.39225 * np.sin(q3) * np.cos(q2)
+        term2 = (0.425 + 0.39225 * np.cos(q3)) * np.sin(q2)
+        x_total_in_Revolute1 = term1 + term2
+        y_total_in_Revolute1 = 0.01615
+        z_total_in_Revolute1 = -0.39225 * np.sin(q3) * np.sin(q2) + (0.425 + 0.39225 * np.cos(q3)) * np.cos(q2)
+
+        P4_x = x_total_in_Revolute1 * np.cos(q1) - y_total_in_Revolute1 * np.sin(q1)
+        P4_y = x_total_in_Revolute1 * np.sin(q1) + y_total_in_Revolute1 * np.cos(q1)
+        P4_z = z_total_in_Revolute1
+
+        # Compute required theta4
+        delta_x = x_target - P4_x
+        delta_y = y_target - P4_y
+        delta_z = z_target - P4_z
+
+        R1 = np.array([
+            [np.cos(q1), -np.sin(q1), 0],
+            [np.sin(q1), np.cos(q1), 0],
+            [0, 0, 1]
+        ])
+        R2 = np.array([
+            [np.cos(q2), 0, np.sin(q2)],
+            [0, 1, 0],
+            [-np.sin(q2), 0, np.cos(q2)]
+        ])
+        R3 = np.array([
+            [np.cos(q3), 0, np.sin(q3)],
+            [0, 1, 0],
+            [-np.sin(q3), 0, np.cos(q3)]
+        ])
+        R = R1 @ R2 @ R3
+        delta_local = np.linalg.inv(R) @ np.array([delta_x, delta_y - 0.093, delta_z])
+
+        if not np.isclose(delta_local[1], 0, atol=1e-3):
+            continue
+
+        theta4 = np.arctan2(delta_local[0], delta_local[2])
+        solutions.append((q1, q2, q3, theta4))
+
+    # Select the solution with minimal error
+    min_error = float('inf')
+    best_sol = None
+    for sol in solutions:
+        q1, q2, q3, q4 = sol
+        # Validate by forward kinematics
+        term1 = 0.39225 * np.sin(q3) * np.cos(q2)
+        term2 = (0.425 + 0.39225 * np.cos(q3)) * np.sin(q2)
+        x_total = term1 + term2
+        y_total = 0.01615
+        z_total = -0.39225 * np.sin(q3) * np.sin(q2) + (0.425 + 0.39225 * np.cos(q3)) * np.cos(q2)
+        P4_x = x_total * np.cos(q1) - y_total * np.sin(q1)
+        P4_y = x_total * np.sin(q1) + y_total * np.cos(q1)
+        P4_z = z_total
+
+        R1 = np.array([
+            [np.cos(q1), -np.sin(q1), 0],
+            [np.sin(q1), np.cos(q1), 0],
+            [0, 0, 1]
+        ])
+        R2 = np.array([
+            [np.cos(q2), 0, np.sin(q2)],
+            [0, 1, 0],
+            [-np.sin(q2), 0, np.cos(q2)]
+        ])
+        R3 = np.array([
+            [np.cos(q3), 0, np.sin(q3)],
+            [0, 1, 0],
+            [-np.sin(q3), 0, np.cos(q3)]
+        ])
+        R4 = np.array([
+            [np.cos(q4), 0, np.sin(q4)],
+            [0, 1, 0],
+            [-np.sin(q4), 0, np.cos(q4)]
+        ])
+        offset = np.array([0, 0.093, 0.09465])
+        rotated_offset = R1 @ R2 @ R3 @ R4 @ offset
+        tcp_x = P4_x + rotated_offset[0]
+        tcp_y = P4_y + rotated_offset[1]
+        tcp_z = P4_z + rotated_offset[2]
+
+        error = ((tcp_x - x_target)**2 + (tcp_y - y_target)**2 + (tcp_z - z_target)**2)
+        if error < min_error:
+            min_error = error
+            best_sol = sol
+
+    if best_sol is None:
+        return inverse_kinematics_fallback(p)
+
+    q1, q2, q3, q4 = best_sol
+    q5 = 0.0
+    return (q1, q2, q3, q4, q5)
+
+def inverse_kinematics_fallback(p):
+    x, y, z = p
+    numerator = x**2 + (y - 0.093)**2 + z**2 - 0.346395
+    denominator = 0.3341625
+    cos_q3 = numerator / denominator
+    cos_q3 = np.clip(cos_q3, -1.0, 1.0)
+    q3 = np.arccos(cos_q3)
+    A = 0.425 + 0.39225 * np.cos(q3)
+    B = 0.39225 * np.sin(q3)
+    S_squared = x**2 + (y - 0.093)**2 - 0.10915**2
+    S = np.sqrt(S_squared) if S_squared >= 0 else 0.0
+    C = z
+    numerator_q2 = S * A - C * B
+    denominator_q2 = S * B + C * A
+    q2 = np.arctan2(numerator_q2, denominator_q2)
+    phi = np.arctan2(0.10915, S) if S != 0 else np.pi / 2
+    q1 = np.arctan2(y - 0.093, x) - phi
+    q1 = (q1 + np.pi) % (2 * np.pi) - np.pi
+    q4 = 0.0
+    q5 = 0.0
+    return (q1, q2, q3, q4, q5)
+```
+
+### Explanation
+1. **Adjust Target Position**: The target position is adjusted by subtracting the fixed Y offset (0.093) to account for the offset from the fourth joint to the TCP.
+2. **Solve for Joints 1-3**: The first three joint angles are computed using geometric and trigonometric relationships, considering both possible solutions for the third joint angle (positive and negative).
+3. **Compute Joint 4**: The fourth joint angle is calculated based on the remaining displacement from the fourth joint's origin to the target, considering the rotation around the Y-axis. The solution with the minimal residual error is selected to ensure the TCP reaches the target position.
+4. **Set Joint 5**: The fifth joint angle is set to zero as it does not affect the position of the TCP.

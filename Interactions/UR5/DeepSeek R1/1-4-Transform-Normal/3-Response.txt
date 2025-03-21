@@ -1,0 +1,61 @@
+To address the error where valid targets are incorrectly flagged as unreachable, we need to handle numerical precision issues in the position calculation. The key fix is to clamp the value of `K` to the valid range for the arccosine function.
+
+```python
+import math
+
+def inverse_kinematics(p: tuple[float, float, float], r: tuple[float, float, float]) -> tuple[float, float, float, float]:
+    r_x, r_y, r_z = r
+    x, y, z = p
+
+    # Orientation part to compute theta_sum and theta4
+    cos_rx = math.cos(r_x)
+    cos_ry = math.cos(r_y)
+    cos_theta_sum = cos_ry * cos_rx
+    theta_sum = math.acos(cos_theta_sum)
+    sin_theta_sum = math.sqrt(1 - cos_theta_sum**2)
+
+    if abs(sin_theta_sum) < 1e-9:
+        theta4 = r_z
+    else:
+        sin_theta4 = math.sin(r_z) * cos_ry
+        cos_theta4 = math.sin(r_y) / sin_theta_sum
+        theta4 = math.atan2(sin_theta4, cos_theta4)
+
+    # Position part to compute theta1, theta2, theta3
+    C = 0.09465 * math.sin(theta_sum)
+    D_val = 0.09465 * math.cos(theta_sum)
+    A = 0.425
+    B = 0.39225
+
+    numerator = (x - C)**2 + (z - D_val)**2 - A**2 - B**2
+    denominator = 2 * A * B
+    K = numerator / denominator
+
+    # Clamp K to handle numerical inaccuracies
+    K = max(min(K, 1.0), -1.0)
+
+    t2 = math.acos(K)
+    solutions = []
+    for current_t2 in [t2, -t2]:
+        M = A + B * math.cos(current_t2)
+        N = B * math.sin(current_t2)
+        denom = M**2 + N**2
+        if denom < 1e-9:
+            continue
+        sin_t1 = (M * (x - C) - N * (z - D_val)) / denom
+        cos_t1 = (M * (z - D_val) + N * (x - C)) / denom
+        t1 = math.atan2(sin_t1, cos_t1)
+        t3 = theta_sum - t1 - current_t2
+        solutions.append((t1, current_t2, t3))
+
+    if not solutions:
+        raise ValueError("No valid solution found")
+
+    t1, t2_val, t3 = solutions[0]
+
+    return (t1, t2_val, t3, theta4)
+```
+
+**Explanation:**
+- **Clamping K:** The value of `K` is clamped between -1 and 1 to handle numerical inaccuracies that might slightly exceed the valid range for the arccosine function.
+- **Numerical Stability:** This adjustment ensures that even with minor computational errors, the code proceeds to compute possible solutions rather than raising an error, aligning with the problem's assumption that all targets are reachable.

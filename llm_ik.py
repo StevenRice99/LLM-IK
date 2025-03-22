@@ -1872,7 +1872,7 @@ class Solver:
                 s = f"{self.model} | {self.robot.name} | {lower + 1} to {upper + 1} | {solving} | {mode} | Run API"
                 if "code" in completion.error:
                     if int(completion.error["code"]) == 402:
-                        logging.warning(f"{s} | Our of credits.")
+                        logging.warning(f"{s} | Out of credits.")
                         return False
                     s += f" | Code: {completion.error['code']}"
                 if "message" in completion.error:

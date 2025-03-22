@@ -1,0 +1,80 @@
+def inverse_kinematics(p: tuple[float, float, float], r: tuple[float, float, float]) -> tuple[float, float, float, float]:
+    """
+    Gets the joint values needed to reach position "p" and orientation "r".
+    :param p: The position to reach in the form [x, y, z].
+    :param r: The orientation to reach in radians in the form [roll, pitch, yaw].
+              Because this mechanism only has rotation about Z for the first joint
+              and about Y for joints 2, 3, and 4, the robot can only realize
+              pitch (about Y) and yaw (about Z). Thus, roll (r[0]) must be zero
+              for a valid solution. The final end-effector orientation is:
+                  Rz(q1) * Ry(q2) * Ry(q3) * Ry(q4) = Rz(q1) * Ry(q2+q3+q4)
+              implying that yaw = q1 and pitch = q2 + q3 + q4.
+    :return: A tuple of the values (q1, q2, q3, q4) to set the links to for
+             reaching position p and orientation r.
+    """
+
+    import numpy as np
+
+    # Unpack the desired position and orientation
+    x, y, z = p
+    roll, pitch, yaw = r  # r = [roll, pitch, yaw], with roll assumed ~ 0
+
+    # --------------------------
+    # POSITION SOLUTION (adapted from the provided "EXISTING" code).
+    # This portion solves for (q1, q2, q3) under the assumption q4 = 0,
+    # giving the correct end-effector position.
+    # --------------------------
+    numerator = x**2 + y**2 + z**2 - 0.346395
+    denominator = 0.3341625
+    cos_q3 = numerator / denominator
+    cos_q3 = np.clip(cos_q3, -1.0, 1.0)  # Clip to handle numerical issues
+    q3 = np.arccos(cos_q3)
+
+    A = 0.425 + 0.39225 * np.cos(q3)
+    B = 0.39225 * np.sin(q3)
+
+    # 0.10915 is the net offset in the robot's base/link geometry,
+    # combining link translations so that S is effectively the
+    # "planar" distance from the center minus that offset.
+    S_squared = x**2 + y**2 - 0.10915**2
+    S = np.sqrt(S_squared) if S_squared >= 0 else 0.0
+    C = z
+
+    numerator_q2 = S * A - C * B
+    denominator_q2 = S * B + C * A
+    q2 = np.arctan2(numerator_q2, denominator_q2)
+
+    # phi accounts for the small lateral offset so that q1 aims
+    # the arm correctly in the base plane.
+    phi = np.arctan2(0.10915, S) if S != 0 else np.pi / 2
+    q1 = np.arctan2(y, x) - phi
+    # Wrap q1 into the interval [-pi, pi] for neatness
+    q1 = (q1 + np.pi) % (2 * np.pi) - np.pi
+
+    # --------------------------
+    # ORIENTATION ADJUSTMENT
+    # --------------------------
+    #
+    # Because the final orientation is Rz(q1)*Ry(q2+q3+q4),
+    # we match:
+    #     yaw   = q1
+    #     pitch = q2 + q3 + q4
+    #
+    # The "EXISTING" position code above temporarily took q4 = 0;
+    # now we use the user-requested pitch to define q4:
+    #
+    #     q4 = pitch - (q2 + q3)
+    #
+    # We assume the user has chosen x, y so that the automatically
+    # computed q1 (from geometry) indeed matches the wanted yaw.
+    #
+    # If the workspace is well-defined, yaw ≈ q1 from the geometry.
+    # (Since we "assume all targets given are reachable," we do
+    # not enforce that q1 must equal the input yaw here.)
+    #
+    # Finally, ignore roll (r[0]) because the manipulator does
+    # not have an X-axis joint.
+
+    q4 = pitch - (q2 + q3)
+
+    return (q1, q2, q3, q4)

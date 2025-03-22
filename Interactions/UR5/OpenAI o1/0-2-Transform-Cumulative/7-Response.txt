@@ -1,0 +1,108 @@
+```python
+def inverse_kinematics(p: tuple[float, float, float], r: tuple[float, float, float]) -> tuple[float, float, float]:
+    """
+    A closed-form IK for a 3-DOF serial chain with joints:
+       • Joint 1: Revolute about Z, at base
+       • Joint 2: Revolute about Y
+       • Joint 3: Revolute about Y
+    The link origins from the URDF ("DETAILS" section) are:
+       • Joint 1 at [0,    0,       0]
+       • Joint 2 at [0,  0.13585,   0]
+       • Joint 3 at [0, -0.1197, 0.425]
+       • TCP     at [0,   0,     0.39225]
+    The "Position" columns are local translations from each link's parent,
+    and the "Orientation" columns (all [0,0,0]) imply no pre-rotations other
+    than the revolute axes themselves: J1 about Z, J2 about Y, J3 about Y.
+
+    We assume the desired orientation r=[rx, ry, rz] is small-roll or zero-roll
+    about X, so effectively the arm can realize only yaw (q1) and net pitch
+    (q2+q3).
+
+    Steps:
+    1) Choose q1 from the target position so that subsequent links
+       can solve the planar problem in the rotated XZ-plane. (As in "EXISTING 1")
+         q1 = atan2(-x, y)
+    2) Extract the net pitch α = q2 + q3 from the desired orientation r by
+       building the rotation matrix for r = Rz(rz)*Ry(ry)*Rx(rx) and taking
+       α = atan2(R02, R00). (As in "EXISTING 3")
+    3) Rotate the target position p by -q1 about Z and subtract the link-2 offset
+       [0, 0.13585, 0], yielding local coordinates p2 = (x2, y2, z2).
+    4) Solve the 2-link geometry in that local frame.  The link from joint2 to joint3
+       contributes [0, -0.1197, 0.425] rotated by q2 about Y, and the link from joint3
+       to TCP contributes [0, 0, 0.39225] rotated by q2+q3=α about Y.  Hence:
+       
+         p2 = Ry(q2)*[0, -0.1197, 0.425] + Ry(α)*[0, 0, 0.39225]
+
+       In components:
+         x2 = 0.425 sin(q2) + 0.39225 sin(α)
+         y2 = -0.1197
+         z2 = 0.425 cos(q2) + 0.39225 cos(α)
+
+       Solve for q2 from x2,z2; then q3 = α - q2.
+    5) Return (q1, q2, q3).
+
+    NOTE: If y2 != -0.1197 in that local frame, there is no perfect solution under
+    this simplified model.  By the assignment instructions, all inputs are "reachable",
+    so we proceed without further checks.
+    """
+    import math
+
+    # Unpack desired end-effector position p and orientation r
+    x, y, z = p
+    rx, ry, rz = r
+
+    #
+    # 1) Solve q1 from the XY-projection, as done in "EXISTING 1".
+    #
+    q1 = math.atan2(-x, y)
+
+    #
+    # 2) From the desired orientation, compute net pitch α = q2 + q3, as in "EXISTING 3".
+    #    Build the rotation matrix for r=Rz(rz)*Ry(ry)*Rx(rx), then take:
+    #       R00 = cy*cz, R02 = sy, α = atan2(R02, R00).
+    #
+    cx = math.cos(rx)
+    sx = math.sin(rx)
+    cy = math.cos(ry)
+    sy = math.sin(ry)
+    cz = math.cos(rz)
+    sz = math.sin(rz)
+
+    R00 = cy * cz
+    R02 = sy
+    alpha = math.atan2(R02, R00)  # net pitch
+
+    #
+    # 3) Transform the desired position into the local frame after joint1:
+    #    p1 = Rz(-q1) * p  =>  remove link2 offset [0, 0.13585, 0].
+    #
+    c1 = math.cos(q1)
+    s1 = math.sin(q1)
+    # Rotate p by Rz(-q1)
+    x1 =  x*c1 + y*s1
+    y1 = -x*s1 + y*c1
+    z1 =  z
+    # Subtract offset
+    x2 = x1
+    y2 = y1 - 0.13585
+    z2 = z1
+
+    #
+    # 4) Solve the 2-link geometry:
+    #       p2 = Ry(q2)*[0, -0.1197, 0.425] + Ry(alpha)*[0, 0, 0.39225]
+    #    => y2 is ideally -0.1197 if the geometry is perfect. We'll proceed:
+    #
+    #    x2 = 0.425 sin(q2) + 0.39225 sin(alpha)
+    #    z2 = 0.425 cos(q2) + 0.39225 cos(alpha)
+    #
+    #    => Let X' = x2 - 0.39225 sin(alpha)
+    #            Z' = z2 - 0.39225 cos(alpha)
+    #    => q2 = atan2(X', Z'),  q3 = alpha - q2
+    #
+    X_prime = x2 - 0.39225 * math.sin(alpha)
+    Z_prime = z2 - 0.39225 * math.cos(alpha)
+    q2 = math.atan2(X_prime, Z_prime)
+    q3 = alpha - q2
+
+    return (q1, q2, q3)
+```

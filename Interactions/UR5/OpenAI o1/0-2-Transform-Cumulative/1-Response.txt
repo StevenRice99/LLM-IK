@@ -1,0 +1,126 @@
+def inverse_kinematics(p: tuple[float, float, float], r: tuple[float, float, float]) -> tuple[float, float, float]:
+    """
+    Gets the joint values needed to reach position "p" and orientation "r" for the 3-DOF arm.
+    Assumes the first joint (about Z) is at the origin, the second and third joints (both about Y)
+    have the offsets shown in the DETAILS, and the orientation r = [rx, ry, rz] is such that
+    only rotations about Y and Z are actually required to match (i.e. roll about X is zero or
+    negligible).  All targets are assumed reachable.
+    """
+    import math
+
+    # Unpack desired end-effector position/orientation
+    x, y, z = p
+    rx, ry, rz = r  # Although the arm cannot generally track roll (rx), we parse it for completeness
+
+    # ---------------------------
+    # 1) Solve for joint 1 (rotation about Z).
+    #
+    # We take the same approach as "EXISTING 1", which used:
+    #     theta = atan2(-x, y)
+    #
+    # This orients the manipulator about the Z-axis so that subsequent joints 2 and 3
+    # can solve the remaining planar problem in their local x–z plane.
+    # ---------------------------
+    q1 = math.atan2(-x, y)
+
+    # ---------------------------
+    # 2) Compute the overall "pitch" needed for joints 2 + 3 from the desired orientation.
+    #
+    # As in "EXISTING 3", form the basic rotation matrix from r = [rx, ry, rz] = Rz(rz)*Ry(ry)*Rx(rx)
+    # and extract the element that corresponds to sin(ry)/cos(ry*…).
+    #
+    # If roll rx ≈ 0, then the manipulator effectively needs only a rotation about Y by (q2 + q3).
+    # We call that sum "alpha".
+    # ---------------------------
+    cx = math.cos(rx)
+    sx = math.sin(rx)
+    cy = math.cos(ry)
+    sy = math.sin(ry)
+    cz = math.cos(rz)
+    sz = math.sin(rz)
+
+    # From the usual Z–Y–X multiplication, the (0,0) element is cy*cz, and the (0,2) element is sy
+    R00 = cy * cz
+    R02 = sy
+    alpha = math.atan2(R02, R00)  # This is effectively the total pitch = q2 + q3
+
+    # ---------------------------
+    # 3) Transform the desired end-effector position back into the frame after joint 1,
+    #    and then shift so that joint 2 is treated as "local origin."
+    #
+    # Joint 1 rotation about Z by q1 is undone via Rz(-q1).
+    # Joint 2 is at local offset [0, 0.13585, 0] from the base frame (after joint 1).
+    # ---------------------------
+    c1 = math.cos(q1)
+    s1 = math.sin(q1)
+
+    # Rotate p by -q1 about Z:
+    #   Rz(-q1) = [[ c1,  s1,  0 ],
+    #              [-s1,  c1,  0 ],
+    #              [  0,   0,  1 ]]
+    x1 = x * c1 + y * s1
+    y1 = -x * s1 + y * c1
+    z1 = z
+
+    # Subtract off the link-2 offset in that local frame (0, 0.13585, 0)
+    # so that the position "p2" is measured from joint 2.
+    x2 = x1
+    y2 = y1 - 0.13585
+    z2 = z1
+
+    # ---------------------------
+    # 4) Solve the planar two-link problem for joints 2 and 3 about Y.
+    #
+    # From DETAILS, the link from joint 2 to joint 3 has a "main" Z length of 0.425
+    # and from joint 3 to the TCP adds another 0.39225 along the same plane.
+    # We will let:
+    #    a = 0.425
+    #    b = 0.39225
+    #
+    # In a simplified notation (as in EXISTING 3), the planar equations become:
+    #    d^2 = x2^2 + z2^2
+    #    cos(q2) = [...]
+    #    q2 + q3 = alpha
+    #
+    # Then pick whichever solution best matches the forward-kinematics check.
+    # ---------------------------
+    a = 0.425
+    b = 0.39225
+
+    d_sq = x2**2 + z2**2
+    d = math.sqrt(d_sq)
+
+    # Numerically protect acos in case of slight overshoot
+    cos_theta2 = (d_sq - a*a - b*b) / (2.0 * a * b)
+    cos_theta2 = max(min(cos_theta2, 1.0), -1.0)
+
+    theta2_candidates = [
+        math.acos(cos_theta2),
+        -math.acos(cos_theta2)
+    ]
+
+    # Try each candidate for q2, solve q3 = alpha - q2, check forward-kinematics consistency
+    solutions = []
+    for t2 in theta2_candidates:
+        t3 = alpha - t2
+        # Compute the resultant (xCalc, zCalc) if we apply these angles in the 2-link planar chain
+        xCalc = a * math.sin(t2) + b * math.sin(t2 + t3)  # but (t2 + t3) = alpha
+        zCalc = a * math.cos(t2) + b * math.cos(t2 + t3)
+
+        # Compare with desired (x2, z2) in that local plane
+        if (math.isclose(xCalc, x2, abs_tol=1e-6)
+                and math.isclose(zCalc, z2, abs_tol=1e-6)):
+            solutions.append((t2, t3))
+
+    # If we found a consistent (q2, q3), pick the first valid solution
+    if solutions:
+        # No special preference here; just pick the first
+        q2, q3 = solutions[0]
+    else:
+        # Otherwise do the fallback from EXISTING 3
+        term_x = x2 - b * math.sin(alpha)
+        term_z = z2 - b * math.cos(alpha)
+        q2 = math.atan2(term_x, term_z)
+        q3 = alpha - q2
+
+    return (q1, q2, q3)

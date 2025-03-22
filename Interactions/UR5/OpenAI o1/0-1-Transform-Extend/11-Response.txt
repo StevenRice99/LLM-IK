@@ -1,0 +1,109 @@
+```python
+import math
+import numpy as np
+
+def inverse_kinematics(p: tuple[float, float, float], r: tuple[float, float, float]) -> tuple[float, float]:
+    """
+    Closed-form inverse kinematics for this specific 2-DOF (Z, then Y) serial arm,
+    using only the yaw (rZ) and pitch (rY) from the requested orientation. Any roll
+    (rX) component is ignored, because the robot has no X-axis revolute joint.
+
+    From the URDF "DETAILS":
+      1) Joint1 (θ1) rotates about Z, with no translational offset.
+      2) Link2 is offset by [0, 0.13585, 0], then Joint2 (θ2) rotates about Y.
+      3) TCP is offset from link2 by [0, -0.1197, 0.425].
+
+    Forward kinematics for the TCP in the base frame:
+      p_calc(θ1, θ2) = Rz(θ1)*[0, 0.13585, 0]^T
+                       + Rz(θ1)*Ry(θ2)*[0, -0.1197, 0.425]^T.
+
+    Orientation in the base frame:
+      R_calc(θ1, θ2) = Rz(θ1)*Ry(θ2).
+
+    We are given a desired position p = (px, py, pz) and orientation r = (rX, rY, rZ)
+    in roll–pitch–yaw. We only have two rotational axes, Z then Y, so we ignore rX
+    (roll) and match the user’s yaw= rZ and pitch= rY “up to a possible flip.”
+
+    Because rotating about Z by (θ1 + π) and about Y by (−θ2) yields the same net
+    orientation (up to a sign flip in the base plane), there can be two possible
+    orientations that match the same yaw–pitch combination. We simply pick the
+    candidate that best matches the desired position.
+
+    The steps:
+      1) Construct R_des_2D = Rz(rZ)*Ry(rY), ignoring rX.
+      2) Decompose R_des_2D to find a principal solution:
+           α0 = atan2(R[1,0], R[0,0])
+           β0 = atan2(-R[2,0], R[2,2])
+         which correspond to (θ1, θ2).
+      3) Also form a “flipped” candidate: (α0 + π, -β0).
+         Both produce the same orientation about Z–Y for a 2-DOF chain.
+      4) Among these two, pick whichever gives a TCP position closest to p.
+      5) Return that solution.
+
+    We assume all targets are reachable and do not perform any limit checks.
+
+    :param p: Desired end-effector position (x, y, z).
+    :param r: Desired orientation in RPY (roll, pitch, yaw) as (rX, rY, rZ).
+    :return: A 2-tuple (θ1, θ2) in radians.
+    """
+
+    # Extract desired position
+    p_des = np.array(p, dtype=float)
+
+    # Extract only the pitch (rY) and yaw (rZ). Ignore rX (roll).
+    _, rY, rZ = r
+
+    # Build R_des_2D = Rz(rZ)*Ry(rY)
+    def Ry(a):
+        return np.array([
+            [ math.cos(a), 0, math.sin(a)],
+            [           0, 1,           0],
+            [-math.sin(a), 0, math.cos(a)]
+        ])
+    def Rz(a):
+        return np.array([
+            [ math.cos(a), -math.sin(a), 0],
+            [ math.sin(a),  math.cos(a), 0],
+            [           0,            0, 1]
+        ])
+
+    R_des_2D = Rz(rZ).dot(Ry(rY))
+
+    # Decompose Rz(θ1)*Ry(θ2) = R_des_2D
+    # standard approach for sequences Rz(θ1)*Ry(θ2):
+    #   θ1 = atan2(R[1,0], R[0,0])
+    #   θ2 = atan2(-R[2,0], R[2,2])
+    def safe_atan2(yv, xv):
+        return math.atan2(float(yv), float(xv))
+
+    alpha0 = safe_atan2(R_des_2D[1,0], R_des_2D[0,0])  # candidate for θ1
+    beta0  = safe_atan2(-R_des_2D[2,0], R_des_2D[2,2]) # candidate for θ2
+
+    # Forward kinematics for the TCP position
+    def fk_position(th1, th2):
+        Rz_th1 = Rz(th1)
+        Ry_th2 = Ry(th2)
+        # link2 offset
+        link2_offset = np.array([0, 0.13585, 0])
+        # TCP offset in link2 frame
+        tcp_offset   = np.array([0, -0.1197, 0.425])
+        return Rz_th1.dot(link2_offset) + Rz_th1.dot(Ry_th2.dot(tcp_offset))
+
+    # We consider two orientation-equivalent solutions:
+    candidates = [
+        (alpha0, beta0),
+        (alpha0 + math.pi, -beta0)
+    ]
+
+    # Pick whichever candidate best matches the desired position
+    best_sol = None
+    best_err = float('inf')
+    for (cand1, cand2) in candidates:
+        p_calc = fk_position(cand1, cand2)
+        err = np.linalg.norm(p_calc - p_des)
+        if err < best_err:
+            best_err = err
+            best_sol = (cand1, cand2)
+
+    return best_sol
+```

@@ -1,0 +1,131 @@
+```python
+def inverse_kinematics(p: tuple[float, float, float], r: tuple[float, float, float]) -> tuple[float, float, float, float]:
+    """
+    Closed-form inverse kinematics for the given 4-DOF manipulator:
+
+       • Joint 1 (q1) rotates about Z at the base.
+       • Joints 2, 3, 4 (q2, q3, q4) rotate about Y.
+       • The link offsets (local positions) are:
+            J1: [0, 0, 0]
+            J2: [0, 0.13585, 0]
+            J3: [0, -0.1197, 0.425]
+            J4: [0, 0, 0.39225]
+            TCP:[0, 0, 0.093]
+
+    The orientation input is roll–pitch–yaw = (r_x, r_y, r_z).  
+    For this arm:
+       • roll (r_x) must be 0,  
+       • pitch (r_y) = q2 + q3 + q4,  
+       • yaw   (r_z) = q1.
+
+    We derive a fully analytical approach that does not call any iterative
+    or symbolic solvers. The steps are:
+
+    1) q1 = r_z directly.  
+    2) From the geometry, one can show that the final (px,py,pz) in world coordinates
+       can be written as a sum of four vectors:
+         p = p_12 + p_23(q2) + p_34(q2,q3) + p_tcp(r_y),
+       where each term is rotated by q1 about Z (for the base yaw).
+       By careful expansion, px,py reduce to:
+          px = cos(q1)*A + sin(q1)*(-0.01615),
+          py = cos(q1)*(0.01615) + sin(q1)*A,
+       and pz to:
+          pz = 0.425 cos(q2) + 0.39225 cos(q2+q3) + 0.093 cos(r_y).
+       Here A = 0.425 sin(q2) + 0.39225 sin(q2+q3) + 0.093 sin(r_y),  
+       and the constant 0.01615 = 0.13585 - 0.1197 = (J2.y - J3.y offsets).  
+    3) From (px, py) and q1 = r_z, we solve for A:
+         A = (px + 0.01615 sin(q1)) / cos(q1),    if cos(q1)≠0
+       or equivalently 
+         A = (py - 0.01615 cos(q1)) / sin(q1),    if sin(q1)≠0.
+       Special-case q1 near ±π/2 if needed (the problem states all targets are valid).  
+    4) Define D = A - 0.093 sin(r_y)  and E = pz - 0.093 cos(r_y).  
+       Then we must solve the 2-link planar system:
+         L1 sin(q2) + L2 sin(q2+q3) = D
+         L1 cos(q2) + L2 cos(q2+q3) = E
+       with L1=0.425, L2=0.39225.  We set α=q2, β=q2+q3 => q3=β−α, so:
+         L1 sin(α) + L2 sin(β) = D
+         L1 cos(α) + L2 cos(β) = E.
+       Standard 2-link geometry yields a closed-form solution.  
+    5) Once q2 and q3 are found, q4 = r_y − q2 − q3.  
+
+    This yields an explicit single “branch” (elbow-down style) solution.  Because
+    there are no loops or iterative solvers, it returns quickly.  It may not
+    reproduce exactly the same angles as another IK solver that picks a different
+    branch or solution of the redundancy, but it is a valid closed-form solution.
+
+    :param p: (x, y, z) target position in world coordinates.
+    :param r: (r_x, r_y, r_z) = (roll, pitch, yaw), with roll=0 assumed.
+    :return: A tuple (q1, q2, q3, q4) in radians.
+    """
+
+    import math
+
+    # Unpack desired position/orientation
+    px, py, pz = p
+    r_roll, r_pitch, r_yaw = r
+
+    # 1) q1 = yaw
+    q1 = r_yaw
+    c1 = math.cos(q1)
+    s1 = math.sin(q1)
+
+    # 2) From expansions, px and py:
+    #    px = c1*A + s1*(-0.01615)
+    #    py = c1*(0.01615) + s1*A
+    #    => A can be extracted if c1*s1 ≠ 0
+    EPS = 1e-12
+    if abs(c1) > EPS:
+        A = (px + 0.01615*s1) / c1
+    else:
+        # Fallback if cos(q1)=0 => q1= ±π/2 => then use the py formula if sin(q1)≠0
+        if abs(s1) < EPS:
+            # Degenerate, but problem states it's always reachable, so do something
+            return (q1, 0.0, 0.0, r_pitch)
+        A = (py - 0.01615*c1) / s1
+
+    # 3) pz expansion => pz = 0.425 cos(q2) + 0.39225 cos(q2+q3) + 0.093 cos(r_pitch).
+    #    Also A = 0.425 sin(q2) + 0.39225 sin(q2+q3) + 0.093 sin(r_pitch).
+    #    => define D = A - 0.093 sin(r_pitch), E = pz - 0.093 cos(r_pitch)
+    D = A - 0.093*math.sin(r_pitch)
+    E = pz - 0.093*math.cos(r_pitch)
+
+    # 4) Solve the 2-link planar system:
+    #       L1 sin(α) + L2 sin(β) = D,
+    #       L1 cos(α) + L2 cos(β) = E,
+    #    with α=q2, β=q2+q3 => q3=β−α.
+    #    Let L1=0.425, L2=0.39225.  We define standard solutions via the law of cosines.
+    L1 = 0.425
+    L2 = 0.39225
+
+    # R = sqrt(D^2 + E^2)
+    R = math.hypot(D, E)
+    # phi = atan2(D, E)
+    phi = math.atan2(D, E)
+
+    # Avoid domain issues by clamping to [-1, 1]
+    def clamp(u):
+        return max(-1.0, min(1.0, u))
+
+    # delta = arccos( (L1^2 + R^2 - L2^2)/(2 L1 R) )
+    num = L1*L1 + R*R - L2*L2
+    den = 2.0*L1*R
+    cosDelta = clamp(num/den)
+    delta = math.acos(cosDelta)
+
+    # We pick the "elbow-down" style: α= phi - delta
+    alpha = phi - delta
+    # Then we find β by direct geometry: 
+    #   x2 = R cos(phi ) - L1 cos(alpha ),  y2= R sin(phi ) - L1 sin(alpha ).
+    #   β= atan2(y2, x2)
+    x2 = R*math.cos(phi) - L1*math.cos(alpha)
+    y2 = R*math.sin(phi) - L1*math.sin(alpha)
+    beta = math.atan2(y2, x2)
+
+    # Hence q2= alpha, q3= beta - alpha
+    q2 = alpha
+    q3 = beta - alpha
+    # Finally q4 = r_pitch - q2 - q3
+    q4 = r_pitch - (q2 + q3)
+
+    return (q1, q2, q3, q4)
+```

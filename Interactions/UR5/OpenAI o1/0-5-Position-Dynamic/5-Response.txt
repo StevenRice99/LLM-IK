@@ -1,0 +1,101 @@
+```python
+import math
+
+def inverse_kinematics(p: tuple[float, float, float]) -> tuple[float, float, float, float, float, float]:
+    """
+    Gets the joint values needed to reach position "p" in the form [x, y, z].
+    :param p: The position to reach, (x, y, z).
+    :return: A tuple of the 6 joint values (in radians) that place the TCP at position p.
+    
+    Approach:
+      1) Solve Joint 1 (revolute about Z) using a simple planar geometry approach.
+         We stack the rest of the chain (joints 2..6) in a shifted frame.
+      2) Rotate the target about -Joint1 around Z to get a point that an existing sub-chain (joints 2..6)
+         solver can handle. The “existing code 2” logic is applied to that shifted point.
+      3) Combine Joint1 with the returned five angles from the sub-chain to form the complete 6–DOF solution.
+    """
+    
+    x, y, z = p
+
+    # --- Step 1: Solve for Joint 1 (rotation about Z) ---
+    # We use the existing code 1 concept: theta1 = atan2(-x, y)
+    theta1 = math.atan2(-x, y)
+
+    # --- Step 2: Express target in the frame after rotating by -theta1 about Z ---
+    c1 = math.cos(-theta1)
+    s1 = math.sin(-theta1)
+    x_sub = x * c1 - y * s1
+    y_sub = x * s1 + y * c1
+    z_sub = z  # unchanged by rotation around Z
+
+    # --- Step 3: Solve angles for joints 2..6 (sub-chain) using “existing code 2” logic ---
+    # Copied/adapted from “EXISTING 2”:
+    def existing_code_2_ik(psub: tuple[float, float, float]) -> tuple[float, float, float, float, float]:
+        L1 = 0.425
+        L2 = 0.39225
+        L3 = 0.09465
+        y_offset = -0.1197 + 0.093
+        tcp_y_offset = 0.0823
+        x_t, y_t, z_t = psub
+
+        def normalize(a):
+            while a > math.pi:
+                a -= 2.0 * math.pi
+            while a < -math.pi:
+                a += 2.0 * math.pi
+            return a
+
+        def fk(q1_, q2_, q3_, q4_):
+            S_ = q1_ + q2_ + q3_
+            d_ = 0.0823 * math.sin(q4_)
+            x_fk_ = L1 * math.sin(q1_) + L2 * math.sin(q1_ + q2_) + L3 * math.sin(S_) - d_ * math.cos(S_)
+            z_fk_ = L1 * math.cos(q1_) + L2 * math.cos(q1_ + q2_) + L3 * math.cos(S_) + d_ * math.sin(S_)
+            y_fk_ = y_offset + tcp_y_offset * math.cos(q4_)
+            return (x_fk_, y_fk_, z_fk_)
+
+        # Solve for q4 from y
+        C_ = (y_t - y_offset) / tcp_y_offset
+        C_ = max(min(C_, 1.0), -1.0)
+        q4_candidates = [math.acos(C_), -math.acos(C_)]
+        psi = math.atan2(x_t, z_t)
+
+        best_solution = None
+        best_error = float('inf')
+        for q4_ in q4_candidates:
+            d_ = tcp_y_offset * math.sin(q4_)
+            L_eff = math.sqrt(L3**2 + d_**2)
+            phi = math.atan2(d_, L3)
+            # T candidates
+            for T_candidate in [psi, psi + math.pi]:
+                S_ = T_candidate + phi
+                W_x = x_t - L_eff * math.sin(T_candidate)
+                W_z = z_t - L_eff * math.cos(T_candidate)
+                r_w = math.hypot(W_x, W_z)
+                if r_w > L1 + L2 or r_w < abs(L1 - L2):
+                    continue
+                c_q2 = (r_w**2 - L1**2 - L2**2) / (2*L1*L2)
+                c_q2 = max(min(c_q2, 1.0), -1.0)
+                for sign_ in [1, -1]:
+                    q2_ = sign_ * math.acos(c_q2)
+                    delta_ = math.atan2(L2 * math.sin(q2_), L1 + L2 * math.cos(q2_))
+                    theta_w = math.atan2(W_x, W_z)
+                    q1_ = theta_w - delta_
+                    q3_ = S_ - (q1_ + q2_)
+                    x_fk, y_fk, z_fk = fk(q1_, q2_, q3_, q4_)
+                    err = math.sqrt((x_fk - x_t)**2 + (y_fk - y_t)**2 + (z_fk - z_t)**2)
+                    if err < best_error:
+                        best_error = err
+                        best_solution = (q1_, q2_, q3_, q4_, 0.0)
+
+        if best_solution is None:
+            raise ValueError("No valid IK solution found.")
+        
+        (q1b, q2b, q3b, q4b, q5b) = best_solution
+        return (normalize(q1b), normalize(q2b), normalize(q3b), normalize(q4b), normalize(q5b))
+
+    # Get angles for joints 2..6 from the existing code 2 logic
+    q2, q3, q4, q5, q6 = existing_code_2_ik((x_sub, y_sub, z_sub))
+
+    # --- Step 4: Return the 6 angles in order ---
+    return (theta1, q2, q3, q4, q5, q6)
+```

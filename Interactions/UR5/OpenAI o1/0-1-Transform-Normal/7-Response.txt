@@ -1,0 +1,105 @@
+```python
+def inverse_kinematics(p: tuple[float, float, float], r: tuple[float, float, float]) -> tuple[float, float]:
+    """
+    Attempt a more exhaustive search over the two principal branches for q2 from pz = 0.425*cos(q2)
+    (namely +acos(...) and -acos(...)), as well as +-2π shifts of each, to better match the desired
+    orientation around Y. For each q2 candidate, solve for q1 in the planar XY equations, also
+    considering +-2π shifts of q1. Then select (q1, q2) that best matches the desired orientation
+    r = [rx, ry, rz] with q2 ≈ ry (mod 2π) and q1 ≈ rz (mod 2π), while still achieving the desired
+    position p = [px, py, pz]. This more thorough approach can capture solutions beyond the principal
+    branch that may match a requested orientation sign or angle near ±π away.
+
+    Robot geometry (in short):
+      - q1 about Z at base
+      - translate +0.13585 on Y, then q2 about Y
+      - final offset [0, -0.1197, 0.425] to TCP
+    So the forward-kinematic equations for the TCP position in world frame are:
+      TCP_x = 0.425*sin(q2)*cos(q1) - 0.01615*sin(q1)
+      TCP_y = 0.425*sin(q2)*sin(q1) + 0.01615*cos(q1)
+      TCP_z = 0.425*cos(q2)
+
+    We attempt to match (px,py,pz), then pick from multiple solutions which is
+    closest to the desired orientation (rx, ry, rz) by measuring the difference
+    in q1 vs rz and q2 vs ry (mod 2π).
+
+    :param p: (px, py, pz) the desired TCP position
+    :param r: (rx, ry, rz) the desired orientation in RPY, but the arm only
+              has Rz(q1)*Ry(q2). We attempt to pick q1 ~ rz and q2 ~ ry.
+    :return: (q1, q2) best matching the desired orientation while satisfying p
+    """
+    import math
+
+    px, py, pz = p
+    rx, ry, rz = r  # We'll try to match ry ~ q2, rz ~ q1
+
+    L = 0.425
+    B = 0.13585 - 0.1197  # 0.01615
+
+    # Safeguard for pz / 0.425 slightly out-of-range floating error
+    ratio = pz / L
+    if ratio > 1.0: 
+        ratio = 1.0
+    elif ratio < -1.0:
+        ratio = -1.0
+
+    # We want up to two principal values for q2 from cos(q2)=pz/L: +acos(...) and -acos(...)
+    # Then we also consider adding ±2π to each to see if that yields a closer orientation match.
+    q2_principal = []
+    try:
+        q2a = math.acos(ratio)
+        q2b = -q2a
+        q2_principal.extend([q2a, q2b])
+    except ValueError:
+        # If somehow pz / L is out of [-1,1], but problem states reachable
+        pass
+
+    # Helper to wrap an angle difference into [-pi, +pi], then we can use absolute value
+    def angle_diff(a, b):
+        d = (a - b) % (2 * math.pi)
+        if d > math.pi:
+            d -= 2 * math.pi
+        return d
+
+    # For given q2, solve planar equations for q1:
+    #   px = 0.425 sin(q2)*cos(q1) - 0.01615 sin(q1) = A cos(q1) - B sin(q1)
+    #   py = 0.425 sin(q2)*sin(q1) + 0.01615 cos(q1) = A sin(q1) + B cos(q1)
+    #
+    # where A = 0.425 sin(q2) and B = 0.01615.
+    # We'll return a "base" solution for q1, then the same solution ±2π.
+    def solve_q1_candidates(px, py, q2_val):
+        A = L * math.sin(q2_val)
+        denom = px*px + py*py
+        if denom < 1e-14:
+            # If px≈py≈0, many q1 solutions. We'll pick 0 + multiples of 2π
+            return [0.0, 2.0*math.pi, -2.0*math.pi]
+        # B is constant for this design:
+        B_ = 0.01615
+        sin_q1 = (A*py - B_*px) / denom
+        cos_q1 = (A*px + B_*py) / denom
+        q1_base = math.atan2(sin_q1, cos_q1)
+        return [q1_base, q1_base + 2*math.pi, q1_base - 2*math.pi]
+
+    candidates = []
+    for q2p in q2_principal:
+        # Also consider q2p ± 2π
+        for q2_candidate in [q2p, q2p + 2*math.pi, q2p - 2*math.pi]:
+            # Solve for q1
+            q1_cands = solve_q1_candidates(px, py, q2_candidate)
+            for q1_base in q1_cands:
+                # Also consider q1_base ± 2π
+                for q1_candidate in [q1_base, q1_base + 2*math.pi, q1_base - 2*math.pi]:
+                    # Evaluate orientation mismatch from desired (rz, ry)
+                    d1 = abs(angle_diff(q1_candidate, rz))
+                    d2 = abs(angle_diff(q2_candidate, ry))
+                    score = d1 + d2
+                    candidates.append((q1_candidate, q2_candidate, score))
+
+    # Pick best candidate by smallest orientation difference
+    if not candidates:
+        # Fallback if none found, though problem states "always reachable"
+        return (0.0, 0.0)
+    best = min(candidates, key=lambda c: c[2])
+    q1_best, q2_best = best[0], best[1]
+
+    return (q1_best, q2_best)
+```

@@ -1,0 +1,123 @@
+def inverse_kinematics(p: tuple[float, float, float]) -> tuple[float, float, float, float, float]:
+    """
+    Closed–form inverse kinematics for the 5-DOF serial manipulator to reach a target position p.
+
+    This solution composes the existing sub–chain solvers:
+      • Existing code 1 solves the first revolute joint (joint1) about Z.
+      • Existing code 2 solves the remaining four revolute joints (joint2..5), which rotate about Y–Y–Y–Z.
+
+    Geometry note:
+      • “Existing code 1” solves joint1 = θZ so the manipulator “faces” the goal in the XY–plane.
+      • After rotating by −θZ (undoing joint1), the remainder of the chain is effectively the 4–DOF set
+        solved by “Existing code 2” (which takes a final y = −0.0267).  In this chain:
+          joint2, joint3, joint4 each rotate about Y,
+          joint5 rotates about Z,
+        and the link lengths/offsets match the manipulator’s local geometry as used by that sub–chain IK.
+
+    :param p: The desired TCP position as (x, y, z).
+    :return: A tuple (joint1, joint2, joint3, joint4, joint5), each in radians.
+    """
+    import math
+
+    # ------------------
+    # 1) Solve joint1 (about Z) using “Existing code 1” logic.
+    #    existing_code_1: theta = atan2(-x, y)
+    # ------------------
+    x, y, z = p
+    theta1 = math.atan2(-x, y)
+
+    # ------------------
+    # 2) Transform the target by undoing joint1’s rotation about Z
+    #    so that the sub–chain solver sees a “front–facing” target.
+    #    Rotating (x, y) by +theta1 corresponds to an original rotation of −theta1.
+    # ------------------
+    # In standard rotation about Z:  x' = x*cos(θ) + y*sin(θ),  y' = −x*sin(θ) + y*cos(θ).
+    px = x * math.cos(theta1) + y * math.sin(theta1)
+    py = -x * math.sin(theta1) + y * math.cos(theta1)
+    pz = z
+
+    # ------------------
+    # 3) Solve the 4–DOF subchain (joint2..5) with “Existing code 2” logic.
+    #
+    #    In that code, the chain is set so valid targets have y = −0.0267,
+    #    and it returns four angles (θ1, θ2, θ3, θ4) corresponding to:
+    #      revolve1(about Y), revolve2(about Y), revolve3(about Y), revolve4(about Z).
+    #
+    #    In our 5–DOF naming, those become joint2..5.
+    # ------------------
+    # Force the sub-chain’s y-coordinate to its expected value.  (Existing code 2 states y must be −0.0267.)
+    py_sub = -0.0267
+
+    # Now we insert the “Existing code 2” directly here:
+    L1 = 0.425
+    L2 = 0.39225
+    L3 = 0.09465
+
+    # Forward kinematics helper for the planar 3R about Y (the revolve4 about Z does not change position):
+    def fk_planar(th1, th2, th3):
+        x_fk = L1 * math.sin(th1) + L2 * math.sin(th1 + th2) + L3 * math.sin(th1 + th2 + th3)
+        z_fk = L1 * math.cos(th1) + L2 * math.cos(th1 + th2) + L3 * math.cos(th1 + th2 + th3)
+        return (x_fk, -0.0267, z_fk)
+
+    # Use the variable names as in existing code 2
+    x_sub, y_sub, z_sub = (px, py_sub, pz)
+    psi = math.atan2(x_sub, z_sub)        # "in-plane" angle
+    T_options = [psi, psi + math.pi]      # two possible ways to place the end–effector
+
+    candidates = []
+    for T_val in T_options:
+        # Wrist center position after removing L3 in direction T_val
+        x_w = x_sub - L3 * math.sin(T_val)
+        z_w = z_sub - L3 * math.cos(T_val)
+        r_w = math.hypot(x_w, z_w)
+
+        # 2R solution for “wrist center” in the plane
+        cos_beta = (r_w**2 - L1**2 - L2**2) / (2 * L1 * L2)
+        # Clamp numeric rounding
+        cos_beta = max(-1.0, min(1.0, cos_beta))
+
+        for sgn in (1, -1):
+            beta = sgn * math.acos(cos_beta)
+            phi_w = math.atan2(x_w, z_w)
+            delta = math.atan2(L2 * math.sin(beta), L1 + L2 * math.cos(beta))
+
+            th1_cand = phi_w - delta   # revolve1 in sub-chain
+            th2_cand = beta           # revolve2 in sub-chain
+            th3_cand = T_val - (th1_cand + th2_cand)
+
+            # Forward kinematics error check
+            x_fk, _, z_fk = fk_planar(th1_cand, th2_cand, th3_cand)
+            err = math.hypot(x_fk - x_sub, z_fk - z_sub)
+            candidates.append((err, th1_cand, th2_cand, th3_cand))
+
+    best = min(candidates, key=lambda tup: tup[0])
+    theta2_sub, theta3_sub, theta4_sub = best[1], best[2], best[3]  # these are the 3 Y–axis joints in sub-chain
+    theta5_sub = 0.0  # revolve4 (in sub-chain) about Z is set to 0 (it won’t change position)
+
+    # Normalize angles to (−π, π)
+    def normalize(a):
+        while a > math.pi:
+            a -= 2*math.pi
+        while a < -math.pi:
+            a += 2*math.pi
+        return a
+
+    theta2_sub = normalize(theta2_sub)
+    theta3_sub = normalize(theta3_sub)
+    theta4_sub = normalize(theta4_sub)
+    theta5_sub = normalize(theta5_sub)
+
+    # “Existing code 2” calls them (θ1, θ2, θ3, θ4), but in our full robot, these map to joint2..5
+    joint2 = theta2_sub
+    joint3 = theta3_sub
+    joint4 = theta4_sub
+    joint5 = theta5_sub
+
+    # Finally, return all five
+    return (
+        normalize(theta1),   # joint1 = revolve1 about Z
+        joint2,              # revolve2 about Y
+        joint3,              # revolve3 about Y
+        joint4,              # revolve4 about Y
+        joint5               # revolve5 about Z
+    )

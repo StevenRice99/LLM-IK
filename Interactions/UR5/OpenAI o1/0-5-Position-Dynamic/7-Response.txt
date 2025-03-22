@@ -1,0 +1,132 @@
+```python
+import math
+
+def inverse_kinematics(p: tuple[float, float, float]) -> tuple[float, float, float, float, float, float]:
+    """
+    Gets the joint values needed to reach position "p" in the form [x, y, z].
+    :param p: The position to reach, (x, y, z).
+    :return: A tuple of the 6 joint values (in radians) that place the TCP at position p.
+    
+    Explanation of the approach:
+      1) We solve for Joint 1 (revolute about Z) using a simple planar geometry approach.
+         Specifically, we use θ1 = atan2(-x, y).
+      2) We then rotate the target position by −θ1 about Z to get a position suitable for the
+         sub-chain (joints 2..6). This “existing code 2” solver is adapted here, but its
+         original out-of-range checks are removed to avoid discarding reachable targets.
+      3) We combine θ1 with the computed (q2, q3, q4, q5, q6) from the sub-chain solution
+         to form the complete 6–joint result.
+
+    Note: Per instructions, we assume the target is always reachable and therefore do not
+    raise exceptions for unreachable targets.
+    """
+
+    x, y, z = p
+
+    # --- Step 1: Solve Joint 1 about Z, from the "existing code 1" approach. ---
+    theta1 = math.atan2(-x, y)  # revolve around Z
+
+    # --- Step 2: Express the target in the frame after rotation −θ1 about Z. ---
+    cos_t1 = math.cos(-theta1)
+    sin_t1 = math.sin(-theta1)
+    x_sub = x * cos_t1 - y * sin_t1
+    y_sub = x * sin_t1 + y * cos_t1
+    z_sub = z
+
+    # --- Step 3: Solve joints 2..6 for the sub-chain. ---
+    def existing_code_2_ik(psub: tuple[float, float, float]) -> tuple[float, float, float, float, float]:
+        """
+        Adaptation of "existing code 2" with the out-of-range check removed.
+        Computes (q2, q3, q4, q5, q6) to position the TCP at psub.
+        """
+
+        # Link lengths and offsets per the original code 2 definitions:
+        L1 = 0.425
+        L2 = 0.39225
+        L3 = 0.09465
+        y_offset = -0.1197 + 0.093
+        tcp_y_offset = 0.0823
+        x_t, y_t, z_t = psub
+
+        def normalize(a):
+            while a > math.pi:
+                a -= 2.0 * math.pi
+            while a < -math.pi:
+                a += 2.0 * math.pi
+            return a
+
+        # Forward kinematics helper, used to pick best solution:
+        def fk(q1_, q2_, q3_, q4_):
+            S_ = q1_ + q2_ + q3_
+            d_ = 0.0823 * math.sin(q4_)
+            x_fk_ = L1 * math.sin(q1_) + L2 * math.sin(q1_ + q2_) + L3 * math.sin(S_) - d_ * math.cos(S_)
+            z_fk_ = L1 * math.cos(q1_) + L2 * math.cos(q1_ + q2_) + L3 * math.cos(S_) + d_ * math.sin(S_)
+            y_fk_ = y_offset + tcp_y_offset * math.cos(q4_)
+            return (x_fk_, y_fk_, z_fk_)
+
+        # Solve q4 from y, ignoring unreachable checks (assume feasible):
+        C_ = (y_t - y_offset) / tcp_y_offset
+        # Clamp numerical round-offs:
+        C_ = max(min(C_, 1.0), -1.0)
+        q4_candidates = [math.acos(C_), -math.acos(C_)]
+        psi = math.atan2(x_t, z_t)
+
+        best_solution = None
+        best_error = float('inf')
+
+        for q4_ in q4_candidates:
+            d_ = tcp_y_offset * math.sin(q4_)
+            # Effective 'radius' from link L3 + the small translation d_
+            L_eff = math.sqrt(L3**2 + d_**2)
+            phi = math.atan2(d_, L3)
+
+            # T can be psi or psi+π
+            for T_candidate in [psi, psi + math.pi]:
+                S_ = T_candidate + phi
+                W_x = x_t - L_eff * math.sin(T_candidate)
+                W_z = z_t - L_eff * math.cos(T_candidate)
+
+                # 2R sub-chain solution for q1_, q2_
+                # We omit the out-of-range check for r_w here, since we assume reachability
+                r_w = math.hypot(W_x, W_z)
+                cos_q2 = (r_w**2 - L1**2 - L2**2) / (2.0 * L1 * L2)
+                # clamp to avoid floating round-off beyond [-1,1]
+                cos_q2 = max(min(cos_q2, 1.0), -1.0)
+
+                for sign_ in [1, -1]:
+                    q2_ = sign_ * math.acos(cos_q2)
+                    # geometry for q1_:
+                    delta_ = math.atan2(L2 * math.sin(q2_), L1 + L2 * math.cos(q2_))
+                    theta_w_ = math.atan2(W_x, W_z)
+                    q1_ = theta_w_ - delta_
+                    q3_ = S_ - (q1_ + q2_)
+
+                    # Evaluate error:
+                    x_fk_, y_fk_, z_fk_ = fk(q1_, q2_, q3_, q4_)
+                    err_ = math.dist((x_fk_, y_fk_, z_fk_), (x_t, y_t, z_t))
+
+                    if err_ < best_error:
+                        best_error = err_
+                        best_solution = (q1_, q2_, q3_, q4_, 0.0)
+
+        if best_solution is None:
+            # Per instructions, we do not raise an error for unreachable.
+            # We just return something arbitrary if no solution is found theoretically.
+            # But we assume it won't happen for a valid input.
+            return (0.0, 0.0, 0.0, 0.0, 0.0)
+
+        q1b, q2b, q3b, q4b, q5b = best_solution
+
+        return (
+            normalize(q1b),
+            normalize(q2b),
+            normalize(q3b),
+            normalize(q4b),
+            normalize(q5b)
+        )
+
+    # Obtain the angles (q2..q6) from the sub-chain solver:
+    q2, q3, q4, q5, q6 = existing_code_2_ik((x_sub, y_sub, z_sub))
+
+    # --- Step 4: Combine everything into the final 6–DOF result. ---
+    return (theta1, q2, q3, q4, q5, q6)
+```

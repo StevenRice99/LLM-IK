@@ -1,0 +1,164 @@
+```python
+def inverse_kinematics(p: tuple[float, float, float], r: tuple[float, float, float]) -> tuple[float, float, float]:
+    """
+    Closed-form style solution using direct symbolic equations for a 3-DoF
+    (Z-Y-Y) manipulator with the given link offsets. This solves for joint
+    angles q1, q2, q3 so that the final transform matches the desired position
+    and RPY (r) orientation as parsed from the URDF.
+
+    Link frame definitions (from the DETAILS table): 
+     1) Joint 1 (axis Z) at base, no translation.
+     2) Translate by [0, 0.13585, 0], then Joint 2 (axis Y).
+     3) Translate by [0, -0.1197, 0.425], then Joint 3 (axis Y).
+     4) Finally translate by [0, 0, 0.39225] to TCP.
+
+    Orientation r=(rx, ry, rz) is assumed to be extrinsic RPY about X, Y, Z in that order.
+
+    We'll build a symbolic forward-kinematics T(q1,q2,q3) and equate it to the
+    desired transform T_des, derived from p & r. Then solve symbolically.
+    """
+    import math
+    import sympy
+    from sympy import symbols, Matrix, sin, cos
+
+    # -- Set up symbolic variables:
+    q1, q2, q3 = symbols('q1 q2 q3', real=True)
+
+    # -- Shortcuts:
+    def Rz(theta):
+        return Matrix([
+            [cos(theta), -sin(theta), 0, 0],
+            [sin(theta),  cos(theta), 0, 0],
+            [0,           0,          1, 0],
+            [0,           0,          0, 1]
+        ])
+    def Ry(theta):
+        return Matrix([
+            [ cos(theta), 0, sin(theta), 0],
+            [ 0,          1, 0,          0],
+            [-sin(theta), 0, cos(theta), 0],
+            [ 0,          0, 0,          1]
+        ])
+    def Tx(x_):
+        return Matrix([
+            [1, 0, 0, x_],
+            [0, 1, 0, 0 ],
+            [0, 0, 1, 0 ],
+            [0, 0, 0, 1 ]
+        ])
+    def Ty(y_):
+        return Matrix([
+            [1, 0, 0, 0 ],
+            [0, 1, 0, y_],
+            [0, 0, 1, 0 ],
+            [0, 0, 0, 1 ]
+        ])
+    def Tz(z_):
+        return Matrix([
+            [1, 0, 0, 0 ],
+            [0, 1, 0, 0 ],
+            [0, 0, 1, z_],
+            [0, 0, 0, 1 ]
+        ])
+
+    # -- Build forward kinematics T(q1,q2,q3):
+    # Base -> Joint1 (Rz(q1)):
+    T1 = Rz(q1)
+    # Then translate by [0, 0.13585, 0], then rotate about Y by q2:
+    T2 = Ty(0.13585)*Ry(q2)
+    # Then translate by [0, -0.1197, 0.425], rotate about Y by q3:
+    T3 = Ty(-0.1197)*Tz(0.425)*Ry(q3)
+    # Finally translate [0,0,0.39225] to the TCP:
+    T4 = Tz(0.39225)
+    # Total FK:
+    T_fk = T1*T2*T3*T4  # 4x4 matrix
+
+    # -- Desired transform from p=(x,y,z) and r=(rx,ry,rz).
+    #    r is an extrinsic roll-pitch-yaw about X, then Y, then Z.
+    #    We'll form R_des = Rz(rz)*Ry(ry)*Rx(rx) in that extrinsic sense:
+    #    But note that "extrinsic X->Y->Z" is the same as "intrinsic Z->Y->X".
+    #    A simpler (and almost universal) convention for RPY = Rx(rx)*Ry(ry)*Rz(rz)
+    #    so we check the problem statement. Typically URDF "rpy" means
+    #    R = Rz(rz)*Ry(ry)*Rx(rx) if the attribute is in the order r,p,y.
+    #    We'll assume that here.
+
+    x, y_, z_ = p
+    rx, ry_, rz_ = r
+
+    # Rotation from URDF-style RPY: Rz(rz)*Ry(ry)*Rx(rx)
+    R_des = (Matrix([
+        [ cos(rz_), -sin(rz_), 0],
+        [ sin(rz_),  cos(rz_), 0],
+        [         0,        0, 1]
+    ]) * Matrix([
+        [ cos(ry_), 0, sin(ry_)],
+        [        0, 1,        0],
+        [-sin(ry_),0, cos(ry_)]
+    ]) * Matrix([
+        [1,      0,       0],
+        [0, cos(rx), -sin(rx)],
+        [0, sin(rx),  cos(rx)]
+    ]))
+
+    T_des = Matrix.eye(4)
+    T_des[0,3] = x
+    T_des[1,3] = y_
+    T_des[2,3] = z_
+    T_des[0:3,0:3] = R_des
+
+    # -- We want T_fk == T_des, i.e. 12 independent equations:
+    #    position: T_fk[0:3,3] = T_des[0:3,3]
+    #    orientation: T_fk[0:3,0:3] = T_des[0:3,0:3]
+    #    But the manipulator has only 3 DOFs, so typically it can only realize
+    #    a subset of orientations. We assume the user only requests feasible ones.
+    #    We'll set up the 6 constraints (3 for position, 3 for orientation chosen
+    #    as a typical inertial-axes approach, e.g. compare 3 angles or compare
+    #    particular matrix elements). We'll match all 9 orientation matrix elements,
+    #    but it will be consistent only if it's truly reachable.
+
+    eqs = []
+    # Position constraints:
+    eqs.append(sympy.Eq(T_fk[0,3], T_des[0,3]))
+    eqs.append(sympy.Eq(T_fk[1,3], T_des[1,3]))
+    eqs.append(sympy.Eq(T_fk[2,3], T_des[2,3]))
+    # Orientation constraints (all 9 elements):
+    for i in range(3):
+        for j in range(3):
+            eqs.append(sympy.Eq(T_fk[i,j], T_des[i,j]))
+
+    # Solve symbolically. This may yield multiple solutions (or none).
+    # We clamp to a real solution if it exists, then pick one in [-2π,2π].
+    sol = sympy.solve(eqs, [q1, q2, q3], dict=True)
+
+    if not sol:
+        # If no exact symbolic solution is found, we try a numeric solve
+        sol_n = sympy.nsolve(eqs[0], 0)  # just to see if we can nsolve one eq
+        # but the manipulator might not be able to do arbitrary orientation.
+        # The problem states "Assume all targets are reachable" so we skip error check.
+        raise ValueError("No symbolic solution found (unexpected).")
+
+    # If we found solutions, pick any that is in the range. If none are in range,
+    # just pick the first. In practice, there can be solutions repeated by 2π, etc.
+    for candidate in sol:
+        v1 = candidate[q1]
+        v2 = candidate[q2]
+        v3 = candidate[q3]
+        # Convert to float in [-π..π or any 2π multiple):
+        # We'll push them into [-2π, 2π]. 
+        def norm_angle(ang):
+            # shift into [-π, π], then allow ±2π overall
+            a = float(ang % (2*math.pi))
+            if a > math.pi:
+                a -= 2*math.pi
+            return a
+        c1 = norm_angle(v1)
+        c2 = norm_angle(v2)
+        c3 = norm_angle(v3)
+        # Re-check if within ± 2π
+        if abs(c1) <= 6.2831853 and abs(c2) <= 6.2831853 and abs(c3) <= 6.2831853:
+            return (c1, c2, c3)
+
+    # Otherwise, just return first solution forcibly:
+    cand = sol[0]
+    return (float(cand[q1]), float(cand[q2]), float(cand[q3]))
+```

@@ -1,0 +1,135 @@
+```python
+def inverse_kinematics(p: tuple[float, float, float], r: tuple[float, float, float]) -> tuple[float, float, float, float]:
+    """
+    Gets the joint values needed to reach position p = (x, y, z) and orientation r = (roll, pitch, yaw)
+    for the 4-DOF serial manipulator described in the DETAILS section:
+      - Joint 1 rotates about Z
+      - Joints 2, 3, and 4 rotate about Y
+      - Link offsets as in DETAILS, with final TCP offset at [0, 0.093, 0].
+
+    Returns (q1, q2, q3, q4) in radians, each wrapped within [-pi, pi].
+    All angles remain within the manipulator's stated joint limits of [-6.2831853, 6.2831853].
+    No reachability checks are performed (assumed always reachable).
+    """
+    import sympy
+    from sympy import sin, cos
+
+    # Unpack position and orientation
+    px, py, pz = p
+    roll, pitch, yaw = r
+
+    # Define symbolic variables for the four joints
+    q1, q2, q3, q4 = sympy.symbols('q1 q2 q3 q4', real=True)
+
+    # Build the target rotation matrix from the given RPY angles
+    # Using Z(yaw) * Y(pitch) * X(roll) convention
+    Rz = sympy.Matrix([
+        [ cos(yaw), -sin(yaw),  0 ],
+        [ sin(yaw),  cos(yaw),  0 ],
+        [        0,         0,  1 ]
+    ])
+    Ry = sympy.Matrix([
+        [  cos(pitch), 0, sin(pitch) ],
+        [           0, 1,          0 ],
+        [ -sin(pitch), 0, cos(pitch) ]
+    ])
+    Rx = sympy.Matrix([
+        [ 1,         0,          0 ],
+        [ 0,  cos(roll), -sin(roll) ],
+        [ 0,  sin(roll),  cos(roll) ]
+    ])
+    R_target = Rz * Ry * Rx
+
+    # A helper to build 4x4 transforms from rotation and translation
+    def make_tf(R, tx=0, ty=0, tz=0):
+        T = sympy.eye(4)
+        T[0:3, 0:3] = R
+        T[0, 3] = tx
+        T[1, 3] = ty
+        T[2, 3] = tz
+        return T
+
+    # Joint 1: rotation about Z by q1 (base link)
+    Rz_q1 = sympy.Matrix([
+        [ cos(q1), -sin(q1), 0 ],
+        [ sin(q1),  cos(q1), 0 ],
+        [       0,        0, 1 ]
+    ])
+    T1 = make_tf(Rz_q1, 0, 0, 0)
+
+    # Joint 2: translate y=0.13585, then rotation about Y by q2
+    T2_translate = make_tf(sympy.eye(3), 0, 0.13585, 0)
+    Ry_q2 = sympy.Matrix([
+        [ cos(q2), 0, sin(q2) ],
+        [       0, 1,       0 ],
+        [-sin(q2), 0, cos(q2) ]
+    ])
+    T2_rotate = make_tf(Ry_q2, 0, 0, 0)
+    T2 = T2_translate * T2_rotate
+
+    # Joint 3: translate (y = -0.1197, z = 0.425), then rotation about Y by q3
+    T3_translate = make_tf(sympy.eye(3), 0, -0.1197, 0.425)
+    Ry_q3 = sympy.Matrix([
+        [ cos(q3), 0, sin(q3) ],
+        [       0, 1,       0 ],
+        [-sin(q3), 0, cos(q3) ]
+    ])
+    T3_rotate = make_tf(Ry_q3, 0, 0, 0)
+    T3 = T3_translate * T3_rotate
+
+    # Joint 4: translate z=0.39225, then rotation about Y by q4
+    T4_translate = make_tf(sympy.eye(3), 0, 0, 0.39225)
+    Ry_q4 = sympy.Matrix([
+        [ cos(q4), 0, sin(q4) ],
+        [       0, 1,       0 ],
+        [-sin(q4), 0, cos(q4) ]
+    ])
+    T4_rotate = make_tf(Ry_q4, 0, 0, 0)
+    T4 = T4_translate * T4_rotate
+
+    # TCP offset: position [0, 0.093, 0], no rotation
+    Tcp = make_tf(sympy.eye(3), 0, 0.093, 0)
+
+    # Full forward kinematics transform
+    T_full = T1 * T2 * T3 * T4 * Tcp
+
+    # We want T_full's position to match (px, py, pz) and orientation to match R_target
+    equations = [
+        sympy.Eq(T_full[0, 3], px),
+        sympy.Eq(T_full[1, 3], py),
+        sympy.Eq(T_full[2, 3], pz)
+    ]
+
+    # Match the 3x3 rotation blocks
+    for i in range(3):
+        for j in range(3):
+            equations.append(sympy.Eq(T_full[i, j], R_target[i, j]))
+
+    # Solve analytically
+    solutions = sympy.solve(equations, [q1, q2, q3, q4], dict=True)
+
+    # If no solutions found, return a default (though problem states all targets are reachable)
+    if not solutions:
+        return (0.0, 0.0, 0.0, 0.0)
+
+    # Pick the first solution
+    sol = solutions[0]
+    import math
+
+    # Helper to wrap angles to [-pi, pi]
+    def wrap_angle(angle):
+        wrapped = (angle + math.pi) % (2 * math.pi) - math.pi
+        # Ensure it's within [-6.2831853, 6.2831853]
+        if wrapped < -6.2831853:
+            wrapped += 2 * math.pi
+        elif wrapped > 6.2831853:
+            wrapped -= 2 * math.pi
+        return wrapped
+
+    q1_val = wrap_angle(float(sol[q1]))
+    q2_val = wrap_angle(float(sol[q2]))
+    q3_val = wrap_angle(float(sol[q3]))
+    q4_val = wrap_angle(float(sol[q4]))
+
+    return (q1_val, q2_val, q3_val, q4_val)
+```

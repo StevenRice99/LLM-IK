@@ -1,0 +1,77 @@
+```python
+def inverse_kinematics(p: tuple[float, float, float], r: tuple[float, float, float]) -> tuple[float, float, float]:
+    """
+    Gets the joint values needed to reach position "p" and orientation "r" for the 3-DOF arm.
+    Assumes the first joint (about Z) is at the origin, the second and third joints (both about Y)
+    have the offsets shown in the DETAILS, and the orientation r = [rx, ry, rz] is such that
+    only rotations about Y and Z are effectively required. All targets are assumed reachable.
+    """
+    import math
+
+    # Unpack desired end-effector position/orientation
+    x, y, z = p
+    rx, ry, rz = r
+
+    # 1) Solve for joint 1 (rotation about Z).
+    #    Approach as in EXISTING 1: theta = atan2(-x, y)
+    q1 = math.atan2(-x, y)
+
+    # 2) Determine the total pitch (alpha) = q2 + q3 from orientation.
+    #    Based on rotation matrix from Z–Y–X Euler angles (rz, ry, rx).
+    cx = math.cos(rx)
+    sx = math.sin(rx)
+    cy = math.cos(ry)
+    sy = math.sin(ry)
+    cz = math.cos(rz)
+    sz = math.sin(rz)
+
+    R00 = cy * cz
+    R02 = sy
+    alpha = math.atan2(R02, R00)  # total pitch = q2 + q3
+
+    # 3) Transform desired position into the frame after joint 1, then apply link 2 offset.
+    c1 = math.cos(q1)
+    s1 = math.sin(q1)
+
+    x1 = x * c1 + y * s1
+    y1 = -x * s1 + y * c1
+    z1 = z
+
+    # Subtract offset at link 2: [0, 0.13585, 0] in that frame
+    x2 = x1
+    y2 = y1 - 0.13585
+    z2 = z1
+
+    # 4) Solve planar 2-link for q2, q3 about Y.
+    #    From DETAILS: link 2->3 has length a = 0.425, link 3->TCP has b = 0.39225.
+    a = 0.425
+    b = 0.39225
+    d_sq = x2**2 + z2**2
+    d = math.sqrt(d_sq)
+
+    # Protect domain of acos
+    cos_theta2 = (d_sq - a*a - b*b) / (2.0 * a * b)
+    cos_theta2 = max(min(cos_theta2, 1.0), -1.0)
+    theta2_candidates = [math.acos(cos_theta2), -math.acos(cos_theta2)]
+
+    solutions = []
+    for t2 in theta2_candidates:
+        t3 = alpha - t2
+        # Forward check
+        xCalc = a * math.sin(t2) + b * math.sin(t2 + t3)  # (t2 + t3) = alpha
+        zCalc = a * math.cos(t2) + b * math.cos(t2 + t3)
+        if (math.isclose(xCalc, x2, abs_tol=1e-6) and 
+            math.isclose(zCalc, z2, abs_tol=1e-6)):
+            solutions.append((t2, t3))
+
+    if solutions:
+        q2, q3 = solutions[0]
+    else:
+        # Fallback approach if no direct match
+        term_x = x2 - b * math.sin(alpha)
+        term_z = z2 - b * math.cos(alpha)
+        q2 = math.atan2(term_x, term_z)
+        q3 = alpha - q2
+
+    return (q1, q2, q3)
+```

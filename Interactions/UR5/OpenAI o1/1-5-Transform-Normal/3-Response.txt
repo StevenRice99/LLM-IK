@@ -1,0 +1,139 @@
+```python
+def inverse_kinematics(p: tuple[float, float, float], r: tuple[float, float, float]) -> tuple[float, float, float, float, float]:
+    """
+    Gets the joint values needed to reach position "p" and orientation "r".
+    :param p: The position to reach in the form [x, y, z].
+    :param r: The orientation to reach in radians in the form [roll_x, pitch_y, yaw_z].
+    :return: A list of the values (q1, q2, q3, q4, q5) in radians.
+    """
+
+    import sympy
+    from sympy import symbols, sin, cos, Matrix, atan2
+
+    # Create symbolic variables for the five joints
+    q1, q2, q3, q4, q5 = symbols('q1 q2 q3 q4 q5', real=True)
+
+    # Helper transformation functions
+    def Txyz(x, y, z):
+        return Matrix([
+            [1, 0, 0, x],
+            [0, 1, 0, y],
+            [0, 0, 1, z],
+            [0, 0, 0, 1]
+        ])
+
+    def RotX(a):
+        return Matrix([
+            [1,      0,       0,      0],
+            [0, cos(a), -sin(a), 0],
+            [0, sin(a),  cos(a), 0],
+            [0,      0,       0,      1]
+        ])
+
+    def RotY(a):
+        return Matrix([
+            [ cos(a), 0, sin(a), 0],
+            [      0, 1,      0, 0],
+            [-sin(a), 0, cos(a), 0],
+            [      0, 0,      0, 1]
+        ])
+
+    def RotZ(a):
+        return Matrix([
+            [cos(a), -sin(a), 0, 0],
+            [sin(a),  cos(a), 0, 0],
+            [     0,       0, 1, 0],
+            [     0,       0, 0, 1]
+        ])
+
+    # Build the forward-kinematics chain T0_TCP(q1..q5):
+
+    # Link 1: Revolute about Y with no preceding translation:
+    T0_1 = RotY(q1)
+
+    # Link 2: Translate [0, -0.1197, 0.425], then revolve about Y:
+    T1_2 = Txyz(0, -0.1197, 0.425) * RotY(q2)
+
+    # Link 3: Translate [0, 0, 0.39225], then revolve about Y:
+    T2_3 = Txyz(0, 0, 0.39225) * RotY(q3)
+
+    # Link 4: Translate [0, 0.093, 0], then revolve about Z:
+    T3_4 = Txyz(0, 0.093, 0) * RotZ(q4)
+
+    # Link 5: Translate [0, 0, 0.09465], then revolve about Y:
+    T4_5 = Txyz(0, 0, 0.09465) * RotY(q5)
+
+    # TCP: Translate [0, 0.0823, 0], then fixed orientation of RotZ(pi/2).
+    T5_TCP = Txyz(0, 0.0823, 0) * RotZ(sympy.pi/2)
+
+    # Full transform from base to TCP:
+    T0_TCP_expr = T0_1 * T1_2 * T2_3 * T3_4 * T4_5 * T5_TCP
+
+    # Extract the desired position and orientation from inputs
+    px, py, pz = p
+    rx, ry, rz = r
+
+    # Construct the desired transformation from p, r using X->Y->Z (roll-pitch-yaw):
+    T_des = (
+        Txyz(px, py, pz)
+        * RotX(rx)
+        * RotY(ry)
+        * RotZ(rz)
+    )
+
+    # Extract position and rotation from T0_TCP_expr
+    R_expr = T0_TCP_expr[0:3, 0:3]
+    px_expr = T0_TCP_expr[0, 3]
+    py_expr = T0_TCP_expr[1, 3]
+    pz_expr = T0_TCP_expr[2, 3]
+
+    # Euler angles from rotation matrix R_expr using roll->pitch->yaw
+    roll_expr = atan2(R_expr[2, 1], R_expr[2, 2])
+    pitch_expr = atan2(-R_expr[2, 0], sympy.sqrt(R_expr[2, 1]**2 + R_expr[2, 2]**2))
+    yaw_expr = atan2(R_expr[1, 0], R_expr[0, 0])
+
+    # Build equations to solve
+    eqs = [
+        sympy.Eq(px_expr, px),
+        sympy.Eq(py_expr, py),
+        sympy.Eq(pz_expr, pz),
+        sympy.Eq(roll_expr, rx),
+        sympy.Eq(pitch_expr, ry),
+        sympy.Eq(yaw_expr, rz),
+    ]
+
+    # Solve the system
+    sol = sympy.solve(eqs, [q1, q2, q3, q4, q5], dict=True)
+
+    # If no solutions found, return zeros (though instructions say it's always reachable)
+    if not sol:
+        return 0.0, 0.0, 0.0, 0.0, 0.0
+
+    # Choose the first solution
+    sol_0 = sol[0]
+    q1_val = float(sol_0[q1] % (2*sympy.pi))
+    q2_val = float(sol_0[q2] % (2*sympy.pi))
+    q3_val = float(sol_0[q3] % (2*sympy.pi))
+    q4_val = float(sol_0[q4] % (2*sympy.pi))
+    q5_val = float(sol_0[q5] % (2*sympy.pi))
+
+    # Ensure angles are within [-6.2831853, 6.2831853]; optionally wrap into [-pi, pi]
+    def wrap_full_range(a):
+        from math import pi
+        if a > pi:
+            a -= 2*pi
+        elif a < -pi:
+            a += 2*pi
+        # clamp to ±6.2831853
+        lower, upper = -6.2831853, 6.2831853
+        a = max(min(a, upper), lower)
+        return float(a)
+
+    q1_val = wrap_full_range(q1_val)
+    q2_val = wrap_full_range(q2_val)
+    q3_val = wrap_full_range(q3_val)
+    q4_val = wrap_full_range(q4_val)
+    q5_val = wrap_full_range(q5_val)
+
+    return q1_val, q2_val, q3_val, q4_val, q5_val
+```

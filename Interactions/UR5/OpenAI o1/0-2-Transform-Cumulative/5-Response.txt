@@ -1,0 +1,115 @@
+```python
+import math
+
+def inverse_kinematics(p: tuple[float, float, float], r: tuple[float, float, float]) -> tuple[float, float, float]:
+    """
+    Closed-form inverse kinematics for a 3-DOF arm with joints:
+       Joint 1: Revolute about Z
+       Joint 2: Revolute about Y
+       Joint 3: Revolute about Y
+    Link offsets from the URDF ("DETAILS" section):
+       • Joint 1 at [0, 0, 0]
+       • Joint 2 at [0, 0.13585, 0]
+       • Joint 3 at [0, -0.1197, 0.425]
+       • TCP    at [0, 0, 0.39225]
+    All r = [rx, ry, rz] are roll-pitch-yaw in the order (X, Y, Z) but the arm can only realize
+    yaw = q1 and pitch = q2 + q3 (it has no independent roll). This solution forces:
+       q1 = rz
+       q2 + q3 = ry
+    Then solves for position p = [x, y, z].
+    """
+
+    # Unpack target position and orientation
+    x, y, z = p
+    rx, ry, rz = r  # roll, pitch, yaw
+
+    # 1) For orientation, the manipulator can only perform a yaw of q1 and a net pitch (q2 + q3).
+    #    We match yaw = q1 = rz, and pitch = q2 + q3 = ry.
+    q1 = rz
+    alpha = ry  # q2 + q3
+
+    # 2) Bring the target position into the "post–joint1" frame by undoing that yaw about Z,
+    #    and also subtract the offset from the base to joint2, which is [0, 0.13585, 0].
+    c1 = math.cos(q1)
+    s1 = math.sin(q1)
+
+    # Rotate [x, y, z] by Rz(-q1)
+    x_local =  x*c1 + y*s1
+    y_local = -x*s1 + y*c1
+    z_local =  z
+
+    # Subtract the link-2 offset in that local frame
+    # Joint 2 is at [0, 0.13585, 0] from the base AFTER joint1. So remove it:
+    y_local -= 0.13585
+
+    # 3) Now we must solve for q2, q3 in a chain that rotates about Y twice and has two offsets:
+    #       a) first offset from joint2 to joint3 is [0, -0.1197, 0.425]
+    #       b) second offset from joint3 to the TCP is [0, 0, 0.39225]
+    #
+    #    In a local frame where the rotation axes are Y, the forward kinematics for joints 2 & 3
+    #    (ignoring any roll about X) is effectively:
+    #
+    #    p_final = Ry(q2)*[0, -0.1197, 0.425] + Ry(q2+q3)*[0, 0, 0.39225].
+    #
+    #    Because rotation about Y leaves the y-component of any vector unchanged, we see that
+    #    the final y is simply (-0.1197) from the first offset (the second offset is along z
+    #    and doesn't affect y). This means the manipulator’s geometry only slightly shifts y
+    #    (it does NOT allow big changes in y within that local frame).  In practice, the main
+    #    variation of y in world-space comes from how q1 reorients the link.
+    #
+    #    We'll match p_local = [x_local, y_local, z_local] with that formula.
+    #
+    #    Let D2(θ) = Ry(θ)*[0, -0.1197, 0.425], D3(φ) = Ry(φ)*[0, 0, 0.39225].
+    #    Then p_local = D2(q2) + D3(q2 + q3) = D2(q2) + D3(alpha).
+    #
+    #    We'll write it out explicitly:
+    #
+    #    D2(q2) = [0.425 sin(q2), -0.1197, 0.425 cos(q2)]
+    #    D3(alpha) = [0.39225 sin(alpha), 0, 0.39225 cos(alpha)]
+    #
+    #    So
+    #
+    #        x_local = 0.425 sin(q2) + 0.39225 sin(alpha)
+    #        y_local = -0.1197
+    #        z_local = 0.425 cos(q2) + 0.39225 cos(alpha).
+    #
+    #    Notice that y_local must be -0.1197 for a consistent solution. If it differs, we won't have
+    #    an exact solution. In reality, the real chain geometry plus the rotation about Z can
+    #    place the end-effector at many (x,y,z) in the global frame, but in the local frame after
+    #    removing q1, the manipulator is essentially a 2-link layout that does not vary local y
+    #    except for that constant -0.1197 shift. We'll proceed with that direct approach:
+    #
+
+    # Check if the local Y is close to the needed -0.1197:
+    # If it is not, the manip may never precisely match. We'll just proceed and rely on small errors.
+    # Solve for q2 from the planar equations in xz. Then q3 = alpha - q2.
+    # x_local = 0.425 sin(q2) + 0.39225 sin(alpha)
+    # z_local = 0.425 cos(q2) + 0.39225 cos(alpha)
+    #
+    # Rearrange to isolate q2. We can do it by standard 2-link approach or a simpler numeric search.
+    # Since the instructions forbid "optimizers," we'll do a small direct approach:
+    #
+    #   Let X' = x_local - 0.39225 sin(alpha)
+    #       Z' = z_local - 0.39225 cos(alpha)
+    #   => X' = 0.425 sin(q2)
+    #      Z' = 0.425 cos(q2)
+    #
+    #   => q2 = atan2(X', Z').
+    #
+
+    # alpha = q2 + q3, so once we have q2, q3 = alpha - q2.
+
+    # Step A: define the "residual" we must explain by the link2 portion
+    X_prime = x_local - 0.39225 * math.sin(alpha)
+    Z_prime = z_local - 0.39225 * math.cos(alpha)
+
+    # Step B: solve for q2
+    q2 = math.atan2(X_prime, Z_prime)
+    # Step C: q3 from alpha
+    q3 = alpha - q2
+
+    # Optional: If y_local is far from -0.1197, it's an indication that no perfect solution
+    # exists under this simplified geometry. We'll keep going anyway.
+
+    return (q1, q2, q3)
+```

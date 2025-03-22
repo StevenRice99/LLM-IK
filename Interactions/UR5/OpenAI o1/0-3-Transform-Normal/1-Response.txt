@@ -1,0 +1,139 @@
+def inverse_kinematics(p: tuple[float, float, float], r: tuple[float, float, float]) -> tuple[float, float, float, float]:
+    """
+    Gets the joint values needed to reach position "p" and orientation "r".
+    :param p: The position to reach in the form [x, y, z].
+    :param r: The orientation to reach in radians in the form [roll_x, pitch_y, yaw_z].
+              For this 4-DOF arm, roll_x must be 0 (no X-axis joint),
+              pitch_y is realized by the sum of joints 2+3+4, and yaw_z by joint 1.
+              You may assume that all given targets (p, r) are valid and reachable.
+    :return: (q1, q2, q3, q4), each in radians, satisfying the manipulator's geometry.
+    """
+
+    import sympy
+    from sympy import symbols, Matrix, sin, cos, solve
+
+    # -------------------------------------------------
+    # Quick helpers for rotation about Z and Y in Sympy
+    # -------------------------------------------------
+    def rot_z(theta):
+        return Matrix([
+            [ cos(theta), -sin(theta), 0],
+            [ sin(theta),  cos(theta), 0],
+            [          0,           0, 1]
+        ])
+
+    def rot_y(theta):
+        return Matrix([
+            [ cos(theta), 0, sin(theta)],
+            [          0, 1,          0],
+            [-sin(theta), 0, cos(theta)]
+        ])
+
+    # -------------------------------------------------
+    # Extract target position/orientation
+    # We interpret r = (roll_x, pitch_y, yaw_z) in RPY
+    # but for this robot, r_x must be 0.
+    # -------------------------------------------------
+    px, py, pz = p
+    r_x, r_y, r_z = r
+
+    # -------------------------------------------------
+    # The manipulator can only realize r_x=0.
+    # Joint 1 (q1) is about Z, matching the final yaw_z.
+    # Joints 2, 3, 4 (about Y) sum to r_y in orientation.
+    # So we set:
+    #     q1 = r_z
+    #     q2 + q3 + q4 = r_y
+    #
+    # Then we solve for q2, q3 from position. Finally q4 = r_y - q2 - q3.
+    # -------------------------------------------------
+
+    q2_sym, q3_sym = symbols('q2 q3', real=True)
+    q1_val = r_z                   # Direct assignment
+    q4_expr = r_y - q2_sym - q3_sym
+
+    # -------------------------------------------------
+    # Forward Kinematics in symbolic form:
+    #
+    # Let:
+    #   T0_1 = rotZ(q1)
+    #   T1_2 = trans(0,0.13585,0)*rotY(q2)
+    #   T2_3 = trans(0,-0.1197,0.425)*rotY(q3)
+    #   T3_4 = trans(0,0,0.39225)*rotY(q4)
+    #   T4_TCP = trans(0,0,0.093)
+    #
+    # p_TCP = T0_1 * T1_2 * T2_3 * T3_4 * T4_TCP * [0,0,0,1]^T
+    #
+    # We'll build this up step-by-step, substituting q4 = r_y - q2 - q3.
+    # -------------------------------------------------
+
+    # Symbolic q1, q2, q3, q4 for building transforms:
+    q1_sym = sympy.Symbol('q1', real=True)
+    q4_sym = sympy.Symbol('q4', real=True)
+
+    # We will substitute numeric q1 later; q4 is expressed in terms of q2,q3.
+
+    # Rotation about Z for joint1:
+    R0_1 = rot_z(q1_sym)
+    p0_1 = Matrix([0, 0, 0])  # revolve1 has no base offset
+
+    # From link1 to link2:
+    # translate by (0,0.13585,0) then rotate about Y by q2
+    p1_2 = Matrix([0, 0.13585, 0])
+    # Overall 4x4 transform is T0_1 * (trans(...) * rotY(q2)), but for the position we do:
+    # p2 = p0_1 + R0_1*p1_2, R2 = R0_1*rotY(q2)
+    # Then next offset is in that new frame:
+    def T_position(R_prev, p_prev, offset, R_local):
+        return p_prev + R_prev * offset, R_prev * R_local
+
+    # Build revolve2 position/orientation:
+    p2_sym, R2_sym = T_position(R0_1, p0_1, p1_2, rot_y(q2_sym))
+
+    # revolve3 offset [0, -0.1197, 0.425]
+    p2_3 = Matrix([0, -0.1197, 0.425])
+    p3_sym, R3_sym = T_position(R2_sym, p2_sym, p2_3, rot_y(q3_sym))
+
+    # revolve4 offset [0, 0, 0.39225], with q4
+    p3_4 = Matrix([0, 0, 0.39225])
+    p4_sym, R4_sym = T_position(R3_sym, p3_sym, p3_4, rot_y(q4_sym))
+
+    # Final TCP offset [0,0,0.093]
+    tcp_offset = Matrix([0, 0, 0.093])
+    p_tcp_sym = p4_sym + R4_sym * tcp_offset
+
+    # -------------------------------------------------
+    # We'll now set up equations:
+    #   p_tcp_sym(q1_sym, q2_sym, q3_sym, q4_sym) = (px, py, pz)
+    #
+    # with q1_sym = q1_val, q4_sym = r_y - q2_sym - q3_sym,
+    # then solve for q2_sym, q3_sym.
+    # -------------------------------------------------
+
+    # Substitute q1 and q4 expressions into p_tcp_sym:
+    p_tcp_sub = p_tcp_sym.subs({
+        q1_sym:  q1_val,
+        q4_sym:  q4_expr
+    })
+
+    # We want p_tcp_sub[0] = px, p_tcp_sub[1] = py, p_tcp_sub[2] = pz
+    eqs = [
+        sympy.Eq(p_tcp_sub[0], px),
+        sympy.Eq(p_tcp_sub[1], py),
+        sympy.Eq(p_tcp_sub[2], pz)
+    ]
+
+    solutions = solve(eqs, [q2_sym, q3_sym], dict=True)
+
+    # Since the problem states "assume all targets are reachable," pick any real solution.
+    if not solutions:
+        # In a real application, you might raise an error or handle no-solution cases.
+        # But here we assume there's always a valid solution.
+        return (0.0, 0.0, 0.0, 0.0)
+
+    sol = solutions[0]  # take the first valid solution
+
+    q2_val = float(sol[q2_sym])
+    q3_val = float(sol[q3_sym])
+    q4_val = float(r_y - q2_val - q3_val)
+
+    return (q1_val, q2_val, q3_val, q4_val)

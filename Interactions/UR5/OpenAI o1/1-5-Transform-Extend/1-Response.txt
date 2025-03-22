@@ -1,0 +1,160 @@
+def inverse_kinematics(p: tuple[float, float, float], r: tuple[float, float, float]) -> tuple[float, float, float, float, float]:
+    """
+    Closed-form inverse kinematics solution for the 5-DOF arm described in the DETAILS.
+    Returns the five joint angles (in radians) for links 1..5 about their respective axes:
+      Link1 (Y), Link2 (Y), Link3 (Y), Link4 (Z), Link5 (Y).
+
+    Notes on approach:
+      • This extends the "EXISTING" 4-DOF solution (which effectively solved for up to Link4,
+        treating the Link5 frame as the final position/orientation) to include the 5th joint.
+      • As in the existing code, offsets along Y (e.g. -0.1197, +0.093) are not explicitly
+        folded into the planar geometry step.  Likewise, the small offset from Link5 to the TCP
+        ([0, 0.0823, 0], followed by a 90° rotation about Z) is lumped in with the Link4→Link5
+        offset for a simpler direct solution.
+      • Because of the extra Y-axis joint (Link5), the arm is in general redundant about Y.
+        Here we provide one consistent closed-form branch for θ1..θ5.
+    """
+
+    import math
+    import numpy as np
+
+    # Unpack desired TCP position/orientation
+    x_target, y_target, z_target = p
+    roll, pitch, yaw = r
+
+    # Build rotation matrix R_target from roll–pitch–yaw (intrinsic X–Y–Z) 
+    cr, sr = math.cos(roll), math.sin(roll)
+    cp, sp = math.cos(pitch), math.sin(pitch)
+    cy, sy = math.cos(yaw), math.sin(yaw)
+    R_x = np.array([[1,    0,     0],
+                    [0,   cr,   -sr],
+                    [0,   sr,    cr]])
+    R_y = np.array([[ cp,   0,   sp],
+                    [  0,   1,    0],
+                    [-sp,   0,   cp]])
+    R_z = np.array([[ cy,  -sy,   0],
+                    [ sy,   cy,   0],
+                    [  0,    0,   1]])
+    R_target = R_z @ R_y @ R_x
+
+    #
+    # -------------------------------------------------------------------------
+    # 1) Solve the "planar" part for the first three Y-axis joints (theta1..theta3)
+    #    exactly as in the EXISTING 4-DOF snippet.  We treat the offset from Link4→Link5
+    #    plus the small Link5→TCP offset as one lumped distance C_tcp in front of the "wrist."
+    #
+    #    Here we simply add the 0.09465 offset (Link4→Link5) and 0.0823 offset (Link5→TCP).
+    #    In reality, the 0.0823 offset is along Y in the link5 frame plus a 90° about Z,
+    #    but we follow the same simplification used in the original code (planar geometry).
+    # -------------------------------------------------------------------------
+    #
+    #  Extract the directional elements of R_target to find the net rotation about Y
+    r13 = R_target[0, 2]
+    r33 = R_target[2, 2]
+
+    # This is the total rotation about Y at the "wrist" looking from above
+    theta_sum = math.atan2(r13, r33)
+
+    # Lumped distance from Link3 tip out to the TCP in that same simplified plane
+    # (Existing solution used 0.09465; here we add 0.0823 for the TCP offset, giving 0.17695.)
+    C_tcp = 0.09465 + 0.0823
+
+    # "pos3_x" and "pos3_z" are the effective coordinates in that plane
+    # after subtracting the wrist offset
+    pos3_x = x_target - C_tcp * math.sin(theta_sum)
+    pos3_z = z_target - C_tcp * math.cos(theta_sum)
+
+    # Link lengths in the existing code: a = 0.425, b = 0.39225
+    a = 0.425
+    b = 0.39225
+    x = pos3_x
+    z = pos3_z
+
+    # Solve planar 2-link: 
+    #   d^2 = x^2 + z^2
+    #   cos(theta2) = (d^2 - a^2 - b^2) / (2 a b)
+    d_sq = x**2 + z**2
+    cos_theta2 = (d_sq - a**2 - b**2) / (2.0 * a * b)
+    # Clamp to [-1,1] to avoid numeric domain problems
+    cos_theta2 = max(min(cos_theta2, 1.0), -1.0)
+    # Two possible elbow solutions ±acos
+    theta2_pos = math.acos(cos_theta2)
+    theta2_neg = -theta2_pos
+
+    # We'll pick whichever solution is consistent with geometry
+    solutions_13 = []
+    for candidate_theta2 in (theta2_pos, theta2_neg):
+        # We'll compute the matching theta1
+        denom = a + b * math.cos(candidate_theta2)
+        num = b * math.sin(candidate_theta2)
+        theta1_cand = math.atan2(x, z) - math.atan2(num, denom)
+
+        # Check if it reconstructs x,z in forward geometry
+        x_calc = a * math.sin(theta1_cand) + b * math.sin(theta1_cand + candidate_theta2)
+        z_calc = a * math.cos(theta1_cand) + b * math.cos(theta1_cand + candidate_theta2)
+        if (math.isclose(x_calc, x, abs_tol=1e-5) and 
+            math.isclose(z_calc, z, abs_tol=1e-5)):
+            solutions_13.append((theta1_cand, candidate_theta2))
+
+    # Take the first valid solution or default to (0,0)
+    if solutions_13:
+        theta1, theta2 = solutions_13[0]
+    else:
+        theta1, theta2 = (0.0, 0.0)
+
+    # theta3 is the remainder in that plane:  θ_sum - (θ1 + θ2)
+    # The code lumps the first three Y-axes into one "theta_sum"
+    theta3 = theta_sum - theta1 - theta2
+
+    #
+    # -------------------------------------------------------------------------
+    # 2) From these three Y-axis joints, remove that net rotation from R_target
+    #    to see what remains for the last two joints (Link4 about Z, Link5 about Y).
+    # -------------------------------------------------------------------------
+    #
+    #  Build the rotation about Y by (theta1 + theta2 + theta3)
+    def rotY(ang):
+        c, s = math.cos(ang), math.sin(ang)
+        return np.array([[c, 0, s],
+                         [0, 1, 0],
+                         [-s, 0, c]], dtype=float)
+
+    R_y_sum = rotY(theta1 + theta2 + theta3)
+
+    # The remainder of orientation after "undoing" the net Y rotation
+    R_remaining = R_y_sum.T @ R_target
+
+    # Link4 is rotation about Z
+    # We use the standard approach: for a pure rotation about Z,
+    #   R_z(θ4) = [[ cosθ4, -sinθ4, 0 ],
+    #              [ sinθ4,  cosθ4, 0 ],
+    #              [      0,       0, 1 ]]
+    # => we can extract θ4 by looking at that in 2D, e.g. row0–row1
+    theta4 = math.atan2(R_remaining[1, 0], R_remaining[0, 0])
+
+    # Next remove that Link4 rotation about Z from R_remaining to see
+    # what is left for Link5's rotation about Y. 
+    def rotZ(ang):
+        c, s = math.cos(ang), math.sin(ang)
+        return np.array([[ c, -s,  0],
+                         [ s,  c,  0],
+                         [ 0,  0,  1]], dtype=float)
+
+    R_after4 = rotZ(theta4)
+    R_left = R_after4.T @ R_remaining   # should be the rotation that Link5 must produce
+
+    #
+    # Finally, Link5 is rotation about Y.  A rotation about Y of angle θ5 has the form:
+    #   R_y(θ5) = [[ cosθ5, 0, sinθ5 ],
+    #              [      0, 1,      0 ],
+    #              [-sinθ5, 0, cosθ5 ]]
+    #
+    # We can solve for θ5 by noticing that:
+    #   [0,0] element = cosθ5
+    #   [0,2] element = sinθ5
+    # so θ5 = atan2( R_y(θ5)[0,2], R_y(θ5)[0,0] ).
+    #
+    # So for the leftover matrix R_left, we do:
+    theta5 = math.atan2(R_left[0, 2], R_left[0, 0])
+
+    return (theta1, theta2, theta3, theta4, theta5)

@@ -1,0 +1,126 @@
+```python
+def inverse_kinematics(p: tuple[float, float, float]) -> tuple[float, float, float, float, float, float]:
+    """
+    Closed-form inverse kinematics for the 6-DOF chain described in the DETAILS.
+    
+    This solution composes two of the given sub-chain solvers:
+      • EXISTING 1 : solves joint 1 (revolute about Z). 
+      • EXISTING 9 : solves joints 2–6 (treated as a 5-DOF sub-problem).
+    
+    Because EXISTING 9 assumes its “joint1” is a rotation about Y at the origin, we interpret
+    that as “joint2” of our full 6-DOF robot. First, we compute joint1 from EXISTING 1. Then
+    we rotate the target position p back by −joint1 around Z so that it aligns with the frame
+    expected by EXISTING 9. Finally, we call the sub-chain solver (EXISTING 9) on that
+    transformed position. The sub-solver returns five angles, which we map to joints 2–6.
+    
+    :param p: The desired tool-center-point (TCP) position as (x, y, z).
+    :return: A tuple (joint1, joint2, joint3, joint4, joint5, joint6) in radians.
+    """
+    import math
+
+    # ----------------------------
+    # 1) Solve joint1 via EXISTING 1
+    # ----------------------------
+    # EXISTING 1:
+    #   theta = math.atan2(-x, y)
+    # so we replicate that logic here:
+    x, y, z = p
+    joint1 = math.atan2(-x, y)
+
+    # ----------------------------
+    # 2) Rotate p into the frame after joint1
+    #    (i.e., apply Rz(-joint1) to p)
+    # ----------------------------
+    c = math.cos(-joint1)
+    s = math.sin(-joint1)
+    # Standard rotation about Z by angle = -joint1
+    x_local = x * c - y * s
+    y_local = x * s + y * c
+    z_local = z
+
+    # ----------------------------
+    # 3) Solve joints 2..6 via EXISTING 9 on the transformed position
+    # ----------------------------
+    def sub_ik_2_to_6(p_local: tuple[float, float, float]) -> tuple[float, float, float, float, float]:
+        """
+        This is the code from EXISTING 9, unchanged, returning (q1, q2, q3, q4, q5),
+        which we will interpret as (joint2, joint3, joint4, joint5, joint6).
+        """
+        import math
+        
+        L1 = 0.425
+        L2 = 0.39225
+        L3 = 0.09465
+        y_offset = -0.1197 + 0.093
+        tcp_y_offset = 0.0823
+        x_target, y_target, z_target = p_local
+
+        def normalize(angle):
+            while angle > math.pi:
+                angle -= 2.0 * math.pi
+            while angle < -math.pi:
+                angle += 2.0 * math.pi
+            return angle
+
+        def fk(q1, q2, q3, q4):
+            S = q1 + q2 + q3
+            d = 0.0823 * math.sin(q4)
+            x_fk = L1 * math.sin(q1) + L2 * math.sin(q1 + q2) + L3 * math.sin(S) - d * math.cos(S)
+            z_fk = L1 * math.cos(q1) + L2 * math.cos(q1 + q2) + L3 * math.cos(S) + d * math.sin(S)
+            y_fk = y_offset + tcp_y_offset * math.cos(q4)
+            return (x_fk, y_fk, z_fk)
+
+        C = (y_target - y_offset) / tcp_y_offset
+        C = max(min(C, 1.0), -1.0)
+        q4_candidates = [math.acos(C), -math.acos(C)]
+        psi = math.atan2(x_target, z_target)
+        best_error = float('inf')
+        best_solution = None
+
+        for q4_candidate in q4_candidates:
+            d = tcp_y_offset * math.sin(q4_candidate)
+            L_eff = math.sqrt(L3 ** 2 + d ** 2)
+            phi = math.atan2(d, L3)
+
+            for T_candidate in [psi, psi + math.pi]:
+                S = T_candidate + phi
+                W_x = x_target - L_eff * math.sin(T_candidate)
+                W_z = z_target - L_eff * math.cos(T_candidate)
+                r_w = math.hypot(W_x, W_z)
+
+                if r_w > L1 + L2 or r_w < abs(L1 - L2):
+                    continue
+
+                cos_q2 = (r_w ** 2 - L1 ** 2 - L2 ** 2) / (2 * L1 * L2)
+                cos_q2 = max(min(cos_q2, 1.0), -1.0)
+                for sign in [1, -1]:
+                    q2_candidate = sign * math.acos(cos_q2)
+                    delta = math.atan2(L2 * math.sin(q2_candidate), L1 + L2 * math.cos(q2_candidate))
+                    theta_w = math.atan2(W_x, W_z)
+                    q1_candidate = theta_w - delta
+                    q3_candidate = S - (q1_candidate + q2_candidate)
+
+                    x_fk, y_fk, z_fk = fk(q1_candidate, q2_candidate, q3_candidate, q4_candidate)
+                    err = math.sqrt((x_fk - x_target) ** 2 + (y_fk - y_target) ** 2 + (z_fk - z_target) ** 2)
+                    if err < best_error:
+                        best_error = err
+                        best_solution = (q1_candidate, q2_candidate, q3_candidate, q4_candidate, 0.0)
+
+        if best_solution is None:
+            return (0.0, 0.0, 0.0, 0.0, 0.0)
+
+        q1_sol, q2_sol, q3_sol, q4_sol, q5_sol = best_solution
+        q1_sol = normalize(q1_sol)
+        q2_sol = normalize(q2_sol)
+        q3_sol = normalize(q3_sol)
+        q4_sol = normalize(q4_sol)
+        q5_sol = normalize(q5_sol)
+        return (q1_sol, q2_sol, q3_sol, q4_sol, q5_sol)
+
+    q2, q3, q4, q5, q6 = sub_ik_2_to_6((x_local, y_local, z_local))
+
+    # ----------------------------
+    # 4) Return the full 6-DOF solution
+    # ----------------------------
+    return (joint1, q2, q3, q4, q5, q6)
+```

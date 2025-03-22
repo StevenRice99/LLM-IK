@@ -1,0 +1,130 @@
+```python
+def inverse_kinematics(p: tuple[float, float, float], r: tuple[float, float, float]) -> tuple[float, float, float, float, float]:
+    """
+    Closed-form symbolic inverse kinematics solution for the 5-DOF arm, including
+    the correct offsets in Y and Z for each link as described in the DETAILS.
+
+    This solution builds the full forward kinematics chain in symbolic form using
+    Sympy, then equates it to the requested (p, r) pose to solve for the five joint
+    angles about their respective axes:
+
+        • Link1: Revolute about Y
+        • Link2: Revolute about Y
+        • Link3: Revolute about Y
+        • Link4: Revolute about Z
+        • Link5: Revolute about Y
+
+    Link offsets are:
+        - From Link1 to Link2:  translation(0, -0.1197, 0.425)
+        - From Link2 to Link3:  translation(0, 0, 0.39225)
+        - From Link3 to Link4:  translation(0, 0.093, 0)
+        - From Link4 to Link5:  translation(0, 0, 0.09465)
+        - From Link5 to TCP:    translation(0, 0.0823, 0) plus a 90° rotation about Z
+
+    The solver handles position (x,y,z) plus roll–pitch–yaw orientation. Since
+    this is a 5-DOF robot, it cannot realize arbitrary orientations, but for
+    reachable (p,r) the solver should return consistent joint angles.
+
+    Returns:
+        (q1, q2, q3, q4, q5) in radians.
+    """
+    import sympy as sp
+
+    # Symbols for unknown joint angles
+    q1, q2, q3, q4, q5 = sp.symbols('q1 q2 q3 q4 q5', real=True)
+
+    # Helper functions for homogeneous transforms
+    def rotY(theta):
+        return sp.Matrix([
+            [ sp.cos(theta), 0, sp.sin(theta), 0],
+            [             0, 1,             0, 0],
+            [-sp.sin(theta), 0, sp.cos(theta), 0],
+            [             0, 0,             0, 1]
+        ])
+    def rotZ(theta):
+        return sp.Matrix([
+            [ sp.cos(theta), -sp.sin(theta), 0, 0],
+            [ sp.sin(theta),  sp.cos(theta), 0, 0],
+            [             0,              0, 1, 0],
+            [             0,              0, 0, 1]
+        ])
+    def transl(x, y, z):
+        return sp.Matrix([
+            [1, 0, 0, x],
+            [0, 1, 0, y],
+            [0, 0, 1, z],
+            [0, 0, 0, 1]
+        ])
+
+    # Build the forward kinematic chain T0_TCP = T0_1 * T1_2 * T2_3 * T3_4 * T4_5 * T5_TCP
+
+    # 1) Link1: revolve about Y, no initial translation:
+    T0_1 = rotY(q1)
+
+    # 2) Link2: translator(0, -0.1197, 0.425) then revolve about Y
+    T1_2 = transl(0, -0.1197, 0.425) * rotY(q2)
+
+    # 3) Link3: translator(0, 0, 0.39225) then revolve about Y
+    T2_3 = transl(0, 0, 0.39225) * rotY(q3)
+
+    # 4) Link4: translator(0, 0.093, 0) then revolve about Z
+    T3_4 = transl(0, 0.093, 0) * rotZ(q4)
+
+    # 5) Link5: translator(0, 0, 0.09465) then revolve about Y
+    T4_5 = transl(0, 0, 0.09465) * rotY(q5)
+
+    # 6) TCP offset: translator(0, 0.0823, 0) then rotate about Z +90°
+    T5_TCP = transl(0, 0.0823, 0) * rotZ(sp.pi/2)
+
+    # Full transform from base to TCP:
+    T0_TCP = T0_1 * T1_2 * T2_3 * T3_4 * T4_5 * T5_TCP
+
+    # Desired position/orientation
+    x_target, y_target, z_target = p
+    roll, pitch, yaw = r
+
+    # Build desired rotation matrix from (roll, pitch, yaw) about X, Y, Z (intrinsic Rz*Ry*Rx or whichever is specified)
+    # We'll assume the input r = (roll, pitch, yaw) is extrinsic X→Y→Z or intrinsic Z→Y→X; 
+    # typically "roll→pitch→yaw" = Rz(yaw)*Ry(pitch)*Rx(roll). We'll proceed with that:
+    R_x = sp.Matrix([
+        [1,            0,            0],
+        [0,  sp.cos(roll), -sp.sin(roll)],
+        [0,  sp.sin(roll),  sp.cos(roll)]
+    ])
+    R_y = sp.Matrix([
+        [ sp.cos(pitch), 0, sp.sin(pitch)],
+        [             0, 1,             0],
+        [-sp.sin(pitch), 0, sp.cos(pitch)]
+    ])
+    R_z = sp.Matrix([
+        [ sp.cos(yaw), -sp.sin(yaw), 0],
+        [ sp.sin(yaw),  sp.cos(yaw), 0],
+        [           0,            0, 1]
+    ])
+    R_des = R_z * R_y * R_x  # final 3×3 orientation
+
+    # Build equations: T0_TCP's translation must match p, rotation must match R_des
+    eqs = []
+    # Position constraints:
+    eqs.append(sp.Eq(T0_TCP[0, 3], x_target))
+    eqs.append(sp.Eq(T0_TCP[1, 3], y_target))
+    eqs.append(sp.Eq(T0_TCP[2, 3], z_target))
+
+    # Orientation constraints (3x3). 
+    for i in range(3):
+        for j in range(3):
+            eqs.append(sp.Eq(T0_TCP[i, j], R_des[i, j]))
+
+    # Solve symbolically
+    sol = sp.solve(eqs, [q1, q2, q3, q4, q5], dict=True)
+
+    # If there's at least one solution, pick the first:
+    if isinstance(sol, list) and len(sol) > 0:
+        s = sol[0]
+        # Convert symbolic solutions to floats
+        ans = (float(s[q1]), float(s[q2]), float(s[q3]), float(s[q4]), float(s[q5]))
+        return ans
+
+    # If no solution found, return zeros (although the problem states valid targets are always reachable)
+    return (0.0, 0.0, 0.0, 0.0, 0.0)
+```

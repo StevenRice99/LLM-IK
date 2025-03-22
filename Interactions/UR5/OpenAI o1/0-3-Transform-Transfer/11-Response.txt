@@ -1,0 +1,193 @@
+```python
+import math
+import numpy as np
+
+def inverse_kinematics(p: tuple[float, float, float], r: tuple[float, float, float]) -> tuple[float, float, float, float]:
+    """
+    Closed-form inverse kinematics for a 4-DOF manipulator with joints:
+      - Joint1 rotates about Z
+      - Joint2 rotates about Y
+      - Joint3 rotates about Y
+      - Joint4 rotates about Y
+    and link geometry from the DETAILS table.
+
+    The manipulator can only achieve yaw=q1 and a lumped pitch=(q2+q3+q4);
+    it cannot realize arbitrary roll. The function ignores the 'roll' component
+    of the requested orientation and attempts to match pitch & yaw.
+
+    This solution explicitly enumerates the possible sign choices (± from
+    arccos), offset corrections, and alternate arctan2( ) branches, then
+    selects the best match to the requested position & orientation
+    via a forward-kinematics check.
+
+    :param p: (x, y, z) target position.
+    :param r: (roll, pitch, yaw) target orientation in radians;
+              'roll' is ignored because the mechanism cannot realize it.
+    :return: (q1, q2, q3, q4) joint angles in radians that best achieve p, r.
+    """
+
+    # -------------------------
+    # 1) Extract target data
+    # -------------------------
+    x, y, z = p
+    _, pitch_des, yaw_des = r  # ignore roll (r[0])
+
+    # Robot geometry constants
+    offset = 0.10915       # net offset for link geometry in the XY plane
+    # The magic constants from the "EXISTING" code:
+    #   cos_q3 = (r^2 - 0.346395) / 0.3341625
+    c3_numer_sub = 0.346395
+    c3_denom = 0.3341625
+
+    # -------------------------
+    # 2) Forward Kinematics helper to evaluate solutions
+    #    (position + orientation-pitch-yaw only)
+    # -------------------------
+    def wrap_to_pi(a):
+        return (a + math.pi) % (2 * math.pi) - math.pi
+
+    def rot_z(th):
+        c, s = math.cos(th), math.sin(th)
+        return np.array([
+            [ c, -s,  0, 0],
+            [ s,  c,  0, 0],
+            [ 0,  0,  1, 0],
+            [ 0,  0,  0, 1]
+        ], dtype=float)
+
+    def rot_y(th):
+        c, s = math.cos(th), math.sin(th)
+        return np.array([
+            [ c,  0,  s, 0],
+            [ 0,  1,  0, 0],
+            [-s, 0,  c, 0],
+            [ 0,  0,  0, 1]
+        ], dtype=float)
+
+    def trans(tx, ty, tz):
+        M = np.eye(4, dtype=float)
+        M[0, 3] = tx
+        M[1, 3] = ty
+        M[2, 3] = tz
+        return M
+
+    def fk(q1, q2, q3, q4):
+        """
+        Return (px, py, pz, pitch, yaw).
+        Roll is omitted because the robot cannot realize it.
+        """
+        # Link transforms, from the DETAILS:
+        #  1) revolve about Z
+        T1 = rot_z(q1)
+        #  2) translate + revolve about Y
+        T2 = trans(0, 0.13585, 0) @ rot_y(q2)
+        #  3) translate + revolve about Y
+        T3 = trans(0, -0.1197, 0.425) @ rot_y(q3)
+        #  4) translate + revolve about Y
+        T4 = trans(0, 0, 0.39225) @ rot_y(q4)
+        #  5) tool offset
+        Ttcp = trans(0, 0, 0.093)
+
+        # total transform
+        T = T1 @ T2 @ T3 @ T4 @ Ttcp
+
+        px, py, pz = T[0, 3], T[1, 3], T[2, 3]
+        R = T[:3, :3]
+
+        # We treat pitch, yaw as if Euler: yaw = atan2(R[1,0], R[0,0])
+        #                                     pitch = atan2(-R[2,0], sqrt(R[0,0]^2+R[1,0]^2))
+        yaw_ = math.atan2(R[1,0], R[0,0])
+        sin_pitch = -R[2,0]
+        cos_pitch = math.sqrt(R[0,0]**2 + R[1,0]**2)
+        pitch_ = math.atan2(sin_pitch, cos_pitch)
+
+        return (px, py, pz, pitch_, yaw_)
+
+    def solution_error(q1_val, q2_val, q3_val, q4_val):
+        px_, py_, pz_, pitch_, yaw_ = fk(q1_val, q2_val, q3_val, q4_val)
+        # position error
+        pos_err = math.sqrt((px_ - x)**2 + (py_ - y)**2 + (pz_ - z)**2)
+        # orientation error in pitch & yaw (wrap differences)
+        yaw_err = wrap_to_pi(yaw_ - yaw_des)
+        pitch_err = wrap_to_pi(pitch_ - pitch_des)
+        # Weighted sum of absolute errors
+        return pos_err + abs(yaw_err) + abs(pitch_err)
+
+    # -------------------------
+    # 3) Enumerate all feasible solutions from geometry
+    # -------------------------
+    r_sq = x*x + y*y + z*z
+    c3_val = (r_sq - c3_numer_sub) / c3_denom
+    # clamp
+    c3_val = max(-1.0, min(1.0, c3_val))
+
+    # possible q3 values
+    q3_candidates = [
+        math.acos(c3_val),
+        -math.acos(c3_val)
+    ]
+
+    # We'll systematically try both possibilities for q3,
+    # plus the two possible "phi" sign shifts in q1,
+    # and also consider adding π to q2 if needed, because
+    # atan2(...) can be offset by π.
+
+    best_sol = None
+    best_err = 1.0e9
+
+    for q3_guess in q3_candidates:
+        # For each q3, define:
+        A = 0.425 + 0.39225 * math.cos(q3_guess)
+        B = 0.39225 * math.sin(q3_guess)
+
+        # plan view radius ignoring offset
+        S_sq = x*x + y*y - offset*offset
+        S_ = math.sqrt(S_sq) if S_sq >= 0 else 0.0
+
+        # define q2 from numerator/denominator
+        # from the original "EXISTING" code
+        numerator_q2 = S_ * A - z * B
+        denominator_q2 = S_ * B + z * A
+        base_q2 = math.atan2(numerator_q2, denominator_q2)
+
+        # We'll try q2 = base_q2 +/- kπ
+        for addpi_q2 in [0.0, math.pi]:
+            q2_guess = base_q2 + addpi_q2
+
+            # The original code computed q1 from geometry as:
+            #   phi = atan2(0.10915, S_)
+            #   q1 = atan2(y, x) - phi
+            # but we also try +/- phi, and we can also consider the 2π offsets.
+            # We'll systematically check these. 
+            phi = math.atan2(offset, S_) if abs(S_) > 1e-8 else (math.pi / 2)
+
+            # base angle in the XY plane
+            base_angle = math.atan2(y, x)
+
+            # We'll consider q1 = base_angle ± phi ± kπ
+            for sign_phi in [1.0, -1.0]:
+                q1_opt = base_angle - sign_phi * phi
+                for addpi_q1 in [0.0, math.pi]:
+                    q1_guess = q1_opt + addpi_q1
+
+                    # define q4 to match pitch
+                    # pitch = q2 + q3 + q4 => q4 = pitch - (q2 + q3)
+                    q4_guess = pitch_des - (q2_guess + q3_guess)
+
+                    # wrap them for neatness
+                    q1f = wrap_to_pi(q1_guess)
+                    q2f = wrap_to_pi(q2_guess)
+                    q3f = wrap_to_pi(q3_guess)
+                    q4f = wrap_to_pi(q4_guess)
+
+                    # Evaluate error
+                    err = solution_error(q1f, q2f, q3f, q4f)
+                    if err < best_err:
+                        best_err = err
+                        best_sol = (q1f, q2f, q3f, q4f)
+
+    # If none found, fallback (unlikely) 
+    if best_sol is None:
+        return (0.0, 0.0, 0.0, 0.0)
+    return best_sol
+```

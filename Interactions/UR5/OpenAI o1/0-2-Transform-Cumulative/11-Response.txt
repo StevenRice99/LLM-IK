@@ -1,0 +1,160 @@
+```python
+import math
+
+def inverse_kinematics(p: tuple[float, float, float], r: tuple[float, float, float]) -> tuple[float, float, float]:
+    """
+    Closed-form IK for a 3-DOF manipulator with joints:
+        • Joint 1: revolve about Z
+        • Joint 2: revolve about Y
+        • Joint 3: revolve about Y
+
+    Link offsets (from the DETAILS and URDF "origin"):
+        Joint1 at [0,       0,       0]   (revolute about Z)
+        Joint2 at [0,    0.13585,    0]   (revolute about Y)
+        Joint3 at [0,   -0.1197,  0.425]   (revolute about Y)
+        TCP    at [0,       0,   0.39225]
+
+    Orientation r = [rx, ry, rz], but this robot can only realize yaw (q1) and a
+    net pitch (q2 + q3). The simplest consistent choice is:
+        q1 = rz
+        q2 + q3 = ry
+    Then we solve the geometry for the end-effector position p = [x, y, z].
+
+    Steps:
+      1) Set q1 = rz.
+      2) Set α = ry (= q2 + q3).
+      3) Transform the target position into the local frame after joint1:
+         rotate p by Rz(-q1) and subtract the link2 offset [0,0.13585,0].
+      4) The sub-chain from joint2 to TCP is effectively two displacements:
+           D2(q2) = rotation about Y by q2 applied to [0, -0.1197, 0.425]
+           D3(α)  = rotation about Y by α  applied to [0, 0, 0.39225]
+         Because both rotations are about Y, the local y-component is just -0.1197
+         from the first part (the second part is along z). In the local x-z plane,
+         these add up to:
+             x_local = 0.425 sin(q2) + 0.39225 sin(α)
+             z_local = 0.425 cos(q2) + 0.39225 cos(α).
+
+      5) Solve for q2 by isolating the portion from the second link:
+             X' = x_local - 0.39225 sin(α)
+             Z' = z_local - 0.39225 cos(α)
+         Then
+             q2 = atan2(X', Z'),
+             q3 = α - q2.
+      6) Because there can be two solutions for q2 from ±acos(...) in typical
+         2-link arms, we compute a candidate from +acos(...) and -acos(...)
+         (using the law of cosines). Then do a small forward check to pick the
+         solution that best matches the transformed target. That helps handle
+         bending "elbow up" vs "elbow down" solutions.
+
+    Returns:
+        (q1, q2, q3) in radians. No special limit checks or extra validation
+        is performed, assuming all inputs are reachable as per instructions.
+    """
+
+    # Unpack target
+    x, y, z = p
+    rx, ry, rz = r
+
+    # 1) q1 from final yaw
+    q1 = rz
+    # 2) net pitch = α
+    alpha = ry
+
+    #
+    # 3) Transform p into local frame after joint1:
+    #    rotate by Rz(-q1), then subtract offset [0, 0.13585, 0]
+    #
+    c1 = math.cos(q1)
+    s1 = math.sin(q1)
+    x_loc =  x*c1 + y*s1
+    y_loc = -x*s1 + y*c1
+    z_loc =  z
+    # subtract link2 offset
+    y_loc -= 0.13585
+
+    #
+    # 4) We treat the sub-chain from joint2 to TCP as:
+    #    x_loc = 0.425 sin(q2) + 0.39225 sin(alpha)
+    #    z_loc = 0.425 cos(q2) + 0.39225 cos(alpha)
+    # We also note the nominal local y should be ~ -0.1197 if geometry lines up,
+    # but we won't fail if there's a slight mismatch.
+    #
+    # We'll do a "law of cosines" approach to identify the two candidate q2 solutions.
+    #
+    a = 0.425      # length from J2 to J3 in the local plane
+    b = 0.39225    # length from J3 to TCP in the local plane
+    X_target = x_loc
+    Z_target = z_loc
+
+    # rewriting:
+    # X_target = a sin(q2) + b sin(alpha)
+    # Z_target = a cos(q2) + b cos(alpha)
+    #
+    # => X' = X_target - b sin(alpha) = a sin(q2)
+    #    Z' = Z_target - b cos(alpha) = a cos(q2)
+    #
+    Xp = X_target - b * math.sin(alpha)
+    Zp = Z_target - b * math.cos(alpha)
+
+    # distance^2 = (Xp^2 + Zp^2) = a^2
+    # => check if out of range => clamp if needed
+    dist_sq = Xp*Xp + Zp*Zp
+    a_sq = a*a
+    # We'll define a small approach with possible numerical tolerance.
+    # If dist_sq ~ a^2, then we can proceed:
+    # q2 = atan2(Xp, Zp) if dist_sq is nonzero. But sometimes there's an elbow-up or elbow-down approach
+    # from the standard 2-link perspective with cos() expansions. Here we do it more directly with "EXISTING 3" style:
+    # cos_theta2 = (d^2 - a^2 - b^2)/(2ab) in typical 2-link. But that might help us get both elbow solutions.
+
+    # Let's do the standard 2-link formula to get both possible q2 values:
+    # In a typical 2-link with lengths a,b and distance d from joint2 to final:
+    #   d^2 = a^2 + b^2 + 2ab cos(phi), phi = π - (q2) or so depending on geometry, but let's be consistent.
+    # Actually let's do it as in "EXISTING 3":
+    d_sq = X_target*X_target + Z_target*Z_target
+    # cos_theta2 = (d^2 - a^2 - b^2)/(2ab), then q2 can be ±acos(...)
+    cos_t2 = (d_sq - a_sq - b*b) / (2*a*b)
+    # clamp
+    if cos_t2 > 1.0:
+        cos_t2 = 1.0
+    elif cos_t2 < -1.0:
+        cos_t2 = -1.0
+
+    # possible solutions
+    sol_candidates = []
+    for sign_ in [1, -1]:
+        # candidate for q2
+        t2_candidate = math.acos(cos_t2) * sign_
+        # then q3 = alpha - q2
+        t3_candidate = alpha - t2_candidate
+        sol_candidates.append((t2_candidate, t3_candidate))
+
+    # If for some reason cos_t2 was near ±1, we'd have duplicates. We'll just evaluate them.
+
+    # We'll do a small forward check in the local frame for each candidate, pick the one that best matches (x_loc, z_loc).
+    def forward_local(q2cand, q3cand):
+        # local x = a sin(q2cand) + b sin(q2cand + q3cand) but (q2cand+q3cand)=alpha
+        # so local x = a sin(q2cand) + b sin(alpha)
+        # local z = a cos(q2cand) + b cos(alpha)
+        xx = a*math.sin(q2cand) + b*math.sin(alpha)
+        zz = a*math.cos(q2cand) + b*math.cos(alpha)
+        return xx, zz
+
+    best_q2, best_q3 = None, None
+    best_err = float('inf')
+    for (q2cand, q3cand) in sol_candidates:
+        xx, zz = forward_local(q2cand, q3cand)
+        err_ = (xx - x_loc)**2 + (zz - z_loc)**2
+        if err_ < best_err:
+            best_err = err_
+            best_q2, best_q3 = q2cand, q3cand
+
+    # If none found, fallback
+    if best_q2 is None or best_q3 is None:
+        # fallback: direct from the simpler X'/Z' approach
+        # q2 = atan2(Xp, Zp), q3 = alpha - q2
+        q2_f = math.atan2(Xp, Zp)
+        q3_f = alpha - q2_f
+        return (q1, q2_f, q3_f)
+
+    return (q1, best_q2, best_q3)
+```

@@ -1,0 +1,101 @@
+```python
+import numpy as np
+
+def inverse_kinematics(p: tuple[float, float, float], r: tuple[float, float, float]) -> tuple[float, float, float, float]:
+    """
+    Gets the joint values needed to reach position "p" and orientation "r".
+    :param p: The position to reach in the form [x, y, z].
+    :param r: The orientation to reach in radians in the form [roll, pitch, yaw].
+              The manipulator has only rotation about Z for joint 1, and about Y for
+              joints 2, 3, and 4, so effectively it can realize an overall yaw = q1
+              and pitch = q2 + q3 + q4. Roll cannot be matched for a 4-DOF arm where
+              joints rotate only about Z and Y.
+    :return: A tuple of the values (q1, q2, q3, q4) to set the links to for
+             reaching position p and orientation r.
+    """
+
+    # Helper to wrap angles to [-pi, pi]
+    def wrap_to_pi(angle):
+        return (angle + np.pi) % (2 * np.pi) - np.pi
+
+    # Helper for angle difference in [-pi, pi]
+    def angle_diff(a, b):
+        return wrap_to_pi(a - b)
+
+    # Unpack desired position and orientation
+    x, y, z = p
+    roll, pitch, yaw = r  # roll is unused (robot can't achieve arbitrary roll)
+
+    # Precompute items common to all solutions
+    offset_sq = 0.10915**2
+    r_sq = x*x + y*y + z*z
+    numerator = r_sq - 0.346395
+    denominator = 0.3341625
+
+    # Solve for q3 via cos(q3) = ...
+    cos_q3 = numerator / denominator
+    cos_q3 = np.clip(cos_q3, -1.0, 1.0)
+    # Two possible solutions for q3: +arccos(...) or -arccos(...)
+    possible_q3 = [np.arccos(cos_q3), -np.arccos(cos_q3)]
+
+    # We'll search among these possibilities for a best orientation match
+    best_sol = None
+    best_err = 1e9  # large initial
+
+    # Explore both q3 solutions
+    for q3 in possible_q3:
+        A = 0.425 + 0.39225 * np.cos(q3)
+        B = 0.39225 * np.sin(q3)
+
+        # We'll define S = sqrt(x^2 + y^2 - offset^2) (>= 0)
+        # Then define q2 from arctan2(...) using the position approach
+        S_sq = x*x + y*y - offset_sq
+        # If negative, clamp to zero for safety
+        S_val = np.sqrt(S_sq) if S_sq > 0 else 0.0
+        C = z
+
+        numerator_q2 = S_val * A - C * B
+        denominator_q2 = S_val * B + C * A
+        q2 = np.arctan2(numerator_q2, denominator_q2)
+
+        # phi accounts for the offset in x-y
+        # This can be added or subtracted from arctan2(y, x),
+        # giving two possible q1 each time
+        phi = np.arctan2(0.10915, S_val) if S_val != 0.0 else np.pi / 2
+        base_angle = np.arctan2(y, x)
+
+        # We'll try both +/- phi to get two possible q1
+        for sign_phi in [1.0, -1.0]:
+            q1_candidate = base_angle + sign_phi * phi
+            q1_candidate = wrap_to_pi(q1_candidate)
+
+            # We want pitch = q2 + q3 + q4 => q4 = pitch - (q2+q3)
+            q4 = pitch - (q2 + q3)
+            # Also wrap q4 to [-pi, pi] or even [-2*pi,2*pi] if needed
+            # but simplest is to keep it in continuous space, as manip limits exceed 2π
+            # We'll just keep it as is for now, though we can wrap if desired:
+            # q4 = wrap_to_pi(q4)  # optional
+
+            # Orientation from these angles:
+            # yawCandidate = q1_candidate
+            # pitchCandidate = q2 + q3 + q4 = pitch
+            # so orientation error is difference in yaw from desired,
+            # plus the difference in pitch from desired
+            # (roll is unachievable, so we ignore it).
+            yaw_error = angle_diff(q1_candidate, yaw)
+            pitch_error = angle_diff(q2 + q3 + q4, pitch)
+            orient_err_sqr = yaw_error*yaw_error + pitch_error*pitch_error
+
+            if orient_err_sqr < best_err:
+                best_err = orient_err_sqr
+                best_sol = (wrap_to_pi(q1_candidate),
+                            wrap_to_pi(q2),
+                            wrap_to_pi(q3),
+                            wrap_to_pi(q4))
+
+    # If nothing found (unlikely), fallback to all zeros
+    if best_sol is None:
+        return (0.0, 0.0, 0.0, 0.0)
+
+    return best_sol
+```

@@ -1,0 +1,74 @@
+```python
+def inverse_kinematics(p: tuple[float, float, float], r: tuple[float, float, float]) -> tuple[float, float, float]:
+    """
+    Analytical 3-DOF inverse kinematics for a Z–Y–Y robot arm with the link structure:
+       Joint 1 (Z) → offset [0, 0, 0]
+       Joint 2 (Y) → offset [0, 0.13585, 0]
+       Joint 3 (Y) → offset [0, -0.1197, 0.425]
+       TCP        → offset [0, 0, 0.39225]
+    Orientation is described by roll–pitch–yaw, but only pitch & yaw apply here:
+       - theta1 = yaw = r[2]
+       - theta2 + theta3 = pitch = r[1]
+    Position is described by p = (x, y, z). We assume all inputs are reachable.
+
+    :param p: (x, y, z) in world space of the target TCP position.
+    :param r: (roll, pitch, yaw) in radians of the target orientation.
+              For this 3-DOF arm, roll is not used (assumed ≈ 0), pitch = r[1], yaw = r[2].
+    :return: (theta1, theta2, theta3), each in radians.
+    """
+    import math
+
+    # Unpack target position and orientation
+    x, y, z = p
+    roll, pitch, yaw = r
+
+    # 1) Assign theta1 = yaw (Joint 1 about Z)
+    theta1 = yaw
+
+    # 2) Convert (x, y, z) into a "local" frame by undoing the rotation about Z by theta1
+    #    and subtracting the link2 offset in Y (0.13585). This local frame is as if Joint 1 = 0.
+    #    Rz(-theta1)*[x, y, z] → (x', y', z'), then y' -= 0.13585.
+    x_prime =  x*math.cos(theta1) + y*math.sin(theta1)
+    y_prime = -x*math.sin(theta1) + y*math.cos(theta1)
+    z_prime =  z
+    # Subtract offset for joint2 in local Y
+    y_prime -= 0.13585
+
+    # 3) In this local frame, the 2 remaining joints (Joint2 & Joint3 about Y) must produce
+    #    the final offset of [0, -0.1197, 0.425] plus [0, 0, 0.39225], with the sum of angles
+    #    in Y = pitch. Because rotations about the same axis commute:
+    #       Ry(theta2)*Ry(theta3) = Ry(theta2+theta3).
+    #    We want theta2 + theta3 = pitch.
+    #
+    #    The position after Joint2, Joint3, and TCP offset in that local frame is:
+    #       [0.425 sin(theta2), -0.1197, 0.425 cos(theta2)]
+    #       + Ry(pitch)*[0, 0, 0.39225].
+    #
+    #    Hence let:
+    #       X = x_prime, Z = z_prime.
+    #       X' = X - 0.39225*sin(pitch) = 0.425*sin(theta2)
+    #       Z' = Z - 0.39225*cos(pitch) = 0.425*cos(theta2)
+    #
+    #    Then we solve for theta2 from X'/Z', and define theta3 = pitch - theta2.
+
+    # For convenience:
+    X = x_prime
+    Y = y_prime  # (should be approximately -0.1197 if the target is consistent)
+    Z = z_prime
+
+    # Subtract the portion due to the final 0.39225 length rotated by pitch
+    Xp = X - 0.39225 * math.sin(pitch)
+    Zp = Z - 0.39225 * math.cos(pitch)
+
+    # Solve for theta2 using atan2
+    # sin(theta2) = X' / 0.425,  cos(theta2) = Z' / 0.425
+    # Clamp for numerical safety in case of minor floating rounding
+    sin_t2 = max(min(Xp / 0.425, 1.0), -1.0)
+    cos_t2 = max(min(Zp / 0.425, 1.0), -1.0)
+    theta2 = math.atan2(sin_t2, cos_t2)
+
+    # 4) Theta3 = pitch - theta2 (because the net rotation about Y is pitch)
+    theta3 = pitch - theta2
+
+    return (theta1, theta2, theta3)
+```

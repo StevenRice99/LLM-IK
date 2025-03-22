@@ -1,0 +1,242 @@
+```python
+def inverse_kinematics(p: tuple[float, float, float]) -> tuple[float, float, float, float, float]:
+    """
+    A direct symbolic closed–form (where possible) / analytic inverse kinematics solution
+    for the 5–DOF serial manipulator described in the DETAILS.  This solver accounts for all
+    link offsets, with joints:
+        Joint1: Revolute about global Z
+        Joint2: Revolute about local Y
+        Joint3: Revolute about local Y
+        Joint4: Revolute about local Y
+        Joint5: Revolute about local Z
+
+    Since only the end–effector position is specified (no orientation is requested),
+    and because rotating joint5 about Z does not change the TCP position (its link
+    offset goes purely along local Z from the revolve–5 frame), this DOF is redundant
+    for position.  We therefore fix Joint5 = 0 in this solver.  That leaves four unknown
+    angles (θ1..θ4) to satisfy three position constraints → a 1–DOF redundancy in general.
+    We direct Sympy’s solver to find a symbolic expression.  The result typically yields
+    multiple branches.  We pick the real solutions (and attempt to put them in −π..π).
+    For the test examples given in the FEEDBACK, one of those branches should match
+    the correct solution sets.
+
+    IMPORTANT:
+      • This solution can yield multiple valid branches.  We try to pick a “reasonable”
+        one by minimal absolute angles, but you may adjust selection if you prefer a
+        different branch (for instance, smaller or larger elbow angles).
+      • Because of the robot geometry (offsets in Y) and 1–DOF redundancy, there is
+        no single unique closed–form.  The code below chooses one consistent branch.
+      • No reachability checks are performed (assume the target is reachable).
+      • Joint limits are not enforced.
+
+    :param p: Desired TCP position as (x, y, z).
+    :return: (θ1, θ2, θ3, θ4, θ5) in radians, each in [−π, π] with θ5=0.
+    """
+    import sympy
+    import math
+
+    # Unpack desired TCP position
+    x_des, y_des, z_des = p
+
+    # ----------------------------------------------------------------
+    # Define symbolic variables for the four unknown joints:
+    #   θ1 (Joint1 about Z), θ2..θ4 (Joints about Y).
+    # We fix Joint5 = 0 for position-only IK.
+    # ----------------------------------------------------------------
+    t1, t2, t3, t4 = sympy.symbols('t1 t2 t3 t4', real=True)
+
+    # Shortcuts for sin/cos
+    s1, c1 = sympy.sin(t1), sympy.cos(t1)
+    s2, c2 = sympy.sin(t2), sympy.cos(t2)
+    s3, c3 = sympy.sin(t3), sympy.cos(t3)
+    s4, c4 = sympy.sin(t4), sympy.cos(t4)
+
+    # ----------------------------------------------------------------
+    # Robot link offsets (from the DETAILS), building the forward kinematics step by step:
+    #
+    # T0->1(θ1) = Rz(t1)
+    # T1->2(θ2) = (transl(0, 0.13585, 0)) * (Ry(t2))
+    # T2->3(θ3) = (transl(0, -0.1197, 0.425)) * (Ry(t3))
+    # T3->4(θ4) = (transl(0, 0, 0.39225)) * (Ry(t4))
+    # T4->5(0)  = (transl(0, 0.093, 0)) * (Rz(0)) → effectively just the translation
+    # T5->TCP   = (transl(0, 0, 0.09465))
+    #
+    # We multiply them to get T0->TCP. Then we equate its translation part to (x_des, y_des, z_des).
+    # ----------------------------------------------------------------
+
+    # Rotation about Z by t1
+    Rz1 = sympy.Matrix([
+        [ c1, -s1,  0, 0],
+        [ s1,  c1,  0, 0],
+        [  0,   0,  1, 0],
+        [  0,   0,  0, 1]
+    ])
+
+    # Translation(0, 0.13585, 0) then Ry(t2)
+    T2_pre = sympy.Matrix([
+        [1, 0, 0, 0],
+        [0, 1, 0, 0.13585],
+        [0, 0, 1, 0],
+        [0, 0, 0, 1]
+    ])
+    Ry2 = sympy.Matrix([
+        [ c2, 0,  s2, 0],
+        [  0, 1,   0, 0],
+        [-s2, 0,  c2, 0],
+        [  0, 0,   0, 1]
+    ])
+    T1_2 = T2_pre * Ry2
+
+    # Translation(0, -0.1197, 0.425) then Ry(t3)
+    T3_pre = sympy.Matrix([
+        [1, 0, 0, 0],
+        [0, 1, 0, -0.1197],
+        [0, 0, 1, 0.425],
+        [0, 0, 0, 1]
+    ])
+    Ry3 = sympy.Matrix([
+        [ c3, 0,  s3, 0],
+        [  0, 1,   0, 0],
+        [-s3, 0,  c3, 0],
+        [  0, 0,   0, 1]
+    ])
+    T2_3 = T3_pre * Ry3
+
+    # Translation(0, 0, 0.39225) then Ry(t4)
+    T4_pre = sympy.Matrix([
+        [1, 0, 0, 0],
+        [0, 1, 0, 0],
+        [0, 0, 1, 0.39225],
+        [0, 0, 0, 1]
+    ])
+    Ry4 = sympy.Matrix([
+        [ c4, 0,  s4, 0],
+        [  0, 1,   0, 0],
+        [-s4, 0,  c4, 0],
+        [  0, 0,   0, 1]
+    ])
+    T3_4 = T4_pre * Ry4
+
+    # Translation(0, 0.093, 0)
+    T4_5 = sympy.Matrix([
+        [1, 0, 0, 0],
+        [0, 1, 0, 0.093],
+        [0, 0, 1, 0],
+        [0, 0, 0, 1]
+    ])
+    # revolve5 = 0 => Rz(0) = identity
+
+    # Translation(0, 0, 0.09465) for TCP
+    T5_TCP = sympy.Matrix([
+        [1, 0, 0, 0],
+        [0, 1, 0, 0],
+        [0, 0, 1, 0.09465],
+        [0, 0, 0, 1]
+    ])
+
+    # Full transform T0->TCP = Rz1 * T1->2 * T2->3 * T3->4 * T4->5 * T5->TCP
+    T0_TCP = Rz1 * T1_2 * T2_3 * T3_4 * T4_5 * T5_TCP
+
+    # Extract symbolic expressions for the final TCP coordinates
+    x_expr = T0_TCP[0, 3]
+    y_expr = T0_TCP[1, 3]
+    z_expr = T0_TCP[2, 3]
+
+    # Define equations: final - desired = 0
+    eqs = [
+        sympy.Eq(x_expr, x_des),
+        sympy.Eq(y_expr, y_des),
+        sympy.Eq(z_expr, z_des)
+    ]
+
+    # ----------------------------------------------------------------
+    # Solve the system for (t1, t2, t3, t4).
+    # There's a known 1–DOF redundancy.  Sympy's 'solve' can produce multiple branches.
+    # We'll get a param in the solutions, from which we choose one real branch in −π..π.
+    # ----------------------------------------------------------------
+    solutions = sympy.solve(eqs, [t1, t2, t3, t4], dict=True)
+
+    # We'll store feasible solutions in here
+    candidate_solutions = []
+
+    # For each symbolic solution, see if there's a free parameter.
+    # Sympy might return expressions with a parameter like k0.  We'll scan some integer
+    # values (e.g. k0 in −1,0,1) to see if they yield real angles in range.  Then pick
+    # the solution with smallest total joint motion.  If there's no parameter,
+    # we just check if it's real.
+    if not solutions:
+        # No solutions found → (but we’re told to assume it’s reachable)
+        # We'll return something obviously wrong
+        return (0.0, 0.0, 0.0, 0.0, 0.0)
+
+    # Sympy can return either a list of dict or a single dict
+    if isinstance(solutions, dict):
+        # Single solution
+        solutions = [solutions]
+
+    def angle_in_range(a):
+        # Return an equivalent angle in [−π, π]
+        a_mod = float(sympy.re(a) % (2*math.pi))
+        if a_mod > math.pi:
+            a_mod -= 2*math.pi
+        return a_mod
+
+    # We define a measure of “small total absolute angle” to pick the “most natural” branch
+    def total_angle_magnitude(vals):
+        return sum(abs(v) for v in vals)
+
+    for sol in solutions:
+        # If there's a free symbol, e.g. k0 in sol, handle it
+        free_syms = list(sol.keys() - [t1, t2, t3, t4])
+        if not free_syms:
+            # No free parameters → plug this in
+            # We must check if it’s real and finite
+            try:
+                a1 = angle_in_range(sol[t1])
+                a2 = angle_in_range(sol[t2])
+                a3 = angle_in_range(sol[t3])
+                a4 = angle_in_range(sol[t4])
+                candidate_solutions.append((a1, a2, a3, a4))
+            except (TypeError, KeyError):
+                pass
+        else:
+            # We have something like k0 in the solution. We'll just try a small set of integers for each
+            # free symbol, e.g. -1, 0, 1, and see if the angles come out real.
+            # (One can expand this range if needed for bigger elbow flips.)
+            from itertools import product
+            candidates_for_params = [-1, 0, 1]
+            param_names = free_syms
+
+            # We'll do a nested loop over all param combos
+            for combo in product(candidates_for_params, repeat=len(param_names)):
+                sub_map = {}
+                for i, psym in enumerate(param_names):
+                    sub_map[psym] = combo[i]
+                try:
+                    a1_ = sol[t1].subs(sub_map)
+                    a2_ = sol[t2].subs(sub_map)
+                    a3_ = sol[t3].subs(sub_map)
+                    a4_ = sol[t4].subs(sub_map)
+                    if (a1_.is_real and a2_.is_real and a3_.is_real and a4_.is_real):
+                        # Convert to float, wrap to [−π, π]
+                        A1 = angle_in_range(a1_)
+                        A2 = angle_in_range(a2_)
+                        A3 = angle_in_range(a3_)
+                        A4 = angle_in_range(a4_)
+                        candidate_solutions.append((A1, A2, A3, A4))
+                except (TypeError, ValueError):
+                    pass
+
+    if not candidate_solutions:
+        # If we still have no feasible solutions, return something
+        return (0.0, 0.0, 0.0, 0.0, 0.0)
+
+    # Pick the candidate that has minimal total joint motion
+    best_sol = min(candidate_solutions, key=total_angle_magnitude)
+    j1, j2, j3, j4 = best_sol
+
+    # We fix joint5=0 for position-only IK
+    j5 = 0.0
+
+    return (j1, j2, j3, j4, j5)
+```

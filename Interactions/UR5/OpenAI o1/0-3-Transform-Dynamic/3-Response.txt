@@ -1,0 +1,87 @@
+```python
+def inverse_kinematics(p: tuple[float, float, float], r: tuple[float, float, float]) -> tuple[float, float, float, float]:
+    """
+    Gets the joint values needed to reach position "p" and orientation "r".
+    :param p: The position to reach in the form [x, y, z].
+    :param r: The orientation to reach in radians in the form [roll, pitch, yaw].
+    :return: A 4-tuple of joint angles [joint1, joint2, joint3, joint4] in radians.
+    """
+    import math
+    import numpy as np
+
+    # -- Solve for joint 1 (around Z) using the approach from EXISTING 1 --
+    x, y, z = p
+    joint1 = math.atan2(-x, y)
+
+    # -- Solve for joints 2, 3, and 4 (all around Y) using the approach from EXISTING 2 --
+    x_target, y_target, z_target = p
+    roll, pitch, yaw = r
+
+    # Compute rotation matrix from roll, pitch, yaw
+    cr, sr = np.cos(roll),  np.sin(roll)
+    cp, sp = np.cos(pitch), np.sin(pitch)
+    cy, sy = np.cos(yaw),   np.sin(yaw)
+    R = np.array([
+        [cy * cp,             cy * sp * sr - sy * cr,   cy * sp * cr + sy * sr],
+        [sy * cp,             sy * sp * sr + cy * cr,   sy * sp * cr - cy * sr],
+        [-sp,                 cp * sr,                  cp * cr            ]
+    ])
+
+    # Reduced "orientation around Y" in sub-chain from R[0,0] and R[0,2]
+    cos_theta = R[0, 0]
+    sin_theta = R[0, 2]
+    target_sum = math.atan2(sin_theta, cos_theta)
+
+    # Link lengths
+    L1 = 0.425
+    L2 = 0.39225
+
+    d_sq = x_target**2 + z_target**2
+    cos_theta2 = (d_sq - L1**2 - L2**2) / (2 * L1 * L2)
+    cos_theta2 = max(min(cos_theta2, 1.0), -1.0)
+
+    theta2_candidates = [math.acos(cos_theta2), -math.acos(cos_theta2)]
+    best_error = float('inf')
+    best_j2, best_j3, best_j4 = 0.0, 0.0, 0.0
+
+    for t2 in theta2_candidates:
+        C = L1 + L2 * math.cos(t2)
+        D = L2 * math.sin(t2)
+        denom = C**2 + D**2
+        if denom < 1e-6:
+            continue
+
+        sin_t1 = (C * x_target - D * z_target) / denom
+        cos_t1 = (D * x_target + C * z_target) / denom
+
+        if abs(sin_t1) > 1.0 or abs(cos_t1) > 1.0:
+            continue
+
+        t1 = math.atan2(sin_t1, cos_t1)
+        t3_base = (target_sum - t1 - t2) % (2 * math.pi)
+        t3_candidates = [t3_base - 2 * math.pi, t3_base, t3_base + 2 * math.pi]
+
+        for t3 in t3_candidates:
+            if not (-2 * math.pi <= t3 <= 2 * math.pi):
+                continue
+
+            x_calc = L1 * math.sin(t1) + L2 * math.sin(t1 + t2)
+            z_calc = L1 * math.cos(t1) + L2 * math.cos(t1 + t2)
+            pos_error = math.hypot(x_calc - x_target, z_calc - z_target)
+
+            orient_sum = (t1 + t2 + t3) % (2 * math.pi)
+            target_orient = target_sum % (2 * math.pi)
+            orient_error = min(abs(orient_sum - target_orient),
+                               2 * math.pi - abs(orient_sum - target_orient))
+
+            total_error = pos_error + orient_error
+            if total_error < best_error:
+                best_error = total_error
+                best_j2, best_j3, best_j4 = t1, t2, t3
+
+    joint2 = best_j2
+    joint3 = best_j3
+    joint4 = best_j4
+
+    return (joint1, joint2, joint3, joint4)
+```

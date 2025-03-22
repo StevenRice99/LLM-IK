@@ -1,0 +1,296 @@
+```python
+def inverse_kinematics(p: tuple[float, float, float]) -> tuple[float, float, float, float, float]:
+    """
+    Closed-form inverse kinematics for a 5-DOF manipulator with joints:
+      - Joint1 about Z
+      - Joint2 about Y
+      - Joint3 about Y
+      - Joint4 about Y
+      - Joint5 about Z  (here fixed at 0 for pure position IK)
+
+    TABLE OF OFFSETS (from the DETAILS section):
+       1) Joint1:   position [0, 0, 0],       rotate Z
+       2) Joint2:   position [0, 0.13585, 0], rotate Y
+       3) Joint3:   position [0, -0.1197, 0.425], rotate Y
+       4) Joint4:   position [0, 0, 0.39225], rotate Y
+       5) Joint5:   position [0, 0.093, 0],   rotate Z
+       TCP offset:  [0, 0, 0.09465]
+
+    Because joints 2, 3, and 4 all rotate about parallel Y axes, the arm is redundant for
+    pure position: we have 4 unknowns (q1,q2,q3,q4) but only 3 spatial constraints (x,y,z).
+    Thus there is an infinite family of solutions unless we impose an extra constraint.
+
+    ─────────────────────────────────────────────────────────────────────────
+    STRATEGY (Closed-Form with a Geometry "Fold" for q4):
+    ─────────────────────────────────────────────────────────────────────────
+    1) First solve a simpler 4-DOF subproblem ignoring the existence of Joint4.  
+       In other words, treat links 3 and 4 as if they were rigidly combined into 
+       a single longer link.  This was the approach in the "EXISTING" code snippet
+       but it placed the end at Link5's origin.  We'll do the same to obtain 
+       (q1, q2, q3) for a coarse pose.
+
+    2) Then, after we have (q1, q2, q3), we add a purely geometric step to adjust q4.
+       We compute the small rotation about Y (in the link-3 frame) that brings 
+       the final offset [0, 0.093, 0] + [0, 0, 0.09465] into alignment with the 
+       actual target.  This corrects large negative Z errors that a single-lumped
+       link cannot address.  The resulting formula is still explicit and does not
+       require iterative solving.
+
+    3) Because Joint5 about Z does not affect x,y,z of the TCP, we fix q5=0 
+       to match the “correct joint values” in the feedback (where q5 was always 0).
+
+    This single extra geometric fold for q4 is, of course, only one of many ways 
+    to resolve the redundancy.  It will not match every possible solution, but it 
+    will handle a wide range of positions (especially the ones for which the simpler 
+    sub-solution alone drifted in Z).  
+
+    :param p: (x, y, z) desired TCP position in world frame.
+    :return: (q1, q2, q3, q4, q5) in radians, one valid solution.
+    """
+    import numpy as np
+
+    # Unpack target
+    x, y, z = p
+    
+    # ───────────────────────────────────────────────────
+    # STEP 1: Solve ignoring Joint4 (as in the "EXISTING" snippet).
+    #         That code lumps link4 (0.39225) into link3 for position only.
+    #         We aim for the center of link5 (z_5 = z - 0.09465).
+    #         Also account for link5 offset 0.093 in Y after the lumps. 
+    #         The existing approach lumps that 0.093 into an effective "0.10915" offset
+    #         in Y (0.13585 - 0.1197 + 0.093 ?) Actually that snippet had 0.10915 as 
+    #         sqrt( (0.13585 - 0.1197)^2 + 0.093^2 ), but we just use the final code.
+    #
+    # We'll replicate exactly the existing formula for q1,q2,q3 ignoring q4:
+    # (This is identical to the "EXISTING" solution except a subtract for z_5)
+    # ───────────────────────────────────────────────────
+
+    # Effective target for the sub-chain is the final p but subtract TCP offset of 0.09465 in z:
+    z_5 = z - 0.09465
+    
+    # The "EXISTING" code also used a 0.10915 offset in y.  That 0.10915 is the net offset 
+    # for the manipulator's lumps. So let's do exactly that code:
+
+    numerator = x**2 + y**2 + z_5**2 - 0.346395
+    denominator = 0.3341625
+    cos_q3_sub = numerator / denominator
+    cos_q3_sub = np.clip(cos_q3_sub, -1.0, 1.0)
+    q3_sub = np.arccos(cos_q3_sub)
+
+    A = 0.425 + 0.39225 * np.cos(q3_sub)
+    B = 0.39225 * np.sin(q3_sub)
+
+    # S is the horizontal distance in XY minus the offset 0.10915
+    S_sq = x**2 + y**2 - 0.10915**2
+    S = np.sqrt(S_sq) if S_sq >= 0 else 0.0
+    C = z_5
+
+    numerator_q2 = S * A - C * B
+    denominator_q2 = S * B + C * A
+    q2_sub = np.arctan2(numerator_q2, denominator_q2)
+
+    phi = np.arctan2(0.10915, S) if S != 0 else np.pi / 2
+    q1_sub = np.arctan2(y, x) - phi
+    # wrap q1 to (-pi, pi)
+    q1_sub = (q1_sub + np.pi) % (2*np.pi) - np.pi
+
+    # That sub-solution sets q4 = 0 in "EXISTING", but we'll correct it below.
+    # For now store them:
+    q1_guess = q1_sub
+    q2_guess = q2_sub
+    q3_guess = q3_sub
+
+    # ───────────────────────────────────────────────────
+    # STEP 2: "Geometric fold" for q4
+    #
+    # We'll place joint4 so that the small link4 can correct for leftover 
+    # error in the final offset [0,0.093,0] before the TCP offset [0,0,0.09465].
+    #
+    #  - Evaluate the transform from base -> link3 for (q1_guess, q2_guess, q3_guess),
+    #    ignoring q4.  Then from link3, the remainder of the chain is:
+    #        T3->4(q4) = translate(0,0,0.39225)*rotateY(q4)
+    #        T4->5(0) = translate(0,0.093,0)
+    #        T5->TCP = translate(0,0,0.09465)
+    #    We want the net T3->TCP to match the vector from link3 to the actual 
+    #    target p in 3D space.  
+    #
+    # Because rotating about Y only controls the X- and Z-components of a vector 
+    # in link3's local frame, we can solve for q4 by a direct 2D approach in that 
+    # local frame, ignoring the Y component (which is just a shift). 
+    #
+    # We do the minimal geometry approach:
+    #   1) Compute the link3 origin in world coords => p3_world.
+    #   2) The desired vector link3->TCP in world is => (p - p3_world).
+    #   3) Convert that vector into link3's local frame => v3_local.
+    #   4) We know the local shape: rotateY(q4)*[0,0,0.39225] + [0,0.093,0] + [0,0,0.09465].
+    #      Let that be function f(q4).
+    #   5) Solve f(q4)_x = v3_local_x and f(q4)_z = v3_local_z for q4. 
+    #      The Y component is simply [0.093 + 0], which must match v3_local_y, 
+    #      but that gives a small check if the sub-solution was consistent. 
+    #
+    # This yields a closed-form (an atan2) for q4. 
+    #
+    # We'll build this transform numerically using standard rotation about Y in Python, 
+    # so no iteration or symbolic solve, just direct trig + atan2 for the solution.
+    # ───────────────────────────────────────────────────
+
+    # 2a) Forward-kin from base to link3 (q1, q2, q3). We'll build a small matrix function:
+    import math
+
+    def rotZ(th):
+        c, s = math.cos(th), math.sin(th)
+        return np.array([
+            [ c, -s,  0],
+            [ s,  c,  0],
+            [ 0,  0,  1]
+        ])
+    def rotY(th):
+        c, s = math.cos(th), math.sin(th)
+        return np.array([
+            [ c, 0,  s],
+            [ 0, 1,  0],
+            [-s,0,  c]
+        ])
+
+    def transform_zRotate(th, tx=0, ty=0, tz=0):
+        """3x3 R plus translation as a 4x4, ignoring orientation in final row/col."""
+        R = rotZ(th)
+        T = np.identity(4)
+        T[:3,:3] = R
+        T[0,3] = tx
+        T[1,3] = ty
+        T[2,3] = tz
+        return T
+    
+    def transform_yRotate(th, tx=0, ty=0, tz=0):
+        R = rotY(th)
+        T = np.identity(4)
+        T[:3,:3] = R
+        T[0,3]   = tx
+        T[1,3]   = ty
+        T[2,3]   = tz
+        return T
+
+    # Base->1: rotateZ(q1_guess)
+    T01 = transform_zRotate(q1_guess, 0, 0, 0)
+    # 1->2: translate(0,0.13585,0) then rotateY(q2_guess)
+    T12 = transform_yRotate(q2_guess, 0, 0.13585, 0)
+    # 2->3: translate(0, -0.1197, 0.425) then rotateY(q3_guess)
+    T23 = transform_yRotate(q3_guess, 0, -0.1197, 0.425)
+
+    # Overall base->3:
+    T03 = T01 @ T12 @ T23
+
+    # The origin of link3 in world coords:
+    p3_world = T03[:3, 3]
+
+    # The vector from link3 to the desired TCP in world:
+    v3_world = np.array([x, y, z]) - p3_world
+
+    # We now describe the local link3->TCP as a function of q4 in link3 coords:
+    # Link4 offset in local frame is "translate(0,0,0.39225) then rotateY(q4)" 
+    # BUT it's actually rotateY(q4)*[0,0,0.39225] if the URDF says "xyz=0 0 0.39225"
+    # THEN "axis=y". That means we do T=Trans * Rot => p4 = RY(q4)*[0,0,0] + [0,0,0.39225]
+    # Actually for computing the final position relative to link3, it's simpler to do 
+    #   p4_local(q4) = [0,0,0.39225] (since the rotation affects subsequent offsets, not itself).
+    # Next offset is link5: [0,0.093,0], which also rotates about y with q4, because 
+    # it is downstream of that rotation:
+    #   p5_local(q4) = p4_local(q4) + RY(q4)*[0,0.093,0]
+    # Then the final TCP offset [0,0,0.09465] does not revolve about z (q5=0), 
+    # so it also must be rotated by RY(q4). 
+    # So net:  pTCP_local(q4) = [0,0,0.39225] 
+    #                             + RY(q4)*[0,0.093,0] 
+    #                             + RY(q4)*[0,0,0.09465]
+    #                           = [0,0,0.39225] + RY(q4)*([0,0.093,0] + [0,0,0.09465])
+    # We'll do that in local coordinates, then compare with v3_local = R03^T * v3_world.
+
+    R03 = T03[:3,:3]  # rotation from link3 to world
+    # transform v3_world into link3 frame:
+    v3_local = R03.T @ v3_world
+
+    # Build the function f(q4):
+    def f_q4(q4):
+        c, s = math.cos(q4), math.sin(q4)
+        # first part: link4's base offset in local is [0,0,0.39225]
+        # second part: rotate [0,0.093, 0] + [0,0,0.09465] about Y by q4
+        y_part = 0.093
+        z_tcp = 0.09465
+        # vector to rotate is v = [0, y_part, z_tcp=0] ??? Wait, it must be [0,y_part,0] + [0,0,z_tcp]? 
+        # Actually it's [0,y_part,0] + [0,0,z_tcp], but let's combine them: 
+        # total is [0, y_part, z_tcp], then rotating about Y:
+        vx =  z_tcp*s
+        vy =  y_part
+        vz =  z_tcp*c
+        # so final = [vx, vy, vz]
+        # but wait, that lumps the offsets incorrectly! Because the 0.093 is purely Y, 
+        # while the 0.09465 is purely Z, so sub-rotation is:
+        #    RY(q4)*[0, 0.093, 0] = [0.093*0, 0.093*1, 0.093*0] = [0, 0.093, 0] => unaffected in x,z 
+        #    RY(q4)*[0, 0, 0.09465] = [0.09465*s, 0, 0.09465*c]
+        # So let's do it piecewise:
+        rotated_link5 = np.array([0, 0.093, 0])  # no change in x,z if rotating about Y
+        rotated_tcp   = np.array([0.09465*s, 0, 0.09465*c])
+        # sum them:
+        addition = rotated_link5 + rotated_tcp
+        # plus link4 offset [0,0,0.39225] (unrotated, from the URDF convention "trans then rotate"):
+        return np.array([0,0,0.39225]) + addition
+
+    # Now we want f_q4(q4)_x = v3_local_x, f_q4(q4)_z = v3_local_z.  
+    # The y component in f_q4 is 0.093 plus something? Actually 0.39225 is in z?
+    # Let's define:
+    #   px(q4) = 0.09465*sin(q4)
+    #   py(q4) = 0.093
+    #   pz(q4) = 0.39225 + 0.09465*cos(q4)
+    # So we have v3_local_x = px(q4), v3_local_z = pz(q4). 
+    # Solve for q4: 
+    #   px(q4) = v3_local_x => 0.09465 * sin(q4) = vx_local
+    #   pz(q4) = 0.39225 + 0.09465 * cos(q4) = vz_local  => 0.09465 cos(q4) = vz_local - 0.39225
+    #
+    # We can do an atan2 approach:
+    #   let rx = vx_local / 0.09465,
+    #       rz = (vz_local - 0.39225) / 0.09465
+    #   then we want sin(q4)=rx, cos(q4)=rz => q4 = atan2(rx, rz).
+
+    vx_local = v3_local[0]
+    vy_local = v3_local[1]
+    vz_local = v3_local[2]
+
+    # The target for x is from 0.09465*sin(q4):
+    # The target for z is from 0.39225 + 0.09465*cos(q4).
+
+    # If 0.09465 is 0 or too small, that's a problem, but it's non-zero. We'll do:
+    eps = 1e-9
+    # sin_part:
+    rx = vx_local / 0.09465 if abs(0.09465) > eps else 0.0
+    # cos_part:
+    rz = (vz_local - 0.39225) / 0.09465 if abs(0.09465) > eps else 0.0
+
+    # We must clamp rx,rz to [-1,1] if needed:
+    # But there's no direct guarantee that (rx^2 + rz^2) <= 1 in every scenario. 
+    # The assumption "inputs are reachable" suggests it won't exceed that. 
+    # Still, let's clamp to avoid domain error:
+    # Then solve q4 = atan2( sin, cos ) = atan2(rx, rz).
+    mag_sq = rx*rx + rz*rz
+    # If that mag > 1, there's no real solution for that portion, but "reachable" assumption 
+    # means let's clamp:
+    if mag_sq > 1.0:
+        scale = np.sqrt(mag_sq)
+        rx /= scale
+        rz /= scale
+
+    q4_sol = np.arctan2(rx, rz)
+    # normalize to (-pi, pi):
+    q4_sol = (q4_sol + np.pi) % (2*np.pi) - np.pi
+
+    # That yields an explicit expression for q4 in closed-form, no iteration.
+
+    # ───────────────────────────────────────────────────
+    # STEP 3: Combine final angles
+    # ───────────────────────────────────────────────────
+    q1 = q1_guess
+    q2 = q2_guess
+    q3 = q3_guess
+    q4 = q4_sol
+    q5 = 0.0
+
+    return (q1, q2, q3, q4, q5)
+```

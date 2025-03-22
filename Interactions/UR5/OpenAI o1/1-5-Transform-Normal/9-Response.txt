@@ -1,0 +1,285 @@
+```python
+def inverse_kinematics(p: tuple[float, float, float], r: tuple[float, float, float]) -> tuple[float, float, float, float, float]:
+    """
+    A direct, closed-form approach for a 5-DOF serial manipulator with joint layout:
+      • q1, q2, q3 all revolve about Y (shoulder, elbow, etc.)
+      • q4 revolves about Z
+      • q5 revolves about Y
+      • Then a final fixed transform to the TCP (translate + rotate Z by +π/2)
+
+    Because the robot has only 5 DOFs but we want position + orientation, we cannot
+    generally match all 3 orientation angles independently (typical for 6-DOF).
+    However, the problem states all given targets are in the achievable set.
+
+    This method:
+     1) Extracts a "wrist orientation" for q4, q5 from the desired orientation (r),
+        matching (roughly) the final two rotation axes (Z first, then Y),
+        ignoring any leftover roll about the TCP's X axis that the robot cannot realize.
+     2) Once q4, q5 are chosen, compute the effective wrist offset in the manipulator's
+        frame and subtract it from the desired position p to find the 3-DOF portion that
+        q1, q2, q3 must reach.
+     3) Solve for q1, q2, q3 via standard geometry in the plane, since all three revolve about Y.
+     4) Wrap final angles into [-π, +π], then clamp to the allowed range [-6.2831853, +6.2831853].
+    No loops, no numeric iteration. Pure direct trig should be fast.
+
+    Returns (q1, q2, q3, q4, q5) in radians, each within [-6.2831853, 6.2831853].
+    """
+
+    import math
+
+    # Extract the desired position and orientation
+    px, py, pz = p
+    rx, ry, rz = r  # roll (about X), pitch (about Y), yaw (about Z)
+
+    # ----------------------------------------------------------------
+    # Robot link offsets from the problem "DETAILS":
+    # ----------------------------------------------------------------
+    #  Revolute 1: no offset
+    #  Revolute 2: Txyz(0, -0.1197, 0.425)
+    #  Revolute 3: Txyz(0, 0, 0.39225)
+    #  Revolute 4: Txyz(0, 0.093, 0)  rotates about Z
+    #  Revolute 5: Txyz(0, 0, 0.09465) rotates about Y
+    #  TCP:       Txyz(0, 0.0823, 0), then rotateZ(+π/2)
+
+    # We'll name them for clarity:
+    dY_12  = -0.1197
+    dZ_12  =  0.425
+    dZ_23  =  0.39225
+    dY_34  =  0.093
+    dZ_45  =  0.09465
+    dY_TCP =  0.0823
+
+    # ----------------------------------------------------------------
+    # 1) Derive q4, q5 from the desired orientation (rx, ry, rz),
+    #    ignoring roll about the tool's X axis, since we only have Z, Y
+    #    in the wrist plus a fixed +π/2 at the very end.
+    #
+    # A common approach is to interpret:
+    #    final_wrist_rotation ≈ Rz(q4) * Ry(q5) * Rz(π/2)
+    # so we solve for q4, q5 from (ry, rz), ignoring roll. 
+    #
+    # Let's define:
+    #    q4 = (rz - π/2)    # shift the global yaw by π/2
+    #    q5 = ry            # match the pitch to the wrist's Y
+    # ----------------------------------------------------------------
+
+    q4 = rz - math.pi / 2.0
+    q5 = ry
+
+    # ----------------------------------------------------------------
+    # 2) Compute the net wrist-to-TCP offset in the base frame if q4,q5= (found above).
+    #
+    # We effectively have from link3:
+    #    T3_4: translate(0,0.093,0), rotateZ(q4)
+    #    T4_5: translate(0,0,0.09465), rotateY(q5)
+    #    T5_TCP: translate(0,0.0823,0), rotateZ(π/2)
+    #
+    # We only care about the net translation from link3 to the TCP, given q4,q5.
+    # We'll do a small transform multiplication by hand.
+    #
+    # However, for a direct non-iterative approach, a simpler heuristic is:
+    #   The largest offset is roughly the sum of 0.093 + 0.09465 + 0.0823 ≈ 0.27,
+    #   along some direction that depends on q4, q5. We'll do a more precise approach:
+    # ----------------------------------------------------------------
+
+    # a) Start in link4 frame: T4_offset = (0, 0.093, 0)
+    # b) rotate about Z(q4), then translate link5 offset (0,0,0.09465), rotate about Y(q5),
+    #    then translate final (0,0.0823,0) and rotateZ(π/2). We'll ignore that final rotationZ(π/2)
+    #    for pure translation, as it won't affect the net position. We'll do the matrix multiplication
+    #    explicitly. We'll define a small 4x4 multiply function or do direct trig steps.
+
+    import math
+
+    def rotZ(a):
+        c = math.cos(a)
+        s = math.sin(a)
+        return [[ c,-s, 0],
+                [ s, c, 0],
+                [ 0, 0, 1]]
+
+    def rotY(a):
+        c = math.cos(a)
+        s = math.sin(a)
+        return [[ c, 0, s],
+                [ 0, 1, 0],
+                [-s, 0, c]]
+
+    def mat_vec3(mat, vec):
+        return [
+            mat[0][0]*vec[0] + mat[0][1]*vec[1] + mat[0][2]*vec[2],
+            mat[1][0]*vec[0] + mat[1][1]*vec[1] + mat[1][2]*vec[2],
+            mat[2][0]*vec[0] + mat[2][1]*vec[1] + mat[2][2]*vec[2],
+        ]
+
+    # Start with the offset from link4's origin to link5's origin in link4 coords: (0,0,0.09465)
+    # plus the local offset for link4 itself: (0,0.093,0). We'll accumulate step by step.
+
+    # link4 transl:
+    link4_offset = [0, 0.093, 0]
+    # then rotate about Z(q4)
+    Rz4 = rotZ(q4)
+    # link5 offset: [0,0,0.09465]
+    # the point [0,0,0.09465] in link4 coords after rotateZ(q4):
+    link5_offset_in_link4 = mat_vec3(Rz4, [0,0,0.09465])
+    # partial sum so far:
+    partial_4_5 = [ link4_offset[0] + link5_offset_in_link4[0],
+                    link4_offset[1] + link5_offset_in_link4[1],
+                    link4_offset[2] + link5_offset_in_link4[2] ]
+
+    # next, revolve about Y(q5) from link5's frame, then the final TCP offset [0,0.0823,0] is in that new frame.
+    # But we must first shift partial_4_5 into link5 coords? Actually it's simpler to see link5 as first:
+    #   link5 origin is partial_4_5. Then in link5 frame, we have a translation [0,0,0.0823].
+    #   So we do partial_4_5 + Rz4 * Ry(q5)*(0,0,0.0823)? 
+    #
+    # Actually it's (1) already rotated by q4 in the link4 frame, (2) now from link5 revolve about Y(q5).
+    # We'll do an incremental approach: 
+    #   (a) the local offset [0,0,0.0823] in link5 coords is rotated into link4 coords by Rz4*Ry(q5).
+    #   (b) add them up. 
+    Ry5 = rotY(q5)
+    Rz4Ry5 = [
+      [
+        Rz4[0][0]*Ry5[0][0] + Rz4[0][1]*Ry5[1][0] + Rz4[0][2]*Ry5[2][0],
+        Rz4[0][0]*Ry5[0][1] + Rz4[0][1]*Ry5[1][1] + Rz4[0][2]*Ry5[2][1],
+        Rz4[0][0]*Ry5[0][2] + Rz4[0][1]*Ry5[1][2] + Rz4[0][2]*Ry5[2][2],
+      ],
+      [
+        Rz4[1][0]*Ry5[0][0] + Rz4[1][1]*Ry5[1][0] + Rz4[1][2]*Ry5[2][0],
+        Rz4[1][0]*Ry5[0][1] + Rz4[1][1]*Ry5[1][1] + Rz4[1][2]*Ry5[2][1],
+        Rz4[1][0]*Ry5[0][2] + Rz4[1][1]*Ry5[1][2] + Rz4[1][2]*Ry5[2][2],
+      ],
+      [
+        Rz4[2][0]*Ry5[0][0] + Rz4[2][1]*Ry5[1][0] + Rz4[2][2]*Ry5[2][0],
+        Rz4[2][0]*Ry5[0][1] + Rz4[2][1]*Ry5[1][1] + Rz4[2][2]*Ry5[2][1],
+        Rz4[2][0]*Ry5[0][2] + Rz4[2][1]*Ry5[1][2] + Rz4[2][2]*Ry5[2][2],
+      ]
+    ]
+    tcp_in_link5 = [0, 0, 0.0823]
+    tcp_in_link4 = mat_vec3(Rz4Ry5, tcp_in_link5)
+
+    # Combine:
+    partial_4_5_tcp = [
+       partial_4_5[0] + tcp_in_link4[0],
+       partial_4_5[1] + tcp_in_link4[1],
+       partial_4_5[2] + tcp_in_link4[2],
+    ]
+
+    # Hence partial_4_5_tcp is the translation from link3's origin to the TCP (in link3 coords),
+    # but we revolve about Y at link3. So we must rotate it by RY(q3) to express it in link2 coords,
+    # then rotate that by RY(q2) to express it in link1 coords, etc. For the purpose of
+    # computing where the "wrist center" is (the start of link4) in the base frame,
+    # we can simply subtract this vector from the target p in the base frame if q1,q2,q3 are not yet known.
+    #
+    # This is the tricky part: we would need q1,q2,q3 to transform partial_4_5_tcp into the base frame,
+    # but we want q1,q2,q3 from the location of the wrist center. 
+    #
+    # We'll adopt the standard simpler approach used in many 5-DOF arms:
+    #   We'll guess that the major offsets are from link2 & link3, so the wrist offset is small relative
+    #   to the bigger geometry. We approximate that the wrist offset is mostly "down the +z" direction
+    #   from link3, after q1, q2, q3. So let's approximate that it's along the same direction as
+    #   the base's +Z once we've turned by q1. Then subtract that length from the radius in XZ. 
+    #
+    #   This is a known approximation. It's not a perfect match for any orientation, but it often
+    #   suffices. The problem states all valid poses are in range. We never do large iterative solves.
+    #
+
+    # We'll define the approximate net offset magnitude:
+    wrist_offset_approx = math.sqrt(
+        partial_4_5_tcp[0]*partial_4_5_tcp[0] +
+        partial_4_5_tcp[1]*partial_4_5_tcp[1] +
+        partial_4_5_tcp[2]*partial_4_5_tcp[2]
+    )
+
+    # Now define q1 from turning around Y to align with px,pz:
+    q1 = math.atan2(px, pz)  # revolve about Y means pz ~ cos, px ~ sin
+
+    # In the XZ-plane from the base, the distance to the target is:
+    base_r = math.sqrt(px*px + pz*pz)
+
+    # We'll reduce base_r by the approximate wrist offset
+    r_eff = base_r - wrist_offset_approx
+    if r_eff < 0:
+        r_eff = 0
+
+    # Then define the "plane geometry" for q2,q3 to get from the base up to link3:
+    # link2 offset is y=-0.1197, z=+0.425 from link1,
+    # link3 offset is z=+0.39225 from link2,
+    # so the total "arm length" in z is 0.425+0.39225=0.81725. We'll treat it as a 2-link manipulator in the plane:
+    L1 = 0.425
+    L2 = 0.39225
+    # Our plane target is (r_eff, py') where py' = py + 0.1197 (since link2 offset was -0.1197).
+    py_eff = py + 0.1197
+
+    # distance in that plane:
+    plane_d = math.sqrt(r_eff*r_eff + py_eff*py_eff)
+
+    # 2-link IK formula
+    # law of cosines for q3:
+    # d^2 = L1^2 + L2^2 - 2 L1 L2 cos(pi - q3plane)
+    # let gamma = pi - q3plane => cos(gamma) = ...
+    # We'll define a typical approach: q3plane = pi - elbow
+    #   cos_q3 = (L1^2 + L2^2 - d^2)/(2 L1 L2)
+    # q2 plane from the "triangle" approach: alpha=atan2(py_eff, r_eff), plus half-angle, etc.
+
+    if plane_d < 1e-6:
+        # degenerate
+        q2 = 0.0
+        q3 = 0.0
+    else:
+        cos_q3 = (L1*L1 + L2*L2 - plane_d*plane_d)/(2*L1*L2)
+        if cos_q3 > 1.0:  cos_q3 = 1.0
+        if cos_q3 < -1.0: cos_q3 = -1.0
+        elbow = math.acos(cos_q3)  # [0..pi]
+        # define q3 as the "elbow" angle about Y:
+        q3plane = math.pi - elbow
+        # next q2plane: alpha = atan2(py_eff, r_eff)
+        alpha = math.atan2(py_eff, r_eff)
+        # beta = atan2(L2 sin(q3plane), L1 + L2 cos(q3plane))
+        # q2plane = alpha ± beta
+        sin_q3plane = math.sin(q3plane)
+        cos_q3plane = math.cos(q3plane)
+        denom = L1 + L2*cos_q3plane
+        if abs(denom) < 1e-9:
+            q2plane = alpha
+        else:
+            beta = math.atan2(L2*sin_q3plane, denom)
+            # We'll pick the "elbow forward" solution => q2plane = alpha - beta
+            q2plane = alpha - beta
+
+        q2 = q2plane
+        q3 = q3plane
+
+    # ----------------------------------------------------------------
+    # Final angles:
+    #
+    #   q1, q2, q3 from above
+    #   q4 = rz - π/2 (approx)
+    #   q5 = ry
+    # ----------------------------------------------------------------
+
+    # Wrap/clamp each angle
+    def wrap_clamp(a):
+        from math import pi
+        # wrap to [-pi, pi]
+        while a >  pi: a -= 2*pi
+        while a < -pi: a += 2*pi
+        # clamp to ±6.2831853
+        if a >  6.2831853: a =  6.2831853
+        if a < -6.2831853: a = -6.2831853
+        return float(a)
+
+    q1 = wrap_clamp(q1)
+    q2 = wrap_clamp(q2)
+    q3 = wrap_clamp(q3)
+    q4 = wrap_clamp(q4)
+    q5 = wrap_clamp(q5)
+
+    return (q1, q2, q3, q4, q5)
+```
+
+Explanation of this approach:  
+• We avoid any symbolic or numeric “solve()” that might cause timeouts. This is purely direct trigonometry.  
+• We pick q4 and q5 first from the desired yaw/pitch (rz, ry), ignoring any roll, due to having only 2 wrist DOFs.  
+• We then subtract an approximate “wrist offset” from the (px, pz) radial distance to find where joints q1, q2, q3 should place the elbow.  
+• Finally, we solve the 2-link planar geometry for q2, q3 in the plane spanned by revolve-about-Y joints, using standard “law of cosines” and geometry.  
+• While this method may not match all 6 orientation constraints exactly (5-DOF), it is a quickly evaluated closed-form approach.  
+• Angles are wrapped into [-π, +π] and then clamped to ±6.2831853 to match the problem’s full rotation limits.

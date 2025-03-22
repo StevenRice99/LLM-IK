@@ -1,0 +1,105 @@
+```python
+def inverse_kinematics(p: tuple[float, float, float], r: tuple[float, float, float]) -> tuple[float, float, float, float]:
+    """
+    Gets the joint values needed to reach position "p" and orientation "r".
+    :param p: The position to reach in the form [x, y, z].
+    :param r: The orientation to reach in radians in the form [x, y, z].
+    :return: A list of the values to set the links to for reaching position "p" and orientation "r".
+    """
+    import sympy
+    from sympy import symbols, Matrix, sin, cos, solve
+
+    # -------------------------------------------------
+    # Quick helpers for rotation about Z and Y in Sympy
+    # -------------------------------------------------
+    def rot_z(theta):
+        return Matrix([
+            [cos(theta), -sin(theta), 0],
+            [sin(theta),  cos(theta), 0],
+            [0,           0,          1]
+        ])
+
+    def rot_y(theta):
+        return Matrix([
+            [ cos(theta), 0, sin(theta)],
+            [ 0,          1, 0         ],
+            [-sin(theta), 0, cos(theta)]
+        ])
+
+    # -------------------------------------------------
+    # Extract target position/orientation
+    # We interpret r = (roll_x, pitch_y, yaw_z) in RPY.
+    # For this robot:
+    #   - Joint 1 (q1) is about Z, handling yaw_z.
+    #   - Joints 2, 3, 4 are about Y, collectively realizing pitch_y.
+    # So we use:
+    #   q1 = r_z
+    #   q2 + q3 + q4 = r_y
+    #   r_x must be 0 for feasible solutions (roll_x = 0).
+    # -------------------------------------------------
+    px, py, pz = p
+    r_x, r_y, r_z = r
+
+    # Assigned directly
+    q1_val = r_z
+
+    # Symbolic definitions for q2, q3, q4
+    q2_sym, q3_sym = symbols('q2 q3', real=True)
+    # q4 = r_y - q2 - q3
+    q4_expr = r_y - q2_sym - q3_sym
+
+    # Symbolic placeholders for transforms
+    q1_sym = sympy.Symbol('q1', real=True)
+    q4_sym = sympy.Symbol('q4', real=True)
+
+    # Rotation about Z for joint1
+    R0_1 = rot_z(q1_sym)
+    p0_1 = Matrix([0, 0, 0])
+
+    # Helper function to compute position/orientation after a transform
+    def T_position(R_prev, p_prev, offset, R_local):
+        return p_prev + R_prev * offset, R_prev * R_local
+
+    # Link 2 offset and rotation about Y
+    p1_2 = Matrix([0, 0.13585, 0])
+    p2_sym, R2_sym = T_position(R0_1, p0_1, p1_2, rot_y(q2_sym))
+
+    # Link 3 offset and rotation about Y
+    p2_3 = Matrix([0, -0.1197, 0.425])
+    p3_sym, R3_sym = T_position(R2_sym, p2_sym, p2_3, rot_y(q3_sym))
+
+    # Link 4 offset and rotation about Y
+    p3_4 = Matrix([0, 0, 0.39225])
+    p4_sym, R4_sym = T_position(R3_sym, p3_sym, p3_4, rot_y(q4_sym))
+
+    # TCP offset
+    tcp_offset = Matrix([0, 0, 0.093])
+    p_tcp_sym = p4_sym + R4_sym * tcp_offset
+
+    # Substitute q1, q4 relations into the symbolic expression
+    p_tcp_sub = p_tcp_sym.subs({
+        q1_sym: q1_val,
+        q4_sym: q4_expr
+    })
+
+    # Equations for matching px, py, pz
+    eqs = [
+        sympy.Eq(p_tcp_sub[0], px),
+        sympy.Eq(p_tcp_sub[1], py),
+        sympy.Eq(p_tcp_sub[2], pz)
+    ]
+
+    # Solve for q2, q3
+    solutions = solve(eqs, [q2_sym, q3_sym], dict=True)
+
+    # Assuming a reachable solution always exists
+    if not solutions:
+        return (0.0, 0.0, 0.0, 0.0)
+
+    sol = solutions[0]
+    q2_val = float(sol[q2_sym])
+    q3_val = float(sol[q3_sym])
+    q4_val = float(r_y - q2_val - q3_val)
+
+    return (q1_val, q2_val, q3_val, q4_val)
+```

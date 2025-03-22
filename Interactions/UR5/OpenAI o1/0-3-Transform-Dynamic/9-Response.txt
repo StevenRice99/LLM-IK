@@ -1,0 +1,192 @@
+```python
+import math
+import numpy as np
+
+def inverse_kinematics(p: tuple[float, float, float], r: tuple[float, float, float]) -> tuple[float, float, float, float]:
+    """
+    Gets the joint values needed to reach position "p" and orientation "r"
+    using a Jacobian-based iterative method (standard numerical IK).
+    
+    We do not use any optimization library calls; this is a direct Newton-like
+    approach for solving the 6D pose error (3 for position, 3 for orientation)
+    with the 4 unknowns, by using a pseudo-inverse of the 6×4 Jacobian.
+    
+    :param p: The desired position in the form [x, y, z].
+    :param r: The desired orientation in radians [roll, pitch, yaw].
+    :return: A 4-tuple of joint angles [joint1, joint2, joint3, joint4] in radians.
+    """
+
+    # -------------------------------
+    # 1) Forward Kinematics function
+    # -------------------------------
+    def fk(q: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+        """
+        Forward kinematics given joint angles q = [q1, q2, q3, q4].
+        Returns (pos, R) where pos is 3×1, R is 3×3.
+        
+        Joint layout (from the DETAILS):
+          Joint1: revolute about Z, origin at base
+          Joint2: revolute about Y, offset [0, 0.13585, 0]
+          Joint3: revolute about Y, offset [0, -0.1197, 0.425]
+          Joint4: revolute about Y, offset [0, 0, 0.39225]
+          TCP offset: [0, 0, 0.093]
+        """
+        q1, q2, q3, q4 = q
+
+        def rotZ(th):
+            return np.array([
+                [ math.cos(th), -math.sin(th), 0 ],
+                [ math.sin(th),  math.cos(th), 0 ],
+                [ 0,             0,            1 ]
+            ], dtype=float)
+        
+        def rotY(th):
+            return np.array([
+                [ math.cos(th),  0, math.sin(th) ],
+                [ 0,             1, 0           ],
+                [-math.sin(th),  0, math.cos(th) ]
+            ], dtype=float)
+
+        def trans(tx, ty, tz):
+            # Return a 4x4 transform for translation
+            T = np.eye(4, dtype=float)
+            T[0,3] = tx
+            T[1,3] = ty
+            T[2,3] = tz
+            return T
+
+        def rot_to_4x4(R):
+            # Embed 3x3 rotation in 4x4
+            T = np.eye(4, dtype=float)
+            T[0:3,0:3] = R
+            return T
+
+        # Build each link transform in 4x4 form
+        # T0_1: rotation about Z by q1
+        T0_1 = rot_to_4x4(rotZ(q1))
+
+        # T1_2: translate [0,0.13585,0], then rotate about Y by q2
+        T1_2 = trans(0, 0.13585, 0) @ rot_to_4x4(rotY(q2))
+
+        # T2_3: translate [0,-0.1197,0.425], then rotate about Y by q3
+        T2_3 = trans(0, -0.1197, 0.425) @ rot_to_4x4(rotY(q3))
+
+        # T3_4: translate [0,0,0.39225], then rotate about Y by q4
+        T3_4 = trans(0, 0, 0.39225) @ rot_to_4x4(rotY(q4))
+
+        # T4_TCP: translate [0,0,0.093]
+        T4_TCP = trans(0, 0, 0.093)
+
+        # Overall transform from base
+        T0_4 = T0_1 @ T1_2 @ T2_3 @ T3_4
+        T0_TCP = T0_4 @ T4_TCP
+
+        # Extract position
+        pos = T0_TCP[0:3, 3].copy()
+
+        # Extract orientation
+        R_ee = T0_TCP[0:3, 0:3].copy()
+
+        return (pos, R_ee)
+
+    # -------------------------------------------
+    # 2) Orientation error via Log of R_des^T * R
+    #    We'll define a function that, given R_des
+    #    and R, returns a 3-vector "axis * angle"
+    # -------------------------------------------
+    def orientation_error(R_des: np.ndarray, R_ee: np.ndarray) -> np.ndarray:
+        # We want R_err = R_des^T * R_ee
+        # Then we convert R_err to a so(3) vector by log map.
+        # A common approach is:
+        #   R_err = R_des^T R_ee
+        #   so(3) = 0.5 * [R_err[2,1] - R_err[1,2],
+        #                  R_err[0,2] - R_err[2,0],
+        #                  R_err[1,0] - R_err[0,1]]
+        # This yields a small 3D rotation vector (for small angles).
+        R_err = R_des.T @ R_ee
+        rx = 0.5 * (R_err[2,1] - R_err[1,2])
+        ry = 0.5 * (R_err[0,2] - R_err[2,0])
+        rz = 0.5 * (R_err[1,0] - R_err[0,1])
+        return np.array([rx, ry, rz], dtype=float)
+
+    # ------------------------------------------------------------
+    # 3) Build desired rotation R_des from roll-pitch-yaw (extrinsic)
+    #    Typically: Rz(yaw)*Ry(pitch)*Rx(roll)
+    # ------------------------------------------------------------
+    roll, pitch, yaw = r
+    cr, sr = math.cos(roll), math.sin(roll)
+    cp, sp_ = math.cos(pitch), math.sin(pitch)
+    cy, sy = math.cos(yaw), math.sin(yaw)
+
+    R_des = np.array([
+        [cy*cp,                cy*sp_*sr - sy*cr,   cy*sp_*cr + sy*sr],
+        [sy*cp,                sy*sp_*sr + cy*cr,   sy*sp_*cr - cy*sr],
+        [-sp_,                 cp*sr,               cp*cr            ]
+    ], dtype=float)
+
+    target_pos = np.array(p, dtype=float)
+
+    # --------------------------------
+    # 4) Define the error function e(q)
+    #    returns 6D error (pos_err, ori_err)
+    # --------------------------------
+    def error_func(q: np.ndarray) -> np.ndarray:
+        pos_fk, R_fk = fk(q)
+        pos_err = pos_fk - target_pos
+        ori_err = orientation_error(R_des, R_fk)
+        return np.concatenate([pos_err, ori_err])
+
+    # --------------------------------
+    # 5) Numeric Jacobian of error wrt q
+    #    We'll do simple finite differences
+    # --------------------------------
+    def jacobian(q: np.ndarray) -> np.ndarray:
+        eps = 1e-6
+        base_err = error_func(q)
+        J = np.zeros((6,4), dtype=float)
+        for i in range(4):
+            dq = np.zeros(4, dtype=float)
+            dq[i] = eps
+            err_plus = error_func(q + dq)
+            J[:, i] = (err_plus - base_err) / eps
+        return J
+
+    # --------------------------------
+    # 6) Iterative Newton-like solver
+    #    We'll start from q=0, do up to 50 steps
+    #    and then return the result
+    # --------------------------------
+    q = np.zeros(4, dtype=float)  # initial guess
+    for _iter in range(50):
+        e_val = error_func(q)
+        norm_e = np.linalg.norm(e_val)
+        if norm_e < 1e-6:
+            break
+
+        J = jacobian(q)
+        # pseudo-inverse
+        JTJ = J.T @ J
+        # regularize slightly in case J is ill-conditioned
+        JTJ += 1e-9 * np.eye(4)
+        dq = np.linalg.inv(JTJ) @ J.T @ (-e_val)
+        q += dq
+
+    # wrap angles to a clean range
+    for i in range(4):
+        # just wrap within [-pi, pi] or [-2pi,2pi] if desired
+        # here we'll do [-pi, pi] for convenience
+        q[i] = (q[i] + math.pi) % (2*math.pi) - math.pi
+
+    return tuple(q)
+```
+
+Explanation of this approach:
+
+• We build a forward kinematics function (fk) that converts a set of four joint angles (q1 through q4) into the end-effector pose (position and 3×3 rotation). This carefully includes all link offsets provided in the “DETAILS.”  
+• We build R_des from the given roll-pitch-yaw.  
+• We define an error function that returns a 6D vector: [position_error, orientation_error], where orientation_error is a small rotation vector (axis-angle) derived from R_desᵀ × R_fk.  
+• We compute the 6×4 Jacobian of this error function by finite differences.  
+• We apply a standard Newton-like iterative update: q ← q − J⁺ × e. We do this for up to 50 steps (which is not an “optimization library,” just a direct numeric iteration), and stop early if the error is sufficiently small.  
+• Finally, we wrap angles into [-π, π] and return them.  
+
+Because the arm has only four joints, it cannot generally match any arbitrary orientation in 3D, but for those poses that are valid/reachable, this method should converge to a solution that matches both position and orientation closely.

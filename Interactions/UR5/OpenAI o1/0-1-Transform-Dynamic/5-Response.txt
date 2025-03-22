@@ -1,0 +1,214 @@
+```python
+import math
+import numpy as np
+
+def inverse_kinematics(p: tuple[float, float, float], r: tuple[float, float, float]) -> tuple[float, float]:
+    """
+    CLOSED-FORM INVERSE KINEMATICS FOR A 2-DOF ROBOT:
+    
+    Links (as per DETAILS):
+      Joint1 (revolute about Z) at base.
+      Translational offset to Joint2 of [0, 0.13585, 0].
+      Joint2 (revolute about Y).
+      Final "TCP" offset of [0, -0.1197, 0.425] from Joint2.
+    
+    The final pose of the TCP must match:
+        position p = [px, py, pz]  (world frame)
+        orientation r = [roll, pitch, yaw] in radians
+    where roll, pitch, yaw come from the URDF "rpy" attribute.  For this
+    2-DOF arm, the final orientation is effectively Rz(q1)*Ry(q2), but
+    due to the robot's link geometry and URDF's rpy conventions, the
+    desired (roll, pitch, yaw) can be close to either (0, q2, q1)
+    or (π, π - q2, yaw ± π), etc.  In short, there may be two possible
+    ways to realize the same end-orientation with different signs of q1, q2.
+    
+    STRATEGY:
+      1) Solve for q2 by using the final TCP Z coordinate:  pz = 0.425 cos(q2).
+         Because cos^-1 returns only [0, π], we also consider the negative-angle
+         solution via ± arccos(...) to allow q2 in [-π, π], etc.
+      2) For each candidate q2, solve for q1 from px, py:
+            px = -0.01615 sin(q1) + 0.425 cos(q1)*sin(q2)
+            py =  0.01615 cos(q1) + 0.425 sin(q1)*sin(q2)
+         which is a linear system for cos(q1) and sin(q1).
+      3) Build the candidate rotation Rz(q1)*Ry(q2).  Convert that rotation
+         to an RPY triple (rollC, pitchC, yawC) using the same convention
+         as the URDF (which is typically R = Rz(r_z)*Ry(r_y)*Rx(r_x)).
+         Compare (rollC, pitchC, yawC) to the target r in a least-squares sense
+         (mod 2π) to see which candidate best matches the requested orientation.
+      4) Return the best (q1, q2) that fits both position and orientation.
+    
+    NOTE:
+      Because all targets are guaranteed reachable, we do not do further checks
+      for singularities or out-of-range p.  We simply pick the best match.
+    
+    :param p: Desired TCP position in world coords (px, py, pz).
+    :param r: Desired TCP orientation as (roll, pitch, yaw), in radians.
+    :return: (q1, q2) in radians that achieve p, r.
+    """
+    px, py, pz = p
+    roll_tgt, pitch_tgt, yaw_tgt = r
+    
+    # Constants from the geometry (derived offsets):
+    #   The net offset along Y is 0.13585 + (-0.1197) = 0.01615
+    #   The final link length in Z is 0.425
+    offset_y = 0.01615
+    link_z   = 0.425
+    
+    #-----------------------------------------------------------------
+    # 1) Solve for q2 from pz = link_z * cos(q2).
+    #    We allow both +arccos(...) and -arccos(...) to capture
+    #    angles beyond [0, π].
+    #-----------------------------------------------------------------
+    c2_nom = pz / link_z
+    # Clamp numerical errors if slight overshoot
+    c2_nom = max(min(c2_nom, 1.0), -1.0)
+    
+    # principal angle in [0, π]
+    q2a = math.acos(c2_nom)
+    # the "other" solution in [-π, 0)
+    q2b = -q2a
+    
+    # We'll collect possible (q1, q2) solutions in a list
+    candidates = []
+    
+    def solve_q1(px, py, offset_y, s2):
+        """
+        Solve the 2D linear system:
+          px = -offset_y*sin(q1) + 0.425*cos(q1)*s2
+          py =  offset_y*cos(q1) + 0.425*sin(q1)*s2
+        for q1.  Return the single float solution in [-π, π).
+        """
+        d = 0.425 * s2
+        c = offset_y
+        
+        # We want cos(q1)=X, sin(q1)=Y.  Then:
+        #   px = -c*Y + d*X
+        #   py =  c*X + d*Y
+        # Let's rearrange:
+        #   px = dX - cY
+        #   py = cX + dY
+        #
+        # Solve for X, Y:
+        #   d*px + c*py = (d^2+c^2)*X
+        #   c*px - d*py = -(d^2+c^2)*Y
+        #
+        denom = d*d + c*c
+        if abs(denom) < 1.0e-15:
+            # Degenerate if offset and sin(q2) are zero simultaneously
+            return None
+        
+        X = (d*px + c*py)/denom  # cos(q1)
+        Y = (c*px - d*py)/denom  # sin(q1)
+        # Use atan2 to get q1 in [-π, π):
+        return math.atan2(Y, X)
+    
+    # For each candidate q2, solve for q1
+    for q2_candidate in (q2a, q2b):
+        s2_candidate = math.sin(q2_candidate)
+        q1_candidate = solve_q1(px, py, offset_y, s2_candidate)
+        if q1_candidate is not None:
+            candidates.append( (q1_candidate, q2_candidate) )
+    
+    #-----------------------------------------------------------------
+    # 2) Compare each candidate's orientation to the requested r.
+    #    We have R_candidate = Rz(q1)*Ry(q2).  We convert that into
+    #    a roll-pitch-yaw (URDF: R = Rz(r_z)*Ry(r_y)*Rx(r_x)) and see
+    #    which is closest to (roll_tgt, pitch_tgt, yaw_tgt).
+    #
+    #    One can do a direct "ZYX" or "XYZ" extraction, but URDF's "rpy"
+    #    generally means extrinsic rotations about X, Y, Z in that order,
+    #    which is equivalent to R = Rz(r_z)*Ry(r_y)*Rx(r_x).
+    #    So to extract (r_x, r_y, r_z) from R, we use standard formula:
+    #       r_x = atan2(R[2,1], R[2,2])
+    #       r_y = -asin(R[2,0])
+    #       r_z = atan2(R[1,0], R[0,0])
+    #-----------------------------------------------------------------
+    def build_Rz_y(q1, q2):
+        """ Return the 3x3 rotation matrix for Rz(q1)*Ry(q2). """
+        c1, s1 = math.cos(q1), math.sin(q1)
+        c2, s2 = math.cos(q2), math.sin(q2)
+        # R = [[ c1*c2, -s1,  c1*s2 ],
+        #      [ s1*c2,  c1,  s1*s2 ],
+        #      [ -s2,    0,   c2   ]]
+        return np.array([
+            [ c1*c2, -s1,     c1*s2 ],
+            [ s1*c2,  c1,     s1*s2 ],
+            [ -s2,    0.0,    c2    ]
+        ], dtype=float)
+    
+    def rpy_from_matrix_URDF(R: np.ndarray):
+        """
+        Extract (r_x, r_y, r_z) from R = Rz(r_z)*Ry(r_y)*Rx(r_x).
+        The standard formulas (assuming no gimbal lock) are:
+          r_x = atan2(R[2,1], R[2,2])
+          r_y = -asin(R[2,0])
+          r_z = atan2(R[1,0], R[0,0])
+        """
+        # Clamp for asin domain
+        # R[2,0] = -s2 if R = Rz(q1)*Ry(q2), but let's do the direct formula:
+        sx = R[2,1]
+        cx = R[2,2]
+        r_x = math.atan2(sx, cx)  # roll
+        
+        # watch out for floating errors
+        sy = -R[2,0]
+        if sy > 1.0:  sy =  1.0
+        if sy < -1.0: sy = -1.0
+        r_y = math.asin(sy)       # pitch
+        
+        sz = R[1,0]
+        cz = R[0,0]
+        r_z = math.atan2(sz, cz)  # yaw
+        
+        return (r_x, r_y, r_z)
+    
+    def angle_diff(a, b):
+        """
+        Minimal difference between angles a and b, both in radians.
+        Result is in [-π, π].
+        """
+        d = (a - b) % (2*math.pi)
+        if d > math.pi:
+            d -= 2*math.pi
+        return d
+    
+    def orientation_error(r_actual, r_target):
+        """
+        Sum of squared differences of each angle in r_actual vs r_target,
+        each difference mod 2π so we handle wrapping properly.
+        """
+        return sum(angle_diff(a, b)**2 for a,b in zip(r_actual, r_target))
+    
+    best_sol = None
+    best_err = float('inf')
+    
+    for (q1_c, q2_c) in candidates:
+        R_c = build_Rz_y(q1_c, q2_c)
+        rpy_c = rpy_from_matrix_URDF(R_c)
+        # measure mismatch vs. (roll_tgt, pitch_tgt, yaw_tgt)
+        err = orientation_error(rpy_c, (roll_tgt, pitch_tgt, yaw_tgt))
+        if err < best_err:
+            best_err = err
+            best_sol = (q1_c, q2_c)
+    
+    # If we somehow got no solution, just return something (shouldn't happen if reachable)
+    if best_sol is None:
+        return (0.0, 0.0)
+    
+    # Wrap final solution into [-2π, 2π], since the joint limits are ± 6.2831853
+    q1_final = (best_sol[0] + math.pi) % (2*math.pi) - math.pi
+    q2_final = (best_sol[1] + math.pi) % (2*math.pi) - math.pi
+    
+    # If outside ±6.2831853, gently wrap; but typically mod ±π suffices.
+    # We'll do a generic wrap just in case:
+    two_pi = 2*math.pi
+    def wrap_limit(theta):
+        while theta >  6.2831853: theta -= two_pi
+        while theta < -6.2831853: theta += two_pi
+        return theta
+    
+    q1_final = wrap_limit(q1_final)
+    q2_final = wrap_limit(q2_final)
+    
+    return (q1_final, q2_final)
+```

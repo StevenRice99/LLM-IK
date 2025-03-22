@@ -1,0 +1,86 @@
+```python
+def inverse_kinematics(p: tuple[float, float, float], r: tuple[float, float, float]) -> tuple[float, float]:
+    """
+    A tailored 2-DOF inverse kinematics solver that tries to match both the
+    position and the user’s requested orientation sign for the two joints.
+    The manipulator has:
+      • q1 about Z at the base,
+      • an offset of +0.13585 in Y, then q2 about Y,
+      • a final offset of [0, -0.1197, 0.425] to the TCP.
+
+    Forward kinematics (TCP position):
+        px = 0.425*sin(q2)*cos(q1) - 0.01615*sin(q1)
+        py = 0.425*sin(q2)*sin(q1) + 0.01615*cos(q1)
+        pz = 0.425*cos(q2)
+    where 0.01615 = 0.13585 - 0.1197.
+
+    Orientation is effectively Rz(q1)*Ry(q2). Thus if the user wants an
+    orientation with roll=rx, pitch=ry, yaw=rz, the robot can only realize
+    q2 ≈ ry and q1 ≈ rz, up to 2π shifts. This code:
+      1) Extracts q2 from the z-coordinate (pz = 0.425*cos(q2)) in ±acos form,
+         but then picks whichever solution is closest to the desired ry (mod 2π).
+      2) Solves for q1 from the planar px,py equations. Then picks among q1±2π
+         whichever is closest to the desired rz (mod 2π). 
+      3) Returns a single (q1, q2) solution that should preserve the sign or 
+         branch implied by the user’s requested orientation [rx, ry, rz].
+
+    :param p: Desired TCP position [px, py, pz].
+    :param r: Desired orientation [rx, ry, rz]. We align q2 to ry, q1 to rz.
+    :return: (q1, q2)
+    """
+    import math
+
+    px, py, pz = p
+    rx, ry, rz = r  # We primarily match q2 ~ ry, q1 ~ rz
+
+    L = 0.425
+    B = 0.01615  # (0.13585 - 0.1197)
+
+    # Utility: wrap angle into [-pi, pi]
+    def wrap_to_pi(a):
+        return (a + math.pi) % (2*math.pi) - math.pi
+
+    # Utility: absolute difference of two angles, w. wrap to [-pi, pi]
+    def angle_diff(a, b):
+        return abs(wrap_to_pi(a - b))
+
+    # Solve q2 from pz = L*cos(q2), and pick whichever sign is closest to ry
+    ratio = pz / L
+    # guard minor floating tolerance
+    ratio = max(min(ratio, 1.0), -1.0)
+    q2_pos = math.acos(ratio)    # principal +acos
+    q2_neg = -q2_pos             # negative branch
+
+    # Among [q2_pos, q2_neg], pick the single best match to ry (mod 2π).
+    q2_candidates = []
+    for c2 in (q2_pos, q2_neg):
+        for shift2 in (0, 2*math.pi, -2*math.pi):
+            val2 = c2 + shift2
+            score2 = angle_diff(val2, ry)
+            q2_candidates.append((val2, score2))
+    q2_candidates.sort(key=lambda x: x[1])
+    q2_solution = q2_candidates[0][0]  # best match
+
+    # Now solve for q1 from the planar equations. 
+    # px = A cos(q1) - B sin(q1), py = A sin(q1) + B cos(q1), where A = L*sin(q2).
+    A = L * math.sin(q2_solution)
+    denom = px**2 + py**2
+    if denom < 1e-12:
+        # If px=py≈0, we can pick any q1. We'll start from 0 and let ±2π shifting fix orientation.
+        q1_base = 0.0
+    else:
+        sin_q1 = (A*py - B*px) / denom
+        cos_q1 = (A*px + B*py) / denom
+        q1_base = math.atan2(sin_q1, cos_q1)
+
+    # Among q1_base ±2π, pick the best match to rz (mod 2π).
+    q1_candidates = []
+    for shift1 in (0, 2*math.pi, -2*math.pi):
+        val1 = q1_base + shift1
+        score1 = angle_diff(val1, rz)
+        q1_candidates.append((val1, score1))
+    q1_candidates.sort(key=lambda x: x[1])
+    q1_solution = q1_candidates[0][0]
+
+    return (q1_solution, q2_solution)
+```

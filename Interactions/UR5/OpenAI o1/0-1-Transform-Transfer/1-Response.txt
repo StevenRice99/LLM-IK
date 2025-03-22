@@ -1,0 +1,106 @@
+def inverse_kinematics(p: tuple[float, float, float], r: tuple[float, float, float]) -> tuple[float, float]:
+    """
+    Gets the joint values needed to reach position "p" and orientation "r"
+    for this 2-DOF serial manipulator.  The manipulator has:
+      • First revolute joint about Z (θ₁),
+      • Second revolute joint about Y (θ₂),
+      • An offset of [0, 0.13585, 0] from joint 1 to joint 2,
+      • An offset of [0, -0.1197, 0.425] from joint 2 to the TCP in the local frame of joint 2,
+      • Final orientation = Rz(θ₁) * Ry(θ₂),
+      • All p, r are guaranteed feasible (so no reachability checks).
+
+    :param p: Desired TCP position (x, y, z).
+    :param r: Desired TCP orientation in radians, as roll–pitch–yaw = [r_x, r_y, r_z].
+              Because the robot only has rotations about Z then Y, it can only realize
+              roll = 0, pitch = θ₂, yaw = θ₁.  Thus we expect r_x≈0, r_y=θ₂, r_z=θ₁.
+    :return: (θ₁, θ₂), the two joint angles in radians.
+    """
+    import math
+
+    # Unpack desired position/orientation
+    x_d, y_d, z_d = p
+    r_x, r_y, r_z = r
+
+    # ---------------------------------------------------------------------------
+    # 1) Solve θ₂ from the z-position, consistent with orientation's pitch = r_y.
+    #
+    # The link from joint 2 to the TCP is effectively 0.425 along local z
+    # plus -0.1197 along local y, rotated by θ₂ about Y.  In the final/world frame,
+    # the TCP's z-coordinate ends up at z = 0.425 cos(θ₂).
+    #
+    # So, cos(θ₂) = z_d / 0.425  =>  θ₂ = ± arccos(z_d / 0.425).
+    # We choose the sign that best matches the requested pitch r_y.
+    # ---------------------------------------------------------------------------
+    cos_theta2 = z_d / 0.425
+    # Clamp numerical slight overshoot
+    if cos_theta2 > 1.0:
+        cos_theta2 = 1.0
+    elif cos_theta2 < -1.0:
+        cos_theta2 = -1.0
+
+    theta2_candidate = math.acos(cos_theta2)
+
+    # Pick the sign (±θ₂) that is closest to r_y
+    def pick_angle_sign(candidate: float, desired: float) -> float:
+        pos_diff = abs(desired - candidate)
+        neg_diff = abs(desired + candidate)
+        return candidate if pos_diff <= neg_diff else -candidate
+
+    theta2 = pick_angle_sign(theta2_candidate, r_y)
+
+    # ---------------------------------------------------------------------------
+    # 2) Solve θ₁ from the x,y coordinates, consistent with yaw = r_z.
+    #
+    # In the world frame:
+    #   p = Rz(θ₁)*[0, 0.13585, 0] + Rz(θ₁)*Ry(θ₂)*[0, -0.1197, 0.425].
+    #
+    # Let w = [0, 0.13585, 0] + Ry(θ₂)*[0, -0.1197, 0.425] = [w_x, w_y, w_z].
+    # Then p = Rz(θ₁)* w.  In particular,
+    #   p_x =  cos(θ₁)* w_x - sin(θ₁)* w_y
+    #   p_y =  sin(θ₁)* w_x + cos(θ₁)* w_y
+    #
+    # We solve these two equations in the plane for θ₁ = atan2(S, C), with
+    #   C = (w_x*p_x + w_y*p_y)/(w_x² + w_y²),
+    #   S = (-w_y*p_x + w_x*p_y)/(w_x² + w_y²).
+    # ---------------------------------------------------------------------------
+    # Compute w
+    w_x = 0.425 * math.sin(theta2)
+    w_y = 0.13585 - 0.1197  # = 0.01615
+    # (The w_z = 0.425*cos(theta2) just matches z_d, used above.)
+
+    A = w_x  # For convenience in the standard "EXISTING" naming
+    B = w_y
+    denom = A*A + B*B
+    # Avoid tiny denom issues if a feasible point is given (shouldn't happen for a real target).
+    if abs(denom) < 1e-15:
+        # If it ever did, nearly any θ₁ solves x,y=0, but we skip special checks per instructions.
+        denom = 1e-15
+
+    C = (A * x_d + B * y_d) / denom
+    S = (-B * x_d + A * y_d) / denom
+    theta1_candidate = math.atan2(S, C)
+
+    # Adjust θ₁ so it's near the requested yaw r_z (since we can add ±2π and
+    # still represent the same physical rotation).
+    def angle_diff(a: float, b: float) -> float:
+        # Returns the signed difference a - b in (-π, π].
+        d = (a - b) % (2.0 * math.pi)
+        if d > math.pi:
+            d -= 2.0 * math.pi
+        return d
+
+    def clamp_angle_to_ref(candidate: float, reference: float) -> float:
+        # Chooses candidate + 2πk so that it is as close as possible to reference.
+        best_angle = candidate
+        best_error = abs(angle_diff(candidate, reference))
+        for k in [-1, 0, 1]:
+            trial = candidate + 2.0 * math.pi * k
+            e = abs(angle_diff(trial, reference))
+            if e < best_error:
+                best_error = e
+                best_angle = trial
+        return best_angle
+
+    theta1 = clamp_angle_to_ref(theta1_candidate, r_z)
+
+    return (theta1, theta2)

@@ -1,0 +1,208 @@
+```python
+import math
+import numpy as np
+
+def inverse_kinematics(p: tuple[float, float, float], r: tuple[float, float, float]) -> tuple[float, float]:
+    """
+    CLOSED-FORM INVERSE KINEMATICS FOR A 2-DOF ROBOT
+
+    Robot structure (from the DETAILS):
+      1) Revolute joint #1 about Z-axis at base.
+         Offset to next joint is [0, 0.13585, 0].
+      2) Revolute joint #2 about Y-axis.
+         Final link (TCP) offset from joint #2 is [0, -0.1197, 0.425].
+
+    We seek q1 (rotation about Z) and q2 (rotation about Y) such that:
+      1) The end-effector (TCP) position [px, py, pz] is met.
+         That position equals: 
+             Rz(q1)*[0, 0.13585, 0]^T + Rz(q1)*Ry(q2)*[0, -0.1197, 0.425]^T.
+      2) The orientation Rz(q1)*Ry(q2) is as close as possible to the requested
+         orientation given by roll-pitch-yaw = r = [roll, pitch, yaw].
+         The URDF convention for rpy is Rz(yaw)*Ry(pitch)*Rx(roll).
+
+    Because a 2-DOF arm can represent some orientations in more than one way
+    (e.g. flipping q1 by ±π and negating q2 can yield the same or similar orientation),
+    we generate all possible candidate solutions from geometry, then pick the
+    one whose orientation best matches (roll, pitch, yaw) in a least-squares sense
+    of angle differences mod 2π.
+
+    :param p: Desired TCP position (px, py, pz) in world frame.
+    :param r: Desired TCP orientation [roll, pitch, yaw] in radians (URDF convention).
+    :return: (q1, q2) in radians that best matches both position + orientation.
+    """
+
+    px, py, pz = p
+    roll_tgt, pitch_tgt, yaw_tgt = r
+
+    # Offsets derived from geometry
+    # Combined Y offset from Joint1 to Joint2: 0.13585 + (-0.1197) = 0.01615
+    offset_y = 0.01615
+    link_z   = 0.425
+
+    # ----------------------------------------------------------------
+    # Helper functions
+    # ----------------------------------------------------------------
+    def clamp(v, vmin, vmax):
+        return max(vmin, min(v, vmax))
+
+    def angle_diff(a, b):
+        """
+        Returns signed difference in [-pi, pi] between angles a and b.
+        """
+        d = (a - b) % (2.0*math.pi)
+        if d > math.pi:
+            d -= 2.0*math.pi
+        return d
+
+    def orientation_error(r_actual, r_target):
+        """
+        Sum of squared angle differences for (roll, pitch, yaw),
+        each difference computed mod 2π.
+        """
+        return sum(angle_diff(a, b)**2 for a,b in zip(r_actual, r_target))
+
+    def build_RzRy(q1, q2):
+        """
+        Return rotation matrix for Rz(q1)*Ry(q2).
+        """
+        c1, s1 = math.cos(q1), math.sin(q1)
+        c2, s2 = math.cos(q2), math.sin(q2)
+        return np.array([
+            [ c1*c2, -s1,     c1*s2 ],
+            [ s1*c2,  c1,     s1*s2 ],
+            [ -s2,    0.0,    c2    ]
+        ], dtype=float)
+
+    def rpy_from_matrix_URDF(R):
+        """
+        Extract (roll, pitch, yaw) from a rotation R in URDF convention:
+          R = Rz(yaw)*Ry(pitch)*Rx(roll).
+        Using standard formula:
+          roll  = atan2(R[2,1], R[2,2]),
+          pitch = -asin(R[2,0]),
+          yaw   = atan2(R[1,0], R[0,0]).
+        """
+        # roll
+        r_x = math.atan2(R[2,1], R[2,2])
+        # pitch
+        sy = -R[2,0]
+        sy = clamp(sy, -1.0, 1.0)
+        r_y = math.asin(sy)
+        # yaw
+        r_z = math.atan2(R[1,0], R[0,0])
+        return (r_x, r_y, r_z)
+
+    def solve_q1(px, py, offy, s2):
+        """
+        From geometry in the XY-plane:
+            px = -offy*sin(q1) + 0.425*cos(q1)*s2
+            py =  offy*cos(q1) + 0.425*sin(q1)*s2
+        Solve for q1 in [-pi, pi).
+        """
+        d = 0.425*s2
+        c = offy
+        denom = d*d + c*c
+        if abs(denom) < 1e-15:
+            return None
+        # px = d*cos(q1) - c*sin(q1)
+        # py = c*cos(q1) + d*sin(q1)
+        # => cos(q1) = (d*px + c*py)/denom
+        # => sin(q1) = (-c*px + d*py)/denom
+        X = (d*px + c*py)/denom  # cos(q1)
+        Y = (-c*px + d*py)/denom # sin(q1)
+        return math.atan2(Y, X)
+
+    def wrap_pm_pi(ang):
+        """
+        Wrap angle to [-pi, pi).
+        """
+        return (ang + math.pi) % (2*math.pi) - math.pi
+
+    def add_2pi_variants(q1, q2):
+        """
+        Return a list of angles that differ by 2π on q1,
+        plus the flip about π: (q1 + π, -q2). We'll also add 2π shifts to the flipped, etc.
+        We do this to capture all orientation-equivalent solutions that might
+        best match the requested orientation sign.
+        """
+        sol = []
+        two_pi = 2.0*math.pi
+        # base
+        for k in [-1, 0, 1]:
+            q1_mod = q1 + k*two_pi
+            sol.append( (q1_mod, q2) )
+        # flipped
+        flip_q1 = q1 + math.pi
+        flip_q2 = -q2
+        for k in [-1, 0, 1]:
+            q1_mod = flip_q1 + k*two_pi
+            sol.append( (q1_mod, flip_q2) )
+        return sol
+
+    # ----------------------------------------------------------------
+    # 1) Solve q2 from pz => pz = 0.425*cos(q2). 
+    #    We have two possible solutions: ±acos(...)
+    # ----------------------------------------------------------------
+    c2Val = clamp(pz / link_z, -1.0, 1.0)
+    base_q2_a = math.acos(c2Val)   # principal [0, π]
+    base_q2_b = -base_q2_a         # negative solution in [-π, 0]
+
+    # ----------------------------------------------------------------
+    # 2) For each q2 candidate, solve q1. Then produce the extended set
+    #    of orientation-equivalent variants for each base solution.
+    # ----------------------------------------------------------------
+    candidates = []
+    for q2cand in [base_q2_a, base_q2_b]:
+        s2cand = math.sin(q2cand)
+        q1cand = solve_q1(px, py, offset_y, s2cand)
+        if q1cand is not None:
+            # Generate all orientation-equivalent variants
+            variants = add_2pi_variants(q1cand, q2cand)
+            for v in variants:
+                candidates.append(v)
+
+    if not candidates:
+        # If no geometric solution, return something (shouldn't happen if reach guaranteed).
+        return (0.0, 0.0)
+
+    # ----------------------------------------------------------------
+    # 3) Among all candidates, compute rotation Rz(q1)*Ry(q2),
+    #    extract its roll-pitch-yaw per URDF, compare to (roll_tgt, pitch_tgt, yaw_tgt).
+    #    Keep the one with minimal orientation error.
+    # ----------------------------------------------------------------
+    best_sol = None
+    best_err = float('inf')
+
+    for (q1_c, q2_c) in candidates:
+        R_c = build_RzRy(q1_c, q2_c)
+        rpy_c = rpy_from_matrix_URDF(R_c)
+        # measure orientation mismatch
+        err = orientation_error(rpy_c, (roll_tgt, pitch_tgt, yaw_tgt))
+        if err < best_err:
+            best_err = err
+            best_sol = (q1_c, q2_c)
+
+    if best_sol is None:
+        return (0.0, 0.0)
+
+    # ----------------------------------------------------------------
+    # 4) Finally, wrap solution angles to [-π, π], and clamp to ±6.2831853 if needed.
+    # ----------------------------------------------------------------
+    q1_raw, q2_raw = best_sol
+
+    q1_final = wrap_pm_pi(q1_raw)
+    q2_final = wrap_pm_pi(q2_raw)
+
+    def clamp_joint_range(ang):
+        # Just ensure ±6.2831853
+        if ang > 6.2831853:
+            ang -= 2.0*math.pi
+        elif ang < -6.2831853:
+            ang += 2.0*math.pi
+        return ang
+
+    q1_final = clamp_joint_range(q1_final)
+    q2_final = clamp_joint_range(q2_final)
+
+    return (q1_final, q2_final)
+```

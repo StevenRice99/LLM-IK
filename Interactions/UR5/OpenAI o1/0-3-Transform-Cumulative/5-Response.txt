@@ -1,0 +1,147 @@
+def inverse_kinematics(p: tuple[float, float, float], r: tuple[float, float, float]) -> tuple[float, float, float, float]:
+    """
+    Gets the joint values needed to reach position p = (x, y, z) and orientation r = (roll, pitch, yaw),
+    for a 4-DOF serial manipulator with joint axes:
+      • Joint 1: about Z
+      • Joints 2, 3, and 4: about Y
+    The link offsets and lengths are applied exactly as in the DETAILS section.  This solution uses SymPy
+    to symbolically solve the forward-kinematics equations (position and orientation) for the four angles.
+    No numeric optimization is used; SymPy's 'solve' performs symbolic/analytic solving.
+    """
+
+    import sympy
+    from sympy import sin, cos
+
+    # Unpack position/orientation
+    px, py, pz = p
+    rx, ry, rz = r
+
+    # Define the symbolic joint variables
+    q1, q2, q3, q4 = sympy.symbols('q1 q2 q3 q4', real=True)
+
+    # ----------------------------------------------------------------
+    # Build the target rotation matrix R_target from RPY = (rx, ry, rz).
+    #
+    # Convention chosen here is Rz(rz) * Ry(ry) * Rx(rx). If your system
+    # uses a different RPY convention, adjust below accordingly.
+    # ----------------------------------------------------------------
+    Rx = sympy.Matrix([
+        [1,          0,           0         ],
+        [0,  cos(rx),  -sin(rx) ],
+        [0,  sin(rx),   cos(rx) ]
+    ])
+    Ry = sympy.Matrix([
+        [ cos(ry),  0, sin(ry)],
+        [       0,  1,      0 ],
+        [-sin(ry),  0, cos(ry)]
+    ])
+    Rz = sympy.Matrix([
+        [ cos(rz), -sin(rz),  0],
+        [ sin(rz),  cos(rz),  0],
+        [       0,        0,  1]
+    ])
+    R_target = Rz * Ry * Rx
+
+    # ----------------------------------------------------------------
+    # Define each link transform in DH-like fashion, but directly
+    # using the offsets/orientations from the DETAILS.
+    #
+    #  1) Joint 1 rotate about Z by q1    + no link offset
+    #  2) Translate y=0.13585, then rotate about Y by q2
+    #  3) Translate y=-0.1197, z=0.425, then rotate about Y by q3
+    #  4) Translate z=0.39225, then rotate about Y by q4
+    #  5) Finally translate y=0.093 for the TCP
+    # ----------------------------------------------------------------
+
+    # Utility to build a 4x4 transform from a 3x3 R and a translation (tx,ty,tz)
+    def make_transform(R_mat, tx=0.0, ty=0.0, tz=0.0):
+        T_ = sympy.eye(4)
+        T_[0:3, 0:3] = R_mat
+        T_[0, 3] = tx
+        T_[1, 3] = ty
+        T_[2, 3] = tz
+        return T_
+
+    # Joint 1: rotate about Z by q1
+    Rz_q1 = sympy.Matrix([
+        [ cos(q1), -sin(q1), 0 ],
+        [ sin(q1),  cos(q1), 0 ],
+        [       0,        0, 1 ]
+    ])
+    T1 = make_transform(Rz_q1, 0, 0, 0)
+
+    # Joint 2: translate + rotate about Y by q2
+    T2_trans = make_transform(sympy.eye(3), 0, 0.13585, 0)
+    Ry_q2 = sympy.Matrix([
+        [ cos(q2), 0, sin(q2)],
+        [ 0,       1, 0      ],
+        [-sin(q2), 0, cos(q2)]
+    ])
+    T2_rot = make_transform(Ry_q2, 0, 0, 0)
+    T2 = T2_trans * T2_rot
+
+    # Joint 3: translate + rotate about Y by q3
+    T3_trans = make_transform(sympy.eye(3), 0, -0.1197, 0.425)
+    Ry_q3 = sympy.Matrix([
+        [ cos(q3), 0, sin(q3)],
+        [ 0,       1, 0      ],
+        [-sin(q3), 0, cos(q3)]
+    ])
+    T3_rot = make_transform(Ry_q3, 0, 0, 0)
+    T3 = T3_trans * T3_rot
+
+    # Joint 4: translate + rotate about Y by q4
+    T4_trans = make_transform(sympy.eye(3), 0, 0, 0.39225)
+    Ry_q4 = sympy.Matrix([
+        [ cos(q4), 0, sin(q4)],
+        [ 0,       1, 0      ],
+        [-sin(q4), 0, cos(q4)]
+    ])
+    T4_rot = make_transform(Ry_q4, 0, 0, 0)
+    T4 = T4_trans * T4_rot
+
+    # TCP offset
+    Ttcp = make_transform(sympy.eye(3), 0, 0.093, 0)
+
+    # Full forward kinematics
+    T_full = T1 * T2 * T3 * T4 * Ttcp
+
+    # We want T_full's rotation to match R_target, and its translation to match (px, py, pz).
+    eqs = []
+    # 1) Position equations
+    eqs.append(sympy.Eq(T_full[0, 3], px))
+    eqs.append(sympy.Eq(T_full[1, 3], py))
+    eqs.append(sympy.Eq(T_full[2, 3], pz))
+
+    # 2) Orientation equations  (compare 3x3 top-left rotation blocks)
+    for i in range(3):
+        for j in range(3):
+            eqs.append(sympy.Eq(T_full[i, j], R_target[i, j]))
+
+    # Solve symbolically for q1, q2, q3, q4
+    # (SymPy's "solve" attempts an analytic solution rather than a numeric optimization.)
+    solutions = sympy.solve(eqs, [q1, q2, q3, q4], dict=True)
+
+    # If no solutions found (the problem states "assume reachable," so typically shouldn't happen)
+    if not solutions:
+        return 0.0, 0.0, 0.0, 0.0
+
+    # Pick the first valid solution.  (In many cases you'd check all solutions and pick best within limits.)
+    sol = solutions[0]
+    q1_val = float(sol[q1])
+    q2_val = float(sol[q2])
+    q3_val = float(sol[q3])
+    q4_val = float(sol[q4])
+
+    # Wrap each angle into the robot's valid range [-2π, 2π] or [-6.2831853, 6.2831853]
+    import math
+    def wrap_to_2pi(a):
+        return (a + math.pi) % (2*math.pi) - math.pi
+
+    q1_val = wrap_to_2pi(q1_val)
+    q2_val = wrap_to_2pi(q2_val)
+    q3_val = wrap_to_2pi(q3_val)
+    q4_val = wrap_to_2pi(q4_val)
+
+    # The problem's stated limits are ±6.2831853, so these are all within range once wrapped to ±π anyway.
+    return (q1_val, q2_val, q3_val, q4_val)

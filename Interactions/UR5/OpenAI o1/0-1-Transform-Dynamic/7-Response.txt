@@ -1,0 +1,175 @@
+```python
+import math
+import numpy as np
+
+def inverse_kinematics(p: tuple[float, float, float], r: tuple[float, float, float]) -> tuple[float, float]:
+    """
+    CLOSED-FORM INVERSE KINEMATICS FOR A 2-DOF ROBOT
+
+    Robot structure (from DETAILS):
+      1) Revolute joint #1 about Z-axis at base (position [0, 0, 0]).
+         Offset to the next joint is [0, 0.13585, 0].
+      2) Revolute joint #2 about Y-axis.
+         Final link (TCP) offset from joint #2 is [0, -0.1197, 0.425].
+
+    We want to find q1 (joint1 angle about Z) and q2 (joint2 angle about Y) so that:
+       position: Rz(q1)*[0, 0.13585, 0] + Rz(q1)*Ry(q2)*[0, -0.1197, 0.425] = p
+       orientation: Rz(q1)*Ry(q2) = rotation that matches r = [roll, pitch, yaw] (in radians)
+
+    Because the manipulator only has two rotations (about Z, then Y), there are effectively
+    up to four possible solutions (two for the cosine-based q2, plus a "flip" on q1 by ±pi
+    combined with negating q2).  We compute all candidate solutions that satisfy p, then pick
+    the one whose final orientation best matches the requested (roll, pitch, yaw).
+
+    :param p: (px, py, pz), the desired TCP position in world coordinates
+    :param r: (roll, pitch, yaw), the desired TCP orientation in radians
+    :return: (q1, q2) in radians, picked to best match position p and orientation r
+    """
+
+    px, py, pz = p
+    roll_tgt, pitch_tgt, yaw_tgt = r
+
+    # Offsets per the geometry
+    # net Y offset from the first to second link:  0.13585 + (-0.1197) = 0.01615
+    offset_y = 0.01615
+    link_z   = 0.425
+
+    #-----------------------------
+    # Helper Functions
+    #-----------------------------
+    def clamp(value, min_val, max_val):
+        return max(min_val, min(value, max_val))
+
+    def angle_diff(a, b):
+        """
+        Returns the signed difference (in [-pi, pi]) between angles a and b (in radians).
+        """
+        d = (a - b) % (2*math.pi)
+        if d > math.pi:
+            d -= 2*math.pi
+        return d
+
+    def orientation_error(r_actual, r_target):
+        """
+        Sum of squared angle differences, each mod 2π, to compare orientation closeness.
+        """
+        return sum(angle_diff(a, b)**2 for a,b in zip(r_actual, r_target))
+
+    def build_Rz_y(q1, q2):
+        """
+        Construct 3×3 rotation matrix for Rz(q1)*Ry(q2).
+        """
+        c1, s1 = math.cos(q1), math.sin(q1)
+        c2, s2 = math.cos(q2), math.sin(q2)
+        # Rz(q1)*Ry(q2) = (3x3):
+        return np.array([
+            [ c1*c2, -s1,     c1*s2 ],
+            [ s1*c2,  c1,     s1*s2 ],
+            [ -s2,    0.0,    c2    ]
+        ], dtype=float)
+
+    def rpy_from_RzRy(R):
+        """
+        Extract (roll, pitch, yaw) from a rotation matrix R = Rz(q1)*Ry(q2),
+        interpreting it as URDF rpy: Rz( r_z ) * Ry( r_y ) * Rx( r_x ).
+        
+        The standard formula is:
+         roll  = atan2(R[2,1], R[2,2])
+         pitch = -asin(R[2,0])
+         yaw   = atan2(R[1,0], R[0,0])
+        """
+        # roll
+        r_x = math.atan2(R[2,1], R[2,2])
+        # pitch
+        sy = -R[2,0]
+        sy = clamp(sy, -1.0, 1.0)  # numeric safety
+        r_y = math.asin(sy)
+        # yaw
+        r_z = math.atan2(R[1,0], R[0,0])
+        return (r_x, r_y, r_z)
+
+    def solve_q1(px, py, offset_y, s2):
+        """
+        Solve from the pair of equations (deriving from forward kinematics in XY-plane):
+           px = -offset_y*sin(q1) + (0.425)*cos(q1)*s2
+           py =  offset_y*cos(q1) + (0.425)*sin(q1)*s2
+        for q1.  Return that angle in [-π, π).
+        """
+        d = 0.425 * s2
+        c = offset_y
+        denom = d*d + c*c
+        if abs(denom) < 1e-15:
+            return None  # degenerate
+
+        # px = d*cos(q1) - c*sin(q1)
+        # py = c*cos(q1) + d*sin(q1)
+        # => cos(q1) = (d*px + c*py) / (d^2 + c^2)
+        # => sin(q1) = ( -c*px + d*py) / (d^2 + c^2)
+        X = ( d*px + c*py ) / denom  # cos(q1)
+        Y = ( -c*px + d*py ) / denom # sin(q1)
+        return math.atan2(Y, X)
+
+    #-----------------------------
+    # 1) Solve for q2 from pz:
+    #    pz = 0.425*cos(q2) => cos(q2)=pz/0.425 => q2 in ± arccos(...)
+    #-----------------------------
+    c2_0 = clamp(pz/link_z, -1.0, 1.0)
+    q2a = math.acos(c2_0)
+    q2b = -q2a   # covers the full range
+
+    # Candidate solutions
+    candidate_pairs = []
+
+    for q2_candidate in (q2a, q2b):
+        s2_candidate = math.sin(q2_candidate)
+        q1_candidate = solve_q1(px, py, offset_y, s2_candidate)
+        if q1_candidate is not None:
+            # We'll store (q1_candidate, q2_candidate)
+            candidate_pairs.append((q1_candidate, q2_candidate))
+
+            # Also store the "flip" version (q1 + π, -q2), because Rz(q1+π)*Ry(-q2)
+            # can yield the same orientation or a close orientation, but might
+            # produce a better match to the target angles.  We'll test them all.
+            q1_flip = q1_candidate + math.pi
+            q2_flip = -q2_candidate
+            candidate_pairs.append((q1_flip, q2_flip))
+
+    #-----------------------------
+    # 2) Among all candidates, compute orientation => measure mismatch => pick best
+    #    Also ensure final angles are wrapped to [-pi, pi] or so.
+    #-----------------------------
+    best_sol = None
+    best_err = float('inf')
+
+    for (q1_c, q2_c) in candidate_pairs:
+        # Build rotation matrix, extract rpy
+        R_c = build_Rz_y(q1_c, q2_c)
+        rpy_c = rpy_from_RzRy(R_c)
+        # Compare to target
+        err = orientation_error(rpy_c, (roll_tgt, pitch_tgt, yaw_tgt))
+        if err < best_err:
+            best_err = err
+            best_sol = (q1_c, q2_c)
+
+    # If something went horribly wrong (should not if reachable), return zeros
+    if best_sol is None:
+        return (0.0, 0.0)
+
+    # Wrap final solution to within ±π (and then to ±6.2831853 if needed)
+    q1_raw, q2_raw = best_sol
+
+    def wrap_angle(theta):
+        # wrap to [-π, π)
+        t = (theta + math.pi) % (2*math.pi) - math.pi
+        # also clamp within ±6.2831853 if needed
+        if t > 6.2831853:
+            t -= 2*math.pi
+        if t < -6.2831853:
+            t += 2*math.pi
+        return t
+
+    q1_final = wrap_angle(q1_raw)
+    q2_final = wrap_angle(q2_raw)
+
+    return (q1_final, q2_final)
+```

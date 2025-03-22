@@ -1,0 +1,179 @@
+```python
+def inverse_kinematics(p: tuple[float, float, float], r: tuple[float, float, float]) -> tuple[float, float, float]:
+    """
+    Analytical 3-DOF inverse kinematics for a serial chain with joints:
+      1) Revolute about Z
+      2) Revolute about Y
+      3) Revolute about Y
+    and link offsets (in their parent frames):
+      Joint1: position [0, 0, 0]
+      Joint2: position [0, 0.13585, 0]
+      Joint3: position [0, -0.1197, 0.425]
+      TCP:    position [0, 0, 0.39225]
+
+    The manipulator can only realize a net orientation of Rz(θ1)*Ry(θ2)*Ry(θ3).
+    In URDF notation (roll, pitch, yaw), we effectively have no roll DOF, so any non-zero
+    roll can often be “absorbed” by shifting pitch/yaw. Below, we do a “zero-roll” extraction:
+
+      1) From the input roll–pitch–yaw, build the 3×3 rotation matrix.
+      2) Extract an equivalent rotation Rz(yaw_eff)*Ry(pitch_eff) that “ignores” roll
+         by matching only the final Z and Y directions, discarding any real rotation
+         about X that the arm can’t handle. This yields (θ1, θ2 + θ3) = (yaw_eff, pitch_eff).
+      3) Solve the position p with the 2R geometry for joints 2,3, ensuring θ2 + θ3 = pitch_eff.
+
+    :param p: The target TCP position (x, y, z).
+    :param r: The target orientation in radians [roll, pitch, yaw].
+    :return: (theta1, theta2, theta3) in radians, each within ±2π.
+    """
+    import math
+
+    # -------------------------------------------------------
+    #  Utility matrix routines for RPY → rotation matrix
+    # -------------------------------------------------------
+    def Rx(a):
+        ca, sa = math.cos(a), math.sin(a)
+        return [
+            [1,    0,     0 ],
+            [0,  ca,   -sa ],
+            [0,  sa,    ca ]
+        ]
+    def Ry(a):
+        ca, sa = math.cos(a), math.sin(a)
+        return [
+            [ ca, 0,  sa ],
+            [  0, 1,   0 ],
+            [-sa, 0,  ca ]
+        ]
+    def Rz(a):
+        ca, sa = math.cos(a), math.sin(a)
+        return [
+            [ ca, -sa, 0 ],
+            [ sa,  ca, 0 ],
+            [  0,   0, 1 ]
+        ]
+    def matmul(A, B):
+        # 3×3 matrix multiplication
+        return [[sum(A[i][k]*B[k][j] for k in range(3)) for j in range(3)] for i in range(3)]
+
+    def rpy_to_matrix(roll, pitch, yaw):
+        # URDF convention: R = Rx(roll)*Ry(pitch)*Rz(yaw)
+        return matmul(matmul(Rx(roll), Ry(pitch)), Rz(yaw))
+
+    # -------------------------------------------------------
+    # 1) Convert (roll,pitch,yaw) → 3×3 rotation matrix
+    # -------------------------------------------------------
+    roll, pitch, yaw = r
+    Rd = rpy_to_matrix(roll, pitch, yaw)
+
+    # -------------------------------------------------------
+    # 2) Extract an equivalent Rz(yaw_eff)*Ry(pitch_eff),
+    #    discarding real roll about X that we can’t realize.
+    # -------------------------------------------------------
+    #
+    # A general 3×3 rotation R can be matched “as best possible” by Rz(γ)*Ry(β)
+    # if we ignore that we can’t do any leftover roll about X. We pick:
+    #   β  = arccos( Rd[2][2] ), but sign from the (0,2) and (1,2) elements
+    #   γ  = atan2( Rd[1][2], Rd[0][2] )  if sin(β) != 0
+    #
+    # But a simpler approach (common for Z–Y factor) is:
+    #   pitch_eff = β = atan2( +√(R[0][2]^2 + R[1][2]^2), R[2][2] )
+    #   yaw_eff   = γ = atan2( R[1][2], R[0][2] )
+    # This directly matches the last column of R for the Y–Z axes ignoring X roll.
+    #
+    # We'll clamp numerics as needed.
+    eps = 1e-9
+    r02 = Rd[0][2]
+    r12 = Rd[1][2]
+    r22 = Rd[2][2]
+
+    # pitch_eff in [-π, +π]
+    #   = arctan2( sqrt(r02^2 + r12^2), r22 )
+    # If r22 < 0, pitch_eff might be > π/2. That’s okay for a 3-DOF solution if it’s physically feasible.
+    sin_pitch_eff = math.sqrt(r02*r02 + r12*r12)
+    # clamp
+    cos_pitch_eff = r22
+    if cos_pitch_eff > 1.0:  cos_pitch_eff = 1.0
+    if cos_pitch_eff < -1.0: cos_pitch_eff = -1.0
+
+    # pitch_eff = ± arccos( cos_pitch_eff ) 
+    # but we pick sign to match the sign of sin_pitch_eff
+    base_pitch_eff = math.acos(cos_pitch_eff)
+    # We want the pitch_eff so that sin_pitch_eff >= 0 => pitch_eff in [0, π], 
+    # or if sin_pitch_eff < 0 => pitch_eff in [-π, 0]. But sin_pitch_eff is non-negative by definition above,
+    # so pitch_eff = base_pitch_eff in [0, π]. If that’s > π, we might also consider negative angle, but let’s keep it.
+    pitch_eff = base_pitch_eff
+    # If R[2][2] < 0, we get an angle in (π/2, π], that’s still valid. 
+    # The sign of r02, r12 sets yaw_eff.
+
+    # Now yaw_eff = atan2( r12, r02 ), but if sin_pitch_eff ~ 0, we must handle carefully:
+    if abs(sin_pitch_eff) < eps:
+        # then pitch_eff ~ 0 or π => the manipulator is “looking along ±Z”
+        # so we define yaw_eff from the top-left or something. 
+        # But in that orientation, effectively everything is about Z anyway. Let's define:
+        yaw_eff = math.atan2(Rd[1][0], Rd[0][0])  # as if pitch_eff=0
+    else:
+        yaw_eff = math.atan2(r12, r02)
+
+    # Wrap them to [-π, π] for neatness
+    def wrap_pm_pi(a):
+        return (a + math.pi) % (2*math.pi) - math.pi
+
+    yaw_eff   = wrap_pm_pi(yaw_eff)
+    pitch_eff = wrap_pm_pi(pitch_eff)
+
+    # So effectively, (θ1, θ2+θ3) = (yaw_eff, pitch_eff).
+
+    # -------------------------------------------------------
+    # 3) Solve position using the known 2R chain in local frame
+    #    Then define (theta2, theta3) so that theta2 + theta3 = pitch_eff.
+    # -------------------------------------------------------
+    x, y, z = p
+
+    # Joint1 = rotate about Z by θ1:
+    #   => θ1 = yaw_eff
+    theta1 = yaw_eff
+
+    # Transform p by unrotating about Z by -theta1, then subtract link2 offset in Y
+    cos1, sin1 = math.cos(theta1), math.sin(theta1)
+    x_loc =  x*cos1 + y*sin1
+    y_loc = -x*sin1 + y*cos1
+    z_loc =  z
+    # Subtract link2 offset in local Y
+    y_loc -= 0.13585
+
+    # Now we have a 2R chain about Y:
+    #   offset b=[0, -0.1197, 0.425], offset c=[0,0,0.39225],
+    #   net angle about Y is pitch_eff => θ2+θ3 = pitch_eff.
+    #
+    # From a simpler derivation or the "EXISTING" code approach:
+    #   x_loc = 0.425 sin(θ2) + 0.39225 sin(θ2+θ3) but θ2+θ3=pitch_eff => => 0.425 sin(θ2) + 0.39225 sin(pitch_eff)
+    #   z_loc = 0.425 cos(θ2) + 0.39225 cos(pitch_eff)
+    #   y_loc should be ~ -0.1197 if all is consistent (within some tolerance).
+    #
+    # Solve for θ2 from x_loc', z_loc':
+    #   Xp = x_loc - 0.39225 sin(pitch_eff)
+    #   Zp = z_loc - 0.39225 cos(pitch_eff)
+    #   => θ2 = atan2( Xp, Zp ), then θ3 = pitch_eff - θ2
+    Xp = x_loc - 0.39225*math.sin(pitch_eff)
+    Zp = z_loc - 0.39225*math.cos(pitch_eff)
+
+    # If link2 can't bend that far, we clamp sin/cos
+    L = 0.425
+    # check for near zero radius
+    denom = (Xp*Xp + Zp*Zp)
+    if denom < 1e-12:
+        # degenerate => set θ2=0 or something
+        theta2 = 0.0
+    else:
+        theta2 = math.atan2(Xp, Zp)
+
+    # Then define θ3
+    theta3 = pitch_eff - theta2
+
+    # wrap them into [-π, π] for cleanliness (limits are ±2π actually, but this is typical)
+    theta1 = wrap_pm_pi(theta1)
+    theta2 = wrap_pm_pi(theta2)
+    theta3 = wrap_pm_pi(theta3)
+
+    return (theta1, theta2, theta3)
+```

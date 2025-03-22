@@ -1,0 +1,143 @@
+```python
+def inverse_kinematics(p: tuple[float, float, float], r: tuple[float, float, float]) -> tuple[float, float]:
+    """
+    Gets the joint values needed to reach position "p" and orientation "r"
+    for this 2-DOF serial manipulator. The manipulator has:
+      • Joint 1: revolute about Z (θ₁).
+      • Joint 2: revolute about Y (θ₂).
+      • An offset of [0, 0.13585, 0] from joint 1 to joint 2.
+      • An offset of [0, -0.1197, 0.425] from joint 2 to the TCP in the local frame of joint 2.
+      • The final orientation is Rz(θ₁) * Ry(θ₂).
+      • Inputs p = (x, y, z) and r = (roll, pitch, yaw) are guaranteed feasible.
+
+    Internally, the basic geometry for position is:
+      z ≈ 0.425 cos(θ₂)
+      x, y come via the planar offset of w = [0.425 sin(θ₂), 0.13585 - 0.1197] rotated by θ₁ in the XY-plane.
+
+    However, because users may request the roll ≈ ±π (a flip about X) for the same physical orientation,
+    we allow two possible (θ₁, θ₂) solutions: the 'normal' solution and a 'flipped' solution:
+      (θ₁ + π, -θ₂)
+    which can yield a roll difference of about ±π while physically the same end-effector orientation.
+
+    We'll compute both solutions, convert each to a full roll–pitch–yaw (ZYX Tait-Bryan convention),
+    then choose whichever matches the requested (r_x, r_y, r_z) more closely.
+
+    :param p: Desired TCP position (x, y, z).
+    :param r: Desired TCP orientation as roll–pitch–yaw in radians, [r_x, r_y, r_z].
+    :return: (θ₁, θ₂) in radians, each wrapped to [-π, π], which reproduces (p, r) as closely as possible.
+    """
+    import math
+
+    # --------------------------------------------------------------------------
+    #  1) Basic position-based solver: Solve θ₂ from z, then θ₁ from (x, y).
+    # --------------------------------------------------------------------------
+    x_d, y_d, z_d = p
+    r_x, r_y, r_z = r
+
+    # Helper: clamp angle to [-π, π]
+    def wrap_to_pi(angle: float) -> float:
+        return (angle + math.pi) % (2.0 * math.pi) - math.pi
+
+    # Solve θ₂ via z_d = 0.425 * cos(θ₂)
+    cos_theta2 = z_d / 0.425
+    cos_theta2 = max(min(cos_theta2, 1.0), -1.0)  # clamp
+    theta2_cand = math.acos(cos_theta2)
+
+    # Pick sign to best match desired pitch r_y
+    def pick_angle_sign(candidate: float, desired: float) -> float:
+        pos_diff = abs(desired - candidate)
+        neg_diff = abs(desired + candidate)
+        return candidate if pos_diff <= neg_diff else -candidate
+
+    theta2_sol = pick_angle_sign(theta2_cand, r_y)
+
+    # Solve θ₁ from x,y in the plane
+    w_x = 0.425 * math.sin(theta2_sol)
+    w_y = 0.13585 - 0.1197  # = 0.01615
+    denom = w_x**2 + w_y**2
+    if abs(denom) < 1e-15:
+        # Degenerate case shouldn't happen for valid p, but just guard anyway
+        denom = 1e-15
+    C = (w_x * x_d + w_y * y_d) / denom
+    S = (-w_y * x_d + w_x * y_d) / denom
+    theta1_sol = math.atan2(S, C)
+
+    # Wrap to [-π, π]
+    theta1_sol = wrap_to_pi(theta1_sol)
+    theta2_sol = wrap_to_pi(theta2_sol)
+
+    # --------------------------------------------------------------------------
+    #  2) Compute a "flipped" solution: (θ₁+π, -θ₂).
+    #     This can give the same final orientation up to a roll flip of ± π.
+    # --------------------------------------------------------------------------
+    theta1_flip = wrap_to_pi(theta1_sol + math.pi)
+    theta2_flip = wrap_to_pi(-theta2_sol)
+
+    # --------------------------------------------------------------------------
+    #  3) We'll compare which solution better matches the requested r = (r_x, r_y, r_z)
+    #     by computing the actual RPY from the final rotation using a ZYX extraction:
+    #        if R = Rz(θ₁)*Ry(θ₂), then
+    #          pitch = -asin(R[2,0])
+    #          roll  = atan2(R[2,1], R[2,2])
+    #          yaw   = atan2(R[1,0], R[0,0])
+    # --------------------------------------------------------------------------
+    def get_rpy_from_z_y(ang_z: float, ang_y: float) -> tuple[float, float, float]:
+        # Build the rotation matrix R = Rz(ang_z)*Ry(ang_y).
+        cz = math.cos(ang_z)
+        sz = math.sin(ang_z)
+        cy = math.cos(ang_y)
+        sy = math.sin(ang_y)
+        # R[2,0] = -sin(ang_y)
+        # R[2,1] = 0
+        # R[2,2] = cos(ang_y)
+        # R[1,0] = sin(ang_z)*cos(ang_y)
+        # R[0,0] = cos(ang_z)*cos(ang_y)
+        # etc.
+
+        # We'll use:
+        #   pitch = -asin(R[2,0])
+        #   roll  =  atan2(R[2,1], R[2,2])
+        #   yaw   =  atan2(R[1,0], R[0,0])
+        # from the standard ZYX formula.
+        R_20 = -sy       # [2,0]
+        R_21 = 0.0       # [2,1]
+        R_22 = cy        # [2,2]
+        R_10 = sz*cy     # [1,0]
+        R_00 = cz*cy     # [0,0]
+
+        pitch = -math.asin(R_20)             # -asin(-sy) = sy => we get pitch ≈ ang_y
+        roll  = math.atan2(R_21, R_22)       # = atan2(0, cy)
+        yaw   = math.atan2(R_10, R_00)       # = atan2(sz*cy, cz*cy) => atan2(sz, cz) => ang_z if cy>0
+
+        # wrap them
+        return (wrap_to_pi(roll), wrap_to_pi(pitch), wrap_to_pi(yaw))
+
+    def angle_diff(a: float, b: float) -> float:
+        # difference in [-π, π]
+        d = (a - b) % (2.0*math.pi)
+        if d > math.pi:
+            d -= 2.0*math.pi
+        return d
+
+    def orientation_error(roll1, pitch1, yaw1, roll2, pitch2, yaw2) -> float:
+        # sum of squared diffs in each angle (wrapped to [-π, π])
+        dr = angle_diff(roll1, roll2)
+        dp = angle_diff(pitch1, pitch2)
+        dy = angle_diff(yaw1, yaw2)
+        return dr*dr + dp*dp + dy*dy
+
+    # Actual RPY for base solution
+    roll_base, pitch_base, yaw_base = get_rpy_from_z_y(theta1_sol, theta2_sol)
+    # Actual RPY for flipped solution
+    roll_flip, pitch_flip, yaw_flip = get_rpy_from_z_y(theta1_flip, theta2_flip)
+
+    # Compare each to the desired r_x, r_y, r_z
+    err_base = orientation_error(roll_base, pitch_base, yaw_base, r_x, r_y, r_z)
+    err_flip = orientation_error(roll_flip, pitch_flip, yaw_flip, r_x, r_y, r_z)
+
+    # Pick whichever is closer
+    if err_flip < err_base:
+        return (wrap_to_pi(theta1_flip), wrap_to_pi(theta2_flip))
+    else:
+        return (wrap_to_pi(theta1_sol), wrap_to_pi(theta2_sol))
+```

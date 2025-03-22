@@ -1,0 +1,95 @@
+```python
+def inverse_kinematics(p: tuple[float, float, float], r: tuple[float, float, float]) -> tuple[float, float, float, float]:
+    """
+    Closed-form solution for the inverse kinematics of a 4-DOF arm with joints:
+      - Joint1 rotates about Z
+      - Joint2 rotates about Y
+      - Joint3 rotates about Y
+      - Joint4 rotates about Y
+    The tool (TCP) position is at [0, 0, 0.093] from the last joint.
+
+    We assume the only feasible orientation for the end-effector is given by yaw=q1
+    and pitch=q2+q3+q4 (roll is not achievable). The function ignores roll (r[0]) 
+    from the provided orientation and uses only (pitch, yaw).
+
+    :param p: Target position [x, y, z].
+    :param r: Target orientation [roll, pitch, yaw], where roll is ignored. 
+    :return: (q1, q2, q3, q4) in radians.
+    """
+
+    import numpy as np
+
+    # Extract desired position and orientation
+    x, y, z = p
+    roll, pitch, yaw = r  # roll is not realizable by this arm, so we ignore it
+
+    # 1) Assign q1 directly to match the requested yaw.
+    #    This is valid only if the manipulator is free to rotate about Z to any yaw.
+    q1 = yaw
+
+    # 2) Transform the target position into the frame where q1=0
+    #    i.e. rotate about Z by -q1 to effectively 'remove' q1 from the position.
+    #    This yields coordinates (X, Y, Z) in the plane used by joints 2, 3, 4.
+    c1 = np.cos(-q1)
+    s1 = np.sin(-q1)
+    # Standard 2D rotation about Z for a point [x, y, z]:
+    #   X =  x*cos(-q1) - y*sin(-q1)
+    #   Y =  x*sin(-q1) + y*cos(-q1)
+    #   Z =  z
+    X = x * c1 - y * s1
+    Y = x * s1 + y * c1
+    Z = z
+
+    # 3) Use the existing position-only solution with q4=0 in the local plane (X, Y, Z),
+    #    then we will correct for pitch at the end. This matches the official geometry:
+    #      - link 2 offset [0, 0.13585, 0]
+    #      - link 3 offset [0, -0.1197, 0.425]
+    #      - link 4 offset [0, 0, 0.39225]
+    #      - TCP offset   [0, 0, 0.093]
+    #    From the originally provided "EXISTING" inverse kinematics code:
+    numerator = X**2 + Y**2 + Z**2 - 0.346395
+    denominator = 0.3341625
+    import math
+    cos_q3 = numerator / denominator
+    cos_q3 = max(-1.0, min(1.0, cos_q3))  # clip to avoid numerical domain error
+    q3_temp = math.acos(cos_q3)
+
+    # Because arccos has two solutions ±q3, we pick the "principal" (positive) one
+    # for continuity.  The original code needed only one for position unless
+    # there's a reason to pick negative. We'll keep it consistent:
+    q3 = q3_temp
+
+    A = 0.425 + 0.39225 * math.cos(q3)
+    B = 0.39225 * math.sin(q3)
+
+    # S is effectively the planar radial distance from the axis minus offset
+    offset_val = 0.10915
+    S_squared = X**2 + Y**2 - offset_val**2
+    S = math.sqrt(S_squared) if S_squared >= 0 else 0.0
+    C = Z
+
+    numerator_q2 = S * A - C * B
+    denominator_q2 = S * B + C * A
+    q2 = math.atan2(numerator_q2, denominator_q2)
+
+    # Small lateral offset: phi is the angle to offset 0.10915 in the base plane
+    phi = math.atan2(offset_val, S) if abs(S) > 1e-9 else (math.pi / 2.0)
+    # We originally subtracted phi: q1 = atan2(y, x) - phi.  But here, we've 
+    # forcibly set q1 from yaw. So we skip that here because we already
+    # accounted for orientation by rotating the coordinate space.
+
+    # 4) Now that we have q2, q3 as if q4=0, we fix Q4 to match the requested pitch:
+    #       pitch = q2 + q3 + q4  --> q4 = pitch - (q2 + q3)
+    q4 = pitch - (q2 + q3)
+
+    # 5) Wrap angles to [-pi, pi] for neatness. (Limits are ±2π, but we keep them in [-π, π].)
+    def wrap_to_pi(angle):
+        return math.atan2(math.sin(angle), math.cos(angle))
+
+    q1 = wrap_to_pi(q1)
+    q2 = wrap_to_pi(q2)
+    q3 = wrap_to_pi(q3)
+    q4 = wrap_to_pi(q4)
+
+    return (q1, q2, q3, q4)
+```

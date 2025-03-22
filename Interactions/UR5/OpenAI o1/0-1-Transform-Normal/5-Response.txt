@@ -1,0 +1,96 @@
+```python
+def inverse_kinematics(p: tuple[float, float, float], r: tuple[float, float, float]) -> tuple[float, float]:
+    """
+    Extended closed‐form IK that accounts for both position and the desired sign
+    for each joint angle corresponding to the requested orientation. Although
+    this 2‐DOF arm can only match certain orientations (since Joint1 is about Z
+    and Joint2 is about Y), the provided orientation r = [rx, ry, rz] will be
+    used to pick which 'branch' (elbow‐up vs. elbow‐down, etc.) is desired. 
+
+    The manipulator geometry is:
+      - Revolute 1 about Z at base. 
+      - Offset of +0.13585 along Y, then Revolute 2 about Y.
+      - Finally a link offset of [0, -0.1197, 0.425] to the TCP.
+
+    The standard forward kinematics for the TCP position is:
+       TCP_x =  0.425 sin(q2) cos(q1)  -  0.01615 sin(q1)
+       TCP_y =  0.425 sin(q2) sin(q1)  +  0.01615 cos(q1)
+       TCP_z =  0.425 cos(q2)
+
+    where 0.01615 = 0.13585 - 0.1197. For the orientation, the arm can
+    achieve transforms of the form Rz(q1)*Ry(q2). Thus, the user's request
+    for orientation [rx, ry, rz] will effectively fix q2 ≈ ry and q1 ≈ rz,
+    up to certain sign flips or ±2π shifts that yield the same geometry.
+
+    This solution enumerates the two possible acos branches for q2:
+       +acos(pz / 0.425) and -acos(pz / 0.425),
+    and then solves for q1 in each case. It then compares each candidate
+    (q1, q2) to the desired orientation (rx, ry, rz) by measuring how
+    close q1 is to rz and q2 is to ry modulo 2π, and returns the best match.
+
+    :param p: Desired TCP position [px, py, pz].
+    :param r: Desired TCP orientation [rx, ry, rz].  The manipulator has
+              only two DOF (Z rotation, Y rotation), so rx is largely
+              not tracked, but ry ~ q2, rz ~ q1 up to 2π.
+    :return: (q1, q2) in radians that achieve both the position and orientation.
+    """
+    import math
+
+    # Small helper to give a "wrapped" difference between angles, in [-pi, +pi].
+    def angle_diff(a, b):
+        d = (a - b) % (2*math.pi)
+        if d > math.pi:
+            d -= 2*math.pi
+        return d  # could return abs(d) depending on usage
+
+    # Helper: given px, py, A=0.425*sin(q2), B=0.01615, solve for q1
+    # from the planar equations:
+    #   px = A cos(q1) - B sin(q1),
+    #   py = A sin(q1) + B cos(q1).
+    #
+    # We'll return up to three "wrapped" versions for q1 to check orientation.
+    def solve_q1_variants(px, py, A, B):
+        denom = px*px + py*py
+        if denom < 1e-12:
+            # If px≈py≈0, then any q1 works. Return a small set of typical values.
+            return [0.0, math.pi, -math.pi]
+        sin_q1 = (A*py - B*px) / denom
+        cos_q1 = (A*px + B*py) / denom
+        base = math.atan2(sin_q1, cos_q1)
+        # We'll check a small set of equivalent angles: base, base ± 2π
+        return [base, base + 2*math.pi, base - 2*math.pi]
+
+    px, py, pz = p
+    # Desired orientation: we try to match q2 ~ r[1], q1 ~ r[2], ignoring r[0].
+    rx, ry, rz = r
+
+    L = 0.425
+    B = 0.13585 - 0.1197  # 0.01615
+
+    # Attempt both possible q2 from z = L cos(q2): 
+    # principal branch +acos(...) and the negative -acos(...).
+    # Then pick whichever is closer to the requested ry modulo 2π.
+    #
+    # We'll gather candidate solutions as (q1, q2, "score").
+    candidates = []
+    # Slight guard for pz beyond the boundary; problem states "reachable," so small clamp:
+    ratio = max(min(pz / L, 1.0), -1.0)
+    q2p = math.acos(ratio)
+    q2n = -q2p
+
+    for q2_candidate in (q2p, q2n):
+        A = L * math.sin(q2_candidate)
+        q1_list = solve_q1_variants(px, py, A, B)
+        for q1_candidate in q1_list:
+            # Orientation difference: sum of absolute angle differences for q2 vs ry, q1 vs rz
+            dq2 = abs(angle_diff(q2_candidate, ry))
+            dq1 = abs(angle_diff(q1_candidate, rz))
+            score = dq2 + dq1
+            candidates.append((q1_candidate, q2_candidate, score))
+
+    # Pick the candidate with the smallest orientation mismatch
+    best = min(candidates, key=lambda c: c[2])
+    q1_final, q2_final = best[0], best[1]
+
+    return (q1_final, q2_final)
+```

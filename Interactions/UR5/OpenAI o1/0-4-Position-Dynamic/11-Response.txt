@@ -1,0 +1,194 @@
+```python
+def inverse_kinematics(p: tuple[float, float, float]) -> tuple[float, float, float, float, float]:
+    """
+    Closed–form inverse kinematics for the 5–DOF manipulator, returning a single
+    valid solution without iterative numeric solvers. It enumerates all “natural”
+    solution branches and picks the one whose forward kinematics is closest to
+    the requested target position.
+
+    Geometry (from DETAILS):
+      • Joint1 revolve about Z at base.
+      • Joint2 revolve about Y, link offset [0, 0.13585, 0].
+      • Joint3 revolve about Y, link offset [0, -0.1197, 0.425].
+      • Joint4 revolve about Y, link offset [0, 0, 0.39225].
+      • Joint5 revolve about Z, link offset [0, 0.093, 0].
+      • TCP offset [0, 0, 0.09465].
+    We only need to match the TCP position (no orientation). Joint5 about Z
+    does not affect position, so we fix joint5 = 0 in each candidate.  The
+    manipulator has more than one valid solution (due to redundancy and link
+    geometry).  This code systematically enumerates a small set of candidate
+    solutions for joints1..4 (two choices for joint1 and two “elbow fold” choices
+    in the 3R subchain) and picks the one yielding minimal final-position error.
+
+    :param p: Target TCP position (x, y, z).
+    :return: A tuple (joint1, joint2, joint3, joint4, joint5) in radians, each
+             wrapped to [−π, π].  We set joint5=0 for position IK.
+    """
+    import math
+
+    # Unpack desired position
+    x_tgt, y_tgt, z_tgt = p
+
+    # Helper: wrap angle into [−π, π]
+    def wrap_to_pi(a):
+        while a > math.pi:
+            a -= 2.0 * math.pi
+        while a < -math.pi:
+            a += 2.0 * math.pi
+        return a
+
+    # Forward kinematics for the entire chain, given (j1..j5).
+    # Returns (x,y,z) of the TCP.
+    def forward_kin(j1, j2, j3, j4, j5):
+        # Denavit–Hartenberg–like approach in matrix form:
+        # But we will implement it step-by-step to avoid relying on external libs.
+
+        # Rotation about Z by j1
+        c1, s1 = math.cos(j1), math.sin(j1)
+        # Current transform as a 4×4 in row-major
+        T = [
+            [ c1, -s1,  0, 0 ],
+            [ s1,  c1,  0, 0 ],
+            [  0,   0,  1, 0 ],
+            [  0,   0,  0, 1 ]
+        ]
+        def matmul(Ta, Tb):
+            # 4x4 matrix multiply
+            Tc = [[0]*4 for _ in range(4)]
+            for rr in range(4):
+                for cc in range(4):
+                    ssum = 0.0
+                    for kk in range(4):
+                        ssum += Ta[rr][kk]*Tb[kk][cc]
+                    Tc[rr][cc] = ssum
+            return Tc
+
+        def translate(dx, dy, dz):
+            return [
+                [1,0,0,dx],
+                [0,1,0,dy],
+                [0,0,1,dz],
+                [0,0,0,1 ]
+            ]
+        def rotY(th):
+            c, s = math.cos(th), math.sin(th)
+            return [
+                [ c, 0,  s, 0],
+                [ 0, 1,  0, 0],
+                [-s, 0,  c, 0],
+                [ 0, 0,  0, 1]
+            ]
+        def rotZ(th):
+            c, s = math.cos(th), math.sin(th)
+            return [
+                [ c, -s, 0, 0],
+                [ s,  c, 0, 0],
+                [ 0,  0, 1, 0],
+                [ 0,  0, 0, 1]
+            ]
+
+        # Joint2 revolve about Y, offset [0, 0.13585, 0]
+        T = matmul(T, translate(0, 0.13585, 0))
+        T = matmul(T, rotY(j2))
+        # Joint3 revolve about Y, offset [0, -0.1197, 0.425]
+        T = matmul(T, translate(0, -0.1197, 0.425))
+        T = matmul(T, rotY(j3))
+        # Joint4 revolve about Y, offset [0, 0, 0.39225]
+        T = matmul(T, translate(0, 0, 0.39225))
+        T = matmul(T, rotY(j4))
+        # Joint5 revolve about Z= j5, offset [0, 0.093, 0]
+        T = matmul(T, translate(0, 0.093, 0))
+        T = matmul(T, rotZ(j5))
+        # Finally the TCP offset [0,0,0.09465]
+        T = matmul(T, translate(0, 0, 0.09465))
+
+        # The final position is T[0,3], T[1,3], T[2,3]
+        return (T[0][3], T[1][3], T[2][3])
+
+    # 3R sub-chain solver about Y, ignoring the Y offsets except that we treat
+    # the link lengths in the x–z plane as L1=0.425, L2=0.39225, L3=0.09465 to
+    # find angles j2,j3,j4.  We let T = j2+j3+j4 = either psi or psi+π. Then 2R
+    # geometry for the “wrist center.” We return all valid sub-chain combos.
+    #
+    # This is the same logic as “Existing code 2” for the planar part, but we
+    # do not forcibly fix y=-0.0267 here; we treat x_sub, z_sub as a purely planar
+    # problem for those 3 joints.  We'll just produce all solutions (2 for T,
+    # ×2 for “elbow sign”), if real, returning (j2, j3, j4).
+    def solve_3R_planar(x_sub, z_sub):
+        L1 = 0.425
+        L2 = 0.39225
+        L3 = 0.09465
+        solutions_3R = []
+
+        psi = math.atan2(x_sub, z_sub)
+        T_candidates = [psi, psi + math.pi]
+        for T_val in T_candidates:
+            x_w = x_sub - L3*math.sin(T_val)
+            z_w = z_sub - L3*math.cos(T_val)
+            r_w = math.hypot(x_w, z_w)
+            cos_beta = (r_w**2 - L1**2 - L2**2)/(2*L1*L2)
+            # clamp
+            if cos_beta>1.0: cos_beta=1.0
+            if cos_beta<-1.0: cos_beta=-1.0
+            try:
+                # two possible elbow folds
+                beta1 = math.acos(cos_beta)
+                for ssgn in [+1, -1]:
+                    beta = ssgn*beta1
+                    phi_w = math.atan2(x_w, z_w)
+                    delta = math.atan2(L2*math.sin(beta), (L1+L2*math.cos(beta)))
+                    j2_ = phi_w - delta
+                    j3_ = beta
+                    j4_ = T_val - (j2_ + j3_)
+                    solutions_3R.append( (j2_, j3_, j4_) )
+            except ValueError:
+                pass
+        return solutions_3R
+
+    # Now we do an overall enumeration:
+    #   joint1 in [ atan2(y_tgt,x_tgt),  atan2(y_tgt,x_tgt)+π ]
+    #   for each joint1, define a “local” sub-chain coordinate
+    #   x_sub, y_sub, z_sub by applying the negative of that rotation about Z to (x_tgt,y_tgt).
+    #
+    #   Then for each 3R planar solution from solve_3R_planar, we get j2,j3,j4
+    #   => we do a forward_kin(...) to check error => keep the best.
+    base_angle0 = math.atan2(y_tgt, x_tgt)
+    base_candidates = [ base_angle0, base_angle0 + math.pi ]
+
+    best_solution = None
+    best_error = float('inf')
+
+    for j1_cand in base_candidates:
+        # Undo that rotation in the XY plane so the sub-chain sees “forward–facing” coords
+        cos_j1, sin_j1 = math.cos(j1_cand), math.sin(j1_cand)
+        # rotating p by -j1 => [ px = x*cos_j1 + y*sin_j1,  py = -x*sin_j1 + y*cos_j1 ]
+        # but for the planar solver, we only need x_sub,z_sub in its local "plane"
+        # The sub-chain eventually rotates about Y only, so we interpret x_sub in that plane
+        px_local =  x_tgt*cos_j1 + y_tgt*sin_j1
+        pz_local =  z_tgt  # unchanged by a rotation about Z
+
+        # Solve the 3R for those planar coords
+        sub_sol = solve_3R_planar(px_local, pz_local)
+        for (j2_cand, j3_cand, j4_cand) in sub_sol:
+            # We fix j5=0
+            # Evaluate forward kinematics
+            x_fk, y_fk, z_fk = forward_kin(j1_cand, j2_cand, j3_cand, j4_cand, 0.0)
+            err = math.sqrt((x_fk - x_tgt)**2 + (y_fk - y_tgt)**2 + (z_fk - z_tgt)**2)
+            if err < best_error:
+                best_error = err
+                best_solution = (j1_cand, j2_cand, j3_cand, j4_cand, 0.0)
+
+    if best_solution is None:
+        # If we somehow found no solutions, return zeros
+        return (0.0,0.0,0.0,0.0,0.0)
+
+    # Wrap final angles to [−π, π]
+    j1, j2, j3, j4, j5 = best_solution
+    j1 = wrap_to_pi(j1)
+    j2 = wrap_to_pi(j2)
+    j3 = wrap_to_pi(j3)
+    j4 = wrap_to_pi(j4)
+    j5 = wrap_to_pi(j5)
+
+    return (j1, j2, j3, j4, j5)
+```

@@ -1,0 +1,72 @@
+```python
+def inverse_kinematics(p: tuple[float, float, float], r: tuple[float, float, float]) -> tuple[float, float, float]:
+    """
+    Gets the joint values needed to reach position "p" and orientation "r".
+
+    :param p: The position to reach in the form [x, y, z].
+    :param r: The orientation to reach in radians in the form [roll, pitch, yaw].
+              For this 3-DOF arm (Z–Y–Y), only pitch (r[1]) and yaw (r[2]) are used.
+              We assume roll (r[0]) is zero or negligible for a reachable orientation.
+    :return: (theta1, theta2, theta3) in radians.
+    """
+
+    import sympy
+    from sympy import symbols, sin, cos
+
+    # Extract position p and orientation r
+    x, y, z = p
+    rx, ry, rz = r
+
+    # Joint 1 is rotation about Z (yaw)
+    theta1 = rz
+
+    # Rotate the target position by -theta1 about Z to remove joint1's effect
+    x_prime = x * cos(theta1) + y * sin(theta1)
+    y_prime = -x * sin(theta1) + y * cos(theta1)
+    z_prime = z
+
+    # Subtract the link offset after joint1; link2 offset is (0, 0.13585, 0), so subtract in local frame
+    y_prime -= 0.13585
+
+    # Symbolic variables
+    theta2_sym = symbols('theta2', real=True)
+    theta3_sym = ry - theta2_sym  # Because theta2 + theta3 = pitch
+
+    # Define transformation matrices
+    def Ry(angle):
+        return sympy.Matrix([
+            [ cos(angle),  0,  sin(angle)],
+            [ 0,           1,  0         ],
+            [-sin(angle),  0,  cos(angle)]
+        ])
+
+    # From the table: 
+    #   After joint2: offset [0, -0.1197, 0.425] 
+    #   After joint3: offset [0, 0, 0.39225]
+    b = sympy.Matrix([0, -0.1197, 0.425])
+    c = sympy.Matrix([0, 0, 0.39225])
+
+    # Position expression in the local frame after joint2 and joint3:
+    p_expr = Ry(theta2_sym)*b + Ry(theta2_sym)*Ry(theta3_sym)*c
+
+    # We want p_expr = (x_prime, y_prime, z_prime)
+    eqs = [
+        sympy.Eq(p_expr[0], x_prime),
+        sympy.Eq(p_expr[1], y_prime),
+        sympy.Eq(p_expr[2], z_prime)
+    ]
+
+    # Solve for theta2
+    sol = sympy.solve(eqs, [theta2_sym], dict=True)
+
+    # Assume the first valid solution is acceptable (per the instructions)
+    if not sol:
+        # No solution found. Per instructions, assume all targets are reachable, so we won't handle unreachable.
+        return (theta1, 0.0, ry)  # fallback
+
+    theta2_val = float(sol[0][theta2_sym])
+    theta3_val = ry - theta2_val
+
+    # Return the joint angles
+    return (theta1, theta2_val, theta3_val)
+```

@@ -1,0 +1,219 @@
+```python
+def inverse_kinematics(p: tuple[float, float, float]) -> tuple[float, float, float, float, float]:
+    """
+    Closed-form analytical inverse kinematics for the 5-DOF manipulator,
+    returning (q1, q2, q3, q4, q5). Joint5 is about Z and does not affect
+    the TCP position, so we set q5 = 0 for position-only IK.
+
+    The manipulator has one redundant DOF for position-only (4 moving
+    joints affecting (x, y, z)), so there can be multiple solutions.
+    We follow a typical "T = q2 + q3 + q4" approach in the Y-rotating
+    sub-chain, combined with trying two base angles q1 (since rotating
+    the base by π can produce additional solutions). We enumerate
+    candidate solutions and pick the one with the smallest position
+    error compared to the input p.
+
+    Joint layout (from the URDF "DETAILS"):
+      1) Revolute 1 about Z, offset [0, 0, 0] 
+      2) Revolute 2 about Y, offset [0, 0.13585, 0]
+      3) Revolute 3 about Y, offset [0, -0.1197, 0.425]
+      4) Revolute 4 about Y, offset [0, 0, 0.39225]
+      5) Revolute 5 about Z, offset [0, 0.093, 0], set q5=0 here
+
+    TCP offset: [0, 0, 0.09465].
+
+    :param p: Desired TCP position (x, y, z).
+    :return: A 5-tuple (q1, q2, q3, q4, q5) in radians, each in [-π, π].
+    """
+    import math
+
+    # Extract target position
+    x_t, y_t, z_t = p
+
+    # Link offsets (based on the URDF)
+    # We'll build a forward kinematics function T0TCP(q1,q2,q3,q4,q5=0)
+    # to measure the error. That is strictly numeric (no iteration).
+    def forward_kinematics(q1, q2, q3, q4):
+        """
+        Returns (x_fk, y_fk, z_fk) for the TCP in world coordinates
+        given the 4 joint angles. Joint 5 is zero and does not affect position.
+        """
+        # We'll manually compose transformations:
+        #   T0->1: Rz(q1)
+        #   T1->2: Trans(0,0.13585,0)*Ry(q2)
+        #   T2->3: Trans(0,-0.1197,0.425)*Ry(q3)
+        #   T3->4: Trans(0,0,0.39225)*Ry(q4)
+        #   T4->5: Trans(0,0.093,0)*Rz(0) => just translate
+        #   T5->TCP: Trans(0,0,0.09465)
+        #
+        # We'll do it step by step in 3D. Each transform is 4x4, but we can do it in shorter approach:
+        import math
+
+        # Short matrix multiply utility
+        def matmul(a, b):
+            c = [[0]*4 for _ in range(4)]
+            for i in range(4):
+                for j in range(4):
+                    c[i][j] = (a[i][0]*b[0][j] + a[i][1]*b[1][j] +
+                               a[i][2]*b[2][j] + a[i][3]*b[3][j])
+            return c
+
+        def rotz(theta):
+            c, s = math.cos(theta), math.sin(theta)
+            return [
+                [ c, -s, 0, 0],
+                [ s,  c, 0, 0],
+                [ 0,  0, 1, 0],
+                [ 0,  0, 0, 1]
+            ]
+        def roty(theta):
+            c, s = math.cos(theta), math.sin(theta)
+            return [
+                [ c, 0, s, 0],
+                [ 0, 1, 0, 0],
+                [-s, 0, c, 0],
+                [ 0, 0, 0, 1]
+            ]
+        def transl(dx, dy, dz):
+            return [
+                [1, 0, 0, dx],
+                [0, 1, 0, dy],
+                [0, 0, 1, dz],
+                [0, 0, 0, 1 ]
+            ]
+
+        # T0->1
+        T01 = rotz(q1)
+        # T1->2
+        T12 = matmul(transl(0, 0.13585, 0), roty(q2))
+        # T2->3
+        T23 = matmul(transl(0, -0.1197, 0.425), roty(q3))
+        # T3->4
+        T34 = matmul(transl(0, 0, 0.39225), roty(q4))
+        # T4->5
+        T45 = transl(0, 0.093, 0)  # no rotation, q5=0
+        # T5->TCP
+        T5TCP = transl(0, 0, 0.09465)
+
+        # Compose
+        T02 = matmul(T01, T12)
+        T03 = matmul(T02, T23)
+        T04 = matmul(T03, T34)
+        T05 = matmul(T04, T45)
+        T0TCP = matmul(T05, T5TCP)
+
+        # Extract final position
+        x_fk = T0TCP[0][3]
+        y_fk = T0TCP[1][3]
+        z_fk = T0TCP[2][3]
+        return (x_fk, y_fk, z_fk)
+
+        # end forward_kinematics
+
+    # We'll define a function to measure position error
+    def position_error(q1_, q2_, q3_, q4_):
+        x_fk, y_fk, z_fk = forward_kinematics(q1_, q2_, q3_, q4_)
+        return math.sqrt((x_fk - x_t)**2 + (y_fk - y_t)**2 + (z_fk - z_t)**2)
+
+    # The standard approach for a 3R planar chain about Y plus a revolve about Z for q1:
+    # 1) We consider possible base angles for q1 in { atan2(y,x), atan2(y,x)+π }
+    # 2) We define T = q2 + q3 + q4 in {psi, psi+π} where psi = atan2(x', z'), but here we must
+    #    do x' = x_t, z' = z_t in the "frame" after we remove the base rotation q1. There's a
+    #    known offset in y, but let's do the same approach used in code #8 or #3R logic:
+    #    We'll simply try T in [psi, psi+π] with psi = atan2(x_t, z_t). Then each T yields a
+    #    "wrist center" for the 2R portion (q2, q3), from which we get q4 = T - (q2+q3).
+    # 3) We gather all solutions (2 base angles × 2 T angles × 2 possible polarities in the 2R sub-solution).
+    # 4) Evaluate forward kinematics for each, pick the best.
+
+    # We'll gather candidates in a list
+    candidates = []
+
+    # We consider two possible base angles
+    base_nominal = math.atan2(y_t, x_t)
+    q1_candidates = [base_nominal, base_nominal + math.pi]
+
+    # T = (q2 + q3 + q4) has two candidates
+    psi = math.atan2(x_t, z_t)
+    T_candidates = [psi, psi + math.pi]
+
+    # Link lengths for the 3R chain along Y
+    L1 = 0.425
+    L2 = 0.39225
+    L3 = 0.09465
+
+    # We'll define a helper for the 2R sub-chain
+    # The sub-chain has "wrist center" after subtracting L3 in direction T,
+    # ignoring the sophisticated offset in y. We'll do a basic approach similar
+    # to code #8, then rely on picking the minimal final error.
+    def twoR_solutions(x_wc, z_wc):
+        # We want L1 + L2 to reach (x_wc, z_wc). So we define
+        # r_wc = sqrt(x_wc^2 + z_wc^2)
+        r_wc = math.sqrt(x_wc**2 + z_wc**2)
+        # law of cosines for angle between L1,L2
+        c_beta = (r_wc**2 - L1**2 - L2**2)/(2*L1*L2)
+        if c_beta > 1.0: c_beta = 1.0
+        if c_beta < -1.0: c_beta = -1.0
+        # If out of domain, no real solution
+        try:
+            beta_mag = math.acos(c_beta)
+        except ValueError:
+            return []  # no solutions
+        sols = []
+        for sign_ in [1.0, -1.0]:
+            beta = sign_*beta_mag
+            alpha = math.atan2(x_wc, z_wc)
+            denom = L1 + L2 * math.cos(beta)
+            if abs(denom) < 1e-12:
+                continue
+            delta = math.atan2(L2*math.sin(beta), denom)
+            q2_ = alpha - delta
+            q3_ = beta
+            sols.append((q2_, q3_))
+        return sols
+
+    for q1_ in q1_candidates:
+        # For each T in T_candidates
+        for T_ in T_candidates:
+            # The wrist center in the local plane after removing q1_
+            # We won't do an explicit transform to local; we do the simpler approach:
+            # x_wc = x_t - L3*sin(T_)
+            # z_wc = z_t - L3*cos(T_)
+            # Then do a 2R solve for q2,q3. Then q4 = T_ - (q2+q3).
+            x_wc = x_t - L3*math.sin(T_)
+            z_wc = z_t - L3*math.cos(T_)
+
+            # 2R solutions
+            sub_solutions = twoR_solutions(x_wc, z_wc)
+            for (q2_, q3_) in sub_solutions:
+                q4_ = T_ - (q2_ + q3_)
+                # Now we have a candidate (q1_, q2_, q3_, q4_)
+                err_ = position_error(q1_, q2_, q3_, q4_)
+                candidates.append((err_, q1_, q2_, q3_, q4_))
+
+    # If no candidates, return something trivial:
+    if not candidates:
+        return (0.0, 0.0, 0.0, 0.0, 0.0)
+
+    # Pick best by minimal position error
+    best = min(candidates, key=lambda c: c[0])
+    _, best_q1, best_q2, best_q3, best_q4 = best
+
+    # We set q5 = 0 for position-only
+    best_q5 = 0.0
+
+    # Normalize angles to [-pi, pi]
+    def normalize(a):
+        while a > math.pi:
+            a -= 2*math.pi
+        while a < -math.pi:
+            a += 2*math.pi
+        return a
+
+    best_q1 = normalize(best_q1)
+    best_q2 = normalize(best_q2)
+    best_q3 = normalize(best_q3)
+    best_q4 = normalize(best_q4)
+    best_q5 = normalize(best_q5)
+
+    return (best_q1, best_q2, best_q3, best_q4, best_q5)
+```

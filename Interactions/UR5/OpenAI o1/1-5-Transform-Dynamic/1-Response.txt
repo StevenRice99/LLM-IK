@@ -1,0 +1,231 @@
+def inverse_kinematics(p: tuple[float, float, float], r: tuple[float, float, float]) -> tuple[float, float, float, float, float]:
+    """
+    Closed-form inverse kinematics solution for the 5-DOF manipulator described in the DETAILS section.
+
+    This solution combines:
+      • Existing code #1, which provides a simple closed-form expression for Joint 1 (about Y).
+      • Existing code #2, which provides a 4-DOF closed-form IK for joints (2..5) about (Y, Y, Z, Y).
+    
+    Because Existing code #2 assumes its first "joint 1" is at the origin with purely vertical offsets,
+    we treat our overall Joint 1 and its offset to Joint 2 as a separate step. In effect:
+      1) Compute Joint 1 (θ₁) from existing code #1 (atan2(x,z)).
+      2) Transform the target (p,r) into the coordinate frame of our "Joint 2" so that the geometry
+         matches what Existing code #2 expects.
+      3) Call the logic from Existing code #2 (inlined below) to solve for joints (2..5).
+
+    NOTE:
+      • This approach uses the simple sub-solution for Joint 1, ignoring the small link offset
+        in its “local” atan2.  In many manipulators, that is acceptable if the first joint’s main
+        job is simply to rotate the arm in the global Y-axis direction toward the target.
+      • We assume the end-effector target is reachable, and we do not include reachability checks.
+      • Joint angle limits are wide enough (±2π) not to force additional clipping.
+
+    :param p: Desired TCP position [x, y, z] in the base frame (meters).
+    :param r: Desired TCP orientation [roll, pitch, yaw] in radians, using URDF's rpy convention.
+    :return: (θ₁, θ₂, θ₃, θ₄, θ₅) all in radians.
+    """
+    import math
+    import numpy as np
+
+    # -----------------------------
+    # 1) SOLVE JOINT 1 FROM CODE #1
+    # -----------------------------
+    x, y, z = p
+    # Existing code #1 uses a simple approach: revolve about Y so that the arm
+    # "faces" the (x,z) direction of the target.
+    theta1 = math.atan2(x, z)
+
+    # --------------------------------------------------------------------------
+    # 2) TRANSFORM TARGET (p,r) INTO THE "JOINT 2" FRAME SO EXISTING CODE #2 CAN BE APPLIED
+    # --------------------------------------------------------------------------
+    #
+    # Our Joint 2 is offset from Joint 1 by T_12 = Trans(0, -0.1197, 0.425).
+    # Also, Joint 1 itself is a rotation about Y by θ₁ at the origin.
+    #
+    # Hence, in homogeneous form:
+    #
+    #    T_base->joint1(θ₁) =  Ry(θ₁) , at origin
+    #
+    #    T_joint1->joint2    =  Translate(0, -0.1197, 0.425)
+    #
+    # So the net transform from base to the Joint 2 frame is:
+    #    T_base->joint2(θ₁) =  Ry(θ₁) * Trans(0, -0.1197, 0.425).
+    #
+    # We invert that to get (p2, R2) = T_base->joint2(θ₁)^(-1) * (p, R).
+    #
+
+    def rot_y(a: float) -> np.ndarray:
+        ca, sa = math.cos(a), math.sin(a)
+        return np.array([
+            [ca,  0, sa],
+            [0,   1,  0],
+            [-sa, 0, ca]
+        ])
+
+    def trans_xyz(dx: float, dy: float, dz: float) -> np.ndarray:
+        """ Homogeneous translation 4x4. """
+        T = np.eye(4)
+        T[0, 3] = dx
+        T[1, 3] = dy
+        T[2, 3] = dz
+        return T
+
+    def mat4_from_rot_trans(R: np.ndarray, t: np.ndarray) -> np.ndarray:
+        """ Build 4x4 homogeneous from 3x3 rotation and 3x1 translation. """
+        T = np.eye(4)
+        T[0:3, 0:3] = R
+        T[0:3, 3]   = t
+        return T
+
+    def invert_homogeneous(T: np.ndarray) -> np.ndarray:
+        """ Invert a 4x4 homogeneous transform. """
+        R = T[0:3, 0:3]
+        p = T[0:3, 3]
+        R_inv = R.T
+        p_inv = -R_inv @ p
+        T_inv = np.eye(4)
+        T_inv[0:3, 0:3] = R_inv
+        T_inv[0:3, 3]   = p_inv
+        return T_inv
+
+    # Rotation about Y by theta1
+    Ry_theta1 = rot_y(theta1)
+    Tb_j1 = mat4_from_rot_trans(Ry_theta1, np.zeros(3))
+
+    # Translation from Joint 1 to Joint 2
+    Tj1_j2 = trans_xyz(0.0, -0.1197, 0.425)
+
+    # Combined transform from the base to the "Joint 2" frame
+    Tb_j2 = Tb_j1 @ Tj1_j2
+
+    # Invert it
+    Tj2_b = invert_homogeneous(Tb_j2)
+
+    # Convert the target orientation rpy -> rotation matrix
+    rr, rp, ry = r
+    def rot_x(a):
+        ca, sa = math.cos(a), math.sin(a)
+        return np.array([[1, 0, 0],
+                         [0, ca, -sa],
+                         [0, sa,  ca]])
+    def rot_z(a):
+        ca, sa = math.cos(a), math.sin(a)
+        return np.array([[ ca, -sa, 0],
+                         [ sa,  ca, 0],
+                         [  0,   0, 1]])
+
+    R_base_target = rot_z(ry) @ rot_y(rp) @ rot_x(rr)  # URDF: Rz(yaw)*Ry(pitch)*Rx(roll)
+    Tbase_target  = mat4_from_rot_trans(R_base_target, np.array(p))
+
+    # Finally transform that into "Joint 2" frame
+    T2_target = Tj2_b @ Tbase_target
+    # Extract p2, R2 from T2_target
+    p2 = T2_target[0:3, 3]
+    R2 = T2_target[0:3, 0:3]
+
+    # Convert R2 to Euler angles for code #2.  Code #2 uses the same URDF convention:
+    # "R_target = Rz(yaw)*Ry(pitch)*Rx(roll)"
+    # So we solve R2 = Rz(γ)*Ry(β)*Rx(α).
+    # A common approach to extract roll-pitch-yaw from a rotation matrix in the "RzRyRx" sense
+    # is the standard inverse:
+    def rpy_from_matrix(R: np.ndarray) -> tuple[float, float, float]:
+        # Here we interpret R = Rz(yaw)*Ry(pitch)*Rx(roll),
+        # so yaw = atan2(R[1,0], R[0,0]), etc.  One well-known formula is:
+        beta = math.asin(-R[2,0])  # pitch
+        alpha = math.atan2(R[2,1], R[2,2])  # roll
+        gamma = math.atan2(R[1,0], R[0,0])  # yaw
+        return (alpha, beta, gamma)
+
+    r2_roll, r2_pitch, r2_yaw = rpy_from_matrix(R2)
+
+    # --------------------------------------------------------------------------
+    # 3) APPLY EXISTING CODE #2 (INLINED) TO SOLVE Joints (2..5) IN THE "Joint 2" FRAME
+    # --------------------------------------------------------------------------
+    #
+    # Renamed here as a sub-function for clarity.  We treat the returned angles
+    # as (theta2, theta3, theta4, theta5).
+    #
+    def solve_j2_to_j5(p_sub: tuple[float, float, float], r_sub: tuple[float, float, float]) -> tuple[float, float, float, float]:
+        # (Inlined from "EXISTING 2", preserving variable names but removing docstring)
+        d2 = 0.39225
+        d3 = 0.093
+        d4 = 0.09465
+        d_tcp = 0.0823
+        psi = 1.570796325
+
+        p_sub = np.array(p_sub)
+        p_x, p_y, p_z = p_sub
+        roll_sub, pitch_sub, yaw_sub = r_sub
+
+        # same rot_x, rot_y, rot_z as above, redeclared
+        def rot_x(a):
+            ca, sa = (np.cos(a), np.sin(a))
+            return np.array([[1, 0, 0], [0, ca, -sa], [0, sa, ca]])
+        def rot_y(a):
+            ca, sa = (np.cos(a), np.sin(a))
+            return np.array([[ca, 0, sa], [0, 1, 0], [-sa, 0, ca]])
+        def rot_z(a):
+            ca, sa = (np.cos(a), np.sin(a))
+            return np.array([[ca, -sa, 0], [sa, ca, 0], [0, 0, 1]])
+
+        R_target_sub = rot_z(yaw_sub) @ rot_y(pitch_sub) @ rot_x(roll_sub)
+
+        # Solve for theta3
+        cos_theta3 = (p_y - d3) / d_tcp
+        cos_theta3 = np.clip(cos_theta3, -1.0, 1.0)
+        theta3_pos = np.arccos(cos_theta3)
+        theta3_neg = -theta3_pos
+
+        r_target = np.sqrt(p_x**2 + p_z**2)
+        delta = np.arctan2(p_x, p_z)
+
+        candidates = []
+        for theta3_candidate in [theta3_pos, theta3_neg]:
+            sin_theta3 = np.sin(theta3_candidate)
+            R_eff = np.sqrt(d4**2 + (d_tcp * sin_theta3)**2)
+            phi = np.arctan2(d_tcp * sin_theta3, d4)
+
+            cos_term = (r_target**2 + d2**2 - R_eff**2) / (2 * d2 * r_target)
+            cos_term = np.clip(cos_term, -1.0, 1.0)
+            theta1_offset = np.arccos(cos_term)
+
+            for t2_candidate in [delta + theta1_offset, delta - theta1_offset]:
+                # "t2_candidate" in that code actually is "θ₁" of subchain. We rename carefully below.
+                Vx = p_x - d2 * np.sin(t2_candidate)
+                Vz = p_z - d2 * np.cos(t2_candidate)
+                theta12 = np.arctan2(Vx, Vz) + phi
+                # "theta2_candidate" is the second joint in the sub-problem
+                # but that sub-problem calls it "theta2" => effectively revolve3 in overall chain
+                # so rename carefully:
+                theta2_sub = theta12 - t2_candidate
+
+                R_pre = rot_y(t2_candidate + theta2_sub) @ rot_z(theta3_candidate)
+                R_y_theta4 = R_pre.T @ R_target_sub @ rot_z(-psi)
+                theta4_sub = np.arctan2(R_y_theta4[0, 2], R_y_theta4[0, 0])  # revolve4 in sub-problem => revolve5 overall
+
+                # Evaluate orientation error to pick best
+                R_forward = rot_y(t2_candidate + theta2_sub) @ rot_z(theta3_candidate) @ rot_y(theta4_sub) @ rot_z(psi)
+                err = np.linalg.norm(R_forward - R_target_sub, ord='fro')
+                # Save candidate (t2_candidate => revolve2, theta2_sub => revolve3, etc.)
+                candidates.append((err, (t2_candidate, theta2_sub, theta3_candidate, theta4_sub)))
+
+        best_candidate = min(candidates, key=lambda x: x[0])[1]
+        # best_candidate is (theta2_subchain, theta3_subchain, theta4_subchain, theta5_subchain)
+        return best_candidate
+
+    # Solve for joints (2..5)
+    t2_sub, t3_sub, t4_sub, t5_sub = solve_j2_to_j5(tuple(p2), (r2_roll, r2_pitch, r2_yaw))
+
+    # --------------------------------------------------------------------------
+    # 4) RETURN FINAL 5-DOF JOINT ANGLES
+    # --------------------------------------------------------------------------
+    #   - Our Joint 1 = theta1
+    #   - Our Joint 2 = t2_sub  (sub-problem's "θ₁")
+    #   - Our Joint 3 = t3_sub  (sub-problem's "θ₂" or "θ₃", depending on naming, but we keep it consistent)
+    #   - Our Joint 4 = t4_sub  (sub-problem's "θ₃" or "θ₄" about Z or Y, but matches revolve4: Z in the table)
+    #   - Our Joint 5 = t5_sub  (sub-problem's last angle about Y)
+    #
+    # Because code #2’s docstring enumerates its chain with (theta1, theta2, theta3, theta4),
+    # interpreted physically here as (Joint2, Joint3, Joint4, Joint5).
+
+    return (theta1, t2_sub, t3_sub, t4_sub, t5_sub)

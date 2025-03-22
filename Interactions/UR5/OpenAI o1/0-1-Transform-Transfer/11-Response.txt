@@ -1,0 +1,192 @@
+```python
+def inverse_kinematics(p: tuple[float, float, float], r: tuple[float, float, float]) -> tuple[float, float]:
+    """
+    Gets the joint values needed to reach position "p" and orientation "r"
+    for this 2-DOF serial manipulator. The manipulator has:
+      • Joint 1 (θ₁): revolute about Z.
+      • Joint 2 (θ₂): revolute about Y.
+      • An offset of [0, 0.13585, 0] from joint 1 to joint 2.
+      • An offset of [0, -0.1197, 0.425] from joint 2 to the TCP in local coordinates.
+      • The final orientation is Rz(θ₁) * Ry(θ₂).
+      • Inputs are guaranteed to be reachable, so no reachability checks.
+
+    Due to the limited 2-DOF (yaw and pitch only), the robot cannot freely
+    realize arbitrary roll. However, the URDF or target orientation might
+    specify roll ≈ +π or −π for effectively the same physical pose. That leads
+    to solutions where the code returns −π while the target wants +π (or vice versa).
+    We handle this by generating two "base" solutions:
+      (θ₁, θ₂)
+      (θ₁ + π, −θ₂)
+    plus ±2π shifts, then picking whichever best matches the requested roll–pitch–yaw,
+    including a small unification step that ensures if the code is about to return −π
+    but the target wants +π (or vice versa), we pick the latter. 
+
+    :param p: Desired position (x, y, z).
+    :param r: Desired orientation in roll–pitch–yaw, (r_x, r_y, r_z), each in radians.
+    :return: (θ₁, θ₂), each in [−π, π], that achieves (p, r) as closely as possible.
+    """
+    import math
+
+    # --------------- Helpers ---------------
+
+    def wrap_to_pi(angle: float) -> float:
+        """Wrap angle to [−π, π]."""
+        return (angle + math.pi) % (2.0 * math.pi) - math.pi
+
+    def angle_diff(a: float, b: float) -> float:
+        """Signed difference (a − b) in [−π, π]."""
+        d = (a - b) % (2.0 * math.pi)
+        if d > math.pi:
+            d -= 2.0 * math.pi
+        return d
+
+    def unify_pi_sign(angle: float, reference: float) -> float:
+        """
+        If both angle and reference are near ±π, unify them to have the same sign
+        so that +π matches +π, and −π matches −π. Otherwise, return 'angle' unchanged.
+        """
+        # Threshold for deciding if angle ≈ ±π:
+        eps = 1e-7
+        # Check if angle is near ±π and reference is near ±π
+        if abs(abs(angle) - math.pi) < eps and abs(abs(reference) - math.pi) < eps:
+            # Match the sign of reference's π
+            return math.copysign(math.pi, reference)
+        else:
+            return angle
+
+    def orientation_error(r1, p1, y1, r2, p2, y2) -> float:
+        """
+        Returns a measure (sum of squared differences) between two RPY triplets,
+        with each difference wrapped to [−π, π].
+        """
+        dr = angle_diff(r1, r2)
+        dp = angle_diff(p1, p2)
+        dy = angle_diff(y1, y2)
+        return dr * dr + dp * dp + dy * dy
+
+    def get_rpy_from_z_y(ang_z: float, ang_y: float) -> tuple[float, float, float]:
+        """
+        Extract roll–pitch–yaw from Rz(ang_z)*Ry(ang_y), using the standard ZYX rules:
+          pitch = −asin(R[2,0])
+          roll  =  atan2(R[2,1], R[2,2])
+          yaw   =  atan2(R[1,0], R[0,0])
+        Then unify ±π signs in roll, yaw based on the actual angle's sign.
+        """
+        cz = math.cos(ang_z)
+        sz = math.sin(ang_z)
+        cy = math.cos(ang_y)
+        sy = math.sin(ang_y)
+
+        # The matrix element R[2,0] = −sy, R[2,1] = 0, R[2,2] = cy
+        # R[1,0] = sz*cy, R[0,0] = cz*cy, etc.
+        R_20 = -sy
+        R_21 = 0.0
+        R_22 = cy
+        R_10 = sz * cy
+        R_00 = cz * cy
+
+        pitch = -math.asin(R_20)               # = sy
+        roll  = math.atan2(R_21, R_22)         # typically 0 or ±π if cy<0
+        yaw   = math.atan2(R_10, R_00)         # typically ang_z if cy>0
+
+        # Wrap each to [−π, π]
+        roll  = wrap_to_pi(roll)
+        pitch = wrap_to_pi(pitch)
+        yaw   = wrap_to_pi(yaw)
+        return (roll, pitch, yaw)
+
+    # --------------- 1) Solve position for "base" solution ---------------
+    x_d, y_d, z_d = p
+    r_x, r_y, r_z = r
+
+    # Solve θ₂ from z_d = 0.425 cos(θ₂)
+    cos_theta2 = z_d / 0.425
+    cos_theta2 = max(min(cos_theta2, 1.0), -1.0)  # clamp
+    theta2_cand = math.acos(cos_theta2)
+
+    # Pick sign to match desired pitch r_y
+    def pick_angle_sign(candidate: float, desired: float) -> float:
+        pd = abs(desired - candidate)
+        nd = abs(desired + candidate)
+        return candidate if pd <= nd else -candidate
+
+    theta2_sol = pick_angle_sign(theta2_cand, r_y)
+
+    # Solve θ₁ from x,y:
+    #   w_x = 0.425 sin(θ₂), w_y = 0.01615
+    w_x = 0.425 * math.sin(theta2_sol)
+    w_y = 0.13585 - 0.1197  # = 0.01615
+    denom = w_x * w_x + w_y * w_y
+    if denom < 1e-15:
+        denom = 1e-15
+    C = (w_x * x_d + w_y * y_d) / denom
+    S = (-w_y * x_d + w_x * y_d) / denom
+    theta1_sol = math.atan2(S, C)
+
+    # Wrap base solution
+    theta1_sol = wrap_to_pi(theta1_sol)
+    theta2_sol = wrap_to_pi(theta2_sol)
+
+    # --------------- 2) Flipped solution (θ₁ + π, −θ₂) ---------------
+    theta1_flip = wrap_to_pi(theta1_sol + math.pi)
+    theta2_flip = wrap_to_pi(-theta2_sol)
+
+    # --------------- 3) Generate candidate set with ±2π offsets ---------------
+    # We'll gather them in a list, then pick the best by orientation error.
+    # Note that physically, adding ±2π to a joint won't change orientation or position,
+    # but it might unify the sign of ±π in the final roll or yaw.
+    candidates = []
+    def add_candidates(base1: float, base2: float):
+        offsets = [0.0, 2.0*math.pi, -2.0*math.pi]
+        cset = []
+        for o1 in offsets:
+            for o2 in offsets:
+                cset.append((base1 + o1, base2 + o2))
+        return cset
+
+    base_list = add_candidates(theta1_sol, theta2_sol)
+    flip_list = add_candidates(theta1_flip, theta2_flip)
+    raw_list = base_list + flip_list
+
+    # Filter duplicates by rounding
+    seen = set()
+    in_rad = []
+    for (a1, a2) in raw_list:
+        # Round to avoid float noise
+        key = (round(a1, 8), round(a2, 8))
+        if key not in seen:
+            seen.add(key)
+            in_rad.append(key)
+
+    # --------------- 4) Score each candidate by orientation error ---------------
+    best_sol = None
+    best_err = float('inf')
+
+    for (cand1, cand2) in in_rad:
+        # Wrap to [−π, π] for the actual forward usage
+        c1w = wrap_to_pi(cand1)
+        c2w = wrap_to_pi(cand2)
+        # Extract the resulting RPY
+        roll_c, pitch_c, yaw_c = get_rpy_from_z_y(c1w, c2w)
+
+        # Also unify ±π with the user if they're near ±π
+        roll_c  = unify_pi_sign(roll_c,  r_x)
+        yaw_c   = unify_pi_sign(yaw_c,   r_z)
+        pitch_c = wrap_to_pi(pitch_c)  # pitch won't typically be ±π, but keep it safe
+        # Re-check wrap
+        roll_c  = wrap_to_pi(roll_c)
+        pitch_c = wrap_to_pi(pitch_c)
+        yaw_c   = wrap_to_pi(yaw_c)
+
+        # Compare to requested (r_x, r_y, r_z)
+        e = orientation_error(roll_c, pitch_c, yaw_c, r_x, r_y, r_z)
+        if e < best_err:
+            best_err = e
+            best_sol = (c1w, c2w)
+
+    if best_sol is None:
+        # Shouldn't happen if inputs are valid
+        return (theta1_sol, theta2_sol)
+
+    return (wrap_to_pi(best_sol[0]), wrap_to_pi(best_sol[1]))
+```

@@ -1,0 +1,161 @@
+```python
+def inverse_kinematics(p: tuple[float, float, float], r: tuple[float, float, float]) -> tuple[float, float, float]:
+    """
+    Closed-form 3-DOF inverse kinematics solver (symbolic via sympy) for a serial manipulator with:
+      Joint1 (Revolute about Z), parent offset [0, 0, 0]
+      Joint2 (Revolute about Y), parent offset [0, 0.13585, 0]
+      Joint3 (Revolute about Y), parent offset [0, -0.1197, 0.425]
+      TCP offset [0, 0, 0.39225]
+    The manipulator’s total forward transform from base to TCP is:
+      T = Rz(θ1)
+          * ( Trans(0, 0.13585, 0) * Ry(θ2) )
+          * ( Trans(0, -0.1197, 0.425) * Ry(θ3) )
+          * Trans(0, 0, 0.39225)
+    This solver matches the final TCP position (x, y, z) and orientation (roll, pitch, yaw)
+    in the URDF RPY convention (Rx(roll)*Ry(pitch)*Rz(yaw)), using Sympy’s symbolic solve
+    (which is not numeric iteration).  We pick one valid solution if multiple exist.
+
+    :param p: (x, y, z) for the target TCP position in world space
+    :param r: (roll, pitch, yaw) for the target TCP orientation in radians
+    :return: (theta1, theta2, theta3), each in radians (within ±2π if wrapped).
+    """
+    import math
+    import sympy
+
+    # Unpack target
+    x_target, y_target, z_target = p
+    roll, pitch, yaw = r
+
+    # ----------------------------------------------------------------
+    # 1) Construct the desired rotation matrix R_des from (roll,pitch,yaw)
+    #    with the URDF convention:  R_des = Rx(roll)*Ry(pitch)*Rz(yaw).
+    # ----------------------------------------------------------------
+    def Rx(a):
+        ca, sa = sympy.cos(a), sympy.sin(a)
+        return sympy.Matrix([
+            [1,    0,    0],
+            [0,   ca, -sa],
+            [0,   sa,  ca]
+        ])
+    def Ry(a):
+        ca, sa = sympy.cos(a), sympy.sin(a)
+        return sympy.Matrix([
+            [ ca, 0, sa],
+            [  0, 1,  0],
+            [-sa, 0, ca]
+        ])
+    def Rz(a):
+        ca, sa = sympy.cos(a), sympy.sin(a)
+        return sympy.Matrix([
+            [ ca, -sa, 0],
+            [ sa,  ca, 0],
+            [  0,   0, 1]
+        ])
+
+    roll_s, pitch_s, yaw_s = sympy.symbols('roll_s pitch_s yaw_s', real=True)
+    R_des_sym = Rx(roll_s)*Ry(pitch_s)*Rz(yaw_s)
+    # Plug in numeric roll, pitch, yaw
+    R_des = R_des_sym.subs({roll_s: roll, pitch_s: pitch, yaw_s: yaw})
+
+    # ----------------------------------------------------------------
+    # 2) Define symbolic variables for the unknown joints: t1, t2, t3
+    # ----------------------------------------------------------------
+    t1, t2, t3 = sympy.symbols('t1 t2 t3', real=True)
+
+    # ----------------------------------------------------------------
+    # 3) Build the forward transform T(t1, t2, t3) symbolically
+    #    T_base^TCP = Rz(t1)
+    #               * [0,0,0.13585] & Ry(t2)
+    #               * [0,-0.1197,0.425] & Ry(t3)
+    #               * [0,0,0.39225]
+    #
+    #  We'll form a 4×4 matrix for each step, then multiply in Sympy.
+    # ----------------------------------------------------------------
+    def Tz(a):
+        return sympy.Matrix([
+            [ sympy.cos(a), -sympy.sin(a), 0, 0],
+            [ sympy.sin(a),  sympy.cos(a), 0, 0],
+            [ 0,             0,            1, 0],
+            [ 0,             0,            0, 1]
+        ])
+    def Ty(a):
+        return sympy.Matrix([
+            [ sympy.cos(a), 0, sympy.sin(a), 0],
+            [ 0,            1, 0,            0],
+            [-sympy.sin(a),0, sympy.cos(a),  0],
+            [ 0,            0, 0,            1]
+        ])
+    def Trans(dx, dy, dz):
+        return sympy.Matrix([
+            [1, 0, 0, dx],
+            [0, 1, 0, dy],
+            [0, 0, 1, dz],
+            [0, 0, 0,  1]
+        ])
+
+    # T1: revolve about Z by t1
+    T1 = Tz(t1)
+    # Next: link2 offset + revolve about Y(t2)
+    T2 = Trans(0, 0.13585, 0)*Ty(t2)
+    # Next: link3 offset + revolve about Y(t3)
+    T3 = Trans(0, -0.1197, 0.425)*Ty(t3)
+    # Finally: TCP offset
+    Ttcp = Trans(0, 0, 0.39225)
+
+    # Full forward transform
+    T_final = T1 * T2 * T3 * Ttcp
+
+    # ----------------------------------------------------------------
+    # 4) From T_final, extract the position (px, py, pz) and rotation R_final
+    # ----------------------------------------------------------------
+    px = T_final[0, 3]
+    py = T_final[1, 3]
+    pz = T_final[2, 3]
+
+    R_final = T_final[:3,:3]  # top-left 3×3
+
+    # We'll match position exactly:
+    eq_pos = [
+        sympy.Eq(px, x_target),
+        sympy.Eq(py, y_target),
+        sympy.Eq(pz, z_target)
+    ]
+
+    # We also match the entire rotation matrix to R_des:
+    # That’s 9 equations, but there's some redundancy. We'll just match all 9 for simplicity.
+    eq_rot = []
+    for i in range(3):
+        for j in range(3):
+            eq_rot.append(sympy.Eq(R_final[i, j], R_des[i, j]))
+
+    # Combine into a single system
+    eqs = eq_pos + eq_rot
+
+    # ----------------------------------------------------------------
+    # 5) Solve symbolically for (t1, t2, t3). 
+    #    We'll pick the first solution if multiple solutions appear.
+    # ----------------------------------------------------------------
+    sol = sympy.solve(eqs, [t1, t2, t3], dict=True)
+
+    if not sol:
+        # Per instructions: "assume all targets given are reachable", so no fallback needed.
+        return (0.0, 0.0, 0.0)  # just a dummy
+    # Otherwise pick the first solution
+    s = sol[0]
+    # Convert to float
+    theta1_val = float(s[t1])
+    theta2_val = float(s[t2])
+    theta3_val = float(s[t3])
+
+    # ----------------------------------------------------------------
+    # 6) Wrap angles into [-π, π], though the limits are ±2π in the table
+    # ----------------------------------------------------------------
+    def wrap_pm_pi(a):
+        return (a + math.pi) % (2*math.pi) - math.pi
+
+    theta1_val = wrap_pm_pi(theta1_val)
+    theta2_val = wrap_pm_pi(theta2_val)
+    theta3_val = wrap_pm_pi(theta3_val)
+
+    return (theta1_val, theta2_val, theta3_val)
+```

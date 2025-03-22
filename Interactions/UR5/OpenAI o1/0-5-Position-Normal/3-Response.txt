@@ -1,0 +1,115 @@
+def inverse_kinematics(p: tuple[float, float, float]) -> tuple[float, float, float, float, float, float]:
+    """
+    Gets the joint values needed to reach position "p".
+    :param p: The position to reach in the form [x, y, z].
+    :return: A list of the values to set the links to for reaching position "p".
+    
+    This solution uses SymPy to construct a symbolic forward-kinematics model of the
+    robot (including its fixed end-effector orientation) and then solves the resulting
+    system of equations for the six joint angles in closed form.  It is assumed that
+    all targets [x, y, z] given are reachable and that we always want the end-effector
+    to maintain the same orientation it has when all joints are zero (i.e., RPY =
+    [0, 0, pi/2]).
+    """
+    import sympy
+
+    # Symbolic variables for the six joints
+    t1, t2, t3, t4, t5, t6 = sympy.symbols('t1 t2 t3 t4 t5 t6', real=True)
+
+    # Helper rotation/translation matrices (all angles in radians).
+    def rot_z(th):
+        return sympy.Matrix([
+            [sympy.cos(th), -sympy.sin(th), 0, 0],
+            [sympy.sin(th),  sympy.cos(th), 0, 0],
+            [0,              0,             1, 0],
+            [0,              0,             0, 1]
+        ])
+
+    def rot_y(th):
+        return sympy.Matrix([
+            [ sympy.cos(th), 0, sympy.sin(th), 0],
+            [ 0,             1, 0,             0],
+            [-sympy.sin(th), 0, sympy.cos(th), 0],
+            [ 0,             0, 0,             1]
+        ])
+
+    def trans(x, y, z):
+        return sympy.Matrix([
+            [1, 0, 0, x],
+            [0, 1, 0, y],
+            [0, 0, 1, z],
+            [0, 0, 0, 1]
+        ])
+
+    # From the table "DETAILS", construct forward-kinematics T_base->TCP symbolically:
+    # Joint 1: revolute about Z, at base
+    T01 = rot_z(t1)
+    # Joint 2: revolve about Y, offset +0.13585 in Y
+    T12 = trans(0, 0.13585, 0)*rot_y(t2)
+    # Joint 3: revolve about Y, offset +(-0.1197, 0.425) in (Y,Z)
+    T23 = trans(0, -0.1197, 0.425)*rot_y(t3)
+    # Joint 4: revolve about Y, offset +0.39225 in Z
+    T34 = trans(0, 0, 0.39225)*rot_y(t4)
+    # Joint 5: revolve about Z, offset +0.093 in Y
+    T45 = trans(0, 0.093, 0)*rot_z(t5)
+    # Joint 6: revolve about Y, offset +0.09465 in Z
+    T56 = trans(0, 0, 0.09465)*rot_y(t6)
+    # TCP: offset +0.0823 in Y, orientation fixed = RPY(0,0, pi/2) = rot_z(pi/2)
+    # but we incorporate that rotation into the final transform for matching
+    # the “home” orientation from the forward-kinematics with all joints zero.
+    T6TCP = trans(0, 0.0823, 0) * rot_z(sympy.pi/2)
+
+    # Full transform from base to TCP
+    T_base_TCP = T01 * T12 * T23 * T34 * T45 * T56 * T6TCP
+
+    # We want T_base_TCP's position to be (x, y, z), i.e. T[0,3], T[1,3], T[2,3].
+    x_des, y_des, z_des = p
+    eq_pos = [
+        T_base_TCP[0, 3] - x_des,
+        T_base_TCP[1, 3] - y_des,
+        T_base_TCP[2, 3] - z_des
+    ]
+
+    # We also want the final orientation to remain the same as the default orientation
+    # (i.e. RPY = [0, 0, pi/2]) for the end-effector in the base frame.
+    # That rotation matrix is:
+    #   Rz(pi/2) = [[0, -1,  0],
+    #               [1,  0,  0],
+    #               [0,  0,  1]]
+    # We match T_base_TCP[0:3,0:3] to that matrix exactly:
+    Rz90 = sympy.Matrix([
+        [0, -1,  0],
+        [1,  0,  0],
+        [0,  0,  1]
+    ])
+    eq_rot = []
+    for r in range(3):
+        for c in range(3):
+            eq_rot.append(T_base_TCP[r, c] - Rz90[r, c])
+
+    # Altogether: 6 equations in 6 unknowns
+    all_eqs = eq_pos + eq_rot
+
+    # Solve symbolically
+    sol = sympy.solve(all_eqs, [t1, t2, t3, t4, t5, t6], dict=True)
+
+    if not sol:
+        # Should not happen since the problem statement says all targets are reachable,
+        # but just in case, return zeros:
+        return (0.0, 0.0, 0.0, 0.0, 0.0, 0.0)
+
+    # If multiple solutions, pick the first
+    # (A full implementation might filter or choose a solution that fits joint limits,
+    #  but the problem states these are effectively unbounded ±2π.)
+    best_solution = sol[0]
+
+    # Convert symbolic solution to floating-point
+    j1 = float(best_solution[t1]) % (2*sympy.pi)
+    j2 = float(best_solution[t2]) % (2*sympy.pi)
+    j3 = float(best_solution[t3]) % (2*sympy.pi)
+    j4 = float(best_solution[t4]) % (2*sympy.pi)
+    j5 = float(best_solution[t5]) % (2*sympy.pi)
+    j6 = float(best_solution[t6]) % (2*sympy.pi)
+
+    # Optionally shift angles into [-pi, +pi], etc. For simplicity, just return as is.
+    return (j1, j2, j3, j4, j5, j6)

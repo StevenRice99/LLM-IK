@@ -1,0 +1,230 @@
+```python
+def inverse_kinematics(p: tuple[float, float, float]) -> tuple[float, float, float, float, float]:
+    """
+    Closed-form inverse kinematics for the 5-DOF manipulator, returning (q1,q2,q3,q4,q5).
+    The last joint (q5) is a rotation about Z which does not affect the TCP position,
+    so for position-only IK we set q5 = 0. That leaves 4 unknowns (q1,q2,q3,q4), which
+    can be solved in closed form by extending the approach of a planar 3R chain plus a
+    rotation about Z at the base.
+
+    Notation and geometry (following the URDF "DETAILS" table and sub-chain logic):
+      • Joint1 rotates about Z at the base.  
+      • Joints2..4 rotate about Y.  
+      • Joint5 rotates about Z (ignored here for position, so q5=0).  
+      • The net effect in the x–z plane (after “projecting” out Joint1’s rotation) is
+        that Joints2..4 form a 3R chain about Y.  
+      • By convention, there is a small net offset along Y in the physical links,
+        which we treat similarly to the “-0.0267” approach from the simpler 3R example,
+        but now we allow the third revolve (q4) to be non-zero.  
+
+    Steps in the code:
+      1) Let (x, y, z) be the desired TCP position in the world frame.  
+      2) Compute q1 = base rotation about Z. We consider two candidate base angles, as
+         the manipulator can flip around ±π.  
+      3) In the frame after rotating by -q1 about Z, the sub-chain of Joints2..4 is
+         purely in the plane about Y. We treat the net 3R chain with lengths L1=0.425,
+         L2=0.39225, L3=0.09465, plus the small offset 0.093 in Y.  
+      4) Define T = (q2 + q3 + q4). We consider T in {psi, psi+π} for plane solutions,
+         similar to the method in the “Existing code #8” approach.  
+      5) For each T choice, we do a 2R closed-form (for q2, q3) to reach the
+         “wrist-center” [the TCP minus L3 in direction T], then set q4 = T - (q2+q3).  
+      6) Evaluate forward kinematics for all candidate (q1,q2,q3,q4) solutions,
+         pick the one with minimal positioning error to (x, y, z).  
+      7) Set q5=0 and normalize angles to [-π, π].  
+
+    :param p: A 3D tuple (x, y, z) for the desired TCP position.
+    :return: (q1, q2, q3, q4, q5) in radians, each normalized to [-π, π].
+    """
+    import math
+
+    x, y, z = p
+
+    # Link lengths matching a 3R chain about Y:
+    L1 = 0.425
+    L2 = 0.39225
+    L3 = 0.09465
+
+    # The total constant offset in Y from the base to the effective plane. 
+    # From the URDF: 0.13585 - 0.1197 + 0.093 = 0.10915, but often we see net ~ -0.0267 in examples.
+    # We'll keep sign explicit: the simplest approach from “Existing code #8” uses y=-0.0267,
+    # but that was a simplified chain. Instead, let's keep the offset = y_offset for matching
+    # actual geometry. Observing the typical usage in code #4 or #8, we call it:
+    y_offset = 0.13585 - 0.1197 + 0.093  # = 0.10915
+    # We then rename it to sign-correct the final chain.  Let's assume the net sign is +0.10915
+    # The manipulator effectively is "shifted" in Y. We'll incorporate that in the error check
+    # rather than forcibly rewriting the global coordinates.
+
+    # We'll define a forward-kinematics of the "planar sub-chain" (q2,q3,q4) after rotating
+    # by q1 about Z, ignoring the offset in Y except for validation. The chain in x–z is:
+    #   x_planar = L1*sin(q2) + L2*sin(q2+q3) + L3*sin(q2+q3+q4)
+    #   z_planar = L1*cos(q2) + L2*cos(q2+q3) + L3*cos(q2+q3+q4)
+    # Then we re-rotate by q1 about Z to match world frame. Meanwhile y is anchored near y_offset.
+
+    def fk_planar(theta2, theta3, theta4):
+        """
+        Forward kinematics in the sub-chain's local coordinate system (the one
+        after 'unrolling' q1 about Z). Returns (x_p, z_p).
+        """
+        s23 = math.sin(theta2 + theta3)
+        c23 = math.cos(theta2 + theta3)
+        s234 = math.sin(theta2 + theta3 + theta4)
+        c234 = math.cos(theta2 + theta3 + theta4)
+
+        x_p = L1 * math.sin(theta2) + L2 * s23 + L3 * s234
+        z_p = L1 * math.cos(theta2) + L2 * c23 + L3 * c234
+        return (x_p, z_p)
+
+    # We'll define a function to compute the actual 3D position in world coords,
+    # given (q1, q2, q3, q4). We'll then measure how far is that from (x,y,z).
+    def fk_3d(q1_, q2_, q3_, q4_):
+        x_p, z_p = fk_planar(q2_, q3_, q4_)
+        # rotate by q1 about Z back to world coords
+        x_w = x_p * math.cos(q1_) - 0.0 * math.sin(q1_)  # there's no local y_p in plane, ignoring
+        y_w = x_p * math.sin(q1_)  # effectively the "planar x" rotates into world X/Y
+        # But we also have a non-zero (approx +0.10915) offset in y.
+        # We'll add that offset:
+        y_w += y_offset
+        z_w = z_p
+        return (x_w, y_w, z_w)
+
+    # We define two main angles for the base q1, which is typically “atan2(y, x)”
+    # plus possible π shift. But in practice, since we want all solutions, we can
+    # consider q1 in {atan2(y, x), atan2(y, x)+2π} or just a single continuous version.
+    # We'll gather multiple candidate solutions from the T-plane approach, then pick best.
+    q1_nominal = math.atan2(y, x)
+
+    # We'll define two T options for T = (q2+q3+q4):
+    #   T = psi or T = psi + π,
+    #   where psi = atan2( (x'), (z') ) or so. But let's do it in world coords
+    #   ignoring q1 for the moment. We'll do the standard approach from code #8:
+    #   psi = atan2(x, z).
+    psi = math.atan2(x, z)
+    T_options = [psi, psi + math.pi]
+
+    # We'll store candidate solutions as (error, q1, q2, q3, q4).
+    candidates = []
+
+    # We'll define a function to measure error
+    def position_error(q1_, q2_, q3_, q4_):
+        x_w, y_w, z_w = fk_3d(q1_, q2_, q3_, q4_)
+        return math.sqrt((x_w - x)**2 + (y_w - y)**2 + (z_w - z)**2)
+
+    # For each T in T_options, we define "wrist center" approach:
+    # Let the final link L3 be "subtracted" from p in direction T. But recall we do that
+    # in the local plane after rotating out q1. We'll do a simpler approach: we just replicate
+    # the 2R approach from code #8, but we do it in the "plane" for (q2,q3) and then get q4 = T - (q2+q3).
+    #
+    # Step: We do not yet fix q1. We'll try q1 = q1_nominal, q1_nominal ± π, etc. But let's keep it simpler
+    # and just do q1 = q1_nominal. Then for T in T_options, we define the local "wrist center"
+    # in the sub-chain frame. But that requires us to rotate (x - offset_y, y - offset_y, z) by -q1 about Z.
+    #
+    # However, in many 5-DOF arms, the base q1 is typically the global rotation needed to realign x,y.
+    # Then the sub-chain is entirely in the XZ plane of that local frame. So let's define that local frame:
+
+    def to_local(q1_, X, Y, Z):
+        # Rotate (X, Y, Z) about Z by -q1_
+        Xl = X * math.cos(q1_) + Y * math.sin(q1_)
+        Yl = -X * math.sin(q1_) + Y * math.cos(q1_)
+        Zl = Z
+        return (Xl, Yl, Zl)
+
+    # Single pass for q1 = q1_nominal in [-pi,pi], but also consider q1±π to handle flipping.
+    q1_options = [q1_nominal, q1_nominal + math.pi]
+    for q1cand in q1_options:
+        # normalize q1cand to [-pi, pi]
+        def norm_angle(a):
+            while a > math.pi:
+                a -= 2*math.pi
+            while a < -math.pi:
+                a += 2*math.pi
+            return a
+        q1n = norm_angle(q1cand)
+
+        # local target = after rotating out q1n about Z, minus the offset in Y
+        Xl, Yl, Zl = to_local(q1n, x, y, z)
+        # We also subtract the link offset y_offset from Yl, because in local frame
+        # we want the plane to be around Yl=0. So Yl' = Yl - y_offset. 
+        # But we have to rotate that offset as well or just subtract it. 
+        # Actually, because y_offset is along the same world Y direction, after rotating by -q1n, 
+        # part of that offset might bleed into local Xl. Let's do it carefully.
+        # The offset is (0, y_offset, 0) in world coords. Let's transform it to local coords too:
+        offX, offY, offZ = to_local(q1n, 0.0, y_offset, 0.0)
+        # Now subtract:
+        Xl -= offX
+        Yl -= offY
+        Zl -= offZ
+
+        # Now we define for each T in T_options:
+        for Tcand in T_options:
+            # The "wrist center" in local plane is the point we want the 2R sub-chain (q2,q3)
+            # to reach, ignoring L3. So we define (x_wc, z_wc) = (Xl, Zl) - L3 in direction Tcand
+            # in the plane. That direction in local plane is (sin Tcand, cos Tcand).
+            # We'll ignore Yl for the plane, but note that Yl must be near 0 for a feasible solution.
+            # The chain is strictly in XZ if rotating about Y with no additional offset.
+            x_wc = Xl - L3 * math.sin(Tcand)
+            z_wc = Zl - L3 * math.cos(Tcand)
+
+            # Now we do a standard 2R formula: We have link lengths L1, L2. We want them to reach (x_wc, z_wc).
+            #   r_wc = sqrt(x_wc^2 + z_wc^2)
+            r_wc = math.sqrt(x_wc**2 + z_wc**2)
+            # law of cosines for the bend angle between L1 and L2 => call that "beta"
+            c_beta = (r_wc**2 - L1**2 - L2**2)/(2*L1*L2)
+            # clamp to [-1, +1]
+            c_beta = max(-1.0, min(1.0, c_beta))
+
+            for sign_beta in [+1, -1]:
+                try:
+                    beta = sign_beta * math.acos(c_beta)
+                except ValueError:
+                    # if c_beta is out of [-1,1], skip
+                    continue
+
+                # Then we define q2 and q3 from geometry:
+                # alpha = atan2(x_wc, z_wc) => direction from origin
+                alpha = math.atan2(x_wc, z_wc)
+
+                # delta = angle from the sub-link
+                #   delta = atan2(L2 sin beta, L1 + L2 cos beta)
+                denom = (L1 + L2*math.cos(beta))
+                if abs(denom) < 1e-12:
+                    continue
+                delta = math.atan2(L2*math.sin(beta), denom)
+
+                # Then candidate q2 = alpha - delta
+                q2cand = alpha - delta
+                # q3cand = beta
+                q3cand = beta
+                # Then q4cand = Tcand - (q2 + q3)
+                q4cand = Tcand - (q2cand + q3cand)
+
+                # We now have (q1n, q2cand, q3cand, q4cand). Let's measure the final error
+                err = position_error(q1n, q2cand, q3cand, q4cand)
+                candidates.append((err, q1n, q2cand, q3cand, q4cand))
+
+    # If no candidates found, fallback
+    if not candidates:
+        return (0.0, 0.0, 0.0, 0.0, 0.0)
+
+    best_sol = min(candidates, key=lambda c: c[0])
+    _, qb1, qb2, qb3, qb4 = best_sol
+
+    # We fix q5=0 for position-only IK
+    qb5 = 0.0
+
+    # normalize angles
+    def normalize(a):
+        import math
+        while a > math.pi:
+            a -= 2*math.pi
+        while a < -math.pi:
+            a += 2*math.pi
+        return a
+
+    qb1 = normalize(qb1)
+    qb2 = normalize(qb2)
+    qb3 = normalize(qb3)
+    qb4 = normalize(qb4)
+    qb5 = normalize(qb5)
+
+    return (qb1, qb2, qb3, qb4, qb5)
+```

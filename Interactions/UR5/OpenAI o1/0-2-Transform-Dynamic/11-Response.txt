@@ -1,0 +1,169 @@
+```python
+def inverse_kinematics(p: tuple[float, float, float], r: tuple[float, float, float]) -> tuple[float, float, float]:
+    """
+    Closed-form analytical solution for the 3-DoF (Z-Y-Y) manipulator with link offsets:
+      Joint1(Z) at [0,0,0].
+      Joint2(Y) at [0,0.13585,0].
+      Joint3(Y) at [0,-0.1197,0.425].
+      Then TCP offset [0,0,0.39225].
+    Orientation r = [rx, ry, rz] is the URDF RPY, meaning R_des = Rz(rz)*Ry(ry)*Rx(rx).
+
+    Strategy:
+    1) Extract the base yaw q1 from R_des by matching rotation about Z.
+    2) Remove that yaw from the desired orientation to find the leftover pitch about Y (call it θ_leftover).
+       This is the sum (q2 + q3).
+    3) Rotate p into the frame after q1 (call that p'), then solve for q2, q3 using 4 constraints:
+       (x', y', z' match, and q2 + q3 = θ_leftover). This incorporates all offsets exactly.
+    4) Return (q1, q2, q3), each wrapped to ±2π.
+
+    The code assumes all targets are reachable (no reachability checks).
+    """
+
+    import math
+    import sympy
+
+    # ----------------------------
+    # 1) Build desired orientation R_des from r
+    #    Rz(rz)*Ry(ry)*Rx(rx)
+    # ----------------------------
+    rx, ry, rz = r
+    # symbolic or numeric, here numeric with sympy for clarity
+    c_rx, s_rx = math.cos(rx), math.sin(rx)
+    c_ry, s_ry = math.cos(ry), math.sin(ry)
+    c_rz, s_rz = math.cos(rz), math.sin(rz)
+
+    # Rz(rz)
+    Rz_mat = sympy.Matrix([[ c_rz, -s_rz, 0],
+                           [ s_rz,  c_rz, 0],
+                           [     0,     0, 1]])
+    # Ry(ry)
+    Ry_mat = sympy.Matrix([[ c_ry, 0, s_ry],
+                           [    0, 1,    0],
+                           [-s_ry, 0, c_ry]])
+    # Rx(rx)
+    Rx_mat = sympy.Matrix([[1,    0,     0],
+                           [0,  c_rx, -s_rx],
+                           [0,  s_rx,  c_rx]])
+    R_des = Rz_mat * Ry_mat * Rx_mat
+
+    # ----------------------------
+    # 2) Extract q1 from R_des by matching rotation about Z
+    #    q1 = atan2(R_des[1,0], R_des[0,0])
+    # ----------------------------
+    q1 = math.atan2(R_des[1,0], R_des[0,0])
+
+    # Remove q1 around Z from R_des => leftover rotation R_rem = Rz(-q1)*R_des
+    c1, s1 = math.cos(q1), math.sin(q1)
+    Rz_minus_q1 = sympy.Matrix([
+        [ c1,  s1, 0],
+        [-s1,  c1, 0],
+        [  0,   0, 1]
+    ])
+    R_rem = Rz_minus_q1 * R_des
+    # For a feasible orientation, R_rem should be a rotation purely about Y
+    # => leftover pitch = q2 + q3
+    # from the matrix of form Ry(θ), we get:
+    #   leftover pitch = atan2( R_rem[0,2], R_rem[0,0] )
+    leftover_pitch = math.atan2(R_rem[0,2], R_rem[0,0])
+
+    # ----------------------------
+    # 3) Solve position for q2,q3
+    #    We rotate p into the frame after q1: p' = Rz(-q1)*[x, y, z]
+    #    Then define forward kinematics for the sub-chain (joint2, joint3):
+    #      p_sub(q2,q3) = Ty(0.13585)*Ry(q2)* Ty(-0.1197)*Tz(0.425)*Ry(q3)* Tz(0.39225)* [0,0,0,1]
+    #    We want p_sub(q2,q3)[0..2] == p'
+    #    plus q2+q3 = leftover_pitch
+    # ----------------------------
+    x, y_, z_ = p
+    import numpy as np
+
+    # p' = Rz(-q1)*(p)
+    Rz_nq1 = np.array([[ c1,  s1, 0],
+                       [-s1,  c1, 0],
+                       [  0,   0, 1]], dtype=float)
+    p_base = np.array([x, y_, z_], dtype=float)
+    pprime = Rz_nq1 @ p_base
+
+    # Build symbolic variables q2, q3
+    q2_s, q3_s = sympy.symbols('q2_s q3_s', real=True)
+
+    # Build the transform for sub-chain in sympy:
+    def Ty(val):
+        return sympy.Matrix([
+            [1, 0, 0, 0 ],
+            [0, 1, 0, val],
+            [0, 0, 1, 0 ],
+            [0, 0, 0, 1 ]
+        ])
+    def Tz(val):
+        return sympy.Matrix([
+            [1, 0, 0, 0 ],
+            [0, 1, 0, 0 ],
+            [0, 0, 1, val],
+            [0, 0, 0, 1 ]
+        ])
+    def Ry_sym(theta):
+        c_ = sympy.cos(theta)
+        s_ = sympy.sin(theta)
+        return sympy.Matrix([
+            [ c_, 0,  s_, 0],
+            [  0, 1,   0, 0],
+            [-s_, 0,  c_, 0],
+            [  0, 0,   0, 1]
+        ])
+
+    T_sub = ( Ty(0.13585)
+              * Ry_sym(q2_s)
+              * Ty(-0.1197) * Tz(0.425)
+              * Ry_sym(q3_s)
+              * Tz(0.39225) )
+
+    # p_sub = T_sub * [0,0,0,1]
+    p_sub = T_sub * sympy.Matrix([0,0,0,1])
+
+    # We want p_sub[0..2] == pprime, plus (q2_s + q3_s = leftover_pitch).
+    eqs = []
+    eqs.append(sympy.Eq(p_sub[0], pprime[0]))
+    eqs.append(sympy.Eq(p_sub[1], pprime[1]))
+    eqs.append(sympy.Eq(p_sub[2], pprime[2]))
+    eqs.append(sympy.Eq(q2_s + q3_s, leftover_pitch))
+
+    sol = sympy.solve(eqs, [q2_s, q3_s], dict=True)
+
+    if not sol:
+        # Per instructions, we assume everything is reachable, so this is unexpected.
+        # Return something default or raise.
+        raise ValueError("No solution found (unexpected, given target is reachable).")
+
+    # We'll pick one solution that has q2,q3 in ±6.2831853. If multiple solutions, pick any.
+    def wrap_angle(a):
+        # put 'a' into [-pi, pi], then if needed ±2π
+        import math
+        a_mod = (float(a) + math.pi) % (2*math.pi) - math.pi
+        # if beyond ±2π, shift
+        while a_mod < -6.2831853:
+            a_mod += 2*math.pi
+        while a_mod > 6.2831853:
+            a_mod -= 2*math.pi
+        return a_mod
+
+    # define a small helper to check range
+    def in_range(x_):
+        return abs(x_) <= 6.2831853
+
+    # gather feasible solutions, pick first
+    for candidate in sol:
+        q2_c = wrap_angle(candidate[q2_s])
+        q3_c = wrap_angle(candidate[q3_s])
+        if in_range(q2_c) and in_range(q3_c):
+            # success
+            # also wrap q1
+            q1_c = wrap_angle(q1)
+            return (q1_c, q2_c, q3_c)
+
+    # if none within ±2π, return the first anyway
+    cand = sol[0]
+    return (wrap_angle(q1),
+            wrap_angle(cand[q2_s]),
+            wrap_angle(cand[q3_s]))
+```

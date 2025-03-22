@@ -1,0 +1,315 @@
+```python
+def inverse_kinematics(p: tuple[float, float, float], r: tuple[float, float, float]) -> tuple[float, float, float, float]:
+    """
+    Closed-form style inverse kinematics for a 4-DOF serial manipulator with joints:
+      • Joint 1 about Z
+      • Joints 2, 3, 4 about Y
+    Link offsets per the DETAILS:
+      • Joint 2 at [0, 0.13585, 0]
+      • Joint 3 at [0, -0.1197, 0.425]
+      • Joint 4 at [0, 0, 0.39225]
+      • TCP offset at [0, 0.093, 0]
+    Orientation is given as r = (roll, pitch, yaw) in radians.
+
+    Because joints 2-4 all rotate about the same (Y) axis, the robot has only one degree of freedom
+    for pitch-like orientation plus the base rotation about Z. Nevertheless, there are multiple
+    mathematically valid solutions differing by π in one joint and −π in another, etc. Also the base
+    joint can shift by ±π while other joints shift to compensate, producing the same final pose.
+
+    This code uses:
+      1) A "naive" direct closed-form for (q1, q2, q3, q4),
+      2) An enumeration of equivalent ±π shifts to find the solution that best matches the requested (p,r).
+         (No numeric iteration is done—just a small finite check.)
+      3) Return the best match restricted to each joint in [−2π, 2π], which also fits the ±6.2831853 limit.
+
+    All valid targets are assumed reachable, so no reachability checks are performed.
+    """
+
+    import math
+    import numpy as np
+
+    # Unpack desired end-effector pose
+    x_target, y_target, z_target = p
+    roll, pitch, yaw = r
+
+    # ------------------------------------------
+    # 1) Define forward kinematics for checking.
+    # ------------------------------------------
+    def forward_kinematics(q1, q2, q3, q4):
+        """
+        Returns (px, py, pz, rX, rY, rZ) of TCP for the given joint angles
+        using standard matrix multiplication with the stated link offsets.
+        """
+        # Rotation about Z by q1
+        c1, s1 = math.cos(q1), math.sin(q1)
+        T1 = np.array([
+            [ c1, -s1, 0, 0],
+            [ s1,  c1, 0, 0],
+            [  0,   0, 1, 0],
+            [  0,   0, 0, 1]
+        ], dtype=float)
+
+        # Translate y=0.13585, then rotate about Y by q2
+        T2_trans = np.array([
+            [1, 0, 0, 0   ],
+            [0, 1, 0, 0.13585],
+            [0, 0, 1, 0   ],
+            [0, 0, 0, 1   ]
+        ], dtype=float)
+        c2, s2 = math.cos(q2), math.sin(q2)
+        T2_rot = np.array([
+            [ c2, 0, s2, 0],
+            [  0, 1,  0, 0],
+            [-s2, 0, c2, 0],
+            [  0, 0,  0, 1]
+        ], dtype=float)
+        T2 = T2_trans @ T2_rot
+
+        # Translate y=-0.1197, z=0.425, then rotate about Y by q3
+        T3_trans = np.array([
+            [1, 0, 0, 0   ],
+            [0, 1, 0, -0.1197],
+            [0, 0, 1, 0.425],
+            [0, 0, 0, 1   ]
+        ], dtype=float)
+        c3, s3 = math.cos(q3), math.sin(q3)
+        T3_rot = np.array([
+            [ c3, 0, s3, 0],
+            [  0, 1,  0, 0],
+            [-s3, 0, c3, 0],
+            [  0, 0,  0, 1]
+        ], dtype=float)
+        T3 = T3_trans @ T3_rot
+
+        # Translate z=0.39225, then rotate about Y by q4
+        T4_trans = np.array([
+            [1, 0, 0, 0],
+            [0, 1, 0, 0],
+            [0, 0, 1, 0.39225],
+            [0, 0, 0, 1]
+        ], dtype=float)
+        c4, s4 = math.cos(q4), math.sin(q4)
+        T4_rot = np.array([
+            [ c4, 0, s4, 0],
+            [  0, 1,  0, 0],
+            [-s4, 0, c4, 0],
+            [  0, 0,  0, 1]
+        ], dtype=float)
+        T4 = T4_trans @ T4_rot
+
+        # TCP offset at y=0.093
+        Ttcp = np.array([
+            [1, 0, 0,  0    ],
+            [0, 1, 0,  0.093],
+            [0, 0, 1,  0    ],
+            [0, 0, 0,  1    ]
+        ], dtype=float)
+
+        # Multiply all
+        T = T1 @ T2 @ T3 @ T4 @ Ttcp
+
+        # Extract position
+        px = T[0, 3]
+        py = T[1, 3]
+        pz = T[2, 3]
+
+        # Extract orientation as RPY from T[0:3,0:3].
+        # Because each joint is about Z or Y, there's only one real DOF for pitch and one for base Z rotation,
+        # but we'll do a standard RPY extraction anyway:
+        r11, r12, r13 = T[0, 0], T[0, 1], T[0, 2]
+        r21, r22, r23 = T[1, 0], T[1, 1], T[1, 2]
+        r31, r32, r33 = T[2, 0], T[2, 1], T[2, 2]
+
+        # Standard "ZYX" RPY extraction:
+        # yaw = atan2(r21, r11), pitch = atan2(-r31, sqrt(r32^2 + r33^2)), roll = atan2(r32, r33)
+        # But the problem states r = (roll, pitch, yaw) in that order. We'll do an X->Y->Z convention to match user definition?
+        # The user says "r" is (rx, ry, rz). Usually that means Rz(rz)*Ry(ry)*Rx(rx).
+        # We'll do a quick numeric approach: we know we only have 1 DOF around X potentially, 1 around Y, 1 around Z.
+        # For consistency, let's interpret it as: R = Rz(rz)*Ry(ry)*Rx(rx). Then:
+        #   rz = atan2(r21, r11)
+        #   ry = asin(r13)  (since r13 = sy, etc.)
+        #   rx = -atan2(r23, r33)  or so, but be careful with signs.
+        # We'll keep it consistent with code #4 approach:
+        sy = r13
+        cy_cz = r11
+        # Just clamp sy in [-1,1]
+        if sy > 1.0: sy = 1.0
+        if sy < -1.0: sy = -1.0
+        ry_ = math.asin(sy)
+        rz_ = math.atan2(r21, r11)
+        rx_ = math.atan2(-r23, r33)
+        return (px, py, pz, rx_, ry_, rz_)
+
+    # ------------------------------------------
+    # 2) A basic "guess" solution (naive) 
+    # ------------------------------------------
+    # For the base joint (q1 about Z), a common approach is to point the manipulator's "Y" axis
+    # toward the target's Y location. A known snippet from "EXISTING 1" is: theta = atan2(-x, y).
+    # We'll do that first guess:
+    q1_guess = math.atan2(-x_target, y_target)
+
+    # For the net rotation about Y, it must be pitch. So let sum_y = pitch.
+    # Then we have q2 + q3 + q4 = pitch. We'll break it up somewhat evenly as a guess:
+    # (Of course the real geometry is more subtle, but we'll do a naive seed.)
+    q2_guess = pitch * 0.3
+    q3_guess = pitch * 0.4
+    q4_guess = pitch * 0.3
+
+    # ------------------------------------------
+    # 3) We'll define a small function that "fixes up" a seed by adjusting q2,q3 so that
+    #    the planar length from joint2..3..4 covers the target distance in XY-plane ignoring small offsets.
+    #    This is only a rough approach so that our enumerations won't be too far off.
+    # ------------------------------------------
+    # The major link lengths are 0.425 and 0.39225 in series. We can do a 2-link planar solve to
+    # get q2' and q3' that place the wrist near the correct radial distance from joint2 pivot.
+    # Then we'll let q4 = pitch - (q2'+q3').
+    def refine_planar(q1_):
+        # Transform the target (x,y,z) so we look at how far it is from the pivot of joint2 in the plane
+        # The pivot of joint2 is at T1(q1) * [0, 0.13585, 0], i.e. base + that offset in Y once we've rotated about Z by q1.
+        c1_ = math.cos(q1_)
+        s1_ = math.sin(q1_)
+
+        # The location of joint2 pivot in world:
+        j2x = 0.0 * c1_ - 0.13585 * s1_
+        j2y = 0.0 * s1_ + 0.13585 * c1_
+        j2z = 0.0
+
+        # The effective "horizontal plane" distance from pivot:
+        dx = x_target - j2x
+        dy = y_target - j2y
+        dz = z_target - j2z
+        # We'll define the "radius" in the plane formed by rotating about Y.
+        # Because joint2 rotates about Y, its plane is XZ in local coords if we think the arm extends in XZ.
+        # We'll interpret "X' = sqrt(dx^2 + dy^2)" as "horizontal" and "Z' = dz" as "vertical" for a 2-link solve:
+        # Link lengths:
+        L2 = 0.425
+        L3 = 0.39225
+        # effective horizontal distance
+        Xp = math.sqrt(dx*dx + dy*dy)
+        # vertical is dz
+        Zp = dz
+        # total distance:
+        d_ = math.hypot(Xp, Zp)
+
+        # Check clamp:
+        cos_q3_ = (d_*d_ - L2*L2 - L3*L3)/(2*L2*L3)
+        if cos_q3_ > 1.0: cos_q3_ = 1.0
+        if cos_q3_ < -1.0: cos_q3_ = -1.0
+        elbow = math.acos(cos_q3_)  # elbow up or down
+        # We'll pick "down" solution (like negative)
+        q3_ = - elbow
+
+        alpha = math.atan2(Zp, Xp)
+        beta = math.atan2(L3*math.sin(q3_), L2 + L3*math.cos(q3_))
+        q2_ = alpha - beta
+
+        return (q2_, q3_)
+
+    q2_naive, q3_naive = refine_planar(q1_guess)
+    q4_naive = pitch - (q2_naive + q3_naive)
+
+    # We'll use that naive set as a starting point
+    base_solution = (q1_guess, q2_naive, q3_naive, q4_naive)
+
+    # ------------------------------------------
+    # 4) Generate the "equivalent" solutions by adding ±π to one joint
+    #    and subtracting ±π from another in order to preserve net orientation,
+    #    plus possibly flipping q1 by ±π (the base can revolve).
+    # We'll create a small set of transformations that keep q2+q3+q4 = same mod 2π
+    # while also letting q1 vary by ±π. In total, we'll accumulate candidates and test each.
+    # ------------------------------------------
+    def within_2pi(angle):
+        """Wrap angle into [-2π, 2π] range, OK for the manipulator's wide limits."""
+        TWO_PI = 2.0*math.pi
+        # Bring within [-π, π] first:
+        ang = (angle + math.pi) % (TWO_PI) - math.pi
+        # If needed, we can shift once more if outside [-2π,2π], but typically it's in [-π, π].
+        return ang
+
+    # A function to produce each variant with ±π flips in (q2, q3, q4)
+    # We keep the sum s = q2+q3+q4. If we add π to q2, we must subtract π from one of q3 or q4 to keep sum the same, etc.
+    # We'll produce a small set manually:
+    def generate_variants(sol):
+        (a1, a2, a3, a4) = sol
+        s = a2 + a3 + a4
+
+        variants = []
+
+        # Helper to wrap all
+        def w(q1_, q2_, q3_, q4_):
+            return (within_2pi(q1_), within_2pi(q2_), within_2pi(q3_), within_2pi(q4_))
+
+        # No changes:
+        variants.append(w(a1, a2, a3, a4))
+
+        # Flip base by π => q1+π, offset one of q2,q3,q4 by π to keep orientation?
+        # Actually flipping the base by π changes orientation around Z, so let's systematically do it,
+        # but we must STILL preserve the final orientation about Y if we do that. This typically means
+        # q2-> -q2 or something. But let's just try q1-> a1+π, keep the others as is, to see if it helps for position:
+        variants.append(w(a1 + math.pi, a2, a3, a4))
+        variants.append(w(a1 - math.pi, a2, a3, a4))
+
+        # For the elbow/wrist about Y: if we add π to a2, we can subtract π from a3 or a4 to keep the sum the same.
+        variants.append(w(a1, a2 + math.pi, a3 - math.pi, a4))
+        variants.append(w(a1, a2 + math.pi, a3, a4 - math.pi))
+        variants.append(w(a1, a2 - math.pi, a3 + math.pi, a4))
+        variants.append(w(a1, a2 - math.pi, a3, a4 + math.pi))
+
+        # Similarly, if we add π to a3, subtract π from a4, etc.
+        variants.append(w(a1, a2, a3 + math.pi, a4 - math.pi))
+        variants.append(w(a1, a2, a3 - math.pi, a4 + math.pi))
+
+        # And we can combine flips of base and elbow for thoroughness (a1±π plus one of the above).
+        # We'll just do a small subset to keep from exploding in count. Enough to fix sign issues:
+        newset = []
+        for v in variants:
+            # Also try v1 with q1 ± π
+            v1p = (v[0]+math.pi, v[1], v[2], v[3])
+            v1m = (v[0]-math.pi, v[1], v[2], v[3])
+            newset.append(v)
+            newset.append(w(*v1p))
+            newset.append(w(*v1m))
+
+        # De-duplicate
+        unique = []
+        seen = set()
+        for cand in newset:
+            ckey = tuple(round(c, 5) for c in cand)
+            if ckey not in seen:
+                seen.add(ckey)
+                unique.append(cand)
+        return unique
+
+    candidates = generate_variants(base_solution)
+
+    # ------------------------------------------
+    # 5) Evaluate each candidate by forward kinematics
+    #    and measure position/orientation error. Pick best.
+    # ------------------------------------------
+    best_sol = (0.0, 0.0, 0.0, 0.0)
+    best_err = 1e9
+
+    def angle_diff(a, b):
+        # difference in [-π, π]
+        d = (a - b + math.pi) % (2*math.pi) - math.pi
+        return abs(d)
+
+    for sol in candidates:
+        (qs1, qs2, qs3, qs4) = sol
+        (fx, fy, fz, frx, fry, frz) = forward_kinematics(qs1, qs2, qs3, qs4)
+        # position error
+        perr = math.sqrt((fx - x_target)**2 + (fy - y_target)**2 + (fz - z_target)**2)
+        # orientation error: sum of absolute angle differences for (roll, pitch, yaw)
+        # but each might not be fully definable if the manipulator can't reach certain roll. We'll measure anyway:
+        oerr = angle_diff(frx, roll) + angle_diff(fry, pitch) + angle_diff(frz, yaw)
+        err = perr + oerr*0.2  # weigh orientation a bit, but not too heavily
+
+        if err < best_err:
+            best_err = err
+            best_sol = sol
+
+    # best_sol is our final answer
+    q1_final, q2_final, q3_final, q4_final = best_sol
+
+    return (q1_final, q2_final, q3_final, q4_final)
+```

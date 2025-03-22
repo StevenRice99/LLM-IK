@@ -1,0 +1,85 @@
+def inverse_kinematics(p: tuple[float, float, float], r: tuple[float, float, float]) -> tuple[float, float]:
+    """
+    Closed‐form inverse kinematics for a 2‐DOF serial arm whose first joint
+    rotates about the Z‐axis and second about the Y‐axis.  The link geometry is:
+
+        Joint 1 (about Z) at the base, no offset.
+        Then a translation of +0.13585 along Y before Joint 2 (about Y).
+        Finally, from Joint 2 to the TCP there is a translation of
+            [0, -0.1197, 0.425] in that link’s local coordinates.
+
+    Because there are only two revolute axes (Z then Y), the end‐effector orientation
+    is R = Rz(q1)*Ry(q2).  In the URDF “rpy” convention (roll‐pitch‐yaw =
+    [rx, ry, rz]), the arm can only achieve rx = 0, with q2 = ry and q1 = rz.
+    However, for most simple 2‐DOF cases (and matching the table’s TCP
+    “Orientation = [0,0,0]”), one typically solves just for position p = (px,py,pz)
+    ignoring any roll component.  The code below does exactly that by matching
+    the final TCP position.  It assumes that any given (p,r) will indeed be
+    consistent/reachable by this 2‐joint geometry.
+
+    The forward kinematic position of the TCP in the world frame can be written
+    (suppressing intermediate translations for brevity) as:
+
+       TCP_x =  0.425 sin(q2) cos(q1)  −  0.01615 sin(q1)
+       TCP_y =  0.425 sin(q2) sin(q1)  +  0.01615 cos(q1)
+       TCP_z =  0.425 cos(q2)
+
+    where 0.01615 = (0.13585 − 0.1197).  From these, one may solve “closed‐form”
+    for q1 and q2 given a desired p = (px, py, pz).  The orientation input “r”
+    is not used in the numeric solving, since the robot has only two axes.  By
+    convention, this solution picks the principal value of arccos for q2 and
+    resolves q1 via atan2.
+
+    :param p: Desired TCP position [x, y, z].
+    :param r: Desired TCP orientation [rx, ry, rz] (unused here unless you
+              wished to enforce ry=q2, rz=q1, rx=0).  Assumed consistent.
+    :return: (q1, q2) in radians.
+    """
+
+    import math
+
+    px, py, pz = p
+
+    # Solve for q2 from the z‐coordinate:
+    #    pz = 0.425 cos(q2)  =>  q2 = arccos(pz / 0.425).
+    #
+    # We take the principal branch of arccos here.  You may choose to
+    # adjust signs if you wanted a different “elbow up/down” solution.
+    #
+    L = 0.425
+    q2 = math.acos(pz / L)
+
+    # For convenience:
+    sin_q2 = math.sin(q2)
+    A = L * sin_q2            # 0.425 * sin(q2)
+    B = 0.01615               # (0.13585 − 0.1197) from the link geometry
+
+    # The planar (x,y) equations are:
+    #   px = A cos(q1) − B sin(q1)
+    #   py = A sin(q1) + B cos(q1)
+    #
+    # One can rearrange those into a neat “dot” and “perp” form:
+    #
+    #   px cos(q1) + py sin(q1) = A
+    #   py cos(q1) − px sin(q1) = B
+    #
+    # which yields:
+    #
+    #   sin(q1) = (A*py − B*px) / (px^2 + py^2)
+    #   cos(q1) = (A*px + B*py) / (px^2 + py^2)
+    #
+    # Then q1 = atan2(sin(q1), cos(q1)).
+    #
+    denom = px*px + py*py
+    # Guard very lightly against a degenerate xy == 0, though problem states “reachable.”
+    if abs(denom) < 1e-12:
+        # If px=py=0, the manipulator must be along the z-axis.  In such a case
+        # one can set q1 arbitrarily (e.g. 0) because rotating about Z does not
+        # change the final position in that degenerate scenario.  We'll just pick 0.
+        q1 = 0.0
+    else:
+        sin_q1 = (A*py - B*px) / denom
+        cos_q1 = (A*px + B*py) / denom
+        q1 = math.atan2(sin_q1, cos_q1)
+
+    return (q1, q2)

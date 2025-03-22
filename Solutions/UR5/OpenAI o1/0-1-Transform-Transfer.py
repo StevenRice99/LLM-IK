@@ -1,0 +1,120 @@
+def inverse_kinematics(p: tuple[float, float, float], r: tuple[float, float, float]) -> tuple[float, float]:
+    """
+    Gets the joint values needed to reach position "p" and orientation "r"
+    for this 2-DOF serial manipulator. The manipulator has:
+      • Joint 1 (θ₁): revolute about Z.
+      • Joint 2 (θ₂): revolute about Y.
+      • An offset of [0, 0.13585, 0] from joint 1 to joint 2.
+      • An offset of [0, -0.1197, 0.425] from joint 2 to the TCP in the local frame of joint 2.
+      • The final orientation is nominally Rz(θ₁) * Ry(θ₂).
+      • We assume all (p, r) are reachable, so no explicit reachability checks.
+
+    Due to the limited 2-DOF (yaw and pitch only), the manipulator cannot
+    change roll freely. However, the URDF or requested orientation might specify
+    roll ≈ ±π for the same physical orientation, causing sign flips in the
+    returned roll. We handle that by generating multiple candidate solutions
+    (including a 'flipped' solution for the yaw/pitch) plus ±2π offsets, then
+    picking whichever best matches the desired (r_x, r_y, r_z) under the usual
+    roll–pitch–yaw comparison.
+
+    :param p: Desired TCP position: (x, y, z).
+    :param r: Desired TCP orientation in RPY (roll, pitch, yaw), i.e. (r_x, r_y, r_z).
+    :return: (θ₁, θ₂) in radians, each wrapped to [-π, π], which reproduces (p, r)
+             as closely as possible.
+    """
+    import math
+
+    def wrap_to_pi(angle: float) -> float:
+        """Wrap an angle to [-π, π]."""
+        return (angle + math.pi) % (2.0 * math.pi) - math.pi
+
+    def angle_diff(a: float, b: float) -> float:
+        """Signed difference (a - b) wrapped to [-π, π]."""
+        d = (a - b) % (2.0 * math.pi)
+        if d > math.pi:
+            d -= 2.0 * math.pi
+        return d
+
+    def orientation_error(roll1, pitch1, yaw1, roll2, pitch2, yaw2) -> float:
+        """
+        Returns a measure of squared difference between two RPY triplets,
+        with each difference wrapped to [-π, π].
+        """
+        dr = angle_diff(roll1, roll2)
+        dp = angle_diff(pitch1, pitch2)
+        dy = angle_diff(yaw1, yaw2)
+        return dr * dr + dp * dp + dy * dy
+
+    def get_rpy_from_zy(ang_z: float, ang_y: float) -> tuple[float, float, float]:
+        """
+        Extract the roll–pitch–yaw (ZYX convention) from the rotation Rz(ang_z)*Ry(ang_y).
+        We'll use the standard formula for ZYX Tait-Bryan angles:
+
+          R = Rz(yaw) * Ry(pitch) * Rx(roll)
+
+        but here we only have yaw=ang_z, pitch=ang_y, and roll=0. So we compute
+        the resulting matrix and extract RPY as if it were a general ZYX sequence:
+            pitch = -asin(R[2,0])
+            roll  =  atan2(R[2,1], R[2,2])
+            yaw   =  atan2(R[1,0], R[0,0])
+
+        Because we have no real roll DOF, you'll see roll come out as ~0 or ±π if there's a flip.
+        """
+        cz = math.cos(ang_z)
+        sz = math.sin(ang_z)
+        cy = math.cos(ang_y)
+        sy = math.sin(ang_y)
+        R_20 = -sy
+        R_21 = 0.0
+        R_22 = cy
+        R_10 = sz * cy
+        R_00 = cz * cy
+        pitch = -math.asin(R_20)
+        roll = math.atan2(R_21, R_22)
+        yaw = math.atan2(R_10, R_00)
+        return (wrap_to_pi(roll), wrap_to_pi(pitch), wrap_to_pi(yaw))
+    x_d, y_d, z_d = p
+    r_x, r_y, r_z = r
+    cos_theta2 = z_d / 0.425
+    cos_theta2 = max(min(cos_theta2, 1.0), -1.0)
+    theta2_cand = math.acos(cos_theta2)
+
+    def pick_angle_sign(candidate: float, desired: float) -> float:
+        pos_diff = abs(desired - candidate)
+        neg_diff = abs(desired + candidate)
+        return candidate if pos_diff <= neg_diff else -candidate
+    theta2_sol = pick_angle_sign(theta2_cand, r_y)
+    w_x = 0.425 * math.sin(theta2_sol)
+    w_y = 0.13585 - 0.1197
+    denom = w_x ** 2 + w_y ** 2
+    if denom < 1e-15:
+        denom = 1e-15
+    C = (w_x * x_d + w_y * y_d) / denom
+    S = (-w_y * x_d + w_x * y_d) / denom
+    theta1_sol = math.atan2(S, C)
+    theta1_sol = wrap_to_pi(theta1_sol)
+    theta2_sol = wrap_to_pi(theta2_sol)
+    theta1_flip = wrap_to_pi(theta1_sol + math.pi)
+    theta2_flip = wrap_to_pi(-theta2_sol)
+    candidates = []
+    base_set = [(theta1_sol, theta2_sol), (theta1_sol + 2.0 * math.pi, theta2_sol), (theta1_sol, theta2_sol + 2.0 * math.pi), (theta1_sol + 2.0 * math.pi, theta2_sol + 2.0 * math.pi), (theta1_sol - 2.0 * math.pi, theta2_sol), (theta1_sol, theta2_sol - 2.0 * math.pi), (theta1_sol - 2.0 * math.pi, theta2_sol - 2.0 * math.pi), (theta1_sol + 2.0 * math.pi, theta2_sol - 2.0 * math.pi), (theta1_sol - 2.0 * math.pi, theta2_sol + 2.0 * math.pi)]
+    flip_set = [(theta1_flip, theta2_flip), (theta1_flip + 2.0 * math.pi, theta2_flip), (theta1_flip, theta2_flip + 2.0 * math.pi), (theta1_flip + 2.0 * math.pi, theta2_flip + 2.0 * math.pi), (theta1_flip - 2.0 * math.pi, theta2_flip), (theta1_flip, theta2_flip - 2.0 * math.pi), (theta1_flip - 2.0 * math.pi, theta2_flip - 2.0 * math.pi), (theta1_flip + 2.0 * math.pi, theta2_flip - 2.0 * math.pi), (theta1_flip - 2.0 * math.pi, theta2_flip + 2.0 * math.pi)]
+    seen = set()
+    for sol in base_set + flip_set:
+        key = (round(sol[0], 8), round(sol[1], 8))
+        if key not in seen:
+            seen.add(key)
+            candidates.append(sol)
+    best_sol = None
+    best_err = float('inf')
+    for cand1, cand2 in candidates:
+        roll_c, pitch_c, yaw_c = get_rpy_from_zy(wrap_to_pi(cand1), wrap_to_pi(cand2))
+        err = orientation_error(roll_c, pitch_c, yaw_c, r_x, r_y, r_z)
+        if err < best_err:
+            best_err = err
+            best_sol = (cand1, cand2)
+    if best_sol is None:
+        best_sol = (theta1_sol, theta2_sol)
+    final_theta1 = wrap_to_pi(best_sol[0])
+    final_theta2 = wrap_to_pi(best_sol[1])
+    return (final_theta1, final_theta2)

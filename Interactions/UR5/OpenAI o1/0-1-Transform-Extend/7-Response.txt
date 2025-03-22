@@ -1,0 +1,135 @@
+```python
+import math
+import numpy as np
+
+def inverse_kinematics(p: tuple[float, float, float], r: tuple[float, float, float]) -> tuple[float, float]:
+    """
+    Closed-form-ish inverse kinematics for a 2-DOF manipulator with:
+      • Joint 1: rotation about Z (θ1)
+      • Joint 2: rotation about Y (θ2)
+
+    Link offsets from the URDF ("DETAILS" section):
+      • Revolute 1 at base: no offset, rotates about Z
+      • Revolute 2 offset from link1 by [0, 0.13585, 0], rotates about Y
+      • TCP offset from link2 by [0, -0.1197, 0.425]
+
+    The desired end-effector pose is given by:
+      • Position p = (px, py, pz)
+      • Orientation r in RPY form: r = (rX, rY, rZ)
+
+    We wish to find θ1, θ2 such that:
+      FK(θ1, θ2) matches the target position p, and
+      Rz(θ1)*Ry(θ2) matches (approximately) the target orientation R_des = Rz(rZ)*Ry(rY)*Rx(rX).
+
+    Because the manipulator only has 2 DOF, there can be multiple ways
+    to produce the same orientation (due to "flips" by π). We enumerate
+    a small set of such flips to find a solution that matches both
+    orientation and position. We assume all targets are reachable and
+    within joint limits of ±6.2831853.
+
+    Steps:
+      1) Form R_des = Rz(rZ)*Ry(rY)*Rx(rX).
+      2) Extract a principal (α, β) from R_des via:
+           β = atan2(-R_des[2,0], R_des[2,2])
+           α = atan2( R_des[1,0],  R_des[0,0])
+      3) Generate a set of candidate solutions by adding +/- π to α
+         and/or β. Then pick whichever candidate yields the smallest
+         orientation error w.r.t. R_des.
+      4) From those top orientation candidates, pick the one that best
+         matches the target position p via the forward kinematics. 
+      5) Return that (θ1, θ2).
+    """
+
+    # Target position
+    p_des = np.array(p, dtype=float)
+
+    # Build the desired orientation matrix R_des = Rz(rZ)*Ry(rY)*Rx(rX)
+    rX, rY, rZ = r
+
+    def Rx_fn(a):
+        return np.array([
+            [1,          0,           0],
+            [0, math.cos(a), -math.sin(a)],
+            [0, math.sin(a),  math.cos(a)]
+        ])
+    def Ry_fn(a):
+        return np.array([
+            [ math.cos(a), 0, math.sin(a)],
+            [           0, 1,           0],
+            [-math.sin(a), 0, math.cos(a)]
+        ])
+    def Rz_fn(a):
+        return np.array([
+            [math.cos(a), -math.sin(a), 0],
+            [math.sin(a),  math.cos(a), 0],
+            [          0,            0, 1]
+        ])
+
+    R_des = Rz_fn(rZ) @ Ry_fn(rY) @ Rx_fn(rX)
+
+    # Extract principal solution for Rz(θ1)*Ry(θ2) = R_des
+    # standard formula:
+    #   β = atan2(-R[2,0], R[2,2]) 
+    #   α = atan2( R[1,0], R[0,0]) 
+    def safe_atan2(yv, xv):
+        return math.atan2(float(yv), float(xv))
+
+    betaA  = safe_atan2(-R_des[2,0], R_des[2,2])  # θ2
+    alphaA = safe_atan2( R_des[1,0], R_des[0,0])  # θ1
+
+    # A function to wrap angles into [-π, π)
+    def wrap_angle(a):
+        return (a + math.pi) % (2*math.pi) - math.pi
+
+    # A function that computes Rz(θ1)*Ry(θ2)
+    def RzY(theta1, theta2):
+        return Rz_fn(theta1) @ Ry_fn(theta2)
+
+    # A function to measure orientation difference (squared Frobenius norm)
+    def orientation_error(R1, R2):
+        # sum of squared differences of all 9 elements
+        diff = R1 - R2
+        return float(np.sum(diff*diff))
+
+    # Forward kinematics to get position
+    def fk_position(th1, th2):
+        Rz_th1 = Rz_fn(th1)
+        Ry_th2 = Ry_fn(th2)
+        link2_offset = np.array([0.0, 0.13585, 0.0])
+        tcp_offset  = np.array([0.0, -0.1197, 0.425])
+        link2_in_base = Rz_th1.dot(link2_offset)
+        tcp_in_base = link2_in_base + Rz_th1.dot(Ry_th2.dot(tcp_offset))
+        return tcp_in_base
+
+    # Generate a set of candidate solutions by offsetting alpha and beta by multiples of π
+    # We'll consider i, j in {-1, 0, 1}, so up to 9 combos. Then we'll rank by orientation error.
+    candidates = []
+    for i in [-1, 0, 1]:
+        for j in [-1, 0, 1]:
+            cand_alpha = wrap_angle(alphaA + i*math.pi)
+            cand_beta  = wrap_angle(betaA  + j*math.pi)
+            R_cand = RzY(cand_alpha, cand_beta)
+            err_o = orientation_error(R_cand, R_des)
+            candidates.append((cand_alpha, cand_beta, err_o))
+
+    # Sort by orientation error
+    candidates.sort(key=lambda x: x[2])
+    best_orientation_error = candidates[0][2]
+
+    # Among those with near-minimal orientation error, pick the one that best matches position
+    best_pos_error = float('inf')
+    best_sol = (candidates[0][0], candidates[0][1])  # default to something
+
+    # Tolerance for matching orientation
+    eps_orient = 1e-9
+    for (a_cand, b_cand, e_cand) in candidates:
+        if e_cand - best_orientation_error < eps_orient:
+            # check position
+            p_calc = fk_position(a_cand, b_cand)
+            e_pos = np.linalg.norm(p_calc - p_des)
+            if e_pos < best_pos_error:
+                best_pos_error = e_pos
+                best_sol = (a_cand, b_cand)
+
+    return best_sol
+```

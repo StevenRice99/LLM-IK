@@ -1,0 +1,142 @@
+```python
+def inverse_kinematics(p: tuple[float, float, float], r: tuple[float, float, float]) -> tuple[float, float, float, float]:
+    """
+    Closed-form inverse kinematics for a 4-DOF serial manipulator with the following structure:
+
+      Joint 1 (Revolute about Z), offset = [0, 0, 0]
+      Joint 2 (Revolute about Y), offset = [0, 0.13585, 0]
+      Joint 3 (Revolute about Y), offset = [0, -0.1197, 0.425]
+      Joint 4 (Revolute about Y), offset = [0, 0, 0.39225]
+      TCP offset                       = [0, 0, 0.093]
+
+    Orientation is given as (roll, pitch, yaw). The manipulator only realizes:
+      • roll = 0,
+      • pitch = q2 + q3 + q4,
+      • yaw   = q1.
+
+    This solver uses Sympy's 'solve' for an exact expression of the position equations, then
+    picks among any real solutions the one that best matches the target (i.e., minimal
+    position error once we substitute back into forward kinematics). This ensures we
+    systematically pick a single consistent branch without iteration or optimization.
+
+    :param p: (x, y, z) in world.
+    :param r: (roll_x, pitch_y, yaw_z) in radians.
+              roll_x = 0, pitch_y, yaw_z.
+    :return: (q1, q2, q3, q4) in radians, each within [-2π, +2π], that reach p, r.
+    """
+    import sympy
+    from sympy import Matrix, symbols, sin, cos, Eq, solve
+
+    # Unpack target
+    px, py, pz = p
+    r_x, r_y, r_z = r  # roll, pitch, yaw
+
+    # We fix Joint 1 = yaw_z
+    q1_val = r_z
+
+    # Symbols for q2, q3, q4
+    q2_sym, q3_sym, q4_sym = symbols('q2 q3 q4', real=True)
+
+    # Build the forward kinematics in symbolic form.
+    # ----------------------------------------------------
+    # Rotation matrices about Z or Y:
+    def rot_z(th):
+        return Matrix([
+            [ cos(th), -sin(th), 0],
+            [ sin(th),  cos(th), 0],
+            [       0,        0, 1]
+        ])
+    def rot_y(th):
+        return Matrix([
+            [ cos(th), 0, sin(th)],
+            [       0, 1,       0],
+            [-sin(th), 0, cos(th)]
+        ])
+
+    # Base to Joint1 (rotZ q1):
+    # Position offset = (0,0,0), orientation = rotZ(q1_val).
+    R0_1 = rot_z(q1_val)
+    p0_1 = Matrix([0, 0, 0])
+
+    # Joint1->Joint2: offset [0, 0.13585, 0], revolve about Y => q2_sym
+    p1_2 = Matrix([0, 0.13585, 0])
+
+    # Joint2->Joint3: offset [0, -0.1197, 0.425], revolve about Y => q3_sym
+    p2_3 = Matrix([0, -0.1197, 0.425])
+
+    # Joint3->Joint4: offset [0, 0, 0.39225], revolve about Y => q4_sym
+    p3_4 = Matrix([0, 0, 0.39225])
+
+    # Joint4->TCP: offset [0, 0, 0.093], no rotation
+    p4_tcp = Matrix([0, 0, 0.093])
+
+    # Helper to get successive positions/orientations
+    def transform(R_in, p_in, offset, R_local):
+        p_out = p_in + R_in * offset
+        R_out = R_in * R_local
+        return p_out, R_out
+
+    # J1->J2
+    p2, R2 = transform(R0_1, p0_1, p1_2, rot_y(q2_sym))
+    # J2->J3
+    p3, R3 = transform(R2, p2, p2_3, rot_y(q3_sym))
+    # J3->J4
+    p4, R4 = transform(R3, p3, p3_4, rot_y(q4_sym))
+    # J4->TCP
+    p_tcp = p4 + R4 * p4_tcp
+
+    # Also enforce pitch constraint: q2 + q3 + q4 = r_y
+    # We'll solve the system:
+    #   p_tcp[0] = px
+    #   p_tcp[1] = py
+    #   p_tcp[2] = pz
+    #   q2 + q3 + q4 = r_y
+    eqs = [
+        Eq(p_tcp[0], px),
+        Eq(p_tcp[1], py),
+        Eq(p_tcp[2], pz),
+        Eq(q2_sym + q3_sym + q4_sym, r_y)
+    ]
+
+    # Solve for q2, q3, q4 in symbolic form
+    all_solutions = solve(eqs, [q2_sym, q3_sym, q4_sym], dict=True)
+
+    if not all_solutions:
+        # Should not happen per problem statement ("assume reachable"), fallback
+        return (0.0, 0.0, 0.0, 0.0)
+
+    # We may get multiple valid branches. We'll pick the one that best matches the target
+    # by re-substituting into the forward kinematics and comparing to (px,py,pz).
+    best_sol = None
+    best_err = None
+
+    for sol in all_solutions:
+        # Extract candidate
+        q2_cand = float(sol[q2_sym])
+        q3_cand = float(sol[q3_sym])
+        q4_cand = float(sol[q4_sym])
+
+        # Evaluate the final position to see how close it is
+        # (This numeric check is not an iterative solver, just a selection among closed-form branches.)
+        # Build final p_tcp for these q2, q3, q4:
+        R0_1_num = rot_z(q1_val)
+        p0_1_num = Matrix([0, 0, 0])
+
+        p2_num, R2_num = transform(R0_1_num, p0_1_num, p1_2, rot_y(q2_cand))
+        p3_num, R3_num = transform(R2_num, p2_num, p2_3, rot_y(q3_cand))
+        p4_num, R4_num = transform(R3_num, p3_num, p3_4, rot_y(q4_cand))
+        p_tcp_num = p4_num + R4_num * p4_tcp
+
+        dx = p_tcp_num[0] - px
+        dy = p_tcp_num[1] - py
+        dz = p_tcp_num[2] - pz
+        err = float(dx*dx + dy*dy + dz*dz)
+
+        if best_sol is None or err < best_err:
+            best_sol = (q2_cand, q3_cand, q4_cand)
+            best_err = err
+
+    q2_val, q3_val, q4_val = best_sol
+
+    return (q1_val, q2_val, q3_val, q4_val)
+```

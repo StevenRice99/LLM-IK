@@ -1,0 +1,104 @@
+def inverse_kinematics(p: tuple[float, float, float], r: tuple[float, float, float]) -> tuple[float, float, float]:
+    """
+    Gets the joint values needed to reach position "p" and orientation "r".
+    :param p: The position to reach in the form [x, y, z].
+    :param r: The orientation to reach in radians in the form [roll, pitch, yaw].
+              For this 3-DOF robot, roll must be zero (r[0] = 0),
+              pitch = r[1] is achieved by joints 2 and 3 (θ2 + θ3),
+              and yaw = r[2] is achieved by joint 1 (θ1).
+    :return: A tuple of (θ1, θ2, θ3) in radians.
+    """
+
+    import math
+
+    # Unpack inputs:
+    x, y, z = p
+    # roll (r_x), pitch (r_y), yaw (r_z)
+    r_x, r_y, r_z = r
+
+    #-----------------------------
+    # Geometry / link offsets:
+    #  1) Joint 1: Revolute about Z, no translation.
+    #  2) Link offset before joint 2: [0, 0.13585, 0].
+    #  3) Joint 2: Revolute about Y.
+    #  4) Link offset before joint 3: [0, -0.1197, 0.425].
+    #  5) Joint 3: Revolute about Y.
+    #  6) TCP offset: [0, 0, 0.39225].
+    #
+    # Orientation:
+    #  - Joint 1 angle = θ1 = r_z
+    #  - Joint 2 + Joint 3 = r_y
+    #
+    # Closed-form approach:
+    #  1) Let θ1 = r_z.
+    #  2) Transform the given target p into the local frame after joint 1.
+    #     In that frame, the position from joint 2 to TCP must match the
+    #     2R chain about Y.  The link's "local y" offset is always -0.1197
+    #     at the TCP frame due to the URDF offsets.
+    #  3) Solve for θ2, θ3 given that θ2 + θ3 = r_y.
+
+    #-----------------------------
+    # 1) From the desired yaw, deduce θ1:
+    theta1 = r_z
+
+    #-----------------------------
+    # 2) Compute the position p2 that the 2R arm (joints 2 and 3) must reach
+    #    in its local frame (which is rotated by -θ1 and translated by
+    #    the link offset [0, 0.13585, 0] from the base).
+    #    The offset [0, 0.13585, 0] in the world frame is:
+    #        j2W = Rz(θ1) * [0, 0.13585, 0] = [0.13585 cos(θ1), 0.13585 sin(θ1), 0].
+    #
+    #    Define p' = p - j2W, then rotate by Rz(-θ1) to find p2.
+    #
+    #    A direct expansion shows the local coordinates p2 = [p2_x, p2_y, p2_z]
+    #    become:
+    #
+    #      p2_x = x cos(θ1) + y sin(θ1) - 0.13585
+    #      p2_y = -x sin(θ1) + y cos(θ1)
+    #      p2_z = z
+    #
+    #    In this local frame, the manipulator’s Y-translation from joint 2
+    #    to joint 3 is fixed at -0.1197. Hence for a consistent solution,
+    #    p2_y should match -0.1197.  (We assume the problem guarantees reachability.)
+
+    p2_x = x*math.cos(theta1) + y*math.sin(theta1) - 0.13585
+    p2_y = -x*math.sin(theta1) + y*math.cos(theta1)  # Should match -0.1197 in a valid solution
+    p2_z = z
+
+    #-----------------------------
+    # 3) Solve the 2R planar subproblem in the local X-Z plane (about Y):
+    #
+    #    Let L2 = 0.425 and L3 = 0.39225.  From the URDF offsets about Y, the
+    #    position from joint 2 to the TCP is:
+    #
+    #        v_x = L2 sin(θ2) + L3 sin(θ2 + θ3)
+    #        v_z = L2 cos(θ2) + L3 cos(θ2 + θ3)
+    #
+    #    But θ2 + θ3 = r_y, so
+    #       v_x = 0.425 sin(θ2) + 0.39225 sin(r_y)
+    #       v_z = 0.425 cos(θ2) + 0.39225 cos(r_y)
+    #
+    #    We want v_x = p2_x, v_z = p2_z.
+    #
+    #    Solve for θ2 from:
+    #       0.425 sin(θ2) = p2_x - 0.39225 sin(r_y)
+    #       0.425 cos(θ2) = p2_z - 0.39225 cos(r_y)
+    #
+    #    Then θ3 = r_y - θ2.
+
+    # Offsets (lengths) used in final subproblem:
+    L2 = 0.425
+    L3 = 0.39225
+
+    # Right-hand-sides for sin and cos of θ2:
+    rhs_sin = (p2_x - L3 * math.sin(r_y)) / L2
+    rhs_cos = (p2_z - L3 * math.cos(r_y)) / L2
+
+    # θ2 from these components (assuming feasibility and consistent magnitudes):
+    theta2 = math.atan2(rhs_sin, rhs_cos)
+
+    # θ3 from the pitch constraint:
+    theta3 = r_y - theta2
+
+    # Return the joint angles:
+    return (theta1, theta2, theta3)

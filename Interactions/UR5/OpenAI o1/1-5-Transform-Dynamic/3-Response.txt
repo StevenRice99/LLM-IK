@@ -1,0 +1,149 @@
+```python
+def inverse_kinematics(p: tuple[float, float, float], r: tuple[float, float, float]) -> tuple[float, float, float, float, float]:
+    """
+    Closed-form inverse kinematics solution for the 5-DOF manipulator described in the DETAILS section.
+
+    This solution combines:
+      • Existing code #1, which provides a simple closed-form expression for Joint 1 (about Y).
+      • Existing code #2, which provides a 4-DOF closed-form IK for joints (2..5) about (Y, Y, Z, Y).
+    
+    Steps:
+      1) Compute Joint 1 (θ₁) from existing code #1 (atan2(x, z)).
+      2) Transform the target (p, r) into the coordinate frame of “Joint 2”.
+      3) Solve for joints (2..5) using the method from Existing code #2.
+      4) Return (θ₁, θ₂, θ₃, θ₄, θ₅).
+
+    :param p: Desired TCP position [x, y, z].
+    :param r: Desired TCP orientation [roll, pitch, yaw] in radians (URDF rpy).
+    :return: A tuple (joint1, joint2, joint3, joint4, joint5) in radians.
+    """
+    import math
+    import numpy as np
+
+    # 1) Solve Joint 1 (θ₁) (Existing code #1):
+    x, y, z = p
+    theta1 = math.atan2(x, z)
+
+    # Helper functions
+    def rot_x(a: float) -> np.ndarray:
+        ca, sa = math.cos(a), math.sin(a)
+        return np.array([[1, 0, 0],
+                         [0, ca, -sa],
+                         [0, sa,  ca]])
+    def rot_y(a: float) -> np.ndarray:
+        ca, sa = math.cos(a), math.sin(a)
+        return np.array([
+            [ ca, 0, sa],
+            [  0, 1,  0],
+            [-sa, 0, ca]
+        ])
+    def rot_z(a: float) -> np.ndarray:
+        ca, sa = math.cos(a), math.sin(a)
+        return np.array([
+            [ca, -sa, 0],
+            [sa,  ca, 0],
+            [ 0,   0, 1]
+        ])
+    def trans_xyz(dx: float, dy: float, dz: float) -> np.ndarray:
+        T = np.eye(4)
+        T[0, 3], T[1, 3], T[2, 3] = dx, dy, dz
+        return T
+    def mat4_from_rot_trans(R: np.ndarray, t: np.ndarray) -> np.ndarray:
+        T = np.eye(4)
+        T[0:3, 0:3] = R
+        T[0:3, 3]   = t
+        return T
+    def invert_homogeneous(T: np.ndarray) -> np.ndarray:
+        R = T[0:3, 0:3]
+        p = T[0:3, 3]
+        R_inv = R.T
+        p_inv = -R_inv @ p
+        T_inv = np.eye(4)
+        T_inv[0:3, 0:3] = R_inv
+        T_inv[0:3, 3]   = p_inv
+        return T_inv
+
+    # 2) Transform target (p, r) into the “Joint 2” frame
+    # T_base->j1(θ₁) = Ry(θ₁)
+    Tb_j1 = mat4_from_rot_trans(rot_y(theta1), np.zeros(3))
+    # T_j1->j2 = Trans(0, -0.1197, 0.425)
+    Tj1_j2 = trans_xyz(0.0, -0.1197, 0.425)
+    # T_base->j2 = Tb_j1 * Tj1_j2
+    Tb_j2 = Tb_j1 @ Tj1_j2
+    # Invert it
+    Tj2_b = invert_homogeneous(Tb_j2)
+
+    # Convert (r) to rotation matrix
+    rr, rp, ry = r
+    R_base_target = rot_z(ry) @ rot_y(rp) @ rot_x(rr)
+    Tbase_target = mat4_from_rot_trans(R_base_target, np.array(p))
+    # T2_target = Tj2_b * Tbase_target
+    T2_target = Tj2_b @ Tbase_target
+    p2 = T2_target[0:3, 3]
+    R2 = T2_target[0:3, 0:3]
+
+    # Decompose R2 into rpy in the same URDF convention (Rz * Ry * Rx)
+    def rpy_from_matrix(R: np.ndarray) -> tuple[float, float, float]:
+        beta = math.asin(-R[2, 0])
+        alpha = math.atan2(R[2, 1], R[2, 2])
+        gamma = math.atan2(R[1, 0], R[0, 0])
+        return (alpha, beta, gamma)
+
+    r2_roll, r2_pitch, r2_yaw = rpy_from_matrix(R2)
+
+    # 3) Solve joints (2..5) using the approach from code #2
+    def solve_j2_to_j5(p_sub: tuple[float, float, float], r_sub: tuple[float, float, float]) -> tuple[float, float, float, float]:
+        d2 = 0.39225
+        d3 = 0.093
+        d4 = 0.09465
+        d_tcp = 0.0823
+        psi = 1.570796325
+
+        p_sub = np.array(p_sub)
+        p_x, p_y, p_z = p_sub
+        roll_sub, pitch_sub, yaw_sub = r_sub
+        def rx(a):
+            ca, sa = np.cos(a), np.sin(a)
+            return np.array([[1, 0, 0], [0, ca, -sa], [0, sa, ca]])
+        def ry(a):
+            ca, sa = np.cos(a), np.sin(a)
+            return np.array([[ca, 0, sa], [0, 1, 0], [-sa, 0, ca]])
+        def rz(a):
+            ca, sa = np.cos(a), np.sin(a)
+            return np.array([[ca, -sa, 0], [sa, ca, 0], [0, 0, 1]])
+
+        R_target_sub = rz(yaw_sub) @ ry(pitch_sub) @ rx(roll_sub)
+        cos_theta3 = (p_y - d3) / d_tcp
+        cos_theta3 = np.clip(cos_theta3, -1.0, 1.0)
+        theta3_pos = np.arccos(cos_theta3)
+        theta3_neg = -theta3_pos
+
+        r_target = np.sqrt(p_x**2 + p_z**2)
+        delta = np.arctan2(p_x, p_z)
+        candidates = []
+        for theta3_candidate in [theta3_pos, theta3_neg]:
+            sin_theta3 = np.sin(theta3_candidate)
+            R_eff = np.sqrt(d4**2 + (d_tcp * sin_theta3)**2)
+            phi = np.arctan2(d_tcp * sin_theta3, d4)
+            cos_term = (r_target**2 + d2**2 - R_eff**2) / (2 * d2 * r_target)
+            cos_term = np.clip(cos_term, -1.0, 1.0)
+            theta1_offset = np.arccos(cos_term)
+            for t2_candidate in [delta + theta1_offset, delta - theta1_offset]:
+                Vx = p_x - d2 * np.sin(t2_candidate)
+                Vz = p_z - d2 * np.cos(t2_candidate)
+                theta12 = np.arctan2(Vx, Vz) + phi
+                theta2_sub = theta12 - t2_candidate
+                R_pre = ry(t2_candidate + theta2_sub) @ rz(theta3_candidate)
+                R_y_theta4 = R_pre.T @ R_target_sub @ rz(-psi)
+                theta4_sub = np.arctan2(R_y_theta4[0, 2], R_y_theta4[0, 0])
+                R_forward = ry(t2_candidate + theta2_sub) @ rz(theta3_candidate) @ ry(theta4_sub) @ rz(psi)
+                err = np.linalg.norm(R_forward - R_target_sub, ord='fro')
+                candidates.append((err, (t2_candidate, theta2_sub, theta3_candidate, theta4_sub)))
+        best_candidate = min(candidates, key=lambda x: x[0])[1]
+        return best_candidate
+
+    t2_sub, t3_sub, t4_sub, t5_sub = solve_j2_to_j5(tuple(p2), (r2_roll, r2_pitch, r2_yaw))
+
+    # 4) Return final solution
+    return (theta1, t2_sub, t3_sub, t4_sub, t5_sub)
+```

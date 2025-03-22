@@ -1,0 +1,204 @@
+def inverse_kinematics(p: tuple[float, float, float], r: tuple[float, float, float]) -> tuple[float, float, float, float, float]:
+    """
+    Gets the joint values needed to reach position "p" and orientation "r".
+    :param p: The position to reach in the form [x, y, z].
+    :param r: The orientation to reach in radians in the form [roll_x, pitch_y, yaw_z].
+    :return: A list of the values (q1, q2, q3, q4, q5) in radians.
+    """
+
+    #
+    # ------------------------------------------------------------------
+    # Overview of the approach:
+    # ------------------------------------------------------------------
+    #
+    # 1) We will build up a symbolic forward-kinematics model T0_TCP(q1..q5)
+    #    by composing the known transforms from the base (link 0) to the
+    #    Tool Center Point (TCP).  The link-to-link transforms largely consist
+    #    of a translation followed by a rotation about the local joint axis.
+    #
+    # 2) We will then create a target transform T_des that corresponds to
+    #    the requested position p = (px, py, pz) and RPY-orientation
+    #    r = (rx, ry, rz).  We treat these r as a rotation of Rz(rz)*Ry(ry)*Rx(rx)
+    #    (assuming standard roll-pitch-yaw about fixed axes).
+    #
+    # 3) We'll set T0_TCP(q1..q5) = T_des (both position and orientation),
+    #    yielding a system of equations in q1..q5.
+    #
+    # 4) We solve symbolically (via sympy) for q1..q5 in closed form.  Because
+    #    there may be multiple valid solutions (the robot is kinematically
+    #    redundant for certain poses, or has periodic solutions for each joint),
+    #    one may pick any valid branch that lies in the specified joint limits.
+    #
+    # 5) Finally, we return one consistent solution (q1, q2, q3, q4, q5).
+    #
+    # This code sketch does not do reachability checks or multiple-solution
+    # branching; it simply attempts a direct symbolic solve for one solution.
+    # All angles are computed in radians, matching the manipulator's conventions.
+    #
+    # ------------------------------------------------------------------
+    # Symbolic Implementation:
+    # ------------------------------------------------------------------
+    #
+    import sympy
+    from sympy import symbols, sin, cos, Matrix, simplify, atan2
+
+    # Create symbolic variables for the five joints
+    q1, q2, q3, q4, q5 = symbols('q1 q2 q3 q4 q5', real=True)
+
+    #
+    # Helpful 4×4 transforms
+    #
+    def Txyz(x, y, z):
+        return Matrix([
+            [1, 0, 0, x],
+            [0, 1, 0, y],
+            [0, 0, 1, z],
+            [0, 0, 0, 1]
+        ])
+
+    def RotX(a):
+        return Matrix([
+            [1,      0,       0,      0],
+            [0, cos(a), -sin(a), 0],
+            [0, sin(a),  cos(a), 0],
+            [0,      0,       0,      1]
+        ])
+
+    def RotY(a):
+        return Matrix([
+            [ cos(a), 0, sin(a), 0],
+            [      0, 1,      0, 0],
+            [-sin(a), 0, cos(a), 0],
+            [      0, 0,      0, 1]
+        ])
+
+    def RotZ(a):
+        return Matrix([
+            [cos(a), -sin(a), 0, 0],
+            [sin(a),  cos(a), 0, 0],
+            [     0,       0, 1, 0],
+            [     0,       0, 0, 1]
+        ])
+
+    #
+    # Build the forward-kinematics chain T0_TCP(q1..q5):
+    #
+    # Link 1: Revolute about Y with no preceding translation:
+    T0_1 = RotY(q1)
+
+    # Link 2: Translate [0, -0.1197, 0.425], then revolve about Y:
+    T1_2 = Txyz(0, -0.1197, 0.425)*RotY(q2)
+
+    # Link 3: Translate [0, 0, 0.39225], then revolve about Y:
+    T2_3 = Txyz(0, 0, 0.39225)*RotY(q3)
+
+    # Link 4: Translate [0, 0.093, 0], revolve about Z:
+    T3_4 = Txyz(0, 0.093, 0)*RotZ(q4)
+
+    # Link 5: Translate [0, 0, 0.09465], revolve about Y:
+    T4_5 = Txyz(0, 0, 0.09465)*RotY(q5)
+
+    # TCP offset: [0, 0.0823, 0], plus a final fixed orientation of Rz(90 deg)
+    # which is (roll=0,pitch=0,yaw=+pi/2).
+    T5_TCP = Txyz(0, 0.0823, 0)*RotZ(sympy.pi/2)
+
+    # Full transform from base to TCP:
+    T0_TCP_expr = T0_1 * T1_2 * T2_3 * T3_4 * T4_5 * T5_TCP
+
+    #
+    # Next, define the target transform from the desired p = (px,py,pz)
+    # and r = (rx, ry, rz) in standard RPY form: Rz(rz)*Ry(ry)*Rx(rx) or, if you
+    # prefer X->Y->Z order, use Rx(rx)*Ry(ry)*Rz(rz). Check which convention
+    # you are using. Here we assume the typical "roll-pitch-yaw" = Rx * Ry * Rz:
+    #
+    px, py, pz = p
+    rx, ry, rz = r
+
+    # Build T_des = translation * orientation
+    T_des = (
+        Txyz(px, py, pz)
+        * RotX(rx)
+        * RotY(ry)
+        * RotZ(rz)
+    )
+
+    #
+    # We want T0_TCP_expr == T_des, i.e. both the rotation submatrix and
+    # translation match.  This yields 6 independent equations:
+    #   (1) T0_TCP_expr[0,3] = px
+    #   (2) T0_TCP_expr[1,3] = py
+    #   (3) T0_TCP_expr[2,3] = pz
+    # plus orientation constraints from the 3×3 sub-block (for roll,pitch,yaw).
+    #
+    # For a 5-DOF robot, typically we can match 5 constraints exactly, and the 6th
+    # is either matched by design or the manipulator is known to have a limited
+    # orientation set.  We assume "assume all targets are reachable" per instructions.
+    #
+    # Below we illustrate matching the position and the final RPY angles from
+    # T0_TCP_expr.  We extract roll_x, pitch_y, yaw_z from its rotation submatrix
+    # with standard formulas.  E.g. for R = T0_TCP_expr[0:3,0:3]:
+    #   pitch_y = atan2( -R[2,0], sqrt(R[0,0]^2 + R[1,0]^2 ) ), etc.
+    #
+    # We set up these equations and solve symbolically.  In practice, one
+    # might systematically handle sign choices in the sqrt or use piecewise
+    # logic for multiple solutions.  Here is a straightforward attempt:
+    #
+    R_expr = T0_TCP_expr[0:3, 0:3]
+    px_expr = T0_TCP_expr[0, 3]
+    py_expr = T0_TCP_expr[1, 3]
+    pz_expr = T0_TCP_expr[2, 3]
+
+    # Compute an Euler-angle extraction from R_expr as roll->pitch->yaw:
+    # roll_x = atan2(R[2,1], R[2,2])
+    # pitch_y= atan2(-R[2,0], sqrt(R[2,1]^2 + R[2,2]^2))
+    # yaw_z  = atan2(R[1,0], R[0,0])
+    roll_expr = atan2(R_expr[2,1], R_expr[2,2])
+    pitch_expr= atan2(-R_expr[2,0], sympy.sqrt(R_expr[2,1]**2 + R_expr[2,2]**2))
+    yaw_expr  = atan2(R_expr[1,0], R_expr[0,0])
+
+    # Now build up 6 equations: (pos) + (roll,pitch,yaw)
+    eqs = []
+    eqs.append(sympy.Eq(px_expr, px))
+    eqs.append(sympy.Eq(py_expr, py))
+    eqs.append(sympy.Eq(pz_expr, pz))
+    eqs.append(sympy.Eq(roll_expr, rx))
+    eqs.append(sympy.Eq(pitch_expr, ry))
+    eqs.append(sympy.Eq(yaw_expr, rz))
+
+    # Solve the system
+    # Note: This can produce multiple solutions. We pick one. 
+    sol = sympy.solve(eqs, [q1, q2, q3, q4, q5], dict=True)
+
+    if len(sol) == 0:
+        # Per instructions, assume inputs are always reachable.  We do not handle
+        # unreachability.  But if code gets here, there's no solution from the solver.
+        # You might raise an exception or return zeros.  We'll just return zeros:
+        return (0.0, 0.0, 0.0, 0.0, 0.0)
+
+    # If we have at least one solution, pick the first.  Then wrap or clamp
+    # each angle to the range [-2π, 2π] (or the full [-6.2831853, 6.2831853]) as needed.
+    sol_0 = sol[0]
+    q1_val = float(sympy.simplify(sol_0[q1]) % (2*sympy.pi))
+    q2_val = float(sympy.simplify(sol_0[q2]) % (2*sympy.pi))
+    q3_val = float(sympy.simplify(sol_0[q3]) % (2*sympy.pi))
+    q4_val = float(sympy.simplify(sol_0[q4]) % (2*sympy.pi))
+    q5_val = float(sympy.simplify(sol_0[q5]) % (2*sympy.pi))
+
+    # Adjust range into [-pi, +pi], for instance, or leave them as is
+    # so long as they stay within [-6.2831853, 6.2831853] as required.
+    def wrap_into_full_range(a):
+        # Nudges angle into [-2π, 2π] if out of range
+        if a >  sympy.pi:  a -= 2*sympy.pi
+        if a < -sympy.pi:  a += 2*sympy.pi
+        # Each joint has a limit of ±6.2831853, so ensure we respect that:
+        if a < -6.2831853: a = -6.2831853
+        if a >  6.2831853: a =  6.2831853
+        return float(a)
+
+    q1_val = wrap_into_full_range(q1_val)
+    q2_val = wrap_into_full_range(q2_val)
+    q3_val = wrap_into_full_range(q3_val)
+    q4_val = wrap_into_full_range(q4_val)
+    q5_val = wrap_into_full_range(q5_val)
+
+    return (q1_val, q2_val, q3_val, q4_val, q5_val)

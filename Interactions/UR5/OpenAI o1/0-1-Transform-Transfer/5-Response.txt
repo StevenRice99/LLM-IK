@@ -1,0 +1,86 @@
+```python
+def inverse_kinematics(p: tuple[float, float, float], r: tuple[float, float, float]) -> tuple[float, float]:
+    """
+    Gets the joint values needed to reach position "p" and orientation "r"
+    for this 2-DOF serial manipulator. The manipulator has:
+      • First revolute joint about Z (θ₁),
+      • Second revolute joint about Y (θ₂),
+      • An offset of [0, 0.13585, 0] from joint 1 to joint 2,
+      • An offset of [0, -0.1197, 0.425] from joint 2 to the TCP in the local frame of joint 2,
+      • Final orientation = Rz(θ₁) * Ry(θ₂),
+      • Joint limits: each in [-2π, 2π], but we will return solutions in [-π, π].
+      • All p, r are guaranteed feasible (so no reachability checks).
+
+    :param p: Desired TCP position (x, y, z).
+    :param r: Desired TCP orientation in radians, as roll–pitch–yaw = [r_x, r_y, r_z].
+              Because the robot only has rotations about Z then Y, effectively
+              the manipulator can realize yaw = θ₁ and pitch = θ₂ (with roll ≈ 0 or ±π
+              being equivalent orientation flips). We reconcile any ±π roll by returning
+              angles in [-π, π].
+    :return: (θ₁, θ₂), the two joint angles in radians in [-π, π].
+    """
+    import math
+
+    # Helper to wrap an angle into [-π, π]
+    def wrap_to_pi(angle: float) -> float:
+        # shift angle into [-π, π]
+        angle = (angle + math.pi) % (2.0 * math.pi) - math.pi
+        return angle
+
+    # Unpack desired position p and orientation r
+    x_d, y_d, z_d = p
+    r_x, r_y, r_z = r
+
+    # ------------------------------------------------------------------------
+    # 1) Solve for θ₂ from the TCP's z coordinate, which comes from:
+    #     z_d ≈ 0.425 * cos(θ₂).
+    # ------------------------------------------------------------------------
+    cos_theta2 = z_d / 0.425
+    # Clamp for numerical robustness:
+    if cos_theta2 > 1.0:
+        cos_theta2 = 1.0
+    elif cos_theta2 < -1.0:
+        cos_theta2 = -1.0
+
+    # Primary 'acos' candidate
+    theta2_cand = math.acos(cos_theta2)
+
+    # We choose ±θ₂ to be as close as possible to the user's pitch (r_y).
+    # That is, if r_y ~ +θ₂, pick +θ₂; else pick -θ₂.
+    def pick_angle_sign(candidate: float, desired: float) -> float:
+        pos_diff = abs(desired - candidate)
+        neg_diff = abs(desired + candidate)
+        return candidate if pos_diff <= neg_diff else -candidate
+
+    theta2 = pick_angle_sign(theta2_cand, r_y)
+
+    # ------------------------------------------------------------------------
+    # 2) Solve for θ₁ from (x_d, y_d).  In the manipulator:
+    #     p = Rz(θ₁)*[0, 0.13585, 0] + Rz(θ₁)*Ry(θ₂)*[0, -0.1197, 0.425].
+    #
+    # Let w = [w_x, w_y], ignoring z. Specifically:
+    #   w_x = 0.425 sin(θ₂)
+    #   w_y = 0.13585 - 0.1197 = 0.01615
+    # Then p_x + i p_y = Rz(θ₁)*(w_x + i w_y).
+    # Standard plane geometry yields θ₁ = atan2(S, C).
+    # ------------------------------------------------------------------------
+    w_x = 0.425 * math.sin(theta2)
+    w_y = 0.13585 - 0.1197  # = 0.01615
+    denom = w_x**2 + w_y**2
+    if abs(denom) < 1e-15:
+        # This would be a degenerate case, but guaranteed not to happen for valid p.
+        denom = 1e-15
+
+    C = (w_x * x_d + w_y * y_d) / denom
+    S = (-w_y * x_d + w_x * y_d) / denom
+    theta1 = math.atan2(S, C)
+
+    # ------------------------------------------------------------------------
+    # 3) Wrap final results so that θ₁, θ₂ ∈ [-π, π].
+    # This helps match the sign convention for orientations near ±π.
+    # ------------------------------------------------------------------------
+    theta1 = wrap_to_pi(theta1)
+    theta2 = wrap_to_pi(theta2)
+
+    return (theta1, theta2)
+```

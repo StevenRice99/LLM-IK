@@ -1,0 +1,116 @@
+def inverse_kinematics(p: tuple[float, float, float]) -> tuple[float, float, float, float, float, float]:
+    """
+    Gets the joint values needed to reach position "p".
+    :param p: The position to reach in the form [x, y, z].
+    :return: A tuple of the 6 joint values (in radians) that place the TCP at position p.
+    
+    Explanation of approach:
+      • First, we solve the angle for joint 1 (which is revolute about the Z–axis) using the
+        "existing code 1" idea.  In the table, joint 1 is around Z, so we use the simple planar
+        arctan2 approach.
+      • Next, we rotate the target position into the frame 'after' that first rotation, effectively
+        subtracting the rotation of joint 1 about Z from the target.  This creates a shifted target
+        that we can feed into the “existing code 2” solver, which was written for a chain of 5
+        revolute joints about (Y, Y, Y, Z, Y).  In our table, those 5 joints correspond to
+        joints 2..6 of the full 6–DOF chain.
+      • Finally, we combine the first joint with the 5-joint solution that “existing code 2” returns.
+        That yields the full 6–joint solution.
+    
+    Note: The orientation is assumed fixed in the URDF (final RPY is [0,0,1.5708]), and the problem
+    only asks for a position IK.  We rely on the provided sub-solvers for closed-form expressions.
+    We do not include any checks for unreachable targets, per instructions.
+    """
+    import math
+
+    # -- Step 1: Solve for Joint 1 using the "existing code 1" approach. --
+    x, y, z = p
+    # existing_code_1: theta = atan2(-x, y)
+    # That solver returns a single angle for a revolute joint about Z.
+    theta1 = math.atan2(-x, y)
+
+    # -- Step 2: Rotate the target point by -theta1 about Z
+    #    to get the coordinates for the sub-chain (joints 2..6).
+    cos_t1 = math.cos(-theta1)
+    sin_t1 = math.sin(-theta1)
+    x_sub = x * cos_t1 - y * sin_t1
+    y_sub = x * sin_t1 + y * cos_t1
+    z_sub = z  # Z is unaffected by rotation about Z
+
+    # -- Step 3: Use "existing code 2" on the transformed point.
+    #    existing_code_2 returns (q1, q2, q3, q4, q5) but those correspond
+    #    to the chain of 5 revolute joints about (Y, Y, Y, Z, Y).
+    #    In our full manipulator, those are joints 2..6.
+
+    # Reusing the solver from "existing code 2"
+    # (just replicate "existing_code_2.inverse_kinematics" here to get the 5 angles).
+    #
+    # For clarity, because the instructions mention we may reuse it without editing
+    # its code, we simply call it as if it were imported:
+    def existing_code_2_ik(p_sub: tuple[float, float, float]) -> tuple[float, float, float, float, float]:
+        """
+        This is the existing code 2 from the prompt, copied directly.
+        """
+        L1 = 0.425
+        L2 = 0.39225
+        L3 = 0.09465
+        y_offset = -0.1197 + 0.093
+        tcp_y_offset = 0.0823
+        x_target, y_target, z_target = p_sub
+
+        def normalize(angle):
+            while angle > math.pi:
+                angle -= 2.0 * math.pi
+            while angle < -math.pi:
+                angle += 2.0 * math.pi
+            return angle
+
+        def fk(q1, q2, q3, q4):
+            S = q1 + q2 + q3
+            d = 0.0823 * math.sin(q4)
+            x_fk = L1 * math.sin(q1) + L2 * math.sin(q1 + q2) + L3 * math.sin(S) - d * math.cos(S)
+            z_fk = L1 * math.cos(q1) + L2 * math.cos(q1 + q2) + L3 * math.cos(S) + d * math.sin(S)
+            y_fk = y_offset + tcp_y_offset * math.cos(q4)
+            return (x_fk, y_fk, z_fk)
+
+        C = (y_target - y_offset) / tcp_y_offset
+        C = max(min(C, 1.0), -1.0)
+        q4_candidates = [math.acos(C), -math.acos(C)]
+        psi = math.atan2(x_target, z_target)
+        best_error = float('inf')
+        best_solution = None
+        for q4_candidate in q4_candidates:
+            d = tcp_y_offset * math.sin(q4_candidate)
+            L_eff = math.sqrt(L3 ** 2 + d ** 2)
+            phi = math.atan2(d, L3)
+            for T_candidate in [psi, psi + math.pi]:
+                S = T_candidate + phi
+                W_x = x_target - L_eff * math.sin(T_candidate)
+                W_z = z_target - L_eff * math.cos(T_candidate)
+                r_w = math.hypot(W_x, W_z)
+                if r_w > L1 + L2 or r_w < abs(L1 - L2):
+                    continue
+                cos_q2 = (r_w ** 2 - L1 ** 2 - L2 ** 2) / (2 * L1 * L2)
+                cos_q2 = max(min(cos_q2, 1.0), -1.0)
+                for sign in [1, -1]:
+                    q2_candidate = sign * math.acos(cos_q2)
+                    delta = math.atan2(L2 * math.sin(q2_candidate), L1 + L2 * math.cos(q2_candidate))
+                    theta_w = math.atan2(W_x, W_z)
+                    q1_candidate = theta_w - delta
+                    q3_candidate = S - (q1_candidate + q2_candidate)
+                    x_fk, y_fk, z_fk = fk(q1_candidate, q2_candidate, q3_candidate, q4_candidate)
+                    error = math.sqrt((x_fk - x_target) ** 2 + (y_fk - y_target) ** 2 + (z_fk - z_target) ** 2)
+                    if error < best_error:
+                        best_error = error
+                        best_solution = (q1_candidate, q2_candidate, q3_candidate, q4_candidate, 0.0)
+        if best_solution is None:
+            raise ValueError('No valid IK solution found for the input target position.')
+        q1b, q2b, q3b, q4b, q5b = best_solution
+        # normalize them
+        def n(a):
+            return normalize(a)
+        return (n(q1b), n(q2b), n(q3b), n(q4b), n(q5b))
+
+    q2_, q3_, q4_, q5_, q6_ = existing_code_2_ik((x_sub, y_sub, z_sub))
+
+    # -- Step 4: Combine everything into the final 6–DOF solution --
+    return (theta1, q2_, q3_, q4_, q5_, q6_)

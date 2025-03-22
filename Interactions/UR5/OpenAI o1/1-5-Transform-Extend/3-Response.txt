@@ -1,0 +1,101 @@
+```python
+def inverse_kinematics(p: tuple[float, float, float], r: tuple[float, float, float]) -> tuple[float, float, float, float, float]:
+    import math
+    import numpy as np
+
+    # Unpack desired TCP position/orientation
+    x_target, y_target, z_target = p
+    roll, pitch, yaw = r
+
+    # Build rotation matrix R_target from roll–pitch–yaw (intrinsic X–Y–Z) 
+    cr, sr = math.cos(roll), math.sin(roll)
+    cp, sp = math.cos(pitch), math.sin(pitch)
+    cy, sy = math.cos(yaw), math.sin(yaw)
+    R_x = np.array([
+        [1,    0,     0],
+        [0,   cr,   -sr],
+        [0,   sr,    cr]
+    ])
+    R_y = np.array([
+        [ cp,   0,   sp],
+        [  0,   1,    0],
+        [-sp,   0,   cp]
+    ])
+    R_z = np.array([
+        [ cy,  -sy,   0],
+        [ sy,   cy,   0],
+        [  0,    0,   1]
+    ])
+    R_target = R_z @ R_y @ R_x
+
+    # Extract elements to find net rotation about Y
+    r13 = R_target[0, 2]
+    r33 = R_target[2, 2]
+    theta_sum = math.atan2(r13, r33)
+
+    # Combine offsets for Link4->Link5 (0.09465) and Link5->TCP (0.0823)
+    C_tcp = 0.09465 + 0.0823
+    pos3_x = x_target - C_tcp * math.sin(theta_sum)
+    pos3_z = z_target - C_tcp * math.cos(theta_sum)
+
+    # Link lengths
+    a = 0.425
+    b = 0.39225
+
+    # Solve planar 2-link for theta1, theta2
+    x = pos3_x
+    z = pos3_z
+    d_sq = x**2 + z**2
+    cos_theta2 = (d_sq - a**2 - b**2) / (2.0 * a * b)
+    cos_theta2 = max(min(cos_theta2, 1.0), -1.0)
+    theta2_pos = math.acos(cos_theta2)
+    theta2_neg = -theta2_pos
+
+    solutions_13 = []
+    for candidate_theta2 in (theta2_pos, theta2_neg):
+        denom = a + b * math.cos(candidate_theta2)
+        num = b * math.sin(candidate_theta2)
+        theta1_cand = math.atan2(x, z) - math.atan2(num, denom)
+        x_calc = a * math.sin(theta1_cand) + b * math.sin(theta1_cand + candidate_theta2)
+        z_calc = a * math.cos(theta1_cand) + b * math.cos(theta1_cand + candidate_theta2)
+        if (math.isclose(x_calc, x, abs_tol=1e-5) and 
+            math.isclose(z_calc, z, abs_tol=1e-5)):
+            solutions_13.append((theta1_cand, candidate_theta2))
+
+    if solutions_13:
+        theta1, theta2 = solutions_13[0]
+    else:
+        theta1, theta2 = (0.0, 0.0)
+
+    theta3 = theta_sum - theta1 - theta2
+
+    def rotY(ang):
+        c, s = math.cos(ang), math.sin(ang)
+        return np.array([
+            [ c, 0, s],
+            [ 0, 1, 0],
+            [-s, 0, c]
+        ], dtype=float)
+
+    R_y_sum = rotY(theta1 + theta2 + theta3)
+    R_remaining = R_y_sum.T @ R_target
+
+    # Solve for theta4 about Z
+    theta4 = math.atan2(R_remaining[1, 0], R_remaining[0, 0])
+
+    def rotZ(ang):
+        c, s = math.cos(ang), math.sin(ang)
+        return np.array([
+            [ c, -s,  0],
+            [ s,  c,  0],
+            [ 0,  0,  1]
+        ], dtype=float)
+
+    R_after4 = rotZ(theta4)
+    R_left = R_after4.T @ R_remaining
+
+    # Solve for theta5 about Y
+    theta5 = math.atan2(R_left[0, 2], R_left[0, 0])
+
+    return (theta1, theta2, theta3, theta4, theta5)
+```

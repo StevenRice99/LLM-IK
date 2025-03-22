@@ -1,0 +1,132 @@
+```python
+def inverse_kinematics(p: tuple[float, float, float], r: tuple[float, float, float]) -> tuple[float, float, float]:
+    """
+    Gets the joint values needed to reach position "p" and orientation "r".
+    :param p: The position to reach in the form [x, y, z].
+    :param r: The orientation to reach in radians in the form [x, y, z].
+    :return: A tuple (joint1, joint2, joint3), in radians, that achieves the target pose.
+    """
+    import math
+    import numpy as np
+
+    # Unpack desired position and orientation
+    x, y, z = p
+    rx, ry, rz = r
+
+    # ------------------
+    # 1) Solve Joint 1
+    # ------------------
+    # From "existing code 1": revolve around Z to align manipulator's plane.
+    q1 = math.atan2(-x, y)
+
+    # -----------------------------------------
+    # 2) Transform target into frame after J1
+    # -----------------------------------------
+    # After rotating by q1 about Z, the next joint sees p from a new frame origin
+    # offset by [0, 0.13585, 0] (the translation from joint1 to joint2).
+    # We'll define Rz(q1) and apply it.
+
+    T1 = np.array([0.0, 0.13585, 0.0])
+    Rz_plus_q1 = np.array([
+        [ math.cos(q1), -math.sin(q1), 0],
+        [ math.sin(q1),  math.cos(q1), 0],
+        [           0,             0, 1]
+    ])
+
+    # Position in the second joint's frame
+    p_12 = Rz_plus_q1.dot(np.array([x, y, z]) - T1)
+
+    # Build full orientation matrix from r = (rx, ry, rz) in Rz*Ry*Rx order:
+    def matrix_rxyz(rx_, ry_, rz_):
+        """Return Rz(rz_)*Ry(ry_)*Rx(rx_)."""
+        cx, sx = math.cos(rx_), math.sin(rx_)
+        cy, sy = math.cos(ry_), math.sin(ry_)
+        cz, sz = math.cos(rz_), math.sin(rz_)
+
+        Rz_mat = np.array([[ cz, -sz,  0],
+                           [ sz,  cz,  0],
+                           [  0,   0,  1]])
+        Ry_mat = np.array([[ cy,  0, sy],
+                           [  0,  1,  0],
+                           [-sy,  0, cy]])
+        Rx_mat = np.array([[ 1,  0,   0],
+                           [ 0, cx, -sx],
+                           [ 0, sx,  cx ]])
+        return Rz_mat.dot(Ry_mat).dot(Rx_mat)
+
+    R_full = matrix_rxyz(rx, ry, rz)
+
+    # Undo the joint-1 rotation in the orientation
+    Rz_minus_q1 = np.array([
+        [ math.cos(-q1), -math.sin(-q1), 0],
+        [ math.sin(-q1),  math.cos(-q1), 0],
+        [            0,             0,   1]
+    ])
+    R_after_j1 = Rz_minus_q1.dot(R_full)
+
+    # Extract the "local pitch" that joints 2 and 3 must achieve:
+    # existing code 2 uses R00 = cos(ry)*cos(rz) and R02 = sin(ry).
+    R00 = R_after_j1[0, 0]
+    R02 = R_after_j1[0, 2]
+    local_pitch_sum = math.atan2(R02, R00)
+
+    # Synthetic orientation for sub-chain:
+    r_12 = (0.0, local_pitch_sum, 0.0)
+
+    # -----------------
+    # 3) Solve Joint 2 & 3
+    # -----------------
+    x_target, y_target, z_target = p_12
+    rx_local, ry_local, rz_local = r_12
+
+    cx = math.cos(rx_local)
+    sx = math.sin(rx_local)
+    cy = math.cos(ry_local)
+    sy = math.sin(ry_local)
+    cz = math.cos(rz_local)
+    sz = math.sin(rz_local)
+
+    R00 = cy * cz
+    R02 = sy
+    theta_sum = math.atan2(R02, R00)
+
+    # Link lengths per "existing code 2"
+    a = 0.425
+    b = 0.39225
+
+    d_sq = x_target**2 + z_target**2
+    d = math.sqrt(d_sq)
+
+    cos_theta2 = (d_sq - a**2 - b**2) / (2 * a * b)
+    # Clamp to avoid minor float rounding issues:
+    cos_theta2 = max(min(cos_theta2, 1.0), -1.0)
+    theta2_1 = math.acos(cos_theta2)
+    theta2_2 = -theta2_1
+    solutions = []
+
+    for t2 in [theta2_1, theta2_2]:
+        t1 = theta_sum - t2
+        # forward check
+        x_calc = a * math.sin(t1) + b * math.sin(theta_sum)
+        z_calc = a * math.cos(t1) + b * math.cos(theta_sum)
+        if (math.isclose(x_calc, x_target, abs_tol=1e-5) and
+            math.isclose(z_calc, z_target, abs_tol=1e-5)):
+            solutions.append((t1, t2))
+
+    if solutions:
+        # pick first valid
+        for (theta2_cand, theta3_cand) in solutions:
+            if -6.2831853 <= theta3_cand <= 6.2831853:
+                q2, q3 = theta2_cand, theta3_cand
+                break
+        else:
+            q2, q3 = solutions[0]
+    else:
+        # fallback
+        term_x = x_target - b * math.sin(theta_sum)
+        term_z = z_target - b * math.cos(theta_sum)
+        q2 = math.atan2(term_x, term_z)
+        q3 = theta_sum - q2
+
+    return (q1, q2, q3)
+```

@@ -1,0 +1,116 @@
+def inverse_kinematics(p: tuple[float, float, float]) -> tuple[float, float, float, float, float]:
+    """
+    Gets the joint values needed to reach position "p".
+    :param p: The position to reach in the form [x, y, z].
+    :return: A list of the values to set the links (joint1..joint5) to for reaching position "p".
+    
+    This solution uses Sympy's symbolic solver to derive a closed-form expression for q1..q4,
+    and sets q5 = 0 (since no orientation constraint is imposed and there is one extra degree
+    of freedom).
+    """
+    import sympy
+    from sympy import symbols, sin, cos, Matrix
+
+    # Unpack target
+    x_target, y_target, z_target = p
+
+    # Define joint symbols (we will fix q5 = 0 to remove redundancy in position-only IK)
+    q1, q2, q3, q4 = symbols('q1 q2 q3 q4', real=True)
+
+    # Shortcuts for sine/cosine
+    s1, c1 = sin(q1), cos(q1)
+    s2, c2 = sin(q2), cos(q2)
+    s3, c3 = sin(q3), cos(q3)
+    s4, c4 = sin(q4), cos(q4)
+
+    #----------------------------------------------------------------------------
+    # Define homogeneous transform helpers
+    #----------------------------------------------------------------------------
+
+    def rot_z(th):
+        """Rotation about Z by th."""
+        return Matrix([
+            [ cos(th), -sin(th), 0, 0],
+            [ sin(th),  cos(th), 0, 0],
+            [       0,        0, 1, 0],
+            [       0,        0, 0, 1]
+        ])
+
+    def rot_y(th):
+        """Rotation about Y by th."""
+        return Matrix([
+            [ cos(th), 0, sin(th), 0],
+            [       0, 1,       0, 0],
+            [-sin(th), 0, cos(th), 0],
+            [       0, 0,       0, 1]
+        ])
+
+    def trans(tx, ty, tz):
+        """Translation by [tx, ty, tz]."""
+        return Matrix([
+            [1, 0, 0, tx],
+            [0, 1, 0, ty],
+            [0, 0, 1, tz],
+            [0, 0, 0,  1]
+        ])
+
+    #----------------------------------------------------------------------------
+    # Build the forward kinematics symbolically (up to the TCP)
+    # Per the DETAILS table, ignoring any final rotation about Z for q5 (we set q5=0).
+    #----------------------------------------------------------------------------
+
+    # 1) Revolute 1 about Z by q1 (no offset)
+    T1 = rot_z(q1)
+
+    # 2) Translate by [0, 0.13585, 0], then Revolute 2 about Y by q2
+    T2 = trans(0, 0.13585, 0) * rot_y(q2)
+
+    # 3) Translate by [0, -0.1197, 0.425], then Revolute 3 about Y by q3
+    T3 = trans(0, -0.1197, 0.425) * rot_y(q3)
+
+    # 4) Translate by [0, 0, 0.39225], then Revolute 4 about Y by q4
+    T4 = trans(0, 0, 0.39225) * rot_y(q4)
+
+    # 5) Translate by [0, 0.093, 0] (joint5 about Z is "q5" but we'll set q5=0 => no shift in position)
+    T5 = trans(0, 0.093, 0)
+
+    # 6) TCP offset by [0, 0, 0.09465]
+    TCP = trans(0, 0, 0.09465)
+
+    # Full transform from base to TCP
+    T_full = T1 * T2 * T3 * T4 * T5 * TCP
+
+    # Extract end-effector position
+    px = T_full[0, 3]
+    py = T_full[1, 3]
+    pz = T_full[2, 3]
+
+    # We want px = x_target, py = y_target, pz = z_target
+    equations = [
+        sympy.Eq(px, x_target),
+        sympy.Eq(py, y_target),
+        sympy.Eq(pz, z_target)
+    ]
+
+    # Solve for q1, q2, q3, q4.  There can be multiple solutions; we take one valid branch.
+    # (We assume the target is reachable somewhere in the valid ranges).
+    sol = sympy.solve(equations, [q1, q2, q3, q4], dict=True)
+
+    if not sol:
+        # Per instructions, we assume all targets will be reachable, so we won't handle "no solution" here.
+        raise ValueError("No valid IK solution found (unexpected).")
+
+    # Pick the first solution (or any) from the returned list of solutions
+    chosen = sol[0]
+
+    # Extract solution in consistent order, and wrap them to a reasonable principal value if desired
+    q1_val = float(chosen[q1])
+    q2_val = float(chosen[q2])
+    q3_val = float(chosen[q3])
+    q4_val = float(chosen[q4])
+
+    # We set q5 = 0.0 for a default orientation (since problem states no orientation constraints)
+    q5_val = 0.0
+
+    # Return the 5-tuple
+    return (q1_val, q2_val, q3_val, q4_val, q5_val)

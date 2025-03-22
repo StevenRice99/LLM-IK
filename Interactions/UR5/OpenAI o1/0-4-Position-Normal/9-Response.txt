@@ -1,0 +1,83 @@
+```python
+def inverse_kinematics(p: tuple[float, float, float]) -> tuple[float, float, float, float, float]:
+    """
+    A simplified closed-form, position-only inverse kinematics solution for this 5-DOF arm.
+    -------------------------------------------------------------------------
+    Given the link geometry, we will:
+      1) Compute joint1 (q1) = atan2(y, x) to point the arm in the plane of (x, y).
+      2) Approximate the remaining links as a simplified 2-link planar mechanism
+         (joints q2 and q3 about Y) reaching out in the plane formed by the radial
+         distance from the robot axis (r = sqrt(x^2 + y^2)) and the vertical z-axis.
+         We treat Link-2 as length L1 = 0.425, Link-3 as length L2 = 0.39225.
+      3) Combine the small end-link offsets (0.093 + 0.09465 = 0.18765) into a
+         "wrist" offset we subtract from the radial distance so that typical 2-link
+         geometry formulas apply. Then we solve for q2, q3 using the law of cosines.
+      4) We set joint4 = 0 and joint5 = 0 for a default orientation about those axes.
+    
+    Because the actual URDF includes small translations (0.13585, -0.1197, etc.), this
+    simplified closed-form version may not be perfectly exact for every (x, y, z),
+    but it provides an algebraic (non-iterative) solution that will run quickly.
+    We assume all requested positions are within the manipulator’s reachable workspace.
+    """
+    import math
+
+    x, y, z = p
+
+    # 1) Base rotation about Z:
+    #    Handle the corner case where x=y=0 by defaulting to 0.
+    if abs(x) < 1e-12 and abs(y) < 1e-12:
+        q1 = 0.0
+    else:
+        q1 = math.atan2(y, x)
+
+    # 2) Distance in the horizontal plane:
+    r = math.sqrt(x*x + y*y)
+
+    # 3) The direct distance from the base (z=0) to the target:
+    R = math.sqrt(r*r + z*z)
+
+    # 4) Subtract the "wrist offset" from that distance,
+    #    here combining link5 + TCP offsets:
+    wrist_offset = 0.093 + 0.09465  # = 0.18765
+    # We reduce R by that offset along the same radial direction:
+    R_eff = max(0.0, R - wrist_offset)
+
+    # 5) Arm link lengths in this simplified model:
+    L1 = 0.425    # (joint2 -> joint3)
+    L2 = 0.39225  # (joint3 -> joint4)
+
+    # 6) Solve the 2-link planar IK for q2, q3 in a standard way:
+    #    We let phi = angle from horizontal plane to the line from base to target
+    #    alpha = law-of-cosines angle
+    if abs(R_eff) < 1e-12:
+        # Degenerate case - put q2= pi/2, q3=0, etc.
+        q2 = math.pi/2
+        q3 = 0.0
+    else:
+        # law of cosines for the "elbow" angle (q3). We'll choose "elbow down" solution.
+        cos_elbow = (L1*L1 + L2*L2 - R_eff*R_eff) / (2*L1*L2)
+        # Clamp to avoid domain errors:
+        cos_elbow = max(-1.0, min(1.0, cos_elbow))
+        # Typically for a 2-link, q3 = pi - arccos(...). That sets the elbow "down" or "up".
+        # We'll choose an "elbow up" style (common in many arms) by using:
+        elbow_angle = math.acos(cos_elbow)
+        q3 = math.pi - elbow_angle
+
+        # Then for q2:
+        #   alpha = arccos( (R_eff^2 + L1^2 - L2^2 ) / (2*L1*R_eff) )
+        cos_alpha = (R_eff*R_eff + L1*L1 - L2*L2) / (2*L1*R_eff)
+        cos_alpha = max(-1.0, min(1.0, cos_alpha))
+        alpha = math.acos(cos_alpha)
+
+        # angle from horizontal:
+        phi = math.atan2(z, r)  # the angle from the ground up to the target
+
+        # q2 is measured from the robot's "horizontal" around Y. We'll add phi and alpha:
+        q2 = phi + alpha
+
+    # 7) We'll set q4=0 (no additional rotation about Y) and q5=0 (no rotation about Z)
+    q4 = 0.0
+    q5 = 0.0
+
+    return (q1, q2, q3, q4, q5)
+```

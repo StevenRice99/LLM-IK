@@ -1,0 +1,166 @@
+```python
+import math
+import numpy as np
+
+def inverse_kinematics(p: tuple[float, float, float], r: tuple[float, float, float]) -> tuple[float, float]:
+    """
+    Closed-form inverse kinematics for a 2-DOF manipulator with:
+      • Joint 1: rotation about Z (θ1)
+      • Joint 2: rotation about Y (θ2)
+
+    Link offsets from the URDF ("DETAILS" section):
+      • Revolute 1 at base: no offset, rotates about Z
+      • Revolute 2 offset from link1 by [0, 0.13585, 0], rotates about Y
+      • TCP offset from link2 by [0, -0.1197, 0.425]
+
+    The desired end-effector pose is given by:
+      • Position p = (px, py, pz)
+      • Orientation r in RPY form: r = (rX, rY, rZ)
+
+    We wish to find θ1, θ2 such that:
+      FK(θ1, θ2) matches (p, Rz(rZ)*Ry(rY)*Rx(rX)).
+
+    ---------------------------------------------
+    OVERVIEW OF THE SOLUTION
+
+    1) Compute the target orientation matrix R_des = Rz(rZ)*Ry(rY)*Rx(rX). We want:
+          Rz(θ1)*Ry(θ2)  ≈  R_des
+       Because the robot has only Z-then-Y joints, we solve for (θ1, θ2) that reproduce R_des.
+
+    2) A standard Euler-factorization approach for Rz(α)*Ry(β) says:
+         Let R = Rz(α)*Ry(β).  Then from R:
+           β = atan2(-R[2,0], R[2,2])
+           α = atan2( R[1,0],  R[0,0])
+       We take those as a principal solution (θ1A, θ2A).
+
+       However, rotations about Z and Y can repeat the same overall orientation if we shift
+       angles by π in a certain combination (the classic “flip” ambiguity).  So we will generate
+       a small set of candidate solutions that produce the same orientation, and we will test
+       which candidate also solves the position requirement.
+
+    3) Position matching.  The forward kinematics for the TCP in the base frame is:
+         p_calc(θ1, θ2) = RotZ(θ1)* [0, 0.13585, 0]^T
+                          + RotZ(θ1)*RotY(θ2)* [0, -0.1197, 0.425]^T.
+       We will compare each orientation-consistent (θ1, θ2) candidate’s forward-kinematics
+       to the desired p.  The one that is (very) close to p is our solution.
+
+    4) Return that (θ1, θ2).  Angles are kept in [-2π, 2π] or similar.  (The URDF’s limit
+       is ±6.2831853, so we just return a solution in that range.)
+
+    We assume all targets are reachable, so exactly one of the candidates will match p.
+
+    ---------------------------------------------
+    """
+
+    # 1) Build target orientation matrix R_des = Rz(rZ)*Ry(rY)*Rx(rX)
+    rX, rY, rZ = r
+    # Rotation about X
+    Rx = np.array([
+        [1,           0,            0],
+        [0, math.cos(rX), -math.sin(rX)],
+        [0, math.sin(rX),  math.cos(rX)]
+    ])
+    # Rotation about Y
+    Ry = np.array([
+        [ math.cos(rY), 0, math.sin(rY)],
+        [            0, 1,           0],
+        [-math.sin(rY), 0, math.cos(rY)]
+    ])
+    # Rotation about Z
+    Rz = np.array([
+        [math.cos(rZ), -math.sin(rZ), 0],
+        [math.sin(rZ),  math.cos(rZ), 0],
+        [           0,             0, 1]
+    ])
+    R_des = Rz @ Ry @ Rx  # matrix multiply in that order
+
+    # 2) Decompose R_des into Rz(θ1)*Ry(θ2).  From the standard form of Rz(α)*Ry(β):
+    #    we read out:
+    #       R[2,0] = -sin(β)
+    #       R[2,2] =  cos(β)
+    #       R[0,0] =  cos(α) cos(β)
+    #       R[1,0] =  sin(α) cos(β)
+    #
+    #    => β = atan2(-R[2,0], R[2,2])
+    #    => α = atan2( R[1,0], R[0,0])
+
+    # Safeguard for numerical issues with e.g. domain of atan2
+    def safe_atan2(yv, xv):
+        return math.atan2(float(yv), float(xv))
+
+    # principal candidate
+    betaA = safe_atan2(-R_des[2,0], R_des[2,2])
+    alphaA = safe_atan2(R_des[1,0], R_des[0,0])
+
+    # We'll generate up to two plausible solutions for (θ1, θ2):
+    #   (alphaA, betaA)
+    #   (alphaA + π, betaA - π)
+    # The second is a known “flip” that can produce the same orientation,
+    # because Rz(a+π)*Ry(b-π) = Rz(a)*[Rz(π)*Ry(-π)] = Rz(a)*[Rx(π)* ... ] (etc).
+    candidates = [
+        (alphaA, betaA),
+        (alphaA + math.pi, betaA - math.pi)
+    ]
+
+    # Normalize angles into [-2π, 2π] so they’re within the robot’s joint limits
+    def wrap_angle(a):
+        # just put it within [-pi, pi], then if needed we can add ±2π to stay within ±6.283
+        a_mod = (a + math.pi) % (2*math.pi) - math.pi
+        # if outside ±2π, shift.  But usually one shift is enough in tests.
+        if a_mod < -2*math.pi:
+            a_mod += 2*math.pi
+        elif a_mod > 2*math.pi:
+            a_mod -= 2*math.pi
+        return a_mod
+
+    # Forward kinematics function for the given (theta1, theta2)
+    def fk_position(th1, th2):
+        # RotZ(th1)
+        c1, s1 = math.cos(th1), math.sin(th1)
+        Rz_th1 = np.array([
+            [ c1, -s1, 0],
+            [ s1,  c1, 0],
+            [  0,   0, 1]
+        ])
+
+        # RotY(th2)
+        c2, s2 = math.cos(th2), math.sin(th2)
+        Ry_th2 = np.array([
+            [ c2, 0, s2],
+            [  0, 1,  0],
+            [-s2, 0, c2]
+        ])
+
+        # link2 offset in local coords
+        link2_offset = np.array([0.0, 0.13585, 0.0])
+        # TCP offset in link2 coords
+        tcp_offset  = np.array([0.0, -0.1197, 0.425])
+
+        # Position of link2 in base
+        link2_in_base = Rz_th1.dot(link2_offset)
+        # Position of TCP in base
+        tcp_in_base = link2_in_base + Rz_th1.dot(Ry_th2.dot(tcp_offset))
+        return tcp_in_base
+
+    # 3) Among the candidate (θ1, θ2) pairs that match orientation, pick the one that
+    #    reproduces the desired position p.  Since the problem states "assume all
+    #    targets are reachable," exactly one candidate should match well.
+
+    p_des = np.array(p, dtype=float)
+    best_sol = None
+    best_err = float('inf')
+
+    for (cand1, cand2) in candidates:
+        # wrap angles to keep them in a normal range
+        th1 = wrap_angle(cand1)
+        th2 = wrap_angle(cand2)
+
+        p_calc = fk_position(th1, th2)
+        err = np.linalg.norm(p_calc - p_des)
+        if err < best_err:
+            best_err = err
+            best_sol = (th1, th2)
+
+    # Return the best solution
+    return best_sol
+```

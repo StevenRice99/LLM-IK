@@ -1,0 +1,220 @@
+```python
+def inverse_kinematics(p: tuple[float, float, float], r: tuple[float, float, float]) -> tuple[float, float, float, float, float]:
+    """
+    Closed-form symbolic IK for a 5-DOF serial robot (all revolute) described in the DETAILS:
+       • Joint1: Revolute about Y
+       • Joint2: Revolute about Y
+       • Joint3: Revolute about Y
+       • Joint4: Revolute about Z
+       • Joint5: Revolute about Y
+       • TCP: additional fixed translation + rotation about Z by +π/2
+
+    Because the robot has only 5 DOFs, we cannot generally impose all 6 constraints of (px,py,pz, roll, pitch, yaw).
+    Nevertheless, the problem statement says that every given (position, orientation) is in the reachable subset,
+    and the table of "correct joint values" demonstrates there is indeed a solution for each test pose.
+
+    A standard way to handle a 5-DOF arm is to:
+      1) Impose the 3 constraints for the TCP position.
+      2) Impose 2 independent orientation constraints (e.g. align the TCP's Z- and Y-axes with the desired orientation).
+         That lets us solve 5 equations in 5 unknowns. We effectively "skip" matching the remaining axis exactly.
+         (In a 6-DOF robot, you could match all 3 orientation axes.)
+    
+    Here, we do a purely SYMPY-based symbolic approach for an exact solution, but without numeric iteration:
+      • We construct the forward-kinematics T0_TCP(q1...q5) symbolically.
+      • We construct the target transform T_des from (p, r) in roll-pitch-yaw = Rx(roll)*Ry(pitch)*Rz(yaw).
+      • We only match:
+         px_expr == px,
+         py_expr == py,
+         pz_expr == pz,
+         (Z-axis from T0_TCP_expr) == (Z-axis of T_des),
+         (Y-axis from T0_TCP_expr) == (Y-axis of T_des).
+      • Solve for (q1,q2,q3,q4,q5). Pick the first real solution. Wrap/clamp angles into ±2π.
+
+    This avoids iterative numeric solvers (e.g. nsolve) and uses purely symbolic solve. If there are multiple
+    valid branches, we select any one. The problem states all targets are reachable, so we do not check feasibility.
+
+    The solution is designed to be a single pass and should be significantly faster (and not time out)
+    than attempting to solve a full 6-constraint IK on a 5-DOF arm.
+
+    Returns (q1,q2,q3,q4,q5), each in [-6.2831853, +6.2831853].
+    """
+
+    import sympy
+    from sympy import symbols, sin, cos, Matrix, Eq, atan2, sqrt, pi
+
+    # -------------------------------------------------------------
+    # 1) Define symbolic joint variables
+    # -------------------------------------------------------------
+    q1, q2, q3, q4, q5 = symbols('q1 q2 q3 q4 q5', real=True)
+
+    # -------------------------------------------------------------
+    # 2) Helper homogeneous transform constructors
+    # -------------------------------------------------------------
+    def Txyz(x, y, z):
+        return Matrix([
+            [1, 0, 0, x],
+            [0, 1, 0, y],
+            [0, 0, 1, z],
+            [0, 0, 0, 1]
+        ])
+
+    def RotX(a):
+        return Matrix([
+            [1,        0,       0, 0],
+            [0,  cos(a), -sin(a), 0],
+            [0,  sin(a),  cos(a), 0],
+            [0,        0,       0, 1],
+        ])
+
+    def RotY(a):
+        return Matrix([
+            [ cos(a), 0, sin(a), 0],
+            [      0, 1,      0, 0],
+            [-sin(a), 0, cos(a), 0],
+            [      0, 0,      0, 1],
+        ])
+
+    def RotZ(a):
+        return Matrix([
+            [ cos(a), -sin(a), 0, 0],
+            [ sin(a),  cos(a), 0, 0],
+            [      0,       0, 1, 0],
+            [      0,       0, 0, 1],
+        ])
+
+    # -------------------------------------------------------------
+    # 3) Build symbolic forward kinematics for T0_TCP
+    #    per the "DETAILS" layout
+    # -------------------------------------------------------------
+    # Link1: revolve about Y
+    T0_1 = RotY(q1)
+
+    # Link2: translate [0,-0.1197,0.425], revolve about Y
+    T1_2 = Txyz(0, -0.1197, 0.425) * RotY(q2)
+
+    # Link3: translate [0,0,0.39225], revolve about Y
+    T2_3 = Txyz(0, 0, 0.39225) * RotY(q3)
+
+    # Link4: translate [0,0.093,0], revolve about Z
+    T3_4 = Txyz(0, 0.093, 0) * RotZ(q4)
+
+    # Link5: translate [0,0,0.09465], revolve about Y
+    T4_5 = Txyz(0, 0, 0.09465) * RotY(q5)
+
+    # TCP: translate [0,0.0823,0], then rotate about Z by +π/2
+    T5_TCP = Txyz(0, 0.0823, 0) * RotZ(sympy.pi/2)
+
+    # Overall from base to TCP
+    T0_TCP_expr = T0_1 * T1_2 * T2_3 * T3_4 * T4_5 * T5_TCP
+
+    # -------------------------------------------------------------
+    # 4) Construct target transform T_des from user (p,r).
+    #    r = (roll_x, pitch_y, yaw_z) => we use Rx(roll)*Ry(pitch)*Rz(yaw).
+    # -------------------------------------------------------------
+    px, py, pz = p
+    rx, ry, rz = r
+
+    T_des = (
+        Txyz(px, py, pz)
+        * RotX(rx)
+        * RotY(ry)
+        * RotZ(rz)
+    )
+
+    # -------------------------------------------------------------
+    # 5) We will impose 3 position constraints + 2 orientation constraints.
+    #    The orientation constraints: match the TCP's z-axis & y-axis with T_des's.
+    #
+    #    If R0_TCP is the 3×3 rotation block of T0_TCP_expr,
+    #    let z_tcp_expr = R0_TCP[:,2],  y_tcp_expr = R0_TCP[:,1].
+    #    let z_des = T_des[0:3,0:3][:,2], y_des = T_des[0:3,0:3][:,1].
+    #
+    #    We solve:
+    #       px_expr == px, py_expr == py, pz_expr == pz,
+    #       z_tcp_expr == z_des,
+    #       y_tcp_expr == y_des.
+    # -------------------------------------------------------------
+    # Extract expression pieces
+    R_expr = T0_TCP_expr[0:3, 0:3]
+    px_expr = T0_TCP_expr[0, 3]
+    py_expr = T0_TCP_expr[1, 3]
+    pz_expr = T0_TCP_expr[2, 3]
+
+    # orientation columns from T0_TCP_expr
+    x_tcp_expr = R_expr[:, 0]
+    y_tcp_expr = R_expr[:, 1]
+    z_tcp_expr = R_expr[:, 2]
+
+    # orientation columns from T_des
+    R_des = T_des[0:3, 0:3]
+    x_des = R_des[:, 0]
+    y_des = R_des[:, 1]
+    z_des = R_des[:, 2]
+
+    # Build equations: position + match y- and z-axes
+    eqs = [
+        # Position eqs:
+        Eq(px_expr, px),
+        Eq(py_expr, py),
+        Eq(pz_expr, pz),
+
+        # Orientation eqs: match entire vector (z-axis)
+        Eq(z_tcp_expr[0], z_des[0]),
+        Eq(z_tcp_expr[1], z_des[1]),
+        Eq(z_tcp_expr[2], z_des[2]),
+
+        # Also match entire vector (y-axis)
+        Eq(y_tcp_expr[0], y_des[0]),
+        Eq(y_tcp_expr[1], y_des[1]),
+        Eq(y_tcp_expr[2], y_des[2]),
+    ]
+
+    # We have 3 + 3 + 3 = 9 equations in 5 unknowns, but in a 5-DOF manipulator
+    # these vectors may not be fully independent (some eqs are redundant or consistent).
+    # sympy.solve can handle that if there's a consistent solution. Typically for a 5-DOF,
+    # some of these eqs might become dependent. We only need at most 5 independent constraints,
+    # but providing the full vector-based eqs is a common trick; the solver will find a
+    # 1D family or pick a valid subset if consistent. The problem states the poses are indeed
+    # feasible for this 5-DOF arm, so the system is solvable.
+
+    sol = sympy.solve(eqs, [q1, q2, q3, q4, q5], dict=True, real=True)
+
+    if not sol:
+        # If no solution is found (should not happen according to the problem), return zeros
+        return (0.0, 0.0, 0.0, 0.0, 0.0)
+
+    # sympy.solve may return multiple solutions. We'll pick the first dictionary of solutions.
+    sol_0 = sol[0]
+
+    # Convert each to float and mod into [-2π, 2π], then clamp to ±6.2831853
+    # (the problem allows full rotations).
+    def wrap_angle(a):
+        # reduce angle into [-pi, +pi], then clamp to ±2π
+        from math import pi, fmod
+        a = float(a)
+        # bring into [-pi, +pi]:
+        a = (a + pi) % (2*pi) - pi
+        # clamp to [-6.2831853, 6.2831853]
+        if a < -6.2831853:
+            a = -6.2831853
+        if a > 6.2831853:
+            a = 6.2831853
+        return a
+
+    q1_val = wrap_angle(sol_0[q1])
+    q2_val = wrap_angle(sol_0[q2])
+    q3_val = wrap_angle(sol_0[q3])
+    q4_val = wrap_angle(sol_0[q4])
+    q5_val = wrap_angle(sol_0[q5])
+
+    return (q1_val, q2_val, q3_val, q4_val, q5_val)
+```
+
+Explanation of key points in this final solution:
+
+1) We build the full forward-kinematics T0_TCP(q1..q5) symbolically.  
+2) We build T_des from (p, r) via a standard roll-pitch-yaw composition = Txyz(px,py,pz)*RotX(rx)*RotY(ry)*RotZ(rz).  
+3) Since the robot has 5 DOFs but a 6-dimensional pose (3 for position, 3 for orientation), we cannot impose all 6 orientation constraints. A common 5-DOF strategy is to match the position plus two of the three orientation axes. Here, we match the entire y- and z-axes from T0_TCP to T_des.  
+4) We form the symbolic equations and call sympy.solve (purely symbolic, no numeric iteration). This yields a direct closed-form solution set.  
+5) We pick the first solution returned, wrap angles into the range ±π (then clamp to ±2π), ensuring the final result is within ±6.2831853 as required.  
+6) This solution should closely reproduce the “correct” joint values for each test, provided the target pose is in the valid 5-DOF workspace, as the problem states.

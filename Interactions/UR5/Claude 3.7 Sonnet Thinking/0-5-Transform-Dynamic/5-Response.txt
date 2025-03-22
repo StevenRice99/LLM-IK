@@ -1,0 +1,165 @@
+I need to reconsider my approach. The test results show significant discrepancies between my solution and the expected joint values. Let me create a more robust inverse kinematics solution:
+
+```python
+def inverse_kinematics(p: tuple[float, float, float], r: tuple[float, float, float]) -> tuple[float, float, float, float, float, float]:
+    """
+    Gets the joint values needed to reach position "p" and orientation "r".
+    :param p: The position to reach in the form [x, y, z].
+    :param r: The orientation to reach in radians in the form [x, y, z].
+    :return: A list of the values to set the links to for reaching position "p" and orientation "r".
+    """
+    import math
+    import numpy as np
+    
+    # Constants for the robot dimensions
+    L1 = 0.425       # Link 3 z-offset
+    L2 = 0.39225     # Link 4 z-offset
+    L3 = 0.09465     # Link 6 z-offset
+    L4 = 0.0823      # TCP y-offset
+    y_const = 0.13585 - 0.1197 + 0.093  # Fixed Y offset from joints 2, 3, and 5
+    
+    # Create the rotation matrix for the desired orientation
+    roll, pitch, yaw = r
+    R_x = np.array([[1, 0, 0], 
+                     [0, math.cos(roll), -math.sin(roll)], 
+                     [0, math.sin(roll), math.cos(roll)]])
+    R_y = np.array([[math.cos(pitch), 0, math.sin(pitch)], 
+                     [0, 1, 0], 
+                     [-math.sin(pitch), 0, math.cos(pitch)]])
+    R_z = np.array([[math.cos(yaw), -math.sin(yaw), 0], 
+                     [math.sin(yaw), math.cos(yaw), 0], 
+                     [0, 0, 1]])
+    R_des = R_z @ R_y @ R_x
+    
+    # Account for the TCP frame rotation (from TCP to joint 6)
+    R_tcp = np.array([[1, 0, 0],
+                      [0, 0, -1],
+                      [0, 1, 0]])  # This transforms from TCP frame to joint 6 frame
+    
+    # Calculate the wrist center position (position of joint 5)
+    # Move back from TCP along z-axis of joint 6 by L3 and then back along y-axis by L4
+    tcp_offset = np.array([0, L4, L3])
+    world_offset = R_des @ tcp_offset
+    wrist_center = np.array([p[0], p[1], p[2]]) - world_offset
+    
+    # Now solve for the first three joints to position the wrist center
+    xc, yc, zc = wrist_center
+    
+    # Solve for q1 (rotation about z-axis at base)
+    # We need to have y offset constant in the rotated frame
+    r_xy = math.sqrt(xc**2 + yc**2)
+    if abs(r_xy) < 1e-6:  # Handle singularity (wrist center directly above base)
+        q1 = 0  # Default value
+    else:
+        # Calculate two possible solutions for q1
+        cos_alpha = y_const / r_xy
+        cos_alpha = max(-1.0, min(1.0, cos_alpha))
+        alpha = math.acos(cos_alpha)
+        theta = math.atan2(yc, xc)
+        
+        q1_sol1 = theta - alpha
+        q1_sol2 = theta + alpha
+        
+        # Choose the solution that best matches expected wrist y-position after rotation
+        test_y1 = -xc * math.sin(q1_sol1) + yc * math.cos(q1_sol1)
+        test_y2 = -xc * math.sin(q1_sol2) + yc * math.cos(q1_sol2)
+        
+        q1 = q1_sol1 if abs(test_y1 - y_const) < abs(test_y2 - y_const) else q1_sol2
+    
+    # Transform wrist center to frame after q1 rotation
+    cos_q1 = math.cos(q1)
+    sin_q1 = math.sin(q1)
+    Rz_q1 = np.array([[cos_q1, -sin_q1, 0],
+                      [sin_q1, cos_q1, 0],
+                      [0, 0, 1]])
+    wrist_in_q1 = Rz_q1.T @ wrist_center
+    x_q1, y_q1, z_q1 = wrist_in_q1
+    
+    # Now we can solve the planar 2R problem in the xz-plane for q2 and q3
+    # Adjust for the y-offset by computing position relative to joint 2
+    x_rel = x_q1
+    z_rel = z_q1 - 0.13585  # Adjust for joint 2 z-offset
+    
+    # Use law of cosines to find q3
+    r_xz = math.sqrt(x_rel**2 + z_rel**2)
+    cos_q3 = (r_xz**2 - L1**2 - L2**2) / (2 * L1 * L2)
+    cos_q3 = max(-1.0, min(1.0, cos_q3))
+    
+    q3_pos = math.acos(cos_q3)
+    q3_neg = -q3_pos
+    
+    # Calculate q2 for both q3 solutions
+    q2_for_pos = math.atan2(x_rel, z_rel) - math.atan2(L2 * math.sin(q3_pos), L1 + L2 * math.cos(q3_pos))
+    q2_for_neg = math.atan2(x_rel, z_rel) - math.atan2(L2 * math.sin(q3_neg), L1 + L2 * math.cos(q3_neg))
+    
+    # Calculate end effector positions for both solutions to see which is closer
+    end_pos_q3pos = [L1 * math.sin(q2_for_pos) + L2 * math.sin(q2_for_pos + q3_pos),
+                      L1 * math.cos(q2_for_pos) + L2 * math.cos(q2_for_pos + q3_pos)]
+    end_pos_q3neg = [L1 * math.sin(q2_for_neg) + L2 * math.sin(q2_for_neg + q3_neg),
+                      L1 * math.cos(q2_for_neg) + L2 * math.cos(q2_for_neg + q3_neg)]
+    
+    err_pos = (end_pos_q3pos[0] - x_rel)**2 + (end_pos_q3pos[1] - z_rel)**2
+    err_neg = (end_pos_q3neg[0] - x_rel)**2 + (end_pos_q3neg[1] - z_rel)**2
+    
+    if err_pos <= err_neg:
+        q2, q3 = q2_for_pos, q3_pos
+    else:
+        q2, q3 = q2_for_neg, q3_neg
+    
+    # Calculate the rotation matrix for the first three joints
+    Ry_q2 = np.array([[math.cos(q2), 0, math.sin(q2)],
+                      [0, 1, 0],
+                      [-math.sin(q2), 0, math.cos(q2)]])
+    Ry_q3 = np.array([[math.cos(q3), 0, math.sin(q3)],
+                      [0, 1, 0],
+                      [-math.sin(q3), 0, math.cos(q3)]])
+    
+    R_0_3 = Rz_q1 @ Ry_q2 @ Ry_q3
+    
+    # Calculate R_3_6 = (R_0_3)^-1 * R_des
+    R_3_6 = R_0_3.T @ R_des
+    
+    # Extract q4, q5, q6 from R_3_6
+    # R_3_6 = Ry(q4) * Rz(q5) * Ry(q6)
+    
+    # Calculate q5
+    q5 = math.atan2(R_3_6[1, 0], R_3_6[1, 1])
+    
+    # Calculate q4 and q6
+    sin_q5 = math.sin(q5)
+    cos_q5 = math.cos(q5)
+    
+    if abs(sin_q5) < 1e-6:  # Singularity case
+        # Choose q4 = 0 and solve for q6
+        q4 = 0
+        q6 = math.atan2(R_3_6[0, 2], R_3_6[2, 2])
+    else:
+        # Regular case
+        q4 = math.atan2(-R_3_6[1, 2], math.sqrt(R_3_6[0, 2]**2 + R_3_6[2, 2]**2))
+        
+        # Calculate q6
+        sin_q4 = math.sin(q4)
+        cos_q4 = math.cos(q4)
+        
+        # Calculate elements of combined rotation matrix
+        r13 = R_3_6[0, 2]
+        r33 = R_3_6[2, 2]
+        
+        q6 = math.atan2(r13 / cos_q4, r33 / cos_q4)
+    
+    return (q1, q2, q3, q4, q5, q6)
+```
+
+This revised solution:
+
+1. Properly handles the TCP offset relative to the joint 6 position
+2. Carefully considers multiple solutions for q1 and selects the one that positions the robot correctly
+3. Solves the planar 2R problem for joints 2 and 3 with proper error checking
+4. Properly extracts the Euler angles for the wrist (joints 4, 5, and 6) from the remaining rotation matrix
+5. Handles potential singularities in the wrist configuration
+
+The key improvements include:
+- A more careful approach to finding the wrist center position
+- Better branch selection for joint solutions
+- Proper handling of the orientation decomposition for the spherical wrist
+- Accounting for the TCP frame offset and orientation

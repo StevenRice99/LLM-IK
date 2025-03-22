@@ -1,0 +1,192 @@
+```python
+import math
+import numpy as np
+
+def inverse_kinematics(p: tuple[float, float, float],
+                       r: tuple[float, float, float]) -> tuple[float, float, float, float, float, float]:
+    """
+    Computes a closed-form analytical inverse kinematics solution for the 6-DOF manipulator.
+    
+    Robot info (all units in meters and radians):
+      • Revolute 1: origin [0,0,0], rotation about Z.
+      • Revolute 2: translate [0, 0.13585, 0] then rotate about Y.
+      • Revolute 3: translate [0, -0.1197, 0.425] then rotate about Y.
+      • Revolute 4: translate [0, 0, 0.39225] then rotate about Y.
+      • Revolute 5: translate [0, 0.093, 0] then rotate about Z.
+      • Revolute 6: translate [0, 0, 0.09465] then rotate about Y.
+      • TCP: translate [0, 0.0823, 0] then fixed orientation Rz(1.570796325).
+      
+    Kinematic decoupling follows the scheme:
+      1. Use the constant y-offset (y_const = 0.13585 - 0.1197 + 0.093 = 0.10915) in the base XY-plane
+         to select a candidate for q1 (two possible solutions).
+      2. In the rotated frame (by –q1), the decoupled desired orientation M = Rz(–q1)*R_des gives:
+              φ = q2+q3+q4 = atan2(M[0,2], M[2,2])
+         and the wrist roll (joint 5) as: q5 = atan2(M[1,0], M[1,1]).
+      3. Removing the TCP offset (of magnitude L_tcp = 0.09465) along φ from the rotated target yield
+         effective planar coordinates. A standard 2R geometry (with L1 = 0.425 and L2 = 0.39225) then yields
+         two candidate solutions for q3, and subsequently q2 and q4.
+      4. Finally, the remaining wrist joint (joint 6, rotation about Y) is recovered by comparing the 
+         5-DOF rotation (R_mid) with the target: 
+             R_mid = Rz(q1)·Ry(q2+q3+q4)·Rz(q5)
+         and we require:
+             R_des = R_mid · [Ry(q6) · Rz(ψ)]
+         with fixed ψ = 1.570796325.
+         Hence, q6 is extracted from the residual rotation.
+    
+    To robustly select the proper solution branch, all candidate combinations (2 for q1 × 2 for q3) 
+    are generated and the one whose forward kinematics best matches the desired TCP pose is chosen.
+    
+    Parameters:
+      p: TCP target position as (x, y, z).
+      r: TCP target orientation in roll, pitch, yaw (URDF convention: Rz(yaw)·Ry(pitch)·Rx(roll)).
+     
+    Returns:
+      A tuple (q1, q2, q3, q4, q5, q6) of joint angles in radians.
+    """
+
+    # ---------------- Helper functions for rotations and translations (4x4 homogeneous matrices) ----------------
+    def norm_angle(angle):
+        # Normalize angle to (-pi, pi]
+        return (angle + math.pi) % (2*math.pi) - math.pi
+
+    def rot_x(a):
+        c, s = math.cos(a), math.sin(a)
+        R = np.array([[1, 0, 0],
+                      [0, c, -s],
+                      [0, s, c]])
+        return R
+
+    def rot_y(a):
+        c, s = math.cos(a), math.sin(a)
+        R = np.array([[c, 0, s],
+                      [0, 1, 0],
+                      [-s, 0, c]])
+        return R
+
+    def rot_z(a):
+        c, s = math.cos(a), math.sin(a)
+        R = np.array([[c, -s, 0],
+                      [s,  c, 0],
+                      [0,  0, 1]])
+        return R
+
+    def homogeneous(R, t):
+        # Build a 4x4 homogeneous transformation from 3x3 rotation and 3-vector translation.
+        T = np.eye(4)
+        T[0:3, 0:3] = R
+        T[0:3, 3] = t
+        return T
+
+    def trans(x, y, z):
+        return homogeneous(np.eye(3), np.array([x, y, z]))
+
+    def rot_hom_z(a):
+        return homogeneous(rot_z(a), np.zeros(3))
+
+    def rot_hom_y(a):
+        return homogeneous(rot_y(a), np.zeros(3))
+
+    # ---------------- Forward kinematics for the complete chain ----------------
+    def fk(joints):
+        q1, q2, q3, q4, q5, q6 = joints
+        # Build transformation for each joint based on the DETAILS table:
+        T1 = rot_hom_z(q1)  # Revolute 1: rotation about Z, no translation.
+        T2 = trans(0, 0.13585, 0) @ homogeneous(rot_y(q2), np.zeros(3))
+        T3 = trans(0, -0.1197, 0.425) @ homogeneous(rot_y(q3), np.zeros(3))
+        T4 = trans(0, 0, 0.39225) @ homogeneous(rot_y(q4), np.zeros(3))
+        T5 = trans(0, 0.093, 0) @ rot_hom_z(q5)
+        T6 = trans(0, 0, 0.09465) @ homogeneous(rot_y(q6), np.zeros(3))
+        # TCP end-effector offset: translation [0, 0.0823, 0] then fixed orientation Rz(ψ) with ψ = 1.570796325.
+        psi = 1.570796325
+        T_TCP = trans(0, 0.0823, 0) @ rot_hom_z(psi)
+        # Compose the full transformation.
+        T_total = T1 @ T2 @ T3 @ T4 @ T5 @ T6 @ T_TCP
+        return T_total
+
+    # ---------------- Compute desired target transformation ----------------
+    # Build R_des from roll, pitch, yaw in URDF convention: R_des = Rz(yaw)·Ry(pitch)·Rx(roll)
+    roll, pitch, yaw_angle = r
+    R_des = rot_z(yaw_angle) @ rot_y(pitch) @ rot_x(roll)
+    T_target = homogeneous(R_des, np.array(p))
+    
+    # ---------------- Robot Geometry Constants ----------------
+    L1 = 0.425       # from Revolute 3 translation (x offset)
+    L2 = 0.39225     # from Revolute 4 translation (z offset)
+    L_tcp = 0.09465  # TCP offset used in decoupled planar calculation (Revolute 6 translation)
+    y_const = 0.13585 - 0.1197 + 0.093  # = 0.10915, effective offset in Y for base decoupling
+    psi = 1.570796325  # fixed TCP yaw offset
+
+    # ------------------- Candidate generation -------------------
+    p_x, p_y, p_z = p
+    p_vec = np.array([p_x, p_y, p_z])
+    r_xy = math.sqrt(p_x**2 + p_y**2)
+    if r_xy < 1e-8:
+        theta = 0.0
+    else:
+        theta = math.atan2(p_y, p_x)
+    # Two candidate solutions for q1 from the condition that (Rz(-q1)*p)_y ≈ y_const.
+    if r_xy != 0:
+        a_val = math.asin(max(-1.0, min(1.0, y_const / r_xy)))
+    else:
+        a_val = 0.0
+    q1_candidate1 = norm_angle(theta - a_val)
+    q1_candidate2 = norm_angle(theta - (math.pi - a_val))
+    q1_candidates = [q1_candidate1, q1_candidate2]
+
+    best_error = float('inf')
+    best_sol = None
+
+    # Loop over q1 candidates.
+    for q1 in q1_candidates:
+        # Compute decoupled target position in frame rotated by -q1.
+        Rz_neg_q1 = rot_z(-q1)
+        p_bar = Rz_neg_q1 @ p_vec  # 3x1 vector
+
+        # Compute decoupled orientation:
+        M = rot_z(-q1) @ R_des
+        phi = math.atan2(M[0, 2], M[2, 2])  # φ = q2+q3+q4.
+        q5_candidate = norm_angle(math.atan2(M[1, 0], M[1, 1]))
+        
+        # Remove the effect of the TCP offset along the φ direction.
+        P_x = p_bar[0] - L_tcp * math.sin(phi)
+        P_z = p_bar[2] - L_tcp * math.cos(phi)
+        r2 = math.sqrt(P_x**2 + P_z**2)
+        # Solve for q3 using the law-of-cosines.
+        cos_q3 = (r2**2 - L1**2 - L2**2) / (2 * L1 * L2)
+        cos_q3 = max(-1.0, min(1.0, cos_q3))
+        q3_options = [math.acos(cos_q3), -math.acos(cos_q3)]
+        
+        for q3 in q3_options:
+            # Solve for q2.
+            q2 = math.atan2(P_x, P_z) - math.atan2(L2 * math.sin(q3), L1 + L2 * math.cos(q3))
+            # Solve for q4 to satisfy φ = q2 + q3 + q4.
+            q4 = norm_angle(phi - (q2 + q3))
+            
+            # Now, with candidate (q1, q2, q3, q4, q5), recover q6 using the wrist orientation residual.
+            # Compute R_mid = Rz(q1)·Ry(q2+q3+q4)·Rz(q5).
+            R_mid = rot_z(q1) @ rot_y(q2 + q3 + q4) @ rot_z(q5_candidate)
+            # We require: R_des = R_mid · [Ry(q6) · Rz(psi)]
+            # So, define the residual rotation:
+            R_res = R_mid.T @ R_des @ rot_z(-psi)
+            # For a pure rotation about Y, R_res should equal Ry(q6):
+            q6 = norm_angle(math.atan2(R_res[0, 2], R_res[0, 0]))
+            
+            candidate = (norm_angle(q1), norm_angle(q2), norm_angle(q3), norm_angle(q4), norm_angle(q5_candidate), q6)
+            
+            # Evaluate this candidate via full forward kinematics.
+            T_candidate = fk(candidate)
+            pos_candidate = T_candidate[0:3, 3]
+            R_candidate = T_candidate[0:3, 0:3]
+            pos_error = np.linalg.norm(pos_candidate - p_vec)
+            orient_error = np.linalg.norm(R_candidate - R_des, ord='fro')
+            total_error = pos_error + orient_error
+            if total_error < best_error:
+                best_error = total_error
+                best_sol = candidate
+
+    # If no candidate is found (unlikely), return zeros.
+    if best_sol is None:
+        return (0.0, 0.0, 0.0, 0.0, 0.0, 0.0)
+    else:
+        return best_sol
+```

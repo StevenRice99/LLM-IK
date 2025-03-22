@@ -1,0 +1,100 @@
+```python
+import math
+
+def inverse_kinematics(p: tuple[float, float, float]) -> tuple[float, float, float, float, float]:
+    """
+    Closed-form inverse kinematics solution for the 5-DOF serial manipulator.
+    This function computes joint angles (q1, q2, q3, q4, q5) that position the TCP at the target point p = (x, y, z).
+
+    Manipulator structure:
+      1. Revolute 1: Origin at [0, 0, 0], rotates about Y.
+      2. Fixed translation: [0, -0.1197, 0.425] to Revolute 2.
+      3. Revolute 2: Rotates about Y.
+      4. Fixed translation: [0, 0, 0.39225] to Revolute 3.
+      5. Revolute 3: Rotates about Y.
+      6. Fixed translation: [0, 0.093, 0] to Revolute 4.
+      7. Revolute 4: Rotates about Z.
+      8. Fixed translation: [0, 0, 0.09465] to Revolute 5.
+      9. Revolute 5: Rotates about Y.
+     10. Fixed translation: [0, 0.0823, 0] to the TCP.
+
+    Notes on the solution:
+      • The forward kinematics with all joint angles zero yields:
+            TCP = [0, 0.0556, 0.9119]
+      • We choose q5 = 0 (simplifying redundancy).
+      • The TCP vertical coordinate (y) is affected by the TCP’s last translation, rotated by q4.
+          In the final transformation, the y-offset becomes: -0.0267 + 0.0823*cos(q4),
+          where the -0.0267 arises from the cumulative fixed translations in y 
+          (i.e. from Revolute 2 and Revolute 4: -0.1197 + 0.093).
+          Thus, we solve:
+              0.0823*cos(q4) - 0.0267 = p_y
+          which gives: cos(q4) = (p_y + 0.0267) / 0.0823.
+      • The base joint q1 aligns the manipulator in the x–z plane:
+              q1 = atan2(p_x, p_z).
+      • In the x–z plane we subtract the fixed offset (0.425 from Revolute 2)
+          so that the effective target distance is:
+              d_target = sqrt(p_x^2+p_z^2) - 0.425.
+      • The remaining portion of the chain (Revolute 3 and the effect of q4)
+          is characterized by constants:
+              A = 0.0823*sin(q4),
+              B = 0.09465, and
+              C = 0.39225.
+          They enter into the planar relation:
+              d_target^2 = A^2 + B^2 + C^2 + 2*C*(A*sin(q3) + B*cos(q3)).
+      • Express A*sin(q3) + B*cos(q3) as R_ab*sin(q3 + δ), where:
+              R_ab = sqrt(A^2+B^2) and δ = atan2(B, A).
+          Thus, we solve for q3 by computing:
+              q3 = asin( (d_target^2-(A^2+B^2+C^2))/(2*C*R_ab) ) - δ.
+      • Finally, the rotation q2 is determined by aligning the end of the arm’s
+          effective planar vector (after q3) with the target:
+              Let V_x = -A*cos(q3) + B*sin(q3)
+                  and V_z = C + A*sin(q3) + B*cos(q3).
+          Then, q2 = atan2(-V_x, V_z).
+
+    Assumes the target is reachable (i.e. all inverse trigonometric operations have valid inputs).
+
+    :param p: The target TCP position as a tuple (p_x, p_y, p_z).
+    :return: A tuple of joint angles (q1, q2, q3, q4, q5) in radians.
+    """
+    # Unpack target coordinates.
+    p_x, p_y, p_z = p
+
+    # --- Step 1: Compute base (q1) to align the manipulator in the x–z plane.
+    q1 = math.atan2(p_x, p_z)
+    
+    # --- Step 2: Solve for q4 using the vertical (y) coordinate.
+    # The TCP y-position arises from:
+    #     y_TCP = (-0.1197 + 0.093) + 0.0823*cos(q4) = -0.0267 + 0.0823*cos(q4)
+    # Solve for cos(q4):
+    cos_q4 = (p_y + 0.0267) / 0.0823
+    q4 = math.acos(cos_q4)
+    
+    # --- Step 3: Set the redundant joint q5 to zero.
+    q5 = 0.0
+
+    # --- Step 4: Compute the effective reach in the x–z plane.
+    r = math.hypot(p_x, p_z)  # Distance from the base to the TCP in the x–z plane.
+    d_target = r - 0.425    # Remove the fixed translation offset along z (from Revolute 2).
+
+    # --- Step 5: Define constants that capture translations affected by q4 and joint 3.
+    A = 0.0823 * math.sin(q4)  # Effect from TCP offset rotated by q4.
+    B = 0.09465              # Translation offset from Revolute 5.
+    C = 0.39225              # Translation offset from Revolute 3.
+
+    # --- Step 6: Solve for q3.
+    # The planar relation yields:
+    #    d_target^2 = A^2 + B^2 + C^2 + 2*C*(A*sin(q3) + B*cos(q3))
+    # Rearranged, we have:
+    #    A*sin(q3) + B*cos(q3) = (d_target^2 - (A**2+B**2+C**2)) / (2*C) = K
+    K = (d_target**2 - (A**2 + B**2 + C**2)) / (2 * C)
+    R_ab = math.hypot(A, B)
+    delta = math.atan2(B, A)
+    q3 = math.asin(K / R_ab) - delta
+
+    # --- Step 7: Solve for q2 by considering the effective vector after joints 2 and 3.
+    V_x = -A * math.cos(q3) + B * math.sin(q3)
+    V_z = C + A * math.sin(q3) + B * math.cos(q3)
+    q2 = math.atan2(-V_x, V_z)
+    
+    return (q1, q2, q3, q4, q5)
+```

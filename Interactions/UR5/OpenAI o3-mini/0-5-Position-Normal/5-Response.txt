@@ -1,0 +1,79 @@
+def inverse_kinematics(p: tuple[float, float, float]) -> tuple[float, float, float, float, float, float]:
+    """
+    Gets the joint values needed to reach position "p" for a specific 6 DOF arm.
+    This closed‐form solution uses a decoupling in which joints 2, 4, 5, and 6 are
+    set to zero and only joints 1 and 3 are computed from the target TCP position.
+    
+    The forward kinematics (with q2=q4=q5=q6=0) can be shown to yield:
+       TCP_x = cos(q1)*(L*sin(q3)) - sin(q1)*(L_offset)
+       TCP_y = sin(q1)*(L*sin(q3)) + cos(q1)*(L_offset)
+       TCP_z = d + L*cos(q3)
+    
+    where the constant parameters come from the robot's link offsets:
+       d        = 0.425            (z translation coming from the third link)
+       L        = 0.39225 + 0.09465 = 0.4869  (effective arm length after q3)
+       L_offset = 0.13585 - 0.1197 + 0.093 + 0.0823 = 0.19145 
+                  (the effective translation in y accumulates from the 2nd link, 
+                   the negative offset in the 3rd link, the 5th link, and the TCP)
+    
+    Thus, from the z-equation one obtains:
+         cos(q3) = (p_z - d)/L  =>  q3 = acos((p_z - d)/L)
+    
+    In the x-y plane, if we define
+         R = sqrt((L*sin(q3))^2 + (L_offset)^2)    and gamma = atan2(L_offset, L*sin(q3)),
+    then the x and y components satisfy:
+         [p_x, p_y] = R * [cos(q1+gamma), sin(q1+gamma)]
+    and hence:
+         q1 = atan2(p_y, p_x) - gamma.
+    
+    With these choices the extra joints are set to zero.
+    
+    :param p: The target TCP position as (p_x, p_y, p_z)
+    :return: The joint angles (q1, q2, q3, q4, q5, q6) in radians.
+    """
+    import math
+
+    # Unpack target TCP position.
+    p_x, p_y, p_z = p
+
+    # Constant robot parameters (in meters) based on the provided table:
+    d = 0.425         # z-offset contributed by revolute 3's origin.
+    L = 0.39225 + 0.09465  # Effective length from the revolute4 and revolute6 translations.
+    # Compute L: 0.39225 (from Revolute 4's translation [0,0,0.39225])
+    #           + 0.09465 (from Revolute 6's translation [0,0,0.09465])
+    #         = 0.4869.
+    L_offset = 0.13585 - 0.1197 + 0.093 + 0.0823  
+    # Explanation:
+    #    From Revolute 2: +0.13585 (y translation),
+    #    From Revolute 3: -0.1197 (y translation),
+    #    From Revolute 5: +0.093 (y translation),
+    #    From TCP offset: +0.0823 (y translation)
+    # Sum = 0.19145.
+    
+    # Compute joint 3 from the z-coordinate.
+    # Ensure the value in acos remains within valid range [-1, 1].
+    cos_q3 = (p_z - d) / L
+    cos_q3 = max(min(cos_q3, 1.0), -1.0)
+    q3 = math.acos(cos_q3)
+
+    # Compute effective projection length in the x-y plane from joint 3.
+    # L*sin(q3) comes from the rotated contribution of the effective arm length.
+    Ls = L * math.sin(q3)
+
+    # gamma is the fixed angle of the vector [L*sin(q3), L_offset].
+    gamma = math.atan2(L_offset, Ls)
+
+    # In the x-y plane the rotated vector before joint1 is:
+    #   [L*sin(q3), L_offset]
+    # and Rz(q1) rotates it so that:
+    #   [p_x, p_y] = Rz(q1)*[L*sin(q3), L_offset]
+    # Hence, the overall angle of [p_x, p_y] is (q1 + gamma) and so:
+    q1 = math.atan2(p_y, p_x) - gamma
+
+    # Set the remaining joints arbitrarily (here, to 0).
+    q2 = 0.0
+    q4 = 0.0
+    q5 = 0.0
+    q6 = 0.0
+
+    return (q1, q2, q3, q4, q5, q6)

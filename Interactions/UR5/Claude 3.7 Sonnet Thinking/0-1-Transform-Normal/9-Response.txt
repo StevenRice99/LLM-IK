@@ -1,0 +1,108 @@
+I need to completely rethink my approach. Looking at the feedback, I notice I'm often getting positions with opposite signs and incorrect orientations. Let's create a more accurate inverse kinematics solution based on the robot's specific geometry.
+
+```python
+import numpy as np
+
+def inverse_kinematics(p: tuple[float, float, float], r: tuple[float, float, float]) -> tuple[float, float]:
+    """
+    Gets the joint values needed to reach position "p" and orientation "r".
+    :param p: The position to reach in the form [x, y, z].
+    :param r: The orientation to reach in radians in the form [x, y, z].
+    :return: A list of the values to set the links to for reaching position "p" and orientation "r".
+    """
+    x, y, z = p
+    rx, ry, rz = r
+    
+    # Constants from the robot description
+    l1 = 0.13585  # Distance from base to joint 2 along z
+    l2 = 0.425    # Distance from joint 2 to TCP along local z
+    offset_y = -0.1197  # Y offset of TCP from joint 2
+    
+    # Correct for the offset in the arm structure
+    # The effective z is adjusted by the height of the first link
+    z_adjusted = z - l1
+    
+    # Calculate theta2 (using the adjusted z)
+    # We need arccos of z_adjusted/l2
+    cos_theta2 = z_adjusted / l2
+    # Clamp to valid range for arccos
+    cos_theta2 = max(min(cos_theta2, 1.0), -1.0)
+    
+    # We have two possible solutions for theta2
+    theta2_pos = np.arccos(cos_theta2)
+    theta2_neg = -theta2_pos
+    
+    # For each possible theta2, calculate the corresponding theta1
+    # Using x = cos(theta1)*(l2*sin(theta2) + offset_y*cos(theta2)) - sin(theta1)*offset_y*sin(theta2)
+    # and y = sin(theta1)*(l2*sin(theta2) + offset_y*cos(theta2)) + cos(theta1)*offset_y*sin(theta2)
+    
+    solutions = []
+    
+    for theta2 in [theta2_pos, theta2_neg]:
+        # Calculate components for the trigonometric equations
+        a = l2 * np.sin(theta2)
+        b = offset_y
+        
+        # Calculate effective radius in xy-plane
+        r_xy = np.sqrt(x*x + y*y)
+        
+        # Get angle in xy-plane
+        phi = np.arctan2(y, x)
+        
+        # Calculate theta1 using the law of cosines and angle adjustments
+        if abs(a) < 1e-10:  # Handle vertical arm case
+            theta1 = phi
+        else:
+            # Calculate theta1 with offset consideration
+            gamma = np.arctan2(b, a)
+            theta1 = phi - gamma
+        
+        # Add both solutions: (theta1, theta2) and (theta1 + pi, -theta2)
+        solutions.append((theta1, theta2))
+        solutions.append((theta1 + np.pi, -theta2))
+    
+    # Normalize angles to be in range [-pi, pi]
+    normalized_solutions = []
+    for theta1, theta2 in solutions:
+        while theta1 > np.pi: theta1 -= 2*np.pi
+        while theta1 < -np.pi: theta1 += 2*np.pi
+        while theta2 > np.pi: theta2 -= 2*np.pi
+        while theta2 < -np.pi: theta2 += 2*np.pi
+        normalized_solutions.append((theta1, theta2))
+    
+    # Choose the solution that best matches the desired orientation
+    # For this robot, orientation is directly related to joint angles:
+    # rx is approximately 0 or pi (depending on configuration)
+    # ry is approximately theta2
+    # rz is approximately theta1
+    
+    best_solution = None
+    min_error = float('inf')
+    
+    for theta1, theta2 in normalized_solutions:
+        # Check if rx matches (either 0 or pi)
+        rx_error = min(abs(rx), abs(rx - np.pi), abs(rx + np.pi))
+        
+        # Check ry against theta2
+        ry_error = min(abs(ry - theta2), abs(ry - theta2 + 2*np.pi), abs(ry - theta2 - 2*np.pi))
+        
+        # Check rz against theta1
+        rz_error = min(abs(rz - theta1), abs(rz - theta1 + 2*np.pi), abs(rz - theta1 - 2*np.pi))
+        
+        # Total orientation error
+        total_error = rx_error + ry_error + rz_error
+        
+        if total_error < min_error:
+            min_error = total_error
+            best_solution = (theta1, theta2)
+    
+    return best_solution
+```
+
+This solution:
+1. Takes into account the correct geometry of the robot, including the offset between joint positions
+2. Calculates multiple possible configurations (4 in total) that reach the desired position
+3. Uses a better orientation matching mechanism that understands the relationship between joint angles and orientation
+4. Properly normalizes all angles to avoid issues with angle wrapping
+
+The key insight is understanding that for this specific robot, the orientation components relate directly to the joint angles, which simplifies the selection of the correct configuration from multiple possibilities.

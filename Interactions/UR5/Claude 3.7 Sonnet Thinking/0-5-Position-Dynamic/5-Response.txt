@@ -1,0 +1,137 @@
+Based on the FORWARD_KINEMATICS tests and the existing code examples, I can now create a complete inverse kinematics solution for the 6-DOF manipulator. I'll combine approaches from both existing solutions and adapt them to handle all 6 joints.
+
+```python
+def inverse_kinematics(p: tuple[float, float, float]) -> tuple[float, float, float, float, float, float]:
+    """
+    Gets the joint values needed to reach position "p".
+    :param p: The position to reach in the form [x, y, z].
+    :return: A list of the values to set the links to for reaching position "p".
+    """
+    import math
+    
+    # Constants from the robot description
+    L1 = 0.425      # Translation along z in joint3
+    L2 = 0.39225    # Translation along z in joint4
+    L3 = 0.09465    # Translation along z in joint6
+    
+    y_offset = 0.13585 - 0.1197 + 0.093  # Joint2 y + Joint3 y + Joint5 y
+    tcp_y_offset = 0.0823  # TCP y offset
+    
+    x_target, y_target, z_target = p
+    
+    def normalize(angle):
+        while angle > math.pi:
+            angle -= 2.0 * math.pi
+        while angle < -math.pi:
+            angle += 2.0 * math.pi
+        return angle
+    
+    def fk(q1, q2, q3, q4, q5, q6):
+        S = q2 + q3 + q4
+        d = tcp_y_offset * math.sin(q6)
+        
+        # Forward kinematics calculation including all joint effects
+        x_fk = math.sin(q1) * (L1 * math.sin(q2) + L2 * math.sin(q2 + q3) + 
+                              L3 * math.sin(S) - d * math.cos(S))
+        z_fk = math.cos(q1) * (L1 * math.sin(q2) + L2 * math.sin(q2 + q3) + 
+                              L3 * math.sin(S) - d * math.cos(S))
+        y_fk = y_offset + L1 * math.cos(q2) + L2 * math.cos(q2 + q3) + 
+              L3 * math.cos(S) + d * math.sin(S)
+        
+        return (x_fk, y_fk, z_fk)
+    
+    # Solve for joint 1 (base rotation)
+    q1 = math.atan2(-x_target, y_target)
+    
+    # Transform target to local frame after q1 rotation
+    r_target = math.sqrt(x_target**2 + y_target**2)
+    
+    # Solve for the remaining joints using approach similar to EXISTING 2
+    # We treat joints 2-6 as a planar manipulator after q1 is determined
+    
+    # Joint 6 affects y position
+    C = (y_target - y_offset) / tcp_y_offset
+    C = max(min(C, 1.0), -1.0)
+    q6_candidates = [math.acos(C), -math.acos(C)]
+    
+    # Compute candidate angles for the remaining joints
+    psi = math.atan2(r_target, z_target)
+    
+    best_error = float('inf')
+    best_solution = None
+    
+    for q6_candidate in q6_candidates:
+        d = tcp_y_offset * math.sin(q6_candidate)
+        L_eff = math.sqrt(L3**2 + d**2)
+        phi = math.atan2(d, L3)
+        
+        for T_candidate in [psi, psi + math.pi]:
+            S = T_candidate + phi
+            
+            # Compute wrist center position
+            W_r = r_target - L_eff * math.sin(T_candidate)
+            W_z = z_target - L_eff * math.cos(T_candidate)
+            
+            # Distance from origin to wrist center
+            w_dist = math.sqrt(W_r**2 + W_z**2)
+            
+            if w_dist > L1 + L2 or w_dist < abs(L1 - L2):
+                continue  # Not reachable
+                
+            # Use cosine law to compute q3
+            cos_q3 = (w_dist**2 - L1**2 - L2**2) / (2 * L1 * L2)
+            cos_q3 = max(min(cos_q3, 1.0), -1.0)
+            
+            for sign in [1, -1]:
+                q3_candidate = sign * math.acos(cos_q3)
+                
+                # Find q2 based on q3
+                beta = math.atan2(W_r, W_z)
+                gamma = math.atan2(L2 * math.sin(q3_candidate), 
+                                  L1 + L2 * math.cos(q3_candidate))
+                q2_candidate = beta - gamma
+                
+                # Find q4 based on q2, q3, and S
+                q4_candidate = S - (q2_candidate + q3_candidate)
+                
+                # Set q5 to 0 for position (will be adjusted later if needed)
+                q5_candidate = 0.0
+                
+                # Check error with forward kinematics
+                x_fk, y_fk, z_fk = fk(q1, q2_candidate, q3_candidate, 
+                                     q4_candidate, q5_candidate, q6_candidate)
+                
+                error = math.sqrt((x_fk - x_target)**2 + 
+                                  (y_fk - y_target)**2 + 
+                                  (z_fk - z_target)**2)
+                
+                if error < best_error:
+                    best_error = error
+                    best_solution = (q1, q2_candidate, q3_candidate, 
+                                    q4_candidate, q5_candidate, q6_candidate)
+    
+    if best_solution is None:
+        # This should not happen if the target is reachable as stated in the requirements
+        raise ValueError('No valid IK solution found for the input target position.')
+    
+    q1, q2, q3, q4, q5, q6 = best_solution
+    
+    # Normalize angles to -π to π range
+    q1 = normalize(q1)
+    q2 = normalize(q2)
+    q3 = normalize(q3)
+    q4 = normalize(q4)
+    q5 = normalize(q5)
+    q6 = normalize(q6)
+    
+    return (q1, q2, q3, q4, q5, q6)
+```
+
+This solution extends the existing code to handle all 6 joints of the manipulator. I adapted the analytical approach from EXISTING 2 and incorporated joint 1 solution from EXISTING 1. The key differences are:
+
+1. Properly accounting for all joint transformations in the forward kinematics check
+2. Including joint 6 in the position calculations
+3. Adapting the wrist center calculations to work with the full 6-DOF robot
+4. Converting the planar calculations to work in 3D space after joint 1 is determined
+
+The solution uses a closed-form analytical approach without relying on optimization methods.

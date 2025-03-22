@@ -1,0 +1,179 @@
+Based on the forward kinematics results, I can see the full robot chain configuration when all joints are at zero. This helps me understand how each joint contributes to the final TCP pose.
+
+Now, I'll complete the inverse kinematics solution by extending the existing 5-DOF solution to include joint 6. The key difference is that we now need to account for the 6th joint rotation around the Y axis and the TCP transformation which includes both a position offset and an orientation change.
+
+Here's my completed solution:
+
+```python
+def inverse_kinematics(p: tuple[float, float, float], r: tuple[float, float, float]) -> tuple[float, float, float, float, float, float]:
+    """
+    Gets the joint values needed to reach position "p" and orientation "r".
+    :param p: The position to reach in the form [x, y, z].
+    :param r: The orientation to reach in radians in the form [x, y, z].
+    :return: A list of the values to set the links to for reaching position "p" and orientation "r".
+    """
+    import math
+    import numpy as np
+    
+    # Robot dimensions
+    L1 = 0.425      # Length of link 3
+    L2 = 0.39225    # Length of link 4
+    L_tcp_z = 0.09465  # Z offset of joint 6 from joint 5
+    L_tcp_y = 0.0823   # Y offset of TCP from joint 6
+    y_const = 0.13585 - 0.1197 + 0.093  # Combined Y offset from joints 2, 3, and 5
+    
+    # Target position
+    p_x, p_y, p_z = p
+    
+    # Calculate rotation matrices for the target orientation
+    roll, pitch, yaw = r
+    R_x = np.array([[1, 0, 0], 
+                    [0, math.cos(roll), -math.sin(roll)], 
+                    [0, math.sin(roll), math.cos(roll)]])
+    R_y = np.array([[math.cos(pitch), 0, math.sin(pitch)], 
+                    [0, 1, 0], 
+                    [-math.sin(pitch), 0, math.cos(pitch)]])
+    R_z = np.array([[math.cos(yaw), -math.sin(yaw), 0], 
+                    [math.sin(yaw), math.cos(yaw), 0], 
+                    [0, 0, 1]])
+    
+    # Target orientation matrix
+    R_des = R_z @ R_y @ R_x
+    
+    # TCP to wrist transformation
+    # TCP has a rotation of pi/2 around Z relative to joint 6
+    tcp_rot_z = np.array([[math.cos(math.pi/2), -math.sin(math.pi/2), 0],
+                          [math.sin(math.pi/2), math.cos(math.pi/2), 0],
+                          [0, 0, 1]])
+    
+    # Remove TCP transformation to get wrist orientation
+    R_wrist = R_des @ tcp_rot_z.T
+    
+    # Remove TCP offset from target position to get wrist position
+    # We need to account for the TCP offset in the rotated frame
+    tcp_offset = np.array([0, L_tcp_y, 0])
+    tcp_offset_rotated = R_des @ tcp_offset
+    wrist_pos = np.array([p_x, p_y, p_z]) - tcp_offset_rotated
+    p_x, p_y, p_z = wrist_pos
+    
+    # Solve for joint 1 (base rotation)
+    r_xy = math.sqrt(p_x**2 + p_y**2)
+    theta = math.atan2(p_y, p_x)
+    
+    ratio = y_const / r_xy
+    ratio = max(-1.0, min(1.0, ratio))
+    a = math.asin(ratio)
+    
+    q1_candidate1 = theta - a
+    q1_candidate2 = theta - (math.pi - a)
+    
+    # Function to compute decoupled orientation matrix for q1 candidates
+    def compute_M(q1_val):
+        cos_q1 = math.cos(q1_val)
+        sin_q1 = math.sin(q1_val)
+        Rz_neg_q1 = np.array([[cos_q1, sin_q1, 0], 
+                              [-sin_q1, cos_q1, 0], 
+                              [0, 0, 1]])
+        M_val = Rz_neg_q1 @ R_wrist
+        return M_val
+    
+    # Choose best q1 by evaluating error in decoupled orientation matrix
+    M1 = compute_M(q1_candidate1)
+    M2 = compute_M(q1_candidate2)
+    err1 = abs(M1[1, 2])
+    err2 = abs(M2[1, 2])
+    q1 = q1_candidate1 if err1 <= err2 else q1_candidate2
+    
+    # Compute final decoupled orientation matrix with chosen q1
+    cos_q1 = math.cos(q1)
+    sin_q1 = math.sin(q1)
+    Rz_neg_q1 = np.array([[cos_q1, sin_q1, 0], 
+                          [-sin_q1, cos_q1, 0], 
+                          [0, 0, 1]])
+    
+    # Transform target position to coordinate system after q1 rotation
+    p_vec = np.array([p_x, p_y, p_z])
+    p_bar = Rz_neg_q1 @ p_vec
+    p_bar_x, p_bar_y, p_bar_z = p_bar
+    
+    # Compute the full decoupled orientation matrix
+    M = Rz_neg_q1 @ R_wrist
+    
+    # Extract q5 from M (rotation about Z axis)
+    q5 = math.atan2(M[1, 0], M[1, 1])
+    
+    # The orientation can be decomposed as M = Ry(phi) @ Rz(q5) @ Ry(q6)
+    # where phi = q2 + q3 + q4
+    
+    # Extract q6 from the orientation matrix
+    q6 = math.atan2(-M[0, 2], M[2, 2])
+    
+    # Compute the total angle phi = q2 + q3 + q4
+    # We need to adjust the calculation to account for q6
+    cos_q6 = math.cos(q6)
+    sin_q6 = math.sin(q6)
+    
+    # Build Ry(q6) matrix
+    Ry_q6 = np.array([[cos_q6, 0, sin_q6], 
+                      [0, 1, 0], 
+                      [-sin_q6, 0, cos_q6]])
+    
+    # Remove the effect of q6 from M
+    M_no_q6 = M @ Ry_q6.T
+    
+    # Now phi (q2+q3+q4) can be extracted from M_no_q6
+    phi = math.atan2(M_no_q6[0, 2], M_no_q6[2, 2])
+    
+    # Adjust position calculation to account for the wrist center
+    # The TCP offset after joint 5 is along Z by L_tcp_z
+    # Then we need to account for the orientation phi and q6
+    P_x = p_bar_x - L_tcp_z * math.sin(phi) * math.cos(q6)
+    P_z = p_bar_z - L_tcp_z * math.cos(phi) * math.cos(q6)
+    
+    # Solve for q3 using the law of cosines
+    r2 = math.sqrt(P_x**2 + P_z**2)
+    cos_q3 = (r2**2 - L1**2 - L2**2) / (2 * L1 * L2)
+    cos_q3 = max(-1.0, min(1.0, cos_q3))
+    
+    q3_candidateA = math.acos(cos_q3)
+    q3_candidateB = -q3_candidateA
+    
+    # Function to evaluate planar solution accuracy
+    def planar_solution(q3_val):
+        q2_val = math.atan2(P_x, P_z) - math.atan2(L2 * math.sin(q3_val), L1 + L2 * math.cos(q3_val))
+        q4_val = phi - (q2_val + q3_val)
+        
+        # Calculate position with these joint angles
+        calc_x = L1 * math.sin(q2_val) + L2 * math.sin(q2_val + q3_val) + L_tcp_z * math.sin(phi) * math.cos(q6)
+        calc_z = L1 * math.cos(q2_val) + L2 * math.cos(q2_val + q3_val) + L_tcp_z * math.cos(phi) * math.cos(q6)
+        
+        # Compute error
+        err_val = math.sqrt((calc_x - p_bar_x)**2 + (calc_z - p_bar_z)**2)
+        return (q2_val, q4_val, err_val)
+    
+    # Choose best solution based on position error
+    q2_A, q4_A, err_A = planar_solution(q3_candidateA)
+    q2_B, q4_B, err_B = planar_solution(q3_candidateB)
+    
+    if err_A <= err_B:
+        q3 = q3_candidateA
+        q2 = q2_A
+        q4 = q4_A
+    else:
+        q3 = q3_candidateB
+        q2 = q2_B
+        q4 = q4_B
+    
+    return (q1, q2, q3, q4, q5, q6)
+```
+
+This solution:
+1. Removes the TCP orientation and position offset to get the wrist position and orientation
+2. Solves for q1 through q5 using the existing approach from the 5-DOF solution
+3. Extracts q6 from the decoupled orientation matrix
+4. Properly accounts for the TCP offset in the final position calculations
+
+The key extensions to the 5-DOF solution are:
+- Handling the TCP transformation (position offset and orientation change)
+- Extracting q6 from the orientation matrix
+- Adjusting the position calculations to account for the wrist center with q6 rotation

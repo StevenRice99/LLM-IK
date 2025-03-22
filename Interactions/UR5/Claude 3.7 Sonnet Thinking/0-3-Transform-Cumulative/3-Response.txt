@@ -1,0 +1,168 @@
+Looking at the forward kinematics results, I can see the 4-DOF robot's configuration when all joints are at 0. Let me understand the robot structure before writing the inverse kinematics solution.
+
+From the results, I can see:
+- Joint 1 rotates around the Z-axis (base rotation)
+- Joints 2, 3, and 4 all rotate around their Y-axes
+- With all joints at 0, the TCP is at [0, 0.10915, 0.81725]
+
+I'll develop a complete inverse kinematics solution by examining the existing code examples and understanding how they solve different parts of the problem.
+
+```python
+def inverse_kinematics(p: tuple[float, float, float], r: tuple[float, float, float]) -> tuple[float, float, float, float]:
+    """
+    Gets the joint values needed to reach position "p" and orientation "r".
+    :param p: The position to reach in the form [x, y, z].
+    :param r: The orientation to reach in radians in the form [x, y, z].
+    :return: A list of the values to set the links to for reaching position "p" and orientation "r".
+    """
+    import math
+    import numpy as np
+    
+    x_target, y_target, z_target = p
+    roll, pitch, yaw = r
+    
+    # Calculate joint 1 (rotation around Z-axis)
+    # Following the approach from Existing Code 1
+    theta1 = math.atan2(-x_target, y_target)
+    
+    # Get trig values for joint 1
+    cos_theta1 = math.cos(theta1)
+    sin_theta1 = math.sin(theta1)
+    
+    # Handle TCP offset [0, 0.093, 0]
+    tcp_offset_y = 0.093
+    
+    # Rotate TCP offset to global frame
+    tcp_global_x = -tcp_offset_y * sin_theta1
+    tcp_global_y = tcp_offset_y * cos_theta1
+    
+    # Adjust target position by subtracting TCP offset
+    x_adj = x_target - tcp_global_x
+    y_adj = y_target - tcp_global_y
+    z_adj = z_target
+    
+    # Rotate to local frame after joint 1
+    x_local = x_adj * cos_theta1 + y_adj * sin_theta1
+    z_local = z_adj
+    
+    # Transform orientation to local frame
+    cr, sr = math.cos(roll), math.sin(roll)
+    cp, sp = math.cos(pitch), math.sin(pitch)
+    cy, sy = math.cos(yaw), math.sin(yaw)
+    
+    R = np.array([
+        [cy*cp, cy*sp*sr - sy*cr, cy*sp*cr + sy*sr],
+        [sy*cp, sy*sp*sr + cy*cr, sy*sp*cr - cy*sr],
+        [-sp, cp*sr, cp*cr]
+    ])
+    
+    # Rotation matrix for joint 1
+    Rz = np.array([
+        [cos_theta1, sin_theta1, 0],
+        [-sin_theta1, cos_theta1, 0],
+        [0, 0, 1]
+    ])
+    
+    # Transform to local frame
+    R_local = Rz @ R
+    
+    # Extract target orientation
+    target_sum = math.atan2(R_local[0, 2], R_local[0, 0])
+    
+    # Link lengths
+    L1 = 0.425    # Length of link 2
+    L2 = 0.39225  # Length of link 3
+    
+    # Calculate joint 3 using law of cosines
+    d_sq = x_local**2 + z_local**2
+    cos_theta3 = (d_sq - L1**2 - L2**2) / (2 * L1 * L2)
+    cos_theta3 = np.clip(cos_theta3, -1.0, 1.0)
+    
+    theta3_pos = math.acos(cos_theta3)
+    theta3_neg = -theta3_pos
+    
+    # Find solutions
+    solutions = []
+    
+    for theta3 in [theta3_pos, theta3_neg]:
+        # Calculate theta2
+        beta = math.atan2(x_local, z_local)
+        alpha = math.atan2(L2 * math.sin(theta3), L1 + L2 * math.cos(theta3))
+        theta2 = beta - alpha
+        
+        # Calculate theta4
+        theta4 = target_sum - theta2 - theta3
+        
+        # Normalize theta4
+        while theta4 > 2 * math.pi:
+            theta4 -= 2 * math.pi
+        while theta4 < -2 * math.pi:
+            theta4 += 2 * math.pi
+        
+        solutions.append((theta2, theta3, theta4))
+    
+    # Choose best solution
+    best_error = float('inf')
+    best_sol = None
+    
+    for sol in solutions:
+        theta2, theta3, theta4 = sol
+        
+        # Check joint limits
+        if not (-6.2831853 <= theta2 <= 6.2831853 and 
+                -6.2831853 <= theta3 <= 6.2831853 and 
+                -6.2831853 <= theta4 <= 6.2831853):
+            continue
+        
+        # Calculate resulting position
+        x_calc = L1 * math.sin(theta2) + L2 * math.sin(theta2 + theta3)
+        z_calc = L1 * math.cos(theta2) + L2 * math.cos(theta2 + theta3)
+        
+        # Calculate error
+        pos_error = math.sqrt((x_calc - x_local)**2 + (z_calc - z_local)**2)
+        
+        orient_sum = (theta2 + theta3 + theta4) % (2 * math.pi)
+        target_orient = target_sum % (2 * math.pi)
+        orient_error = min(abs(orient_sum - target_orient), 2 * math.pi - abs(orient_sum - target_orient))
+        
+        total_error = pos_error + orient_error
+        
+        if total_error < best_error:
+            best_error = total_error
+            best_sol = (theta2, theta3, theta4)
+    
+    # Use first solution if no valid solution found
+    if best_sol is None and solutions:
+        best_sol = solutions[0]
+    elif best_sol is None:
+        best_sol = (0.0, 0.0, 0.0)
+    
+    theta2, theta3, theta4 = best_sol
+    
+    # Normalize angles to be within joint limits
+    while theta1 > 6.2831853: theta1 -= 2 * math.pi
+    while theta1 < -6.2831853: theta1 += 2 * math.pi
+    
+    while theta2 > 6.2831853: theta2 -= 2 * math.pi
+    while theta2 < -6.2831853: theta2 += 2 * math.pi
+    
+    while theta3 > 6.2831853: theta3 -= 2 * math.pi
+    while theta3 < -6.2831853: theta3 += 2 * math.pi
+    
+    while theta4 > 6.2831853: theta4 -= 2 * math.pi
+    while theta4 < -6.2831853: theta4 += 2 * math.pi
+    
+    return (theta1, theta2, theta3, theta4)
+```
+
+The solution combines strategies from the provided examples:
+1. Joint 1 calculation from Existing Code 1
+2. Planar arm solution for joints 2-4 inspired by Existing Code 4
+3. Handling the TCP offset properly by transforming between frames
+4. Finding multiple solutions and selecting the best one that minimizes position and orientation error
+
+The algorithm:
+1. Calculates joint 1 based on the target XY position
+2. Transforms the target position and orientation to the local frame after joint 1
+3. Solves the planar manipulator problem for joints 2, 3, and 4 using geometric methods
+4. Selects the best solution within joint limits

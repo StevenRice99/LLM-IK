@@ -1,0 +1,87 @@
+We can “decouple” the IK for this 5‐DOF arm into two parts. Because only joint 1 (rotating about Z) “steers” the arm laterally, and the rest of the chain (joints 2–5) always produces a fixed “arm‐length” in the base “y–z” plane, a valid solution is obtained by first “removing” the azimuth (rotation about Z) so that the remaining chain generates only a z–offset.
+
+In our robot the fixed translations are such that when joints 2–5 are zero the TCP comes out at
+
+  TCP = (0, 0.10915, 0.9119).
+
+In fact, the first joint rotates about Z and “steers” a fixed magnitude in the xy–plane. In our case, note that the only x–component of TCP comes from joint 1’s rotation of the constant y–offset 0.10915. (You can verify this by “running” the forward kinematics when q₂ through q₅ are zero.) Hence, for the desired TCP (x,y,z) the following must hold:
+  –sin(q₁) · 0.10915 = x  and  cos(q₁) · 0.10915 = y.
+That is, one recovers
+  q₁ = atan2(–x, y)
+and (since 0.10915 = √(x² + y²)) the horizontal position “fixes” the first joint.
+
+The remainder of the chain must “lift” the TCP’s z–coordinate. (Its y–coordinate is forced by the fixed offsets.) In the kinematics the remaining (position‐affecting) translations appear in two “blocks”:  
+ • From joint 2 to joint 3, the translation is [0, –0.1197, 0.425]. (Its z–component is 0.425.)  
+ • From joint 3 to TCP the translations are “in series” (first a 0.39225 shift then a TCP offset 0.09465) that add to give an effective z–contribution 0.39225+0.09465 = 0.4869. (The intervening translation along y, 0.093, is “invisible” to the TCP z–coordinate.)  
+
+Thus if we call Lₐ = 0.425 and L_b = 0.4869 the forward kinematics (in the q₁ = 0 “plane”) are
+
+  X = Lₐ sin(q₂) + L_b sin(q₂+q₃)  and  Z = Lₐ cos(q₂) + L_b cos(q₂+q₃).
+
+For a reachable target the TCP (after “undoing” the q₁ rotation) must have zero x–coordinate and z–coordinate equal to the desired TCP’s z value. (The very structure of the chain guarantees that the overall y–offset is fixed at 0.10915.)  
+Setting X = 0 leads to  
+  Lₐ sin(q₂) + L_b sin(q₂+q₃) = 0.
+A standard way to solve the “2R” IK for a point along the z–axis is to solve using the cosine law. In fact one may show that
+  
+  cos(q₃) = [z² – Lₐ² – L_b²]⁄(2·Lₐ·L_b)
+  
+and then
+  
+  q₂ = atan2( –L_b sin(q₃), Lₐ + L_b cos(q₃) ).
+
+Finally, note that the last two joints (q₄ and q₅) do not affect TCP position (their translations lie along invariant directions of their axes) so we may set
+
+  q₄ = 0  and  q₅ = 0.
+
+Below is one acceptable closed–form solution for inverse kinematics for our 5–DOF robot:
+
+------------------------------------------------------------
+def inverse_kinematics(p: tuple[float, float, float]) -> tuple[float, float, float, float, float]:
+    import math
+    # Unpack the target TCP position (in base coordinates).
+    x, y, z = p
+
+    # (1) Solve for joint 1.
+    # With the structure of the manipulator the only “lateral” displacement comes from
+    # rotating the fixed offset 0.10915 in the y-direction. (Indeed, when joints 2–5 are 0,
+    # the forward kinematics yield TCP = (0, 0.10915, 0.9119).)
+    # In general, we require:
+    #      –sin(q₁)·0.10915 = x   and   cos(q₁)·0.10915 = y.
+    # (Assume p is reachable so that sqrt(x*x+y*y) == 0.10915.)
+    q1 = math.atan2(-x, y)
+
+    # (2) Solve for joints 2 and 3.
+    # In the "q1 = 0" system the arm’s effective “planar” kinematics from joint2 to TCP are:
+    #
+    #    [ Tx ]   [ Lₐ*sin(q₂) + L_b*sin(q₂+q₃) ]
+    #    [ Ty ] = [        –0.1197 + 0.093     ] = [ –0.0267 ]   (y–offset is fixed)
+    #    [ Tz ]   [ Lₐ*cos(q₂) + L_b*cos(q₂+q₃) ]
+    #
+    # but the TCP “lifting” is effected solely by the z–component.
+    # Here we define:
+    L_a = 0.425
+    L_b = 0.39225 + 0.09465   # effective second link length = 0.4869
+
+    # The forward kinematics along the z direction yield:
+    #    L_a*cos(q₂) + L_b*cos(q₂+q₃) = z_target.
+    # A standard 2–link solution (see the cosine law) gives:
+    cos_q3 = (z*z - L_a*L_a - L_b*L_b) / (2.0 * L_a * L_b)
+    # Safeguard against minor roundoff:
+    cos_q3 = max(min(cos_q3, 1.0), -1.0)
+    q3 = math.acos(cos_q3)
+    # There are two possible solutions (elbow–up, elbow–down). We choose the one with q3 as computed.
+    q2 = math.atan2(-L_b * math.sin(q3), L_a + L_b * math.cos(q3))
+
+    # (3) Joints 4 and 5 do not affect TCP position.
+    q4 = 0.0
+    q5 = 0.0
+
+    return (q1, q2, q3, q4, q5)
+------------------------------------------------------------
+
+Explanation of key points:
+ • q₁ is computed so that when we “undo” a rotation by q₁ the TCP’s x–coordinate becomes zero.
+ • The remaining two “position‐active” joints (q₂ and q₃) become exactly the 2R planar chain needed to “lift” the TCP to the desired z height.
+ • q₄ and q₅ are “redundant” for positioning and are set to zero.
+
+This closed–form solution meets the specification under the assumption that the target TCP position is kinematically reachable (for instance, its x–y coordinates satisfy √(x²+y²) = 0.10915, and its z coordinate is consistent with the arm “length”).

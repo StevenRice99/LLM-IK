@@ -1,0 +1,87 @@
+import math
+
+def inverse_kinematics(p: tuple[float, float, float]) -> tuple[float, float, float, float]:
+    """
+    Analytical closed–form inverse kinematics for a 4-DOF serial manipulator.
+    
+    The robot chain (with all lengths in meters) is defined by:
+      • Revolute 1 (axis Y) at the base.
+      • A fixed translation from base to joint2: [0, -0.1197, 0.425]
+      • Revolute 2 about Y.
+      • A fixed translation from joint2 to joint3: [0, 0, 0.39225]
+      • Revolute 3 about Y.
+      • A fixed translation from joint3 to joint4: [0, 0.093, 0]  
+         (affecting only y)
+      • Revolute 4 about Z.
+      • A fixed translation from joint4 to TCP: [0, 0, 0.09465]
+      
+    In the x–z plane only the translations along z matter.
+    If we “project” the kinematics into the x–z plane the effective chain is:
+         x = L1*sin(θ1) + L2*sin(θ1+θ2) + L3*sin(θ1+θ2+θ3)
+         z = L1*cos(θ1) + L2*cos(θ1+θ2) + L3*cos(θ1+θ2+θ3)
+    with:
+         L1 = 0.425      (from [0, -0.1197, 0.425])
+         L2 = 0.39225    (from [0, 0, 0.39225])
+         L3 = 0.09465    (from TCP translation [0, 0, 0.09465])
+    and the fixed y coordinate is:
+         y = -0.1197 + 0.093 = -0.0267.
+    
+    Note: These three joints (rotating about Y) yield a redundant (3R) system in the plane.
+    We resolve the redundancy by picking the end–effector “orientation” in the x–z plane,
+    T = θ1 + θ2 + θ3, from one of two natural choices:
+         T = psi   or   T = psi + π,
+    where psi = atan2(x, z). For each choice the 2R sub–chain from joints 1 and 2
+    (which must reach the “wrist center” defined by subtracting L3 in the T direction)
+    is solved in closed form.
+    Finally joint 4 does not affect position so we set it to 0.
+    
+    The algorithm below computes both candidate solutions (using the two choices for T and
+    the two solutions from the 2R IK of the wrist center) and selects the one whose forward
+    kinematics best matches the target p.
+    
+    :param p: The target TCP position as (x, y, z). (For valid targets y should equal -0.0267.)
+    :return: A tuple (θ1, θ2, θ3, θ4) in radians.
+    """
+    x, y, z = p
+    L1 = 0.425
+    L2 = 0.39225
+    L3 = 0.09465
+
+    def fk_planar(theta1, theta2, theta3):
+        x_fk = L1 * math.sin(theta1) + L2 * math.sin(theta1 + theta2) + L3 * math.sin(theta1 + theta2 + theta3)
+        z_fk = L1 * math.cos(theta1) + L2 * math.cos(theta1 + theta2) + L3 * math.cos(theta1 + theta2 + theta3)
+        return (x_fk, -0.0267, z_fk)
+    psi = math.atan2(x, z)
+    T_options = [psi, psi + math.pi]
+    candidates = []
+    for T in T_options:
+        x_w = x - L3 * math.sin(T)
+        z_w = z - L3 * math.cos(T)
+        r_w = math.sqrt(x_w ** 2 + z_w ** 2)
+        cos_beta = (r_w ** 2 - L1 ** 2 - L2 ** 2) / (2 * L1 * L2)
+        cos_beta = max(-1.0, min(1.0, cos_beta))
+        for sign in (1, -1):
+            beta = sign * math.acos(cos_beta)
+            phi_w = math.atan2(x_w, z_w)
+            delta = math.atan2(L2 * math.sin(beta), L1 + L2 * math.cos(beta))
+            theta1_candidate = phi_w - delta
+            theta2_candidate = beta
+            theta3_candidate = T - (theta1_candidate + theta2_candidate)
+            x_fk, _, z_fk = fk_planar(theta1_candidate, theta2_candidate, theta3_candidate)
+            err = math.hypot(x_fk - x, z_fk - z)
+            candidates.append((err, theta1_candidate, theta2_candidate, theta3_candidate))
+    best = min(candidates, key=lambda tup: tup[0])
+    theta1, theta2, theta3 = (best[1], best[2], best[3])
+    theta4 = 0.0
+
+    def normalize(angle):
+        while angle > math.pi:
+            angle -= 2 * math.pi
+        while angle < -math.pi:
+            angle += 2 * math.pi
+        return angle
+    theta1 = normalize(theta1)
+    theta2 = normalize(theta2)
+    theta3 = normalize(theta3)
+    theta4 = normalize(theta4)
+    return (theta1, theta2, theta3, theta4)

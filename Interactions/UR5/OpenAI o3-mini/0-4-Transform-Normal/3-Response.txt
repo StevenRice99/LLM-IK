@@ -1,0 +1,138 @@
+Below is one valid analytical solution. In our solution we note that the overall forward‐kinematics factors into a “base” rotation about Z (q₁) that rotates a “planar” 3R chain (with links of effective lengths 0.425, 0.39225, and 0.09465) plus a final rotation about Z (q₅). In particular, one may show that the TCP position (p) can be “unrotated” by q₁ so that
+
+  p̄ = Rz(–q₁)·p = [X, Y, Z]  with Y = 0.13585 – 0.1197 + 0.093 = 0.10915
+
+so that q₁ is chosen to force the second (y) component to that constant. (A short algebra yields that if p = [pₓ, p_y, p_z] then
+  –pₓ·sin(q₁) + p_y·cos(q₁) = 0.10915.
+One may write this as
+  √(pₓ²+p_y²)·cos(q₁+δ) = 0.10915  with δ = atan2(–pₓ, p_y),
+so that one valid solution is  
+  q₁ = acos(0.10915/√(pₓ²+p_y²)) – δ.)
+
+Once q₁ is known, the desired tool orientation (given as roll/pitch/yaw in r) is used to “decouple” the remaining degree of freedom. One may show that the full rotation matrix factors as
+
+  R = Rz(q₁) · [R_y(q₂+q₃+q₄) · Rz(q₅)]
+
+so that with
+  M = Rz(–q₁)·R_des   (with R_des built from r = [roll, pitch, yaw] in URDF order, i.e. R_des = Rz(yaw)·R_y(pitch)·R_x(roll))
+one may extract  
+  φ = q₂+q₃+q₄ = atan2(M[0,2], M[2,2])  and  q₅ = atan2(M[1,0], M[1,1]).
+
+The position part now reduces to “removing” the last link (which contributes a fixed offset L₃ = 0.09465 along the direction φ) from p̄ giving an effective 2R arm:
+  [Pₓ, P_z] = [p̄ₓ – L₃·sin(φ), p̄_z – L₃·cos(φ)]  
+which must be reached by two links of lengths L₁ = 0.425 and L₂ = 0.39225. Standard geometry (law of cosines) then gives
+  q₃ = arccos((r₂² – L₁² – L₂²)/(2·L₁·L₂))  with r₂ = √(Pₓ²+P_z²)
+and
+  q₂ = atan2(Pₓ, P_z) – atan2(L₂·sin(q₃), L₁+L₂·cos(q₃)).
+Finally, the remaining joint angle is recovered from  
+  q₄ = φ – (q₂+q₃).
+
+One acceptable complete implementation is as follows:
+
+------------------------------------------------------------
+def inverse_kinematics(p: tuple[float, float, float],
+                       r: tuple[float, float, float]) -> tuple[float, float, float, float, float]:
+    """
+    Gets the joint values (in radians) to reach position p and orientation r.
+    p: An (x, y, z) tuple for the target TCP position.
+    r: An (roll, pitch, yaw) tuple (in radians) for the target TCP orientation.
+    
+    The robot’s kinematics are summarized as:
+      • Joint 1: rotation about Z, with no offset.
+      • Joint 2: a fixed translation (0, 0.13585, 0) then rotation about Y.
+      • Joint 3: a fixed translation (0, -0.1197, 0.425) then rotation about Y.
+      • Joint 4: a fixed translation (0, 0, 0.39225) then rotation about Y.
+      • Joint 5: a fixed translation (0, 0.093, 0) then rotation about Z.
+      • TCP: a final fixed translation (0, 0, 0.09465).
+    
+    The derivation below uses the fact that the product transform factors as:
+         p_TCP = Rz(q₁) · { p_planar(q₂,q₃,q₄) }  
+         R_total = Rz(q₁) · [ R_y(q₂+q₃+q₄) · Rz(q₅) ]
+    so that the y–component of the “unrotated” position p̄ = Rz(–q₁)·p must equal
+         0.13585 – 0.1197 + 0.093 = 0.10915.
+    
+    This yields q₁, then the desired tool orientation (built as R_des = Rz(yaw) R_y(pitch) R_x(roll))
+    is “unwrapped” by Rz(–q₁) so that one can extract φ = q₂+q₃+q₄ and q₅.
+    
+    Finally, subtracting the link 5/TCP offset (L₃ = 0.09465) yields an effective 2R arm for which
+    standard geometric IK yields q₂ and q₃ (and hence q₄ = φ – (q₂+q₃)). 
+    """
+    import math
+    import numpy as np
+
+    # Link parameters (lengths and constant offsets)
+    L1 = 0.425      # from joint2->joint3 (along the “planar” arm)
+    L2 = 0.39225    # from joint3->joint4
+    L3 = 0.09465    # from joint5->TCP (TCP translation)
+    # The fixed y offsets sum to:
+    y_const = 0.13585 - 0.1197 + 0.093  # equals 0.10915
+
+    # Unpack target position.
+    p_x, p_y, p_z = p
+    # First, solve for q₁ from the constraint that after “unrotating” p by –q₁,
+    # the y–component must equal y_const.
+    r_xy = math.sqrt(p_x**2 + p_y**2)
+    # Write the y–component of Rz(–q₁)*p:
+    #   p̄_y = -sin(q₁)*p_x + cos(q₁)*p_y = y_const.
+    # This can be rearranged as:
+    #   √(pₓ²+p_y²) ⋅ cos(q₁+δ) = y_const   with δ = atan2(–pₓ, p_y).
+    delta = math.atan2(-p_x, p_y)
+    ratio = y_const / r_xy
+    ratio = max(min(ratio, 1.0), -1.0)  # numerical safety
+    q1 = math.acos(ratio) - delta
+
+    # Compute p̄ = Rz(–q₁)*p.
+    cos_q1 = math.cos(q1)
+    sin_q1 = math.sin(q1)
+    p_bar_x = cos_q1 * p_x + sin_q1 * p_y
+    p_bar_y = -sin_q1 * p_x + cos_q1 * p_y   # should equal y_const (≈ 0.10915)
+    p_bar_z = p_z
+
+    # Build the desired rotation R_des from r = (roll, pitch, yaw).
+    # Note: URDF specifies rpy as roll, pitch, yaw with R_des = Rz(yaw)·R_y(pitch)·R_x(roll).
+    roll, pitch, yaw = r
+    R_x = np.array([[1, 0, 0],
+                    [0, math.cos(roll), -math.sin(roll)],
+                    [0, math.sin(roll), math.cos(roll)]])
+    R_y = np.array([[math.cos(pitch), 0, math.sin(pitch)],
+                    [0, 1, 0],
+                    [-math.sin(pitch), 0, math.cos(pitch)]])
+    R_z = np.array([[math.cos(yaw), -math.sin(yaw), 0],
+                    [math.sin(yaw), math.cos(yaw), 0],
+                    [0, 0, 1]])
+    R_des = R_z @ R_y @ R_x
+
+    # Remove the effect of q₁ from R_des:
+    Rz_neg_q1 = np.array([[cos_q1, sin_q1, 0],
+                          [-sin_q1, cos_q1, 0],
+                          [0, 0, 1]])
+    M = Rz_neg_q1 @ R_des
+
+    # One may show that M = R_y(φ)·Rz(q₅). Comparing with the standard form,
+    # we have M[0,2] = sin(φ) and M[2,2] = cos(φ), so
+    phi = math.atan2(M[0,2], M[2,2])
+    # Also, M[1,0] = sin(q₅) and M[1,1] = cos(q₅), so
+    q5 = math.atan2(M[1,0], M[1,1])
+
+    # Next, remove the effect of the last link (TCP offset) from the position.
+    # We have (from the forward chain):
+    #   p̄ₓ = L1·sin(q₂) + L2·sin(q₂+q₃) + L3·sin(φ)
+    #   p̄_z = L1·cos(q₂) + L2·cos(q₂+q₃) + L3·cos(φ)
+    # Define the effective target for the 2R “planar” arm:
+    P_x = p_bar_x - L3 * math.sin(phi)
+    P_z = p_bar_z - L3 * math.cos(phi)
+    r2 = math.sqrt(P_x**2 + P_z**2)
+
+    # Solve for q₃ using the cosine law.
+    cos_q3 = (r2**2 - L1**2 - L2**2) / (2 * L1 * L2)
+    cos_q3 = max(min(cos_q3, 1.0), -1.0)
+    q3 = math.acos(cos_q3)  # (elbow “up” solution)
+    # Then q₂ is given by
+    q2 = math.atan2(P_x, P_z) - math.atan2(L2 * math.sin(q3), L1 + L2 * math.cos(q3))
+    # Finally, solve for q₄ from the relation φ = q₂+q₃+q₄
+    q4 = phi - (q2 + q3)
+
+    return (q1, q2, q3, q4, q5)
+------------------------------------------------------------
+
+This implementation follows one acceptable closed‐form derivation. (Note that alternate solution branches exist because of the usual trigonometric ambiguities.)

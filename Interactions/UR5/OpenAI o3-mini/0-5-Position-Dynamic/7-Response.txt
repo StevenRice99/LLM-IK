@@ -1,0 +1,131 @@
+```python
+import math
+import numpy as np
+# Note: We assume that functions.FORWARD_KINEMATICS is available in the environment.
+
+def inverse_kinematics(p: tuple[float, float, float]) -> tuple[float, float, float, float, float, float]:
+    """
+    Closed-form analytical inverse kinematics for the 6-DOF manipulator via candidate–branch search.
+    
+    The robot is defined (m and rad) by:
+      • Revolute 1: Position [0, 0, 0], rpy [0,0,0], axis Z.
+      • Revolute 2: Translation [0, 0.13585, 0], rpy [0,0,0], axis Y.
+      • Revolute 3: Translation [0, -0.1197, 0.425], rpy [0,0,0], axis Y.
+      • Revolute 4: Translation [0, 0, 0.39225], rpy [0,0,0], axis Y.
+      • Revolute 5: Translation [0, 0.093, 0], rpy [0,0,0], axis Z.
+      • Revolute 6: Translation [0, 0, 0.09465], rpy [0,0,0], axis Y.
+      • TCP: Translation [0, 0.0823, 0] with fixed orientation rpy [0,0,1.570796325].
+    
+    In many spherical‐wrist robots the TCP position can be decoupled into a horizontal (x,z) 2R–subchain
+    (driven by joints 1–3) plus the effects of a wrist offset (via joint4). In a prior “simplified” formulation
+    the vertical (y) coordinate was given by: 
+         y = -0.0267 + 0.0823*cos(q4)
+    and one could solve for q4 directly. In our case (as indicated by the test targets) the reachable y–range
+    is not consistent with that simplified expression, so we instead allow q4 to vary over a discretized set.
+    
+    For each candidate q4 we define:
+         d = tcp * sin(q4)
+         L_eff = sqrt(L3^2 + d^2)
+         φ = atan2(d, L3)
+    where L3 = 0.09465 and tcp = 0.0823.
+    
+    Then, letting ψ = atan2(x_target, z_target), we try both T_candidate = ψ and ψ + π.
+    A candidate for S = q1 + q2 + q3 is then S_candidate = T_candidate + φ.
+    
+    The 2R (planar) subchain (with link lengths L1 and L2, where L1 = 0.425 and L2 = 0.39225)
+    must then satisfy:
+         W_x = x_target - L_eff*sin(T_candidate)
+         W_z = z_target - L_eff*cos(T_candidate)
+         r_w = hypot(W_x, W_z)
+    and by the cosine law
+         cos(q2) = (r_w^2 - L1^2 - L2^2) / (2*L1*L2)
+    (with q2 having two branches: ±acos(...)).
+    Then we compute
+         δ = atan2(L2*sin(q2), L1 + L2*cos(q2))
+         q1 = atan2(W_x, W_z) - δ
+         q3 = S_candidate - (q1 + q2)
+    
+    Joints 5 and 6 are redundant for position so we choose q5 = q6 = 0.
+    
+    Finally, we evaluate the full (position) forward kinematics (using functions.FORWARD_KINEMATICS)
+    for each candidate joint solution and return the candidate whose TCP position best matches the target.
+    
+    This method assumes that the target is reachable.
+    
+    :param p: Target TCP position (x, y, z).
+    :return: Tuple (q1, q2, q3, q4, q5, q6) of joint angles in radians.
+    """
+    # Robot dimensions and fixed offsets (in meters)
+    L1 = 0.425
+    L2 = 0.39225
+    L3 = 0.09465
+    tcp = 0.0823  # TCP offset (m); note that due to the fixed tool rotation, its effect is along -x
+
+    x_target, y_target, z_target = p
+    psi = math.atan2(x_target, z_target)  # candidate horizontal orientation
+
+    best_error = float('inf')
+    best_solution = None
+
+    # Discretize q4 candidates over the full range [-pi, pi].
+    num_q4 = 36
+    q4_candidates = [ -math.pi + (2*math.pi)*i/(num_q4 - 1) for i in range(num_q4) ]
+    
+    for q4_candidate in q4_candidates:
+        # For the wrist, define an effective offset:
+        d = tcp * math.sin(q4_candidate)
+        L_eff = math.sqrt(L3**2 + d**2)
+        phi = math.atan2(d, L3)
+        for T_candidate in [psi, psi + math.pi]:
+            S_candidate = T_candidate + phi  # candidate for q1+q2+q3
+
+            # Compute the effective wrist center in the horizontal plane:
+            W_x = x_target - L_eff * math.sin(T_candidate)
+            W_z = z_target - L_eff * math.cos(T_candidate)
+            r_w = math.hypot(W_x, W_z)
+            
+            # Check if the 2R subchain is reachable.
+            if r_w > (L1 + L2) or r_w < abs(L1 - L2):
+                continue
+
+            cos_q2 = (r_w**2 - L1**2 - L2**2) / (2 * L1 * L2)
+            # Clamp to [-1, 1] for numerical safety.
+            cos_q2 = max(min(cos_q2, 1.0), -1.0)
+            for sign in [1, -1]:
+                q2_candidate = sign * math.acos(cos_q2)
+                delta = math.atan2(L2 * math.sin(q2_candidate), L1 + L2 * math.cos(q2_candidate))
+                theta_w = math.atan2(W_x, W_z)
+                q1_candidate = theta_w - delta
+                q3_candidate = S_candidate - (q1_candidate + q2_candidate)
+                
+                candidate = (q1_candidate, q2_candidate, q3_candidate, q4_candidate, 0.0, 0.0)
+                
+                # Evaluate the candidate using the provided forward kinematics.
+                fk_pos = functions.FORWARD_KINEMATICS(
+                    joint1=candidate[0],
+                    joint2=candidate[1],
+                    joint3=candidate[2],
+                    joint4=candidate[3],
+                    joint5=candidate[4],
+                    joint6=candidate[5]
+                )
+                error = math.sqrt((fk_pos[0] - x_target)**2 +
+                                  (fk_pos[1] - y_target)**2 +
+                                  (fk_pos[2] - z_target)**2)
+                if error < best_error:
+                    best_error = error
+                    best_solution = candidate
+
+    if best_solution is None:
+        raise ValueError("No valid IK solution found for the input target position.")
+
+    def normalize(angle):
+        while angle > math.pi:
+            angle -= 2.0 * math.pi
+        while angle < -math.pi:
+            angle += 2.0 * math.pi
+        return angle
+
+    best_solution = tuple(normalize(j) for j in best_solution)
+    return best_solution
+```

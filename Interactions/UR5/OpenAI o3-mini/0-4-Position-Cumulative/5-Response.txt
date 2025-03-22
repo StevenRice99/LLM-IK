@@ -1,0 +1,85 @@
+```python
+import math
+
+def inverse_kinematics(p: tuple[float, float, float]) -> tuple[float, float, float, float, float]:
+    """
+    Computes a closed-form inverse kinematics solution for a 5–DOF serial manipulator.
+    
+    The robot chain is defined by:
+       • Revolute 1 at the base: translation [0, 0, 0] and rotation about Z.
+       • Revolute 2: translation [0, 0.13585, 0] and rotation about Y.
+       • Revolute 3: translation [0, -0.1197, 0.425] and rotation about Y.
+       • Revolute 4: translation [0, 0, 0.39225] and rotation about Y.
+       • Revolute 5: translation [0, 0.093, 0] and rotation about Z.
+       • TCP: translation [0, 0, 0.09465].
+       
+    When all joints except joint 1 are zero, the forward kinematics yield:
+         TCP = (0, 0.10915, 0.9119)
+    Notice that the entire lateral (x–y) displacement comes from revolving the fixed offset of 0.10915 
+    (in the base y–direction) by joint 1. In particular, the effect of q₁ is:
+         x = -0.10915·sin(q₁)    and    y =  0.10915·cos(q₁)
+    so that for the target TCP position p = (x, y, z) we must have:
+         q₁ = atan2(-x, y)
+    (Assume the target is reachable so that √(x²+y²) equals 0.10915.)
+    
+    Once joint 1 “steers” the fixed lateral offset correctly, the remaining joints must position the TCP in z.
+    In the q₁=0 “frame” the chain becomes a planar 2–R system (with 2 redundant joints) whose only effect on
+    position is along z. In that frame:
+         • Joint 2 (rotation about Y) followed by a fixed translation [0, -0.1197, 0.425] contributes:
+                 Lₐ = 0.425  (z–component when q₂ = 0)
+         • Joint 3 (rotation about Y) together with the next fixed translation [0, 0, 0.39225] contributes:
+                 L_b = 0.39225  (z–component when q₃ = 0)
+         • Finally, the TCP adds an additional 0.09465 in z.
+    Thus the effective z–equation is:
+         z_target = Lₐ·cos(q₂) + L_b·cos(q₂+q₃) + 0.09465
+    while the x–equation (which must vanish in the properly rotated frame) is:
+         0 = Lₐ·sin(q₂) + L_b·sin(q₂+q₃)
+    
+    A standard approach is to first “subtract” the TCP’s last z–translation so that:
+         z' = z_target – 0.09465 = Lₐ·cos(q₂) + L_b·cos(q₂+q₃)
+    Then using the cosine law for a 2R planar chain,
+         cos(q₃) = (z'² – Lₐ² – L_b²) / (2 Lₐ L_b)
+    and the x–constraint can be used to compute:
+         q₂ = -atan2(L_b·sin(q₃), Lₐ + L_b·cos(q₃))
+    
+    The remaining joints (q₄ and q₅) do not affect the TCP position. We set them to zero.
+    
+    :param p: The target TCP position as a tuple (x, y, z).
+              For physically reachable targets, √(x²+y²) should equal 0.10915.
+    :return: A tuple (q1, q2, q3, q4, q5) of joint angles in radians.
+    """
+    # Unpack target TCP position
+    x, y, z = p
+
+    # ---- Joint 1: Rotation about Z ----
+    # The fixed lateral offset is 0.10915 (from revolute 5 translation);
+    # its rotated image must match the x and y components:
+    #     x = -0.10915*sin(q₁) and y = 0.10915*cos(q₁)
+    q1 = math.atan2(-x, y)
+    
+    # ---- Joints 2 and 3: Positioning in z via a 2R planar chain ----
+    # Effective link lengths in the “planar” chain:
+    L_a = 0.425          # From revolute 3 translation (z part)
+    L_b = 0.39225        # From revolute 4 translation (z part)
+    # Note: The TCP’s final fixed z–translation is 0.09465.
+    # Remove this offset from the target z–coordinate:
+    z_prime = z - 0.09465
+
+    # Use the cosine law to solve for q₃:
+    #    cos(q₃) = (z_prime² - L_a² - L_b²) / (2 * L_a * L_b)
+    cos_q3 = (z_prime**2 - L_a**2 - L_b**2) / (2 * L_a * L_b)
+    # Clamp cos(q₃) to the valid range [-1, 1] to account for numerical errors.
+    cos_q3 = max(min(cos_q3, 1.0), -1.0)
+    q3 = math.acos(cos_q3)
+    
+    # Now, using the zero x–displacement condition in the rotated (q1=0) frame:
+    #    0 = L_a*sin(q₂) + L_b*sin(q₂+q₃)
+    # This can be solved for q₂:
+    q2 = -math.atan2(L_b * math.sin(q3), L_a + L_b * math.cos(q3))
+
+    # ---- Joints 4 and 5: Redundant for position; set to zero ----
+    q4 = 0.0
+    q5 = 0.0
+
+    return (q1, q2, q3, q4, q5)
+```

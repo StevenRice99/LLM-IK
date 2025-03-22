@@ -1,0 +1,198 @@
+```python
+def inverse_kinematics(p: tuple[float, float, float],
+                       r: tuple[float, float, float]) -> tuple[float, float, float, float, float, float]:
+    """
+    Solves the full 6-DOF inverse kinematics in closed form.
+    
+    Kinematic Details (from the URDF):
+      • Joint 1: Revolute about Z at [0, 0, 0]
+      • Joint 2: Translate [0, 0.13585, 0] then rotate about Y
+      • Joint 3: Translate [0, -0.1197, 0.425] then rotate about Y
+      • Joint 4: Translate [0, 0, 0.39225] then rotate about Y
+      • Joint 5: Translate [0, 0.093, 0] then rotate about Z
+      • Joint 6: Translate [0, 0, 0.09465] then rotate about Y
+      • TCP: Translation [0, 0.0823, 0] and a fixed rotation Rz(1.570796325)
+    
+    The approach is to decouple the problem into two stages:
+      1. Solve for joints 1–5 (the “arm”) using a decoupled planar formulation.
+         This is based on the following:
+            • The fixed translational offsets yield a constant:
+                   y_const = 0.13585 − 0.1197 + 0.093 = 0.10915.
+            • In the base XY–plane, the rotated target must satisfy
+                   -p_x * sin(q1) + p_y * cos(q1) = y_const.
+            • Two candidate solutions for q1 are computed:
+                   q1_candidate1 = θ − a    and    q1_candidate2 = θ − (π − a)
+              where θ = atan2(p_y, p_x) and a = asin( y_const/√(p_x² + p_y²) ).
+            • The candidate that minimizes the (1,2) element (in magnitude) of the decoupled
+              rotation error (M = Rz(–q1)*R_des) is selected.
+    
+         Once q1 is chosen, the decoupled target position p̄ = Rz(–q1)*p is computed.
+         Then the decoupled orientation M = Rz(–q1)*R_des is factorized as:
+                   M = Ry(φ) · Rz(q5)
+         so that φ = q2 + q3 + q4 = atan2(M[0,2], M[2,2]) and q5 = atan2(M[1,0], M[1,1]).
+         Finally, removing the wrist offset L_tcp = 0.09465 (translation from joint 5 to 6)
+         along the direction φ yields a 2R problem. That is, defining:
+                   P_x = p̄_x − L_tcp·sin(φ)
+                   P_z = p̄_z − L_tcp·cos(φ)
+         and r₂ = √(P_x² + P_z²), we apply the cosine law to obtain:
+                   cos(q3) = (r₂² − L1² − L2²) / (2·L1·L2)
+         (with two possible branches, q3_candidateA = acos(·) and q3_candidateB = −acos(·)).
+         For each branch, one computes:
+                   q2 = atan2(P_x, P_z) − atan2(L2·sin(q3), L1 + L2·cos(q3))
+                   q4 = φ − (q2 + q3)
+         and selects the set (q2, q3, q4) that minimizes the planar position error.
+    
+      2. With the 5-DOF solution (q1 through q5) setting the wrist (joint 6) to the correct position,
+         the remaining wrist rotation q6 is recovered from the residual orientation.
+         In our factorized forward kinematics the overall rotation is:
+                   R_total = Rz(q1) · Ry(q2+q3+q4) · Rz(q5) · [Ry(q6) · R_tcp]
+         where the fixed wrist tool rotation is R_tcp = Rz(1.570796325).
+         Since the computed “arm” rotation is:
+                   R_arm = Rz(q1) · Ry(q2+q3+q4) · Rz(q5)
+         we have
+                   R_des = R_arm · (Ry(q6) · R_tcp)
+         so that
+                   Ry(q6) = R_armᵀ · R_des · R_tcpᵀ.
+         Now, noting that a rotation about Y is given by:
+                   Ry(q6) = [[ cos(q6),  0, sin(q6)],
+                             [   0,      1,   0    ],
+                             [ -sin(q6), 0, cos(q6)]],
+         one may extract q6 as:
+                   q6 = atan2( X[0,2], X[0,0] )
+         where X = (R_armᵀ · R_des) · R_tcpᵀ.
+    
+    Parameters:
+      p : The target TCP position as (x, y, z).
+      r : The target TCP orientation as (roll, pitch, yaw) in radians (URDF convention:
+           R_des = Rz(yaw)·Ry(pitch)·Rx(roll)).
+    
+    Returns:
+      A tuple (q1, q2, q3, q4, q5, q6) of joint angles (in radians).
+    """
+    import math
+    import numpy as np
+
+    # ----- Geometric constants from the URDF -----
+    L1 = 0.425       # Link from joint 2 to 3
+    L2 = 0.39225     # Link from joint 3 to 4
+    L_tcp = 0.09465  # Translation from joint 5 to 6 (wrist offset)
+    y_const = 0.13585 - 0.1197 + 0.093  # = 0.10915
+
+    # Unpack target TCP position and orientation
+    p_x, p_y, p_z = p
+
+    # ----- (1) Solve for joints 1–5 -----
+    # Compute candidate q1 values from the base XY constraint.
+    r_xy = math.sqrt(p_x**2 + p_y**2)
+    theta = math.atan2(p_y, p_x)
+    ratio = y_const / r_xy
+    ratio = max(-1.0, min(1.0, ratio))
+    a = math.asin(ratio)
+    q1_candidate1 = theta - a
+    q1_candidate2 = theta - (math.pi - a)
+
+    def compute_M(q1_val: float) -> np.ndarray:
+        cos_q1 = math.cos(q1_val)
+        sin_q1 = math.sin(q1_val)
+        Rz_neg = np.array([[cos_q1, sin_q1, 0],
+                           [-sin_q1, cos_q1, 0],
+                           [0, 0, 1]])
+        roll, pitch, yaw = r
+        R_x = np.array([[1, 0, 0],
+                        [0, math.cos(roll), -math.sin(roll)],
+                        [0, math.sin(roll), math.cos(roll)]])
+        R_y = np.array([[math.cos(pitch), 0, math.sin(pitch)],
+                        [0, 1, 0],
+                        [-math.sin(pitch), 0, math.cos(pitch)]])
+        R_z = np.array([[math.cos(yaw), -math.sin(yaw), 0],
+                        [math.sin(yaw),  math.cos(yaw), 0],
+                        [0, 0, 1]])
+        R_des = R_z @ R_y @ R_x
+        return Rz_neg @ R_des
+
+    # Select the q1 candidate that minimizes |M[1,2]|
+    M1 = compute_M(q1_candidate1)
+    M2 = compute_M(q1_candidate2)
+    q1 = q1_candidate1 if abs(M1[1, 2]) <= abs(M2[1, 2]) else q1_candidate2
+
+    # Compute decoupled target position: p̄ = Rz(–q1)*p
+    cos_q1 = math.cos(q1)
+    sin_q1 = math.sin(q1)
+    Rz_neg_q1 = np.array([[cos_q1, sin_q1, 0],
+                          [-sin_q1, cos_q1, 0],
+                          [0, 0, 1]])
+    p_vec = np.array([p_x, p_y, p_z])
+    p_bar = Rz_neg_q1 @ p_vec
+    p_bar_x, p_bar_y, p_bar_z = p_bar
+
+    # Recalculate R_des (target rotation) using URDF convention.
+    roll, pitch, yaw = r
+    R_x = np.array([[1, 0, 0],
+                    [0, math.cos(roll), -math.sin(roll)],
+                    [0, math.sin(roll), math.cos(roll)]])
+    R_y = np.array([[math.cos(pitch), 0, math.sin(pitch)],
+                    [0, 1, 0],
+                    [-math.sin(pitch), 0, math.cos(pitch)]])
+    R_z = np.array([[math.cos(yaw), -math.sin(yaw), 0],
+                    [math.sin(yaw), math.cos(yaw), 0],
+                    [0, 0, 1]])
+    R_des = R_z @ R_y @ R_x
+
+    # Compute the decoupled orientation matrix: M = Rz(–q1)*R_des.
+    M = Rz_neg_q1 @ R_des
+    # Factor M as: M = Ry(φ) · Rz(q5)
+    phi = math.atan2(M[0, 2], M[2, 2])  # φ = q2+q3+q4
+    q5 = math.atan2(M[1, 0], M[1, 1])
+
+    # Remove the wrist offset L_tcp along φ to obtain the effective 2R target.
+    P_x = p_bar_x - L_tcp * math.sin(phi)
+    P_z = p_bar_z - L_tcp * math.cos(phi)
+    r2 = math.sqrt(P_x**2 + P_z**2)
+    cos_q3 = (r2**2 - L1**2 - L2**2) / (2 * L1 * L2)
+    cos_q3 = max(-1.0, min(1.0, cos_q3))
+    q3_candidateA = math.acos(cos_q3)
+    q3_candidateB = -q3_candidateA
+
+    def planar_solution(q3_val: float) -> tuple[float, float, float]:
+        q2_val = math.atan2(P_x, P_z) - math.atan2(L2 * math.sin(q3_val), L1 + L2 * math.cos(q3_val))
+        q4_val = phi - (q2_val + q3_val)
+        # Reconstruct the planar (x,z) position from the solution for error comparison.
+        calc_x = L1 * math.sin(q2_val) + L2 * math.sin(q2_val + q3_val) + L_tcp * math.sin(phi)
+        calc_z = L1 * math.cos(q2_val) + L2 * math.cos(q2_val + q3_val) + L_tcp * math.cos(phi)
+        err_val = math.sqrt((calc_x - p_bar_x)**2 + (calc_z - p_bar_z)**2)
+        return (q2_val, q4_val, err_val)
+
+    q2_A, q4_A, err_A = planar_solution(q3_candidateA)
+    q2_B, q4_B, err_B = planar_solution(q3_candidateB)
+    if err_A <= err_B:
+        q3, q2, q4 = q3_candidateA, q2_A, q4_A
+    else:
+        q3, q2, q4 = q3_candidateB, q2_B, q4_B
+
+    # ----- (2) Recover joint 6 (wrist rotation) via the residual orientation -----
+    # Reconstruct the arm rotation from base to joint 6:
+    R_z_q1 = np.array([[math.cos(q1), -math.sin(q1), 0],
+                        [math.sin(q1),  math.cos(q1), 0],
+                        [0, 0, 1]])
+    angle_y = q2 + q3 + q4
+    R_y_total = np.array([[math.cos(angle_y), 0, math.sin(angle_y)],
+                           [0, 1, 0],
+                           [-math.sin(angle_y), 0, math.cos(angle_y)]])
+    R_z_q5 = np.array([[math.cos(q5), -math.sin(q5), 0],
+                        [math.sin(q5),  math.cos(q5), 0],
+                        [0, 0, 1]])
+    R_arm = R_z_q1 @ R_y_total @ R_z_q5
+
+    # The fixed wrist (tool) orientation is R_tcp = Rz(1.570796325).
+    R_tcp = np.array([[math.cos(1.570796325), -math.sin(1.570796325), 0],
+                      [math.sin(1.570796325),  math.cos(1.570796325), 0],
+                      [0, 0, 1]])
+
+    # Isolate the wrist rotation:
+    # R_des = R_arm · (Ry(q6) · R_tcp)  ==>  Ry(q6) = R_armᵀ · R_des · R_tcpᵀ.
+    X = (R_arm.T @ R_des) @ R_tcp.T
+    # For a pure rotation about Y:  Ry(q6) = [[cos(q6),0,sin(q6)],[0,1,0],[-sin(q6),0,cos(q6)]].
+    q6 = math.atan2(X[0, 2], X[0, 0])
+
+    return (q1, q2, q3, q4, q5, q6)
+```

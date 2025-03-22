@@ -1,0 +1,132 @@
+```python
+def inverse_kinematics(p: tuple[float, float, float]) -> tuple[float, float, float, float]:
+    """
+    Computes a closed‐form inverse kinematics solution for the 4‐DOF manipulator.
+    
+    Robot data from the URDF:
+      • Link offsets (in meters):
+           d1 = [0, –0.1197, 0.425]      (from base to joint 2)
+           d2 = 0.39225                (translation along z from joint 2 to joint 3)
+           d3 = [0, 0.093, 0]          (translation from joint 3 to joint 4; note only y–offset)
+           d4 = 0.09465               (TCP offset along z of joint 4’s frame)
+      • All revolute joints rotate about Y except the final one which rotates about Z.
+      • Because rotations about Y do not affect the y–coordinate and the given link
+        offsets sum to –0.1197+0.093 = –0.0267 in y, the target’s y–coordinate must be –0.0267.
+      • Joint 4 is redundant for positioning; here we choose q4 = 0.
+    
+    Our strategy is to decouple the base (q1) from the “shoulder–elbow” (q2 and q3) subchain.
+    In our formulation the forward kinematics of the position can be written as:
+    
+      p = R_y(q1) · { d1 + R_y(q2) · [ d2 * k̂ + R_y(q3) · (d3 * ĵ + d4 * k̂) ] }
+    
+    where k̂ = [0, 0, 1] and ĵ = [0, 1, 0]. (All rotations
+    and translations are expressed in meters and radians.)
+    
+    Decoupling the kinematics, a common technique is to “back‐out” the wrist (TCP) offset.
+    We define the wrist center position w by subtracting the TCP offset along the z–axis:
+    
+         w = p – d4 * k̂.
+    
+    Next, we choose the base angle q1 so that the plane in which the remaining
+    joints must lie is “aligned” with the vertical (x–z) plane. Here we use the simple
+    choice:
+    
+         q1 = atan2(w_x, w_z)
+    
+    and note that with our convention, the wrist center lies in the plane
+       (w_x, w_z), with
+         w_x = pₓ        and
+         w_z = p_z – d4.
+    
+    In the shoulder frame (i.e. with q1 removed) the effective 2R chain (joints 2 and 3)
+    must deliver a translation from joint 2 (located at d1 = [0, –0.1197, 0.425]) to w.
+    Since the rotations about Y do not affect the y–coordinate, we consider only the x–z plane.
+    In that plane the effective distance from joint 2 to the wrist center is
+         R_eff = sqrt(w_x² + w_z²) – d1_z,
+    where d1_z = 0.425.
+    
+    We now “collapse” the contributions of joints 2 and 3 into a planar 2R chain with effective link lengths
+         L1 = d2       and
+         L2 = d4 (since the TCP offset now acts like the “second link” length),
+    so that the cosine–law yields
+         cos(q3) = (R_eff² – (L1² + L2²)) / (2·L1·L2).
+    (Because of possible numerical error we clamp the argument to [–1, 1].)
+    
+    Finally, to “close” the 2R chain the interior angle (call it φ) is given by
+         φ = atan2( L2·sin(q3), L1 + L2·cos(q3) ).
+    With our chosen geometry the shoulder joint is then set to
+         q2 = atan2(R_eff, –d1_z) – φ.
+    
+    (Any equivalent solution is acceptable.)
+    
+    The final joint q4 is set to zero.
+    
+    Note:
+      Because this manipulator is kinematically redundant for positioning the TCP, many
+      inverse kinematics solutions exist. This implementation adopts one valid closed‐form solution.
+    
+    :param p: A 3‐tuple (pₓ, p_y, p_z) specifying the desired TCP position.
+              p_y is assumed to equal –0.0267.
+    :return: A 4‐tuple (q1, q2, q3, q4) of the joint angles (in radians) that achieve p.
+    """
+    import math
+
+    # Unpack target position
+    p_x, p_y, p_z = p
+
+    # Fixed parameters (from the URDF)
+    d1_z = 0.425       # Translation along z from base to joint 2
+    d4 = 0.09465       # TCP offset along z (applied after joint 4)
+    L1 = 0.39225       # d2: link from joint2 to joint3 along z in joint2 frame
+    L2 = d4            # Using the TCP offset as the effective second link length
+
+    # (1) Compute the wrist center by “removing” the TCP offset.
+    # Since joint 4 rotates about Z (leaving the z–axis direction unchanged),
+    # we subtract d4 along the z–axis.
+    w_x = p_x
+    w_y = p_y  # remains unchanged (should be –0.0267)
+    w_z = p_z - d4
+
+    # (2) Choose the base (q1) so that, when we remove its effect, the wrist center lies in the shoulder plane.
+    q1 = math.atan2(w_x, w_z)
+
+    # (3) In the shoulder (or “arm”) plane the effective (horizontal) distance from joint 2 to the wrist center is:
+    r_w = math.sqrt(w_x**2 + w_z**2)
+    R_eff = r_w - d1_z  # subtract the z-offset of joint 2
+
+    # (4) Solve for the elbow angle q3 using the cosine law for the 2R chain.
+    # (Here we use L1 and L2 as the effective link lengths.)
+    num = (R_eff**2) - (L1**2 + L2**2)
+    denom = 2 * L1 * L2
+    cos_q3 = num / denom
+    # Clamp to valid range to prevent math domain errors.
+    cos_q3 = max(min(cos_q3, 1.0), -1.0)
+    # One valid solution is obtained by taking the “elbow‐down” configuration:
+    q3 = math.acos(cos_q3)
+    
+    # (5) Compute the auxiliary angle phi needed to “close” the 2R chain.
+    phi = math.atan2(L2 * math.sin(q3), L1 + L2 * math.cos(q3))
+    
+    # (6) Compute q2 from geometry.
+    # Here we take the angle from the horizontal line to the line joining joint 2 and the wrist center.
+    q2 = math.atan2(R_eff, -d1_z) - phi
+
+    # (7) Set the redundant joint to zero.
+    q4 = 0.0
+
+    return (q1, q2, q3, q4)
+``` 
+
+Explanation:
+
+1. We first “back out” the TCP offset d4 to get the wrist center w.
+2. The base angle q1 is chosen so that when the base rotation is undone, the wrist center lies in the plane of the shoulder.
+3. In that “shoulder–elbow” plane we define an effective distance R_eff from joint 2 (which is located at z = d1_z) to the wrist center.
+4. Treating the remainder as a planar 2R chain with link lengths L1 and L2, we use the cosine law to solve for q3 (elbow angle) and then compute an auxiliary angle φ.
+5. Finally, q2 is given by the difference between the bearing to the wrist center and φ.
+6. We set the redundant final joint q4 = 0.
+
+Any solution equivalent to the one computed below is acceptable. (Note that due to redundancy, slight differences in the choice of q1 and the branch of arctan/arccos are allowed.) 
+     
+This closed‐form solution (using standard math functions and appropriate clamping) is one acceptable answer.
+```

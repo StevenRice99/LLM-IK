@@ -1,0 +1,96 @@
+```python
+import math
+
+def inverse_kinematics(p: tuple[float, float, float], r: tuple[float, float, float]) -> tuple[float, float]:
+    """
+    Computes the joint angles for the 2DOF chain (Revolute 1 about Z and Revolute 2 about Y)
+    so that the TCP reaches position p = [x, y, z] and orientation r = [roll, pitch, yaw]
+    
+    Kinematics:
+      x = 0.425*sin(theta2)*cos(theta1) - 0.01615*sin(theta1)
+      y = 0.425*sin(theta2)*sin(theta1) + 0.01615*cos(theta1)
+      z = 0.425*cos(theta2)
+    
+    However, because the chain has only two joints the full
+    (roll, pitch, yaw) of the TCP is overconstrained. In fact, if p and r are
+    consistent the TCP must satisfy:
+         TCP_pitch = f(theta2)    and    TCP_yaw = f(theta1, theta2)
+    with the following relationship arising naturally from the FK:
+    
+      - If we define the chain’s rotation as R = Rz(theta1)*Ry(theta2), then
+          (using a standard ZYX Euler extraction)
+          extracted_pitch = { theta2                      if  |theta2| <= pi/2,
+                             π - theta2                   if theta2 >  pi/2,
+                            -π - theta2                   if theta2 < -pi/2 }
+          extracted_yaw   = { theta1              if cos(theta2) >= 0,
+                             theta1 + π          if cos(theta2) <  0  }  (modulo 2π)
+          The roll extracted is either 0 or ±π accordingly.
+    
+    Because p and r are assumed to be exactly consistent with the chain geometry,
+    we can “read off” the joint angles from p and r as follows.
+    
+    Step 1. From z = 0.425*cos(theta2) get:
+             cos(theta2) = z/0.425
+             A first candidate is: candidate = acos(z/0.425)    (lies in [0, pi])
+             But notice that since the actual TCP pitch is given by:
+                positive branch: extracted_pitch = candidate         if candidate <= pi/2
+                                  or = π - candidate       if candidate >  pi/2
+                negative branch: extracted_pitch = -candidate        if candidate <= pi/2
+                                  or = -π + candidate      if candidate >  pi/2
+             We choose the branch (i.e. sign of theta2) that yields an extracted pitch 
+             closest to the desired pitch r[1].
+    
+    Step 2. The x,y equations are then exactly solved by (when p and r are consistent)
+             an appropriate choice of theta1. In fact, from the FK the TCP yaw will be:
+                  yaw = theta1       if cos(theta2) >= 0
+                  yaw = theta1 + π   if cos(theta2) <  0      (with angles wrapped to [-π, π])
+             Hence we simply choose theta1 so that:
+                  if cos(theta2) < 0  then   theta1 = (r[2] - π) mod 2π,
+                  else                     theta1 = r[2]  (mod 2π).
+    
+    This solution is completely “closed‐form.”
+    
+    :param p: TCP position [x, y, z]
+    :param r: TCP orientation [roll, pitch, yaw] in radians.
+              (Note: for this chain roll is not controlled and will be 0 or ±π.)
+    :return: (theta1, theta2) joint angles (in radians)
+    """
+    x, y, z = p
+    desired_roll, desired_pitch, desired_yaw = r
+    
+    # --- Step 1: Solve for theta2 from z ---
+    # From forward kinematics: z = 0.425 * cos(theta2)
+    # => cos(theta2) = z/0.425  (target p is assumed reachable so |z/0.425| <= 1)
+    candidate = math.acos(z / 0.425)  # candidate in [0, π]
+    
+    # For a given candidate, the "extracted" TCP pitch (via Euler angles from Rz*Ry)
+    # is given by:
+    #    if |theta2| <= π/2, then pitch = theta2, else if theta2 > π/2 then pitch = π - theta2,
+    #    and if theta2 < -π/2 then pitch = -π - theta2.
+    if candidate <= (math.pi / 2):
+        pos_pitch = candidate        # using theta2 = candidate
+        neg_pitch = -candidate       # using theta2 = -candidate 
+    else:
+        pos_pitch = math.pi - candidate   # if candidate > π/2, then setting theta2 = candidate gives pitch = π - candidate
+        neg_pitch = -math.pi + candidate  # and setting theta2 = -candidate gives pitch = -π + candidate
+
+    # Choose the branch (i.e. the sign for theta2) so that the extracted pitch is close to desired_pitch.
+    if abs(pos_pitch - desired_pitch) <= abs(neg_pitch - desired_pitch):
+        theta2 = candidate    # use the positive candidate branch
+    else:
+        theta2 = -candidate   # use the negative candidate branch
+
+    # --- Step 2: Set theta1 from desired yaw ---
+    # The FK gives:
+    #    if cos(theta2) >= 0, then effective yaw = theta1,
+    #    if cos(theta2) < 0, then effective yaw = theta1 + π (mod 2π).
+    if math.cos(theta2) >= 0:
+        theta1 = desired_yaw
+    else:
+        theta1 = desired_yaw - math.pi
+
+    # Wrap theta1 into the interval [-π, π]:
+    theta1 = (theta1 + math.pi) % (2 * math.pi) - math.pi
+
+    return (theta1, theta2)
+```

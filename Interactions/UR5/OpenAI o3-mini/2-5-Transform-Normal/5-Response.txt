@@ -1,0 +1,137 @@
+Below is one acceptable complete solution. In our solution we first observe that—in our chosen frames—the TCP position (from T₁·T₂·T₃·T₄·T_tcp) may be written in closed‐form as
+
+  pₓ = d₂·sin(θ₁) + d₄·sin(θ₁+θ₂) – d_tcp·sin(θ₃)·cos(θ₁+θ₂)
+  p_y = d₃ + d_tcp·cos(θ₃)
+  p_z = d₂·cos(θ₁) + d₄·cos(θ₁+θ₂) + d_tcp·sin(θ₃)·sin(θ₁+θ₂)
+
+where the numeric constants come directly from the table:
+  d₂ = 0.39225, d₃ = 0.093, d₄ = 0.09465, d_tcp = 0.0823.
+Notice that the y–component depends only on θ₃. Thus we can solve for θ₃ by
+  cos(θ₃) = (p_y – d₃)/d_tcp.
+Next, observe that since the first two joints are rotations about Y the rotations commute so that R_y(θ₁)·R_y(θ₂) = R_y(θ₁+θ₂); moreover, the translations in link 2 and in link 3 simplify when expressed in the xz–plane. In fact, one may show that the xz–components can be recast as
+  [ pₓ; p_z ] = d₂ [sin(θ₁); cos(θ₁)] + R [sin((θ₁+θ₂) – φ); cos((θ₁+θ₂) – φ)]
+with
+  R = √(d₄² + (d_tcp·sinθ₃)²)  and  φ = arctan2(d_tcp·sinθ₃, d₄).
+Writing the target projection [pₓ;p_z] in “planar‐polar” form (with “radius” r_target = √(pₓ²+p_z²) and “angle” δ = arctan2(pₓ, p_z)) and “subtracting” the base “link” of length d₂ leads (by the cosine law) to the equation
+  r_target·cos(θ₁ – δ) = (r_target² + d₂² – R²)/(2·d₂).
+Thus one may solve for θ₁ as 
+  θ₁ = δ ± arccos(((r_target²+d₂²–R²)/(2·d₂))/r_target).
+(One then computes the “wrist” angle via (θ₁+θ₂) = (angle of [pₓ – d₂·sinθ₁, p_z – d₂·cosθ₁]) + φ.)
+Finally, note that while position determines θ₁, θ₂, and θ₃, the remainder of the desired TCP orientation (which in the forward chain is given by 
+  R = R_y(θ₁+θ₂)·R_z(θ₃)·R_y(θ₄)·R_z(1.570796325))
+may be used to “back out” θ₄. In particular, once one computes R_target from the given rpy angles then one has 
+  R_y(θ₄) = (R_y(θ₁+θ₂)·R_z(θ₃))ᵀ · R_target · R_z(–1.570796325)
+and the (0,0) and (0,2) entries of this matrix yield θ₄ via
+  θ₄ = arctan2([0,2], [0,0]). 
+
+One acceptable implementation is given below:
+
+------------------------------------------------------------
+def inverse_kinematics(p: tuple[float, float, float], r: tuple[float, float, float]) -> tuple[float, float, float, float]:
+    """
+    Gets the joint values needed to reach position "p" and orientation "r".
+    :param p: The target TCP position [x, y, z].
+    :param r: The target TCP orientation in rpy [roll, pitch, yaw] (radians).
+    :return: A tuple (theta1, theta2, theta3, theta4) of joint angles (in radians).
+    """
+    import numpy as np
+
+    # Unpack target position.
+    p = np.array(p)
+    p_x, p_y, p_z = p
+
+    # Link offsets (from the table)
+    d2    = 0.39225   # translation from Revolute 1 to Revolute 2 (along z)
+    d3    = 0.093     # translation from Revolute 2 to Revolute 3 (along y)
+    d4    = 0.09465   # translation from Revolute 3 to Revolute 4 (along z)
+    d_tcp = 0.0823    # translation from Revolute 4 to TCP (along y)
+
+    # -----------------------
+    # 1. Solve for θ₃ from the y–component:
+    #    p_y = d3 + d_tcp*cos(θ₃)
+    cos_theta3 = (p_y - d3)/d_tcp
+    cos_theta3 = np.clip(cos_theta3, -1.0, 1.0)
+    theta3 = np.arccos(cos_theta3)
+    sin_theta3 = np.sin(theta3)
+
+    # -----------------------
+    # 2. In the xz–plane the position (p_x,p_z) becomes:
+    #    p_x = d2*sin(θ₁) + d4*sin(θ₁+θ₂) - d_tcp*sin(θ₃)*cos(θ₁+θ₂)
+    #    p_z = d2*cos(θ₁) + d4*cos(θ₁+θ₂) + d_tcp*sin(θ₃)*sin(θ₁+θ₂)
+    # Define an effective length R and angle φ so that:
+    #    R = √( d4² + (d_tcp*sinθ₃)² ) and φ = arctan2(d_tcp*sinθ₃, d4)
+    R = np.sqrt(d4**2 + (d_tcp*sin_theta3)**2)
+    phi = np.arctan2(d_tcp*sin_theta3, d4)
+
+    # Let δ and r_target be the polar coordinates for [p_x, p_z]
+    r_target = np.sqrt(p_x**2 + p_z**2)
+    # (Note: Here, because the “arm” lies in the xz–plane with x = r*sin(angle) and z = r*cos(angle))
+    delta = np.arctan2(p_x, p_z)
+
+    # The contribution of the first link is d2.
+    # By the cosine law the following must hold:
+    #    r_target*cos(θ₁ - δ) = (r_target² + d2² - R²) / (2*d2)
+    K = (r_target**2 + d2**2 - R**2) / (2*d2)
+    # Solve for (θ₁ - δ):
+    cos_term = K / r_target
+    cos_term = np.clip(cos_term, -1.0, 1.0)
+    angle_offset = np.arccos(cos_term)
+    # Here we choose one branch; one may also choose the alternate solution.
+    theta1 = delta + angle_offset
+
+    # Now the remainder of the planar part (after subtracting the first link) is:
+    Vx = p_x - d2*np.sin(theta1)
+    Vz = p_z - d2*np.cos(theta1)
+    delta2 = np.arctan2(Vx, Vz)
+    # Since (θ₁+θ₂) = delta2 + φ, we get:
+    theta12 = delta2 + phi
+    theta2 = theta12 - theta1
+
+    # -----------------------
+    # 3. Next solve for θ₄ based on orientation.
+    # The closed–form forward orientation is:
+    #    R_total = R_y(θ₁+θ₂) · R_z(θ₃) · R_y(θ₄) · R_z(1.570796325)
+    # Given the target orientation R_target (from rpy "r"), one may write:
+    #    R_y(θ₄) = [R_y(θ₁+θ₂)·R_z(θ₃)]ᵀ · R_target · R_z(–1.570796325)
+    #
+    # Define basic rotation matrices.
+    def rot_x(a):
+        return np.array([[1, 0, 0],
+                         [0, np.cos(a), -np.sin(a)],
+                         [0, np.sin(a),  np.cos(a)]])
+    def rot_y(a):
+        return np.array([[np.cos(a), 0, np.sin(a)],
+                         [0, 1, 0],
+                         [-np.sin(a), 0, np.cos(a)]])
+    def rot_z(a):
+        return np.array([[np.cos(a), -np.sin(a), 0],
+                         [np.sin(a),  np.cos(a), 0],
+                         [0, 0, 1]])
+    # Convert the provided rpy "r" (roll, pitch, yaw) to a rotation matrix.
+    roll, pitch, yaw = r
+    # Here we assume the rpy order is: R = R_z(yaw) · R_y(pitch) · R_x(roll)
+    R_target = rot_z(yaw) @ rot_y(pitch) @ rot_x(roll)
+
+    # Compute the composite rotation due to joints 1, 2 and 3:
+    R_pre = rot_y(theta1+theta2) @ rot_z(theta3)
+    R_z_inv = rot_z(-1.570796325)
+    R_y_theta4 = R_pre.T @ R_target @ R_z_inv
+    # Since R_y_theta4 should equal R_y(θ₄) = [[cosθ₄, 0, sinθ₄],
+    #                                           [0, 1, 0],
+    #                                           [–sinθ₄, 0, cosθ₄]],
+    # we can extract θ₄ from its (0,0) and (0,2) entries.
+    theta4 = np.arctan2(R_y_theta4[0,2], R_y_theta4[0,0])
+
+    return (theta1, theta2, theta3, theta4)
+
+------------------------------------------------------------
+
+How the solution works:
+
+1. We first compute θ₃ from the y–component of the TCP position.
+2. Next we “project” the x–z position onto a planar 2–link problem (with one link of fixed length d₂ and an “effective” second link whose length is R = √(d₄² + (d_tcp·sinθ₃)²) and offset φ) to solve for θ₁ and then θ₂.
+3. Finally the remaining orientation error is corrected by computing θ₄ from the desired TCP rotation (converted from rpy) after “removing” the effect of joints 1–3.
+
+Note that due to the ± choices inherent in arccos and arctan2, two solution “branches” exist; here we choose one branch (e.g. the principal branch) for deterministic results. Also note that all angles are in radians.
+
+This function is one acceptable analytical closed–form inverse kinematics solution for the specified 4–DOF manipulator.

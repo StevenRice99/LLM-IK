@@ -1,0 +1,166 @@
+Looking carefully at the robot kinematics and studying the correct joint values, I've identified where my previous approach went wrong. I need to implement a solution that properly handles the orientation constraints. Here's a completely revised solution:
+
+```python
+def inverse_kinematics(p: tuple[float, float, float], r: tuple[float, float, float]) -> tuple[float, float, float, float]:
+    """
+    Gets the joint values needed to reach position "p" and orientation "r".
+    :param p: The position to reach in the form [x, y, z].
+    :param r: The orientation to reach in radians in the form [x, y, z].
+    :return: A list of the values to set the links to for reaching position "p" and orientation "r".
+    """
+    import numpy as np
+    
+    # Robot dimensions
+    l1_y = 0.13585  # Joint 2 Y offset
+    l2_y = -0.1197  # Joint 3 Y offset
+    l2_z = 0.425    # Joint 3 Z offset
+    l3_z = 0.39225  # Joint 4 Z offset
+    tcp_y = 0.093   # TCP Y offset
+    
+    # Target position and orientation
+    x, y, z = p
+    roll, pitch, yaw = r
+    
+    # Step 1: Calculate joint 1 (rotation around Z-axis)
+    theta1 = yaw
+    
+    # Step 2: Create rotation matrix for target orientation
+    cr, sr = np.cos(roll), np.sin(roll)
+    cp, sp = np.cos(pitch), np.sin(pitch)
+    cy, sy = np.cos(yaw), np.sin(yaw)
+    
+    R = np.array([
+        [cy*cp, cy*sp*sr - sy*cr, cy*sp*cr + sy*sr],
+        [sy*cp, sy*sp*sr + cy*cr, sy*sp*cr - cy*sr],
+        [-sp, cp*sr, cp*cr]
+    ])
+    
+    # Step 3: Extract target sum from orientation matrix
+    # This is used to constrain joints 2, 3, 4
+    cos_theta = R[0, 0]
+    sin_theta = R[0, 2]
+    target_sum = np.arctan2(sin_theta, cos_theta)
+    
+    # Step 4: Calculate TCP to wrist offset
+    # Rotate the orientation matrix to frame after joint 1
+    c1, s1 = np.cos(theta1), np.sin(theta1)
+    R1 = np.array([
+        [c1, s1, 0],
+        [-s1, c1, 0],
+        [0, 0, 1]
+    ])
+    
+    R_in_1 = R1.T @ R
+    
+    # TCP offset in joint 1 frame
+    tcp_offset = R_in_1 @ np.array([0, tcp_y, 0])
+    
+    # Step 5: Transform target position to joint 1 frame
+    pos_1 = R1.T @ np.array([x, y, z])
+    
+    # Calculate wrist position by removing TCP offset
+    wrist = pos_1 - tcp_offset
+    
+    # Step 6: Account for joint 2 offset
+    wrist[1] -= l1_y
+    
+    # Step 7: Solve for joints 2, 3, 4 as a planar manipulator
+    L1 = np.sqrt(l2_y**2 + l2_z**2)  # Effective length from joint 2 to 3
+    L2 = l3_z                        # Length from joint 3 to 4
+    
+    # Distance from joint 2 to wrist
+    d_sq = wrist[0]**2 + wrist[2]**2
+    
+    # Use law of cosines to find joint 3 angle
+    cos_theta3 = (d_sq - L1**2 - L2**2) / (2 * L1 * L2)
+    cos_theta3 = np.clip(cos_theta3, -1.0, 1.0)
+    
+    # Two possible solutions for joint 3
+    theta3 = np.arccos(cos_theta3)
+    theta3_alt = -theta3
+    
+    solutions = []
+    
+    # Try both possible joint 3 angles
+    for t3 in [theta3, theta3_alt]:
+        # Calculate intermediate values for joint 2
+        C = L1 + L2 * np.cos(t3)
+        D = L2 * np.sin(t3)
+        denom = C**2 + D**2
+        
+        if denom < 1e-6:
+            continue
+        
+        # Calculate joint 2 angle
+        sin_t2 = (C * wrist[0] - D * wrist[2]) / denom
+        cos_t2 = (D * wrist[0] + C * wrist[2]) / denom
+        
+        if abs(sin_t2) > 1.0 or abs(cos_t2) > 1.0:
+            continue
+        
+        t2 = np.arctan2(sin_t2, cos_t2)
+        
+        # Calculate joint 4 to achieve desired orientation
+        # Joint 4 is chosen to make the sum of joint angles match target_sum
+        t4_base = (target_sum - t2 - t3) % (2 * np.pi)
+        
+        # Try different ranges for t4
+        t4_candidates = [t4_base - 2 * np.pi, t4_base, t4_base + 2 * np.pi]
+        
+        for t4 in t4_candidates:
+            if -2 * np.pi <= t4 <= 2 * np.pi:
+                solutions.append((t2, t3, t4))
+    
+    # Choose the best solution
+    best_error = float('inf')
+    best_sol = (0.0, 0.0, 0.0)
+    
+    for sol in solutions:
+        t2, t3, t4 = sol
+        
+        # Check if angles are within limits
+        if not (-2*np.pi <= t2 <= 2*np.pi and -2*np.pi <= t3 <= 2*np.pi and -2*np.pi <= t4 <= 2*np.pi):
+            continue
+        
+        # Calculate forward kinematics to check position error
+        x_calc = L1 * np.sin(t2) + L2 * np.sin(t2 + t3)
+        z_calc = L1 * np.cos(t2) + L2 * np.cos(t2 + t3)
+        
+        pos_error = np.hypot(x_calc - wrist[0], z_calc - wrist[2])
+        
+        # Check orientation error
+        orient_sum = (t2 + t3 + t4) % (2 * np.pi)
+        target_orient = target_sum % (2 * np.pi)
+        orient_error = min(abs(orient_sum - target_orient), 2 * np.pi - abs(orient_sum - target_orient))
+        
+        total_error = pos_error + orient_error
+        
+        if total_error < best_error:
+            best_error = total_error
+            best_sol = sol
+    
+    # Normalize angles to [-π, π]
+    def normalize_angle(angle):
+        return ((angle + np.pi) % (2 * np.pi)) - np.pi
+    
+    theta1 = normalize_angle(theta1)
+    theta2, theta3, theta4 = best_sol
+    
+    theta2 = normalize_angle(theta2)
+    theta3 = normalize_angle(theta3)
+    theta4 = normalize_angle(theta4)
+    
+    return (theta1, theta2, theta3, theta4)
+```
+
+This solution:
+
+1. Sets joint 1 equal to the yaw angle from the input orientation
+2. Creates a proper rotation matrix for the target orientation
+3. Extracts the target orientation sum constraint from the rotation matrix
+4. Accounts for the TCP offset in the joint 1 frame
+5. Solves the planar manipulator inverse kinematics for joints 2, 3, and 4
+6. Uses the same approach as in EXISTING 2 to ensure the sum of joint angles matches the target orientation
+7. Selects the solution with minimum position and orientation error
+
+The key insight was understanding that joint 1 should be set to the yaw angle, and the target orientation sum (derived from the rotation matrix) constrains the sum of joints 2, 3, and 4.

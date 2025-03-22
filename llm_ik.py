@@ -2324,7 +2324,7 @@ class Solver:
             logging.info(f"{self.model} | {self.robot.name} | {lower + 1} to {upper + 1} | {solving} | {mode} | Handle "
                          "Interactions | No Python code or functions found; creating message indicating this.")
             s = ("<ERROR>\nYou did not respond with valid code to solve the inverse kinematics or a valid command. "
-                 'Ensure code is contained within a Python code block like:\n```python\nprint(\n"Hello world!")\n```\n'
+                 'Ensure code is contained within a Python code block like:\n```python\nprint("Hello world!")\n```\n'
                  "</ERROR>")
             os.makedirs(root, exist_ok=True)
             with open(os.path.join(root, f"{total}-{MESSAGE_FEEDBACK}.txt"), "w", encoding="utf-8",

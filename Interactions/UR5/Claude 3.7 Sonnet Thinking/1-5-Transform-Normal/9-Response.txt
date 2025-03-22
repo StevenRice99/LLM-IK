@@ -1,0 +1,170 @@
+Based on the feedback, I need to completely revise my approach. Let me develop a more accurate inverse kinematics solution that properly accounts for the robot's structure and joint configurations.
+
+```python
+def inverse_kinematics(p: tuple[float, float, float], r: tuple[float, float, float]) -> tuple[float, float, float, float, float]:
+    """
+    Gets the joint values needed to reach position "p" and orientation "r".
+    :param p: The position to reach in the form [x, y, z].
+    :param r: The orientation to reach in radians in the form [x, y, z].
+    :return: A list of the values to set the links to for reaching position "p" and orientation "r".
+    """
+    import numpy as np
+    from math import atan2, sin, cos, sqrt, acos, pi
+    
+    # Robot dimensions (from URDF)
+    # Link lengths and offsets
+    l1_y = -0.1197    # Y offset from joint 1 to joint 2
+    l1_z = 0.425      # Z offset from joint 1 to joint 2
+    l2_z = 0.39225    # Z offset from joint 2 to joint 3
+    l3_y = 0.093      # Y offset from joint 3 to joint 4
+    l4_z = 0.09465    # Z offset from joint 4 to joint 5
+    l5_y = 0.0823     # Y offset from joint 5 to TCP
+    
+    # Target position and orientation
+    px, py, pz = p
+    rx, ry, rz = r
+    
+    # Function to create rotation matrices
+    def rotation_matrix(axis, angle):
+        """Create rotation matrix for rotation around given axis."""
+        c, s = cos(angle), sin(angle)
+        if axis == 'x':
+            return np.array([
+                [1, 0, 0],
+                [0, c, -s],
+                [0, s, c]
+            ])
+        elif axis == 'y':
+            return np.array([
+                [c, 0, s],
+                [0, 1, 0],
+                [-s, 0, c]
+            ])
+        elif axis == 'z':
+            return np.array([
+                [c, -s, 0],
+                [s, c, 0],
+                [0, 0, 1]
+            ])
+    
+    # Create target rotation matrix from Euler angles (XYZ convention)
+    Rx = rotation_matrix('x', rx)
+    Ry = rotation_matrix('y', ry)
+    Rz = rotation_matrix('z', rz)
+    R_target = Rz @ Ry @ Rx
+    
+    # TCP has a fixed rotation offset around Z-axis
+    tcp_rot_offset = rotation_matrix('z', 1.570796325)
+    
+    # Adjust for TCP rotation offset to get the wrist orientation
+    R_wrist = R_target @ tcp_rot_offset.T
+    
+    # Calculate wrist center position
+    # We need to move back from the TCP along the local z-axis
+    tcp_offset = np.array([0, l5_y, 0])
+    tcp_offset_world = R_target @ tcp_offset
+    wrist_center = np.array(p) - tcp_offset_world
+    
+    # Extract wrist center coordinates
+    wcx, wcy, wcz = wrist_center
+    
+    # Calculate joint 1 (rotation around Y-axis)
+    theta1 = atan2(wcx, wcz)
+    
+    # Calculate distance from joint 1 to wrist center in the plane
+    r_wc = sqrt(wcx**2 + wcz**2)
+    
+    # Calculate vertical distance from joint 1 to wrist center
+    d_wc = wcy
+    
+    # Need to move from joint 1 coordinate frame to joint 2
+    d_j2 = d_wc - l1_y  # Adjust for joint 2 Y offset
+    h_j2 = r_wc - l1_z  # Distance in plane after removing joint 2 Z offset
+    
+    # Calculate distance from joint 2 to wrist center
+    d_j2_wc = sqrt(d_j2**2 + h_j2**2)
+    
+    # Calculate effective length of link 3 to wrist (includes joint 4 offset)
+    l3_eff = sqrt(l3_y**2 + l4_z**2)
+    phi_l3 = atan2(l3_y, l4_z)  # Angle of effective link 3
+    
+    # Angle between d_j2_wc and horizontal
+    alpha = atan2(d_j2, h_j2)
+    
+    # Use law of cosines to find angle between d_j2_wc and link 2
+    cos_beta = (d_j2_wc**2 + l2_z**2 - l3_eff**2) / (2 * d_j2_wc * l2_z)
+    cos_beta = min(1, max(-1, cos_beta))  # Numerical stability
+    beta = acos(cos_beta)
+    
+    # Calculate theta2
+    theta2 = alpha - beta
+    
+    # Use law of cosines to find angle between link 2 and link 3
+    cos_gamma = (l2_z**2 + l3_eff**2 - d_j2_wc**2) / (2 * l2_z * l3_eff)
+    cos_gamma = min(1, max(-1, cos_gamma))  # Numerical stability
+    gamma = acos(cos_gamma)
+    
+    # Calculate theta3 (need to account for the angle of effective link 3)
+    theta3 = pi/2 - (gamma + phi_l3)
+    
+    # Calculate rotation matrices for the first three joints
+    R01 = rotation_matrix('y', theta1)
+    R12 = rotation_matrix('y', theta2)
+    R23 = rotation_matrix('y', theta3)
+    
+    # Rotation from base to joint 3
+    R03 = R01 @ R12 @ R23
+    
+    # The rotation needed from joint 3 to wrist
+    R3w = R03.T @ R_wrist
+    
+    # Extract theta4 (rotation around Z) and theta5 (rotation around Y)
+    # We need to decompose R3w into a Z-Y rotation sequence
+    
+    # For a rotation matrix in the form of Z-Y, we can extract angles as follows:
+    # Assuming R = Rz(θ4) * Ry(θ5), we have:
+    # R = [ c4.c5, -s4, c4.s5 ]
+    #     [ s4.c5,  c4, s4.s5 ]
+    #     [  -s5,    0,   c5  ]
+    
+    # Extract theta5 first
+    s5 = -R3w[2, 0]  # -sin(theta5) = R3w[2,0]
+    c5 = R3w[2, 2]   # cos(theta5) = R3w[2,2]
+    theta5 = atan2(s5, c5)
+    
+    # Then extract theta4
+    if abs(s5) > 0.99999:  # Close to ±1, means theta5 is close to ±pi/2
+        # Gimbal lock case - can choose theta4 arbitrarily
+        theta4 = 0
+    else:
+        s4 = R3w[1, 0] / cos(theta5)  # sin(theta4) = R3w[1,0]/cos(theta5)
+        c4 = R3w[0, 0] / cos(theta5)  # cos(theta4) = R3w[0,0]/cos(theta5)
+        theta4 = atan2(s4, c4)
+    
+    # Normalize angles to standard range
+    def normalize_angle(angle):
+        while angle > pi:
+            angle -= 2 * pi
+        while angle < -pi:
+            angle += 2 * pi
+        return angle
+    
+    theta1 = normalize_angle(theta1)
+    theta2 = normalize_angle(theta2)
+    theta3 = normalize_angle(theta3)
+    theta4 = normalize_angle(theta4)
+    theta5 = normalize_angle(theta5)
+    
+    return (theta1, theta2, theta3, theta4, theta5)
+```
+
+This solution addresses several key issues in my previous approaches:
+
+1. More carefully handles the geometric relationships between joints, especially for theta2 and theta3
+2. Properly accounts for the robot's specific link offsets in both Y and Z directions
+3. Correctly transforms the TCP offset to the world frame before calculating the wrist center
+4. Uses the proper rotation sequence for joint 4 (Z-axis) and joint 5 (Y-axis)
+5. Handles gimbal lock cases for joint 4
+6. Uses the law of cosines with appropriate numerical stability checks
+
+The solution decomposes the problem into the positioning part (joints 1-3) and the orientation part (joints 4-5), working with the correct rotation matrices and geometric relationships for this specific robot configuration.

@@ -1,0 +1,176 @@
+def inverse_kinematics(p: tuple[float, float, float]) -> tuple[float, float, float, float, float]:
+    """
+    Computes an analytical closed–form inverse kinematics solution for the 5–DOF manipulator.
+    
+    The robot is defined by the following chain:
+      • Revolute 1: Rotation about Z at the base.
+         – Origin: [0, 0, 0]
+         – Limits: ±6.2831853 rad
+      • Fixed translation from (base) to joint2: [0, 0.13585, 0]
+      • Revolute 2: Rotation about Y.
+         – (Joint2) Origin (local): [0, 0, 0] (the joint rotates the chain)
+         – Limits: ±6.2831853 rad
+      • Fixed translation from joint2 to joint3: [0, -0.1197, 0.425]
+      • Revolute 3: Rotation about Y.
+         – Limits: ±6.2831853 rad
+      • Fixed translation from joint3 to joint4: [0, 0, 0.39225]
+      • Revolute 4: Rotation about Y.
+         – Limits: ±6.2831853 rad
+      • Fixed translation from joint4 to joint5: [0, 0.093, 0]
+      • Revolute 5: Rotation about Z.
+         – Limits: ±6.2831853 rad
+      • Fixed translation from joint5 to TCP: [0, 0, 0.09465]
+    
+    In this kinematic chain the effect of the base joint (joint 1) is to “rotate” the entire
+    planar (joint2–joint4) sub–chain, which (when expressed in the frame of joint2) lies in the 
+    plane (ideally with x = 0). We decouple the chain by choosing joint1 so that when its action is “undone”
+    the effective TCP (relative to joint2) lies in the x–z plane.
+    
+    To do this note that when all joints are zero the TCP in the base frame is
+         [0, 0.10915, 0.9119]
+    That is because the fixed translation from base to joint2 is [0, 0.13585, 0] and subsequent
+    translations (in joint2’s frame) yield y = –0.1197 + 0.093 = –0.0267 so that
+         (–0.0267 + 0.13585) = 0.10915.
+    Hence, we require that, after “removing” the effect of joint1,
+         y_eff = (–sin(θ₁)*x + cos(θ₁)*y) = 0.10915.
+    There are two solutions for θ₁.
+    
+    For the remaining joints we “project” the position into the planar sub–chain.
+    In this sub–chain only the translations along the Z–axis count (the transformations along Y
+    remain fixed). We set the effective link lengths as:
+         L₁ = 0.425    (from the z–component of [0, -0.1197, 0.425])
+         L₂ = 0.39225  (from [0,0,0.39225])
+         L₃ = 0.09465  (from the TCP translation [0,0,0.09465])
+    Let offset12 = 0.13585 (from base to joint2).
+    
+    We then express the TCP (in joint2’s frame) as:
+         p_eff = Rz(–θ₁)* p – [0, offset12, 0]
+    With an ideal target p_eff = [0, –0.0267, z_eff].
+    Denote (x_eff, z_eff) as the coordinates for a subsequent planar 3R chain (with redundancy).
+    
+    To resolve the redundancy of the 3R chain (joints 2–4, all about Y) we “choose” an effective wrist–orientation 
+    T = θ₂ + θ₃ + θ₄ based on ψ = atan2(x_eff, z_eff). We try both T = ψ and T = ψ+π. For each choice we 
+    subtract the last link’s effect: (L₃ along the T direction) to obtain the wrist center:
+         (x_w, z_w) = (x_eff – L₃ sin T, z_eff – L₃ cos T).
+    This wrist center must be reached by the 2R (links L₁ and L₂) sub–chain. Its distance is
+         r_w = √(x_w² + z_w²),
+    so that by the cosine–law
+         cosβ = (r_w² – L₁² – L₂²)/(2 L₁ L₂).
+    (β has two possible values, corresponding to elbow–up and elbow–down configurations.)
+    
+    Then letting
+         φ_w = atan2(x_w, z_w)
+         δ   = atan2(L₂ sinβ, L₁ + L₂ cosβ),
+    we choose one solution as:
+         θ₂ = φ_w – δ,
+         θ₃ = β,
+         θ₄ = T – (θ₂ + θ₃).
+    Joint 5 does not affect TCP position so we set it to zero.
+    
+    Each candidate solution is tested using the provided forward kinematics function and the one with the smallest
+    error (in TCP position) is returned.
+    
+    :param p: The desired TCP position (x, y, z) in meters.
+    :return: A tuple of joint angles (θ₁, θ₂, θ₃, θ₄, θ₅) in radians.
+    """
+    import math
+    # Unpack target TCP position
+    x, y, z = p
+
+    # Decouple base rotation (joint1 about Z).
+    # We require that, after “undoing” joint1, the effective y coordinate equals 0.10915.
+    # That is: (cosθ₁*y – sinθ₁*x) = 0.10915.
+    D = 0.10915
+    r_xy = math.sqrt(x * x + y * y)
+    if r_xy == 0:
+        possible_theta1 = [0.0]
+    else:
+        ratio = D / r_xy
+        ratio = max(-1.0, min(1.0, ratio))
+        base_angle = math.acos(ratio)
+        alpha = math.atan2(x, y)
+        # Two solutions for joint1:
+        possible_theta1 = [-alpha + base_angle, -alpha - base_angle]
+
+    # Define fixed constants.
+    offset12 = 0.13585  # translation from base to joint2 (along Y)
+    # For the planar sub-chain (joints 2,3,4), only the Z–axis translations matter:
+    L1 = 0.425    # from [0, -0.1197, 0.425]
+    L2 = 0.39225  # from [0, 0, 0.39225]
+    L3 = 0.09465  # from [0, 0, 0.09465] (TCP)
+    theta5_solution = 0.0  # Joint 5 (about Z) is set to zero.
+
+    best_error = float("inf")
+    best_solution = None
+
+    def normalize(angle):
+        while angle > math.pi:
+            angle -= 2 * math.pi
+        while angle < -math.pi:
+            angle += 2 * math.pi
+        return angle
+
+    # Loop over candidate joint1 angles
+    for theta1 in possible_theta1:
+        # Compute position of joint2 in the base frame:
+        # p2 = RotZ(theta1)*[0, offset12, 0] = [ -offset12*sinθ₁, offset12*cosθ₁, 0 ]
+        # Hence, the vector from joint2 to TCP is:
+        d_x = x + offset12 * math.sin(theta1)
+        d_y = y - offset12 * math.cos(theta1)
+        d_z = z
+
+        # Remove the effect of joint1 by rotating by –theta1:
+        cos_t = math.cos(theta1)
+        sin_t = math.sin(theta1)
+        x_eff = cos_t * d_x + sin_t * d_y
+        y_eff = -sin_t * d_x + cos_t * d_y  # This should ideally be –0.0267.
+        z_eff = d_z
+
+        # The remaining 3R chain (joints 2–4, all about Y) will affect only the x and z coordinates.
+        # Compute ψ = atan2(x_eff, z_eff) – the natural orientation in the plane.
+        psi = math.atan2(x_eff, z_eff)
+        T_options = [psi, psi + math.pi]  # Two natural choices for the overall “wrist orientation”
+        for T in T_options:
+            # Subtract the offset due to the last link (L3 along direction T) to get the wrist center:
+            x_w = x_eff - L3 * math.sin(T)
+            z_w = z_eff - L3 * math.cos(T)
+            r_w = math.sqrt(x_w * x_w + z_w * z_w)
+
+            # Solve the 2R (L1–L2) inverse kinematics via the cosine law.
+            cos_beta = (r_w * r_w - L1 * L1 - L2 * L2) / (2 * L1 * L2)
+            cos_beta = max(-1.0, min(1.0, cos_beta))
+            for sign in [1, -1]:  # Two solutions for the elbow configuration.
+                beta = sign * math.acos(cos_beta)
+                phi_w = math.atan2(x_w, z_w)
+                delta = math.atan2(L2 * math.sin(beta), L1 + L2 * math.cos(beta))
+                theta2_candidate = phi_w - delta
+                theta3_candidate = beta
+                theta4_candidate = T - (theta2_candidate + theta3_candidate)
+
+                # Normalize the angles.
+                sol = (normalize(theta1),
+                       normalize(theta2_candidate),
+                       normalize(theta3_candidate),
+                       normalize(theta4_candidate),
+                       normalize(theta5_solution))
+
+                # Evaluate candidate solution using provided forward kinematics.
+                fk_result = functions.FORWARD_KINEMATICS(joint1=sol[0],
+                                                          joint2=sol[1],
+                                                          joint3=sol[2],
+                                                          joint4=sol[3],
+                                                          joint5=sol[4])
+                try:
+                    x_fk, y_fk, z_fk = fk_result
+                except Exception:
+                    x_fk, y_fk, z_fk = fk_result["TCP"]
+                error = math.sqrt((x_fk - x) ** 2 + (y_fk - y) ** 2 + (z_fk - z) ** 2)
+                if error < best_error:
+                    best_error = error
+                    best_solution = sol
+
+    return best_solution
+
+  
+# Note: This function assumes all targets are reachable and does not include any checking for unreachable targets.
+# Also, it relies on the provided forward kinematics function "functions.FORWARD_KINEMATICS" to select the best candidate.

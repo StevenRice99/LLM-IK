@@ -1,0 +1,128 @@
+Below is one acceptable closed‐form solution. In our solution we first “remove” the base’s rotation by choosing q₁ so that when the target position p is rotated back into the “arm plane” the fixed offset in the y‑direction is recovered. (In our convention the y offset between joint 1 and joint 2 is 0.13585 while the later link translations subtract 0.1197 and add 0.093 so that the net “sideways” offset is 0.10915.) Then the remaining problem is equivalent to a 2R planar arm (with link lengths L₁ = 0.425 and L₂ = 0.4869) whose forward kinematics are
+
+  pₓ′ = L₁·sin(q₂) + L₂·sin(q₂+q₃)   and  p_z = L₁·cos(q₂) + L₂·cos(q₂+q₃).
+
+One acceptable solution is to choose q₄ = 0 and q₅ = 0. (Note that an infinite family of solutions exist.) One complete implementation is given below.
+
+------------------------------------------------------------
+def inverse_kinematics(p: tuple[float, float, float]) -> tuple[float, float, float, float, float]:
+    """
+    Gets the joint values needed to reach position "p".
+    The manipulator details are:
+
+      • Joint 1: Revolute about Z at [0,0,0].
+      • Joint 2: Revolute about Y with a translation of [0, 0.13585, 0] from joint 1.
+      • Joint 3: Revolute about Y with a translation of [0, -0.1197, 0.425] from joint 2.
+      • Joint 4: Revolute about Y with a translation of [0, 0, 0.39225] from joint 3.
+      • Joint 5: Revolute about Z with a translation of [0, 0.093, 0] from joint 4.
+      • TCP:    Translation of [0, 0, 0.09465] from joint 5.
+      
+    In our solution we assume q₄ = 0 and q₅ = 0.
+    
+    First, note that the overall forward kinematics (when q₄ and q₅ are zero) may be written as:
+    
+      p = Rz(q₁) * V
+      where V = [ Vₓ, V_y, V_z ] with
+          Vₓ = 0.425 sin(q₂) + 0.4869 sin(q₂+q₃)
+          V_y = 0.13585 - 0.1197 + 0.093 = 0.10915   (constant)
+          V_z = 0.425 cos(q₂) + 0.4869 cos(q₂+q₃)
+    
+    To “remove” the rotation Rz(q₁) we require that when p is rotated by -q₁ the y‐component of the result equals 0.10915.
+    Writing Rz(–q₁)*p = [p′ₓ, p′_y, p_z] and letting H = sqrt(pₓ²+p_y²),
+    one may show that p′_y = –sin(q₁)pₓ + cos(q₁)p_y.
+    Thus we choose q₁ so that:
+    
+         – sin(q₁)pₓ + cos(q₁)p_y = 0.10915.
+         
+    One way to do this is to write pₓ and p_y in “polar form”. In particular, if we define δ such that
+         p_y = H cos δ   and   pₓ = H sin δ,
+    then the above condition is equivalent to:
+    
+         H cos(q₁+δ) = 0.10915    ⇒  q₁ = arccos(0.10915/H) – δ.
+    
+    Finally, the planar (2R) inverse kinematics for q₂ and q₃ is obtained by letting
+    
+         r = sqrt((p′ₓ)² + (p_z)²)
+         with  p′ₓ = cos(q₁)pₓ + sin(q₁)p_y,
+    and then using the cosine law:
+    
+         cos(q₃) = (r² – L₁² – L₂²)/(2 L₁ L₂)         [with L₁ = 0.425, L₂ = 0.4869]
+         q₃ = acos( … )
+         
+         and
+         
+         q₂ = atan2(p′ₓ, p_z) – atan2(L₂ sin(q₃), L₁ + L₂ cos(q₃)).
+         
+    The following implementation follows this procedure.
+    """
+    import math
+
+    # Unpack target position
+    p_x, p_y, p_z = p
+
+    # Constant offset in the "arm plane"
+    offset_y = 0.10915  # = 0.13585 - 0.1197 + 0.093
+
+    # Compute horizontal distance (in x-y plane) of the target.
+    H = math.hypot(p_x, p_y)
+    
+    # If H is nearly zero, choose q1 = 0 (degenerate case)
+    if H < 1e-8:
+        q1 = 0.0
+        delta = 0.0
+    else:
+        # Write p_x and p_y in polar form: let delta = arctan2(p_x, p_y)
+        # (so that p_y = H cos(delta), p_x = H sin(delta))
+        delta = math.atan2(p_x, p_y)
+        # The condition –sin(q1)p_x + cos(q1)p_y = H cos(q1+delta) must equal offset_y.
+        # Thus, cos(q1+delta) = offset_y/H.
+        # (Assume that |offset_y/H| <= 1 since the target is assumed reachable.)
+        angle_sum = math.acos(max(min(offset_y/H, 1), -1))
+        q1 = angle_sum - delta
+
+    # Rotate target p by –q1 to remove base rotation:
+    cos_q1 = math.cos(q1)
+    sin_q1 = math.sin(q1)
+    # p' = Rz(–q1)*p:
+    p_prime_x = cos_q1 * p_x + sin_q1 * p_y
+    p_prime_y = -sin_q1 * p_x + cos_q1 * p_y
+    # p_prime_y should be offset_y (0.10915) – by construction, it is.
+    
+    # Now the remaining planar (2R) problem is:
+    #   p_prime_x = L1*sin(q2) + L2*sin(q2+q3)
+    #   p_z       = L1*cos(q2) + L2*cos(q2+q3)
+    L1 = 0.425
+    L2 = 0.4869
+    # Compute distance r in the plane (x-z plane)
+    r = math.hypot(p_prime_x, p_z)
+    
+    # Compute q3 using the cosine law.
+    cos_q3 = (r**2 - L1**2 - L2**2) / (2 * L1 * L2)
+    # Clamp value to the valid domain of acos.
+    cos_q3 = max(min(cos_q3, 1), -1)
+    q3 = math.acos(cos_q3)
+    
+    # Compute the angle to the target in the plane.
+    angle_base = math.atan2(p_prime_x, p_z)
+    # Compute q2 from the standard 2R inverse kinematics.
+    q2 = angle_base - math.atan2(L2 * math.sin(q3), L1 + L2 * cos_q3)
+    
+    # Choose arbitrary values for q4 and q5.
+    q4 = 0.0
+    q5 = 0.0
+
+    return (q1, q2, q3, q4, q5)
+------------------------------------------------------------
+
+Explanation of key steps:
+
+1. We first determine q₁ by “aligning” the target p so that when rotated by –q₁ the resulting y‑coordinate equals 0.10915 (the net offset coming from joints 2–TCP). Writing p in polar form (with p_y = H cosδ, pₓ = H sinδ) leads to the relation
+  cos(q₁+δ) = 0.10915/H  ⇒  q₁ = arccos(0.10915/H) – δ.
+
+2. Then with p rotated (p′ = Rz(–q₁)·p), the 2R planar arm (with link lengths 0.425 and 0.4869) must satisfy:
+  p′ₓ = L₁ sin(q₂) + L₂ sin(q₂+q₃)  and  p_z = L₁ cos(q₂) + L₂ cos(q₂+q₃).
+Standard geometric formulas give q₃ (via the cosine law) and then q₂.
+
+3. Finally, we set q₄ = q₅ = 0.
+
+This solution meets the requirements stated and (when plugged into the provided forward kinematics) yields the expected TCP positions.

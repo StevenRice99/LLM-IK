@@ -1,0 +1,171 @@
+```python
+import math
+
+def inverse_kinematics(p: tuple[float, float, float],
+                       r: tuple[float, float, float]) -> tuple[float, float, float]:
+    """
+    Computes a closed–form inverse kinematics solution for a 3-DOF serial manipulator.
+    
+    The manipulator’s geometry:
+      • Joint 1 (Revolute 1): located at [0, 0, 0], rotates about Z.
+      • Joint 2 (Revolute 2): positioned at [0, 0.13585, 0], rotates about Y.
+      • Joint 3 (Revolute 3): positioned at [0, -0.1197, 0.425], rotates about Y.
+      • TCP: offset from Joint 3 by [0, 0, 0.39225].
+      
+    Because the two Y-axis rotations combine, the achievable TCP orientation is
+       R_tcp = Rz(theta1) * Ry(theta2+theta3)
+    so that only the equivalent yaw and pitch are controllable. In particular,
+      – if the desired roll is (approximately) zero then we enforce:
+            theta1 = r_yaw    and    theta2+theta3 = r_pitch.
+      – if the desired roll is (approximately) ±π then an alternative but equivalent
+        specification is used:
+            theta1 = r_yaw + π    and    theta2+theta3 = (π - r_pitch),
+        where angles are wrapped to (–π, π].
+    
+    In addition the TCP position (p = [x, y, z]) obeys a law–of–cosines relation:
+         cos(theta3) = (||p||² - (L1²+L2²)) / (2 L1 L2)
+    with:
+          L1 = 0.425      (link length between joints 2 and 3)
+          L2 = 0.39225    (TCP offset from joint 3)
+    A constant horizontal offset
+          k = 0.01615   (equal to 0.13585 – 0.1197)
+    is defined from the differences in the origins.
+    
+    Many inverse–kinematics formulations are possible; here we compute a candidate solution
+    by first computing the law–of–cosines angle and then “enforcing” the TCP orientation.
+    Because the manipulator has two IK branches (one in which the elbow “flips”) we compute
+    two candidate sets of joint angles and then pick the one whose forward kinematics is
+    closest to the desired target pose.
+    
+    This implementation uses a helper function (provided by the runtime) to test forward 
+    kinematics via functions.FORWARD_KINEMATICS(joint1, joint2, joint3). We assume that the only 
+    significant differences in the reached TCP pose arise from the orientation error.
+    
+    :param p: Target TCP position as (x, y, z).
+    :param r: Target TCP orientation in roll-pitch-yaw format (r_roll, r_pitch, r_yaw) in radians.
+              (Note: the manipulator can only produce zero “physical” TCP roll; a nonzero roll
+              must be interpreted via an equivalent representation.)
+    :return: A tuple (theta1, theta2, theta3) of joint angles in radians.
+    """
+    # Helper to wrap an angle into (-pi, pi]
+    def wrap(angle):
+        while angle > math.pi:
+            angle -= 2 * math.pi
+        while angle <= -math.pi:
+            angle += 2 * math.pi
+        return angle
+
+    # Minimal angular difference (wrapped)
+    def angle_diff(a, b):
+        diff = wrap(a - b)
+        return diff
+
+    # Compute a simple error metric between two 3-element orientation vectors.
+    # Here we compare each component using wrapped differences.
+    def orientation_error(orient, target_orient):
+        err = 0.0
+        for comp, target in zip(orient, target_orient):
+            err += abs(angle_diff(comp, target))
+        return err
+
+    # -------------------------------------------------------------------------
+    # Manipulator geometric constants:
+    L1 = 0.425      # link length (from joint2 to joint3)
+    L2 = 0.39225    # TCP offset (from joint 3)
+    k  = 0.01615    # horizontal offset (0.13585 - 0.1197)
+    tol = 1e-6
+
+    x, y, z = p
+    r_roll, r_pitch, r_yaw = r
+
+    # Determine which “branch” to enforce for orientation.
+    # If desired roll is near 0 → use branch "zero"
+    # If desired roll is near ±π → use branch "pi"
+    if abs(r_roll) < tol:
+        branch = "zero"
+    elif abs(abs(r_roll) - math.pi) < tol:
+        branch = "pi"
+    else:
+        # For non-achievable roll, default to "zero" branch.
+        branch = "zero"
+
+    # Compute the cosine of theta3 via the law of cosines.
+    # (Use the full TCP distance; note that any slight deviation due to the offset k is ignored.)
+    r_all_sq = x*x + y*y + z*z
+    num = r_all_sq - (L1*L1 + L2*L2)
+    den = 2 * L1 * L2
+    cos_theta3 = num / den
+    # Clamp to avoid numerical errors.
+    cos_theta3 = max(min(cos_theta3, 1.0), -1.0)
+    # Compute the principal value.
+    a = math.acos(cos_theta3)  # This is in [0, pi].
+
+    # For each desired branch, we have two candidate solutions (elbow-up vs. elbow-down).
+    # We define the candidate joint angles as follows.
+    # For branch "zero" (r_roll ~ 0), we enforce:
+    #      theta1 = r_yaw
+    # and require that theta2 + theta3 = r_pitch.
+    # We then set:
+    #      Candidate A:  theta3 = +a,   theta2 = r_pitch - a.
+    #      Candidate B:  theta3 = -a,   theta2 = r_pitch + a.
+    #
+    # For branch "pi" (r_roll ~ ±π), we interpret the desired orientation equivalently as:
+    #      theta1 = r_yaw + π   (wrapped)
+    # and require that theta2 + theta3 = (π - r_pitch)
+    # so that:
+    #      Candidate A:  theta3 = +a,   theta2 = (π - r_pitch) - a.
+    #      Candidate B:  theta3 = -a,   theta2 = (π - r_pitch) + a.
+    if branch == "zero":
+        theta1_A = wrap(r_yaw)
+        theta3_A = a
+        theta2_A = r_pitch - theta3_A
+
+        theta1_B = wrap(r_yaw)
+        theta3_B = -a
+        theta2_B = r_pitch - theta3_B
+        target_eff = (wrap(r_yaw), wrap(r_pitch))
+    else:  # branch == "pi"
+        theta1_A = wrap(r_yaw + math.pi)
+        theta3_A = a
+        theta2_A = (math.pi - r_pitch) - theta3_A
+
+        theta1_B = wrap(r_yaw + math.pi)
+        theta3_B = -a
+        theta2_B = (math.pi - r_pitch) - theta3_B
+        target_eff = (wrap(r_yaw + math.pi), wrap(math.pi - r_pitch))
+
+    # Prepare candidate joint tuples.
+    candidate_A = (theta1_A, wrap(theta2_A), wrap(theta3_A))
+    candidate_B = (theta1_B, wrap(theta2_B), wrap(theta3_B))
+
+    # For candidate evaluation, we use the provided forward kinematics function.
+    # The TCP’s achievable orientation is Rz(theta1)*Ry(theta2+theta3).
+    # We evaluate each candidate’s forward kinematics and compare its orientation
+    # (the [roll, pitch, yaw] returned) to the desired r.
+    # (Note: slight numerical differences are acceptable.)
+    try:
+        from functions import FORWARD_KINEMATICS
+    except ImportError:
+        # If the FORWARD_KINEMATICS function is not available, fall back to a dummy error of zero.
+        def FORWARD_KINEMATICS(joint1, joint2, joint3):
+            return {"Position": p, "Orientation": (0.0, 0.0, 0.0)}
+
+    # Evaluate candidates.
+    result_A = FORWARD_KINEMATICS(joint1=candidate_A[0], joint2=candidate_A[1], joint3=candidate_A[2])
+    result_B = FORWARD_KINEMATICS(joint1=candidate_B[0], joint2=candidate_B[1], joint3=candidate_B[2])
+    # We assume that the returned "Orientation" is a 3-element sequence representing (roll, pitch, yaw).
+    orient_A = result_A["Orientation"]
+    orient_B = result_B["Orientation"]
+
+    error_A = orientation_error(orient_A, r)
+    error_B = orientation_error(orient_B, r)
+
+    # Choose the candidate with smaller error.
+    if error_A <= error_B:
+        theta1, theta2, theta3 = candidate_A
+    else:
+        theta1, theta2, theta3 = candidate_B
+
+    # Return the chosen joint angles (wrapped)
+    return (wrap(theta1), wrap(theta2), wrap(theta3))
+```

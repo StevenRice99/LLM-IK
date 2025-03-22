@@ -1,0 +1,111 @@
+Based on the feedback, I can see my solution has several critical issues, particularly in handling joint 3 (which is consistently set to 0) and properly relating the orientation requirements to joint angles.
+
+Let me revise my approach to create a complete inverse kinematics solution:
+
+```python
+def inverse_kinematics(p: tuple[float, float, float], r: tuple[float, float, float]) -> tuple[float, float, float]:
+    """
+    Gets the joint values needed to reach position "p" and orientation "r".
+    :param p: The position to reach in the form [x, y, z].
+    :param r: The orientation to reach in radians in the form [x, y, z].
+    :return: A list of the values to set the links to for reaching position "p" and orientation "r".
+    """
+    import math
+    import numpy as np
+    
+    x_target, y_target, z_target = p
+    rx, ry, rz = r
+    
+    # Link dimensions from the problem description
+    link1_z = 0.13585
+    link2_len = 0.425
+    link3_len = 0.39225
+    
+    # First, solve for joint 1 (rotation around Z axis)
+    theta1 = math.atan2(x_target, y_target)
+    
+    # Create rotation matrix from roll, pitch, yaw (rpy) orientation
+    # Using the ZYX Euler angle convention
+    cx, sx = math.cos(rx), math.sin(rx)
+    cy, sy = math.cos(ry), math.sin(ry)
+    cz, sz = math.cos(rz), math.sin(rz)
+    
+    R = np.array([
+        [cy*cz, -cy*sz, sy],
+        [cx*sz + cz*sx*sy, cx*cz - sx*sy*sz, -cy*sx],
+        [sx*sz - cx*cz*sy, cz*sx + cx*sy*sz, cx*cy]
+    ])
+    
+    # Calculate rotation matrix for joint 1
+    R1 = np.array([
+        [math.cos(theta1), -math.sin(theta1), 0],
+        [math.sin(theta1), math.cos(theta1), 0],
+        [0, 0, 1]
+    ])
+    
+    # Calculate the rotation matrix for joints 2 and 3 combined
+    R23 = R1.T @ R
+    
+    # The y-axis of the end effector frame (after R23 rotation) should align with the world y-axis
+    # This gives us the sum of theta2 and theta3
+    theta23 = math.atan2(R23[0, 2], R23[0, 0])
+    
+    # Transform target position to joint 1's coordinate frame
+    x1 = x_target * math.cos(theta1) + y_target * math.sin(theta1)
+    y1 = -x_target * math.sin(theta1) + y_target * math.cos(theta1)
+    z1 = z_target
+    
+    # Calculate the distance from joint 2 to the target along the x-z plane
+    x1_adjusted = x1
+    z1_adjusted = z1 - link1_z  # Adjust for the height of joint 2
+    
+    # Use the law of cosines to find theta3
+    d_sq = x1_adjusted**2 + z1_adjusted**2
+    d = math.sqrt(d_sq)
+    
+    cos_theta3 = (d_sq - link2_len**2 - link3_len**2) / (2 * link2_len * link3_len)
+    cos_theta3 = max(min(cos_theta3, 1.0), -1.0)  # Ensure value is in valid range
+    
+    theta3 = math.acos(cos_theta3)
+    
+    # There are two possible solutions for theta3 (positive and negative angle)
+    # We'll check both to see which one gives the correct orientation
+    solutions = []
+    
+    for theta3_candidate in [theta3, -theta3]:
+        # Calculate theta2 using the law of sines
+        beta = math.atan2(x1_adjusted, z1_adjusted)
+        gamma = math.atan2(link3_len * math.sin(theta3_candidate), 
+                           link2_len + link3_len * math.cos(theta3_candidate))
+        theta2_candidate = beta - gamma
+        
+        # Check if theta2 + theta3 matches the required orientation sum
+        if abs((theta2_candidate + theta3_candidate) - theta23) < 0.1:
+            solutions.append((theta2_candidate, theta3_candidate))
+    
+    # If we found valid solutions, choose the one that best matches the required orientation
+    if solutions:
+        best_solution = min(solutions, key=lambda sol: abs((sol[0] + sol[1]) - theta23))
+        theta2, theta3 = best_solution
+    else:
+        # If no solution found that satisfies orientation perfectly, use the closest one
+        theta3 = theta3  # Choose positive theta3 by default
+        theta2 = theta23 - theta3
+    
+    # Ensure angles are in valid ranges
+    theta1 = ((theta1 + math.pi) % (2 * math.pi)) - math.pi
+    theta2 = ((theta2 + math.pi) % (2 * math.pi)) - math.pi
+    theta3 = ((theta3 + math.pi) % (2 * math.pi)) - math.pi
+    
+    return (theta1, theta2, theta3)
+```
+
+This revised solution:
+
+1. Properly calculates joint 1 angle based on target position
+2. Uses the target orientation to determine the combined effect of joints 2 and 3
+3. Transforms the target to joint 1's reference frame
+4. Uses geometric approach (law of cosines) to solve for joint 3
+5. Calculates joint 2 based on joint 3 and the required orientation
+6. Checks multiple possible solutions and selects the one that best satisfies both position and orientation
+7. Ensures all angles are in the valid range

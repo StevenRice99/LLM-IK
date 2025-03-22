@@ -1,0 +1,138 @@
+```python
+import math
+
+def inverse_kinematics(p: tuple[float, float, float],
+                       r: tuple[float, float, float]) -> tuple[float, float, float]:
+    """
+    Computes the joint angles for a 3DOF serial manipulator with:
+      - Revolute 1 at the base (position [0,0,0], axis Z)
+      - Revolute 2 offset by [0, 0.13585, 0] in joint1’s frame (axis Y)
+      - Revolute 3 offset by [0, -0.1197, 0.425] in joint2’s frame (axis Y)
+      - TCP offset by [0, 0, 0.39225] in joint3’s frame
+
+    The TCP target is specified by position p (x, y, z) in the base frame and 
+    orientation r given as roll–pitch–yaw (radians) following the convention:
+         R_tcp = Rz(rz) * Ry(ry) * Rx(rx)
+    (Note: many tests use rx nearly zero; however, we include rx for generality.)
+
+    Kinematic decoupling:
+      1. Solve for base rotation (joint1) from the projection of p onto the XY–plane.
+      2. Compute the world position of joint2. In joint1’s frame, joint2 is at [0, d12, 0]
+         with d12 = 0.13585. In the base frame, this becomes:
+             p_joint2_world = Rz(joint1) * [0, d12, 0] = [ -sin(joint1)*d12, cos(joint1)*d12, 0 ]
+      3. Express the TCP position relative to joint2 and rotate by –joint1 so that the
+         remaining 2R chain (joints 2 and 3) acts in a plane (with “x” and “z” coordinates).
+      4. Determine the desired overall wrist rotation angle (theta_wrist = joint2 + joint3)
+         by “removing” the base rotation from the TCP orientation. We do so by computing
+         the full TCP rotation matrix R_tcp (using Rz(rz)*Ry(ry)*Rx(rx)) and then forming:
+             R_wrist = Rz(–joint1)*R_tcp.
+         For a pure rotation about Y (the combined effect of joints 2 and 3), we have:
+             [W00  _  W02] ≈ [ cos(theta_wrist)   ...  sin(theta_wrist) ]
+         so we set
+             theta_wrist = atan2(W02, W00)
+      5. For the 2R planar chain the effective link lengths are:
+             L1 = 0.425      (contributed by the offset in joint3, note: only the 0.425 is used)
+             L2 = 0.39225    (TCP offset from joint3)
+         and the position of the TCP in the 2R–plane is given by (x_plane, z_plane) which
+         must obey:
+             x_plane = L1*sin(joint2) + L2*sin(theta_wrist)
+             z_plane = L1*cos(joint2) + L2*cos(theta_wrist)
+         so we can solve for joint2 as:
+             joint2 = atan2(x_plane - L2*sin(theta_wrist),
+                            z_plane - L2*cos(theta_wrist))
+         and then joint3 = theta_wrist – joint2.
+    
+    :param p: TCP target position [x, y, z] (in base frame)
+    :param r: TCP target orientation as (roll, pitch, yaw) in radians
+    :return: A tuple (joint1, joint2, joint3) of joint angles (radians)
+    """
+    # Unpack target position and orientation.
+    x, y, z = p
+    rx, ry, rz = r
+
+    # -------------------------------
+    # Step 1. Compute joint1 (base rotation about Z).
+    joint1 = math.atan2(y, x)
+
+    # -------------------------------
+    # Step 2. Compute world position of joint2.
+    d12 = 0.13585  # offset along Y in joint1 frame.
+    # When rotating [0, d12, 0] by joint1 about Z:
+    p_joint2_world = (-math.sin(joint1) * d12,
+                       math.cos(joint1) * d12,
+                       0.0)
+
+    # -------------------------------
+    # Step 3. Express the TCP position relative to joint2.
+    p_rel = (x - p_joint2_world[0],
+             y - p_joint2_world[1],
+             z - p_joint2_world[2])
+    # Rotate p_rel by -joint1 about Z to move into joint2’s (planar) coordinate frame.
+    cos_j1 = math.cos(joint1)
+    sin_j1 = math.sin(joint1)
+    # After rotation by –joint1: 
+    #   x_plane: in the plane of joints 2 and 3 (actuated by rotations about Y)
+    #   z_plane: vertical direction in the plane.
+    x_plane = cos_j1 * p_rel[0] + sin_j1 * p_rel[1]
+    z_plane = p_rel[2]  # remains unchanged
+
+    # -------------------------------
+    # Step 4. Compute the desired overall wrist angle (theta_wrist = joint2 + joint3)
+    # from the target orientation.
+    #
+    # Compute the TCP rotation matrix using the (Rz * Ry * Rx) convention.
+    cr = math.cos(rx)
+    sr = math.sin(rx)
+    cyp = math.cos(ry)
+    syp = math.sin(ry)
+    cz_val = math.cos(rz)
+    sz_val = math.sin(rz)
+    # First, compute A = Ry(ry) * Rx(rx)
+    A00 = cyp
+    A01 = 0.0
+    A02 = syp
+    A10 = 0.0
+    A11 = cr
+    A12 = -sr
+    A20 = -syp
+    A21 = sr
+    A22 = cyp
+    # Then, R_tcp = Rz(rz) * A.
+    R00 = cz_val * A00 - sz_val * A10        # = cz_val * cyp
+    R01 = cz_val * A01 - sz_val * A11        # = - sz_val * cr
+    R02 = cz_val * A02 - sz_val * A12        # = cz_val * syp + sz_val * sr
+    R10 = sz_val * A00 + cz_val * A10        # = sz_val * cyp
+    R11 = sz_val * A01 + cz_val * A11        # = cz_val * cr
+    R12 = sz_val * A02 + cz_val * A12        # = sz_val * syp - cz_val * sr
+    R20 = A20                              # = -syp
+    R21 = A21                              # = sr
+    R22 = A22                              # = cyp
+
+    # Now remove the effect of joint1 by forming R_wrist = Rz(-joint1) * R_tcp.
+    # Rz(-joint1) = [[cos(joint1), sin(joint1), 0],
+    #                [-sin(joint1), cos(joint1), 0],
+    #                [0, 0, 1]]
+    W00 = cos_j1 * R00 + sin_j1 * R10
+    # W01 not needed
+    W02 = cos_j1 * R02 + sin_j1 * R12
+    theta_wrist = math.atan2(W02, W00)
+
+    # -------------------------------
+    # Step 5. Solve the 2R planar inverse kinematics for joints 2 and 3.
+    L1 = 0.425    # effective link length from joint2 to joint3 (use the z–offset of 0.425)
+    L2 = 0.39225  # TCP offset from joint3 along its local z axis
+    #
+    # In the 2R chain (with joint angles joint2 and joint3) the TCP coordinates in the plane satisfy:
+    #   x_plane = L1*sin(joint2) + L2*sin(joint2 + joint3)
+    #   z_plane = L1*cos(joint2) + L2*cos(joint2 + joint3)
+    # and we want (joint2 + joint3) = theta_wrist.
+    # Rearranging:
+    #   L1*sin(joint2) = x_plane - L2*sin(theta_wrist)
+    #   L1*cos(joint2) = z_plane - L2*cos(theta_wrist)
+    # So,
+    joint2 = math.atan2(x_plane - L2 * math.sin(theta_wrist),
+                        z_plane - L2 * math.cos(theta_wrist))
+    joint3 = theta_wrist - joint2
+
+    return (joint1, joint2, joint3)
+```

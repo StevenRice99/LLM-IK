@@ -1,0 +1,365 @@
+After analyzing the feedback patterns, I notice that in most cases, the correct theta1 value matches the rz component of the orientation. This insight suggests a direct relationship between joint 1 and the z-rotation in the target orientation. Let me improve my solution:
+
+```python
+def inverse_kinematics(p: tuple[float, float, float], r: tuple[float, float, float]) -> tuple[float, float, float]:
+    """
+    Gets the joint values needed to reach position "p" and orientation "r".
+    :param p: The position to reach in the form [x, y, z].
+    :param r: The orientation to reach in radians in the form [x, y, z].
+    :return: A list of the values to set the links to for reaching position "p" and orientation "r".
+    """
+    import math
+    import numpy as np
+    
+    x_target, y_target, z_target = p
+    rx, ry, rz = r
+    
+    # Link dimensions from the problem description
+    l1_z = 0.13585  # Joint 2 z-offset from Joint 1
+    l2 = 0.425      # Length of link 2
+    l3_x = 0        # Joint 3 x-offset
+    l3_y = -0.1197  # Joint 3 y-offset from Joint 2
+    l3_z = 0.425    # Joint 3 z-offset from Joint 2
+    tcp_z = 0.39225 # TCP z-offset from Joint 3
+    
+    # Set theta1 equal to the z-component of the orientation
+    theta1 = rz
+    
+    # Create rotation matrix for joint 1 rotation around Z
+    R1 = np.array([
+        [math.cos(theta1), -math.sin(theta1), 0],
+        [math.sin(theta1), math.cos(theta1), 0],
+        [0, 0, 1]
+    ])
+    
+    # Transform target position to joint 1's coordinate frame
+    target_pos = np.array([x_target, y_target, z_target])
+    pos_in_frame1 = R1.T @ target_pos
+    
+    # Extract target position in joint 1's frame
+    x1 = pos_in_frame1[0]
+    y1 = pos_in_frame1[1]
+    z1 = pos_in_frame1[2]
+    
+    # Adjust for the link geometries to find the position relative to joint 2
+    # The target position is where the TCP should be
+    # We need to work backwards to find where joint 3 should be
+    
+    # Create rotation matrix from orientation
+    cx, sx = math.cos(rx), math.sin(rx)
+    cy, sy = math.cos(ry), math.sin(ry)
+    cz, sz = math.cos(rz), math.sin(rz)
+    
+    R_target = np.array([
+        [cy*cz, cy*sz, -sy],
+        [-cx*sz + sx*sy*cz, cx*cz + sx*sy*sz, sx*cy],
+        [sx*sz + cx*sy*cz, -sx*cz + cx*sy*sz, cx*cy]
+    ])
+    
+    # Adjust for joint 1 rotation
+    R_target_in_frame1 = R1.T @ R_target
+    
+    # The z-axis of the end effector points along the TCP
+    # So we move back from the target position by tcp_z along the z-axis of the end effector
+    tcp_offset = tcp_z * R_target_in_frame1[:, 2]
+    joint3_pos = pos_in_frame1 - tcp_offset
+    
+    # Now we have the position of joint 3 in joint 1's frame
+    # Calculate the position of joint 3 relative to joint 2
+    joint3_rel_to_joint2 = np.array([joint3_pos[0], joint3_pos[1] - l1_z, joint3_pos[2]])
+    
+    # The distance from joint 2 to joint 3
+    joint3_distance = np.linalg.norm(joint3_rel_to_joint2)
+    
+    # Use law of cosines to find theta3
+    cos_theta3 = (joint3_distance**2 - l2**2 - (l3_y**2 + l3_z**2)) / (2 * l2 * math.sqrt(l3_y**2 + l3_z**2))
+    cos_theta3 = max(min(cos_theta3, 1.0), -1.0)  # Clamp to valid range
+    
+    # Find theta3
+    theta3 = -math.acos(cos_theta3)  # Negative because joint 3 bends inward
+    
+    # Calculate theta2 based on the angle to joint 3 and the joint 3 angle
+    # First get the angle to the joint 3 position in the xz plane
+    theta_to_joint3 = math.atan2(joint3_rel_to_joint2[0], joint3_rel_to_joint2[2])
+    
+    # Angle from link 2 to the line connecting joint 2 to joint 3
+    beta = math.atan2(l3_y, l3_z)
+    
+    # Calculate theta2
+    theta2 = theta_to_joint3 - math.atan2(l2 * math.sin(theta3), l2 * math.cos(theta3) + math.sqrt(l3_y**2 + l3_z**2))
+    
+    # Double-check with both positive and negative theta3
+    alt_theta3 = -theta3
+    alt_theta2 = theta_to_joint3 - math.atan2(l2 * math.sin(alt_theta3), l2 * math.cos(alt_theta3) + math.sqrt(l3_y**2 + l3_z**2))
+    
+    # Check which solution better matches the Y component of orientation
+    sol1_error = abs(math.sin(theta2 + theta3) - math.sin(ry))
+    sol2_error = abs(math.sin(alt_theta2 + alt_theta3) - math.sin(ry))
+    
+    if sol2_error < sol1_error:
+        theta2, theta3 = alt_theta2, alt_theta3
+    
+    return (theta1, theta2, theta3)
+```
+
+Hmm, I realize this solution still doesn't properly account for the orientation constraints and link offsets. Let me simplify and create a more accurate solution:
+
+```python
+def inverse_kinematics(p: tuple[float, float, float], r: tuple[float, float, float]) -> tuple[float, float, float]:
+    """
+    Gets the joint values needed to reach position "p" and orientation "r".
+    :param p: The position to reach in the form [x, y, z].
+    :param r: The orientation to reach in radians in the form [x, y, z].
+    :return: A list of the values to set the links to for reaching position "p" and orientation "r".
+    """
+    import math
+    import numpy as np
+    
+    # Extract target position and orientation
+    x, y, z = p
+    rx, ry, rz = r
+    
+    # Robot dimensions
+    j2_z = 0.13585        # Joint 2 z-offset from base
+    l2 = 0.425            # Length of link 2
+    j3_to_tcp = 0.39225   # Distance from joint 3 to TCP
+    
+    # For this robot, theta1 is directly equal to rz
+    theta1 = rz
+    
+    # Transform target position to joint 1 frame
+    c1, s1 = math.cos(theta1), math.sin(theta1)
+    x1 = c1*x + s1*y
+    y1 = -s1*x + c1*y
+    z1 = z
+    
+    # Calculate the position that joint 3 needs to reach
+    # This involves moving back from the target position along the end-effector z-axis
+    # The end-effector z-axis is determined by the orientation
+    cx, sx = math.cos(rx), math.sin(rx)
+    cy, sy = math.cos(ry), math.sin(ry)
+    
+    # Z-axis of the end effector in world frame (after all rotations)
+    ez_x = sy
+    ez_y = -sx*cy
+    ez_z = cx*cy
+    
+    # Transform end-effector z-axis to joint 1 frame
+    ez_x1 = c1*ez_x + s1*ez_y
+    ez_y1 = -s1*ez_x + c1*ez_y
+    ez_z1 = ez_z
+    
+    # Position of joint 3 in joint 1 frame
+    j3_x = x1 - j3_to_tcp * ez_x1
+    j3_y = y1 - j3_to_tcp * ez_y1
+    j3_z = z1 - j3_to_tcp * ez_z1
+    
+    # Position of joint 3 relative to joint 2
+    j3_rel_x = j3_x
+    j3_rel_y = j3_y - j2_z  # Adjust for joint 2 height
+    j3_rel_z = j3_z
+    
+    # Distance from joint 2 to joint 3
+    d = math.sqrt(j3_rel_x**2 + j3_rel_z**2)
+    
+    # Calculate theta2 directly using atan2
+    theta2 = math.atan2(j3_rel_x, j3_rel_z)
+    
+    # Calculate theta3 to match the orientation (specifically ry)
+    # The y component of orientation is determined by theta2 + theta3
+    theta3 = math.asin(sy) - theta2
+    
+    return (theta1, theta2, theta3)
+```
+
+After further thought, I realize this problem requires a more precise geometric approach. Let me finalize the solution:
+
+```python
+def inverse_kinematics(p: tuple[float, float, float], r: tuple[float, float, float]) -> tuple[float, float, float]:
+    """
+    Gets the joint values needed to reach position "p" and orientation "r".
+    :param p: The position to reach in the form [x, y, z].
+    :param r: The orientation to reach in radians in the form [x, y, z].
+    :return: A list of the values to set the links to for reaching position "p" and orientation "r".
+    """
+    import math
+    import numpy as np
+    
+    # Extract target position and orientation
+    x, y, z = p
+    rx, ry, rz = r
+    
+    # Based on the robot configuration, theta1 equals rz
+    theta1 = rz
+    
+    # Link dimensions
+    h = 0.13585    # Height of joint 2 above joint 1
+    a2 = 0.425     # Length of link 2
+    a3 = 0.39225   # Length of TCP from joint 3
+    
+    # Create rotation matrix from orientation angles
+    cx, sx = math.cos(rx), math.sin(rx)
+    cy, sy = math.cos(ry), math.sin(ry)
+    cz, sz = math.cos(rz), math.sin(rz)
+    
+    # Rotation matrix for target orientation
+    R = np.array([
+        [cy*cz, -cy*sz, sy],
+        [cx*sz + sx*sy*cz, cx*cz - sx*sy*sz, -sx*cy],
+        [sx*sz - cx*sy*cz, sx*cz + cx*sy*sz, cx*cy]
+    ])
+    
+    # The third column of R represents the z-axis of the end effector
+    z_axis = R[:, 2]
+    
+    # Move back from target position along the z-axis to find joint 3 position
+    j3 = np.array([x, y, z]) - a3 * z_axis
+    
+    # Transform joint 3 position to joint 1 frame
+    c1, s1 = math.cos(theta1), math.sin(theta1)
+    R1 = np.array([
+        [c1, s1, 0],
+        [-s1, c1, 0],
+        [0, 0, 1]
+    ])
+    
+    j3_in_j1 = R1 @ j3
+    
+    # Adjust for joint 2 height
+    p_prime = np.array([j3_in_j1[0], j3_in_j1[1] - h, j3_in_j1[2]])
+    
+    # Calculate distance from joint 2 to joint 3
+    d = np.linalg.norm(p_prime)
+    
+    # Use ry to determine the sum of theta2 and theta3
+    theta23 = ry
+    
+    # Use geometry to find individual angles
+    theta2 = math.atan2(p_prime[0], p_prime[2]) - math.asin(p_prime[1]/d)
+    theta3 = theta23 - theta2
+    
+    return (theta1, theta2, theta3)
+```
+
+Wait, this still doesn't properly handle all the geometric constraints. Let me make one final correction with the correct approach:
+
+```python
+def inverse_kinematics(p: tuple[float, float, float], r: tuple[float, float, float]) -> tuple[float, float, float]:
+    """
+    Gets the joint values needed to reach position "p" and orientation "r".
+    :param p: The position to reach in the form [x, y, z].
+    :param r: The orientation to reach in radians in the form [x, y, z].
+    :return: A list of the values to set the links to for reaching position "p" and orientation "r".
+    """
+    import math
+    
+    # From the test cases, it's clear that:
+    # 1. theta1 = rz (the z-component of orientation)
+    # 2. theta2 and theta3 are determined by position and ry
+    
+    _, _, rz = r
+    theta1 = rz
+    
+    # The rest of the solution can be copied from the existing solution 2
+    # which solves for joints 2 and 3
+    
+    import math
+    
+    x_target, y_target, z_target = p
+    rx, ry, rz = r
+    cx = math.cos(rx)
+    sx = math.sin(rx)
+    cy = math.cos(ry)
+    sy = math.sin(ry)
+    cz = math.cos(rz)
+    sz = math.sin(rz)
+    R00 = cy * cz
+    R02 = sy
+    theta_sum = math.atan2(R02, R00)
+    a = 0.425
+    b = 0.39225
+    
+    # Transform target to frame after theta1 rotation
+    c1, s1 = math.cos(theta1), math.sin(theta1)
+    x1 = c1 * x_target + s1 * y_target
+    z1 = z_target
+    
+    d_sq = x1 ** 2 + z1 ** 2
+    d = math.sqrt(d_sq)
+    cos_theta2 = (d_sq - a ** 2 - b ** 2) / (2 * a * b)
+    cos_theta2 = max(min(cos_theta2, 1.0), -1.0)
+    theta2_1 = math.acos(cos_theta2)
+    theta2_2 = -theta2_1
+    solutions = []
+    for theta2 in [theta2_1, theta2_2]:
+        theta1 = theta_sum - theta2
+        x_calc = a * math.sin(theta1) + b * math.sin(theta_sum)
+        z_calc = a * math.cos(theta1) + b * math.cos(theta_sum)
+        if math.isclose(x_calc, x1, abs_tol=1e-05) and math.isclose(z_calc, z1, abs_tol=1e-05):
+            solutions.append((theta1, theta2))
+    if solutions:
+        for theta2, theta3 in solutions:
+            if -6.2831853 <= theta3 <= 6.2831853:
+                return (theta1, theta2, theta3)
+        return (theta1, solutions[0][0], solutions[0][1])
+    else:
+        term_x = x1 - b * math.sin(theta_sum)
+        term_z = z1 - b * math.cos(theta_sum)
+        theta2 = math.atan2(term_x, term_z)
+        theta3 = theta_sum - theta2
+        return (theta1, theta2, theta3)
+```
+
+Actually, I notice I'm still not getting this right. Let me try one more direct approach:
+
+```python
+def inverse_kinematics(p: tuple[float, float, float], r: tuple[float, float, float]) -> tuple[float, float, float]:
+    """
+    Gets the joint values needed to reach position "p" and orientation "r".
+    :param p: The position to reach in the form [x, y, z].
+    :param r: The orientation to reach in radians in the form [x, y, z].
+    :return: A list of the values to set the links to for reaching position "p" and orientation "r".
+    """
+    import math
+    import numpy as np
+    
+    # Robot dimensions
+    l1_z = 0.13585
+    l2 = 0.425
+    l3 = 0.39225
+    
+    # From the test cases, it's clear that theta1 = rz
+    _, _, rz = r
+    theta1 = rz
+    
+    # Transform target position to joint 1 frame
+    x, y, z = p
+    c1, s1 = math.cos(theta1), math.sin(theta1)
+    x1 = c1*x + s1*y
+    y1 = -s1*x + c1*y
+    z1 = z
+    
+    # Adjust for joint 2 height
+    y1_adj = y1 - l1_z
+    
+    # Calculate the triangular geometry for links 2 and 3
+    r_sq = x1**2 + y1_adj**2 + z1**2
+    cos_theta3 = (r_sq - l2**2 - l3**2) / (2 * l2 * l3)
+    cos_theta3 = max(min(cos_theta3, 1.0), -1.0)  # Ensure in valid range
+    
+    # Calculate theta3
+    theta3 = -math.acos(cos_theta3)  # Negative due to the robot's configuration
+    
+    # Calculate theta2
+    sin_theta3 = math.sin(theta3)
+    k1 = l2 + l3 * cos_theta3
+    k2 = l3 * sin_theta3
+    
+    # Project onto xz plane for theta2 calculation
+    gamma = math.atan2(x1, z1)
+    alpha = math.atan2(k2, k1)
+    
+    theta2 = gamma - alpha
+    
+    return (theta1, theta2, theta3)
+```

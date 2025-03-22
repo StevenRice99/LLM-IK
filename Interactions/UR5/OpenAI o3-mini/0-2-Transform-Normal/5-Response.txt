@@ -1,0 +1,78 @@
+Below is one valid closed‐form solution. In our derivation we first note that the forward kinematics is given by
+
+  TCP = Rz(theta₁) · { [0, 0.13585, 0] + Ry(theta₂)·[0, –0.1197, 0.425] + Ry(theta₂+theta₃)·[0, 0, 0.39225] }.
+
+Because only revolute 1 contributes to an overall yaw we can “read off” the base joint from the desired TCP orientation r. In particular, if we write the desired TCP Euler angles as [roll, pitch, yaw] then one obtains
+
+  theta₁ = r[2]  and theta₂ + theta₃ = φ = r[1].
+
+To solve for theta₂ we proceed as follows. First, undo the base rotation from the target position p by computing
+
+  p′ = Rz(–theta₁) · p.
+
+Writing p′ = [p′ₓ, p′ᵧ, p′𝓏] and noting that the (fixed) offset [0, 0.13585, 0] and the translation [0, –0.1197, 0.425] combine to yield a constant y-offset (0.13585 – 0.1197 = 0.01615) independent of theta₂, the x– and z–components satisfy
+
+  p′ₓ = 0.425·sin(theta₂) + 0.39225·sin(φ)
+  p′𝓏 = 0.425·cos(theta₂) + 0.39225·cos(φ).
+
+Subtracting the constant TCP offset (which arises from executing Ry(φ) on [0, 0, 0.39225]), we obtain
+
+  0.425·sin(theta₂) = p′ₓ – 0.39225·sin(φ)
+  0.425·cos(theta₂) = p′𝓏 – 0.39225·cos(φ).
+
+Thus one may solve
+
+  theta₂ = atan2 [ p′ₓ – 0.39225·sin(φ),  p′𝓏 – 0.39225·cos(φ) ]
+  theta₃ = φ – theta₂.
+
+The Python function below implements this solution (using math.atan2 and math.cos/sin). Note that the orientation input r is assumed to be provided as (roll, pitch, yaw) and that roll will be zero in all reachable cases.
+
+--------------------------------------------------
+def inverse_kinematics(p: tuple[float, float, float], r: tuple[float, float, float]) -> tuple[float, float, float]:
+    """
+    Gets the joint values needed to reach TCP position "p" and orientation "r".
+    :param p: The position to reach in the form [x, y, z].
+    :param r: The orientation to reach (rpy in radians) in the form [roll, pitch, yaw].
+    :return: A tuple of joint values (theta1, theta2, theta3).
+    """
+    import math
+
+    # Extract target position and orientation.
+    px, py, pz = p
+    roll, pitch, yaw = r  # Note: roll is not used (assumed zero for a 3-dof with only yaw & pitch)
+
+    # Joint 1 (base joint about Z) is chosen to match the desired TCP yaw.
+    theta1 = yaw
+
+    # The combined rotation of joints 2 and 3 (both about Y) is equated to the desired TCP pitch.
+    phi = pitch  # phi = theta2 + theta3
+
+    # Remove the base rotation Rz(theta1) from the TCP position.
+    # Rz(-theta1) is:
+    #   [ cos(theta1)   sin(theta1)  0 ]
+    #   [ -sin(theta1)  cos(theta1)  0 ]
+    #   [      0             0       1 ]
+    p_prime_x = math.cos(theta1)*px + math.sin(theta1)*py
+    # p_prime_y = -math.sin(theta1)*px + math.cos(theta1)*py  (not used, it should equal 0.01615)
+    p_prime_z = pz
+
+    # From the kinematics, the TCP position in the intermediate frame is:
+    #   p_prime = [0.425*sin(theta2) + 0.39225*sin(phi),
+    #              0.01615,
+    #              0.425*cos(theta2) + 0.39225*cos(phi)]
+    #
+    # Solve for theta2 by subtracting out the TCP offset that comes from joint 3:
+    adjusted_x = p_prime_x - 0.39225 * math.sin(phi)
+    adjusted_z = p_prime_z - 0.39225 * math.cos(phi)
+    
+    # Then:
+    #   0.425*sin(theta2) = adjusted_x   and   0.425*cos(theta2) = adjusted_z.
+    theta2 = math.atan2(adjusted_x, adjusted_z)
+
+    # Finally, joint 3 is obtained from the difference.
+    theta3 = phi - theta2
+
+    return (theta1, theta2, theta3)
+--------------------------------------------------
+
+This solution computes the unique inverse kinematics for targets that are reachable (with the assumption that the TCP roll is zero).

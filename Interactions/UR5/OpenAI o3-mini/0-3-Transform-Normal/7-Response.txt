@@ -1,0 +1,126 @@
+def inverse_kinematics(p: tuple[float, float, float], r: tuple[float, float, float]) -> tuple[float, float, float, float]:
+    """
+    Computes the joint angles (theta1, theta2, theta3, theta4) required for the 4-DOF serial manipulator
+    to attain a desired TCP position "p" and orientation "r" (given as roll, pitch, yaw in radians).
+    
+    Kinematic details (all units in meters, angles in radians):
+      • Revolute 1: translation = [0, 0, 0], rotation about Z (joint angle = theta1)
+      • Revolute 2: translation = [0, 0.13585, 0], rotation about Y (joint angle = theta2)
+      • Revolute 3: translation = [0, -0.1197, 0.425], rotation about Y (joint angle = theta3)
+      • Revolute 4: translation = [0, 0, 0.39225], rotation about Y (joint angle = theta4)
+      • TCP: translation = [0, 0.093, 0]
+    
+    The overall homogeneous transformation is:
+      T0_TCP = Rz(theta1) · Trans(0,0.13585,0) · Ry(theta2) · Trans(0, -0.1197, 0.425) · 
+               Ry(theta3) · Trans(0, 0, 0.39225) · Ry(theta4) · Trans(0, 0.093, 0)
+    
+    Because the last three joints rotate about Y (and rotations about Y leave Y‐components unchanged),
+    the net rotation from joints 2–4 is simply a rotation about Y by the sum theta2+theta3+theta4.
+    
+    We assume that the desired TCP orientation “r” is given in roll–pitch–yaw where:
+      r = (roll, pitch, yaw)
+    and the kinematics force roll = 0 so that:
+      • theta1 is determined by the desired yaw (theta1 = r[2])
+      • theta2 + theta3 + theta4 must equal the desired pitch (theta_total = r[1])
+    
+    The position inverse–kinematics is decoupled by computing the wrist center.
+    In world coordinates the TCP offset (from joint 4) is along Y; since rotations about Y leave Y unchanged,
+    we have:
+      p_wrist = p – Rz(theta1)·[0, d_TCP, 0]
+    where d_TCP = 0.093.
+    
+    Then, transforming to the coordinate frame of joint 2 (which is reached from the base by a rotation Rz(theta1)
+    and a translation [0, d2, 0] with d2 = 0.13585), we have:
+      p_wrist_2 = Rz(-theta1)·p_wrist – [0, d2, 0]
+    In an ideal target, p_wrist_2’s Y-component must equal –0.1197. The planar problem uses its X and Z.
+    
+    Written out, letting:
+      X = (p_wrist_2)_x  
+      Z = (p_wrist_2)_z  
+      L1 = 0.425   (effective “link” from joint 2 to joint 3 along Z)
+      L2 = 0.39225 (effective “link” from joint 3 to joint 4 along Z)
+    the planar equations are:
+      X = L1*sin(theta2) + L2*sin(theta2+theta3)
+      Z = L1*cos(theta2) + L2*cos(theta2+theta3)
+    a standard 2R inverse–kinematics problem.
+    
+    The solution is chosen as follows:
+      1. Set theta1 = desired yaw = r[2]
+      2. Set "net" pitch theta_total = r[1] so that theta4 = theta_total – (theta2+theta3)
+      3. Compute the wrist center in world frame:
+             p_wrist = ( p_x + sin(theta1)*0.093,
+                         p_y – cos(theta1)*0.093,
+                         p_z )
+      4. Transform to joint 2 frame:
+             x_w2 = cos(theta1)*(p_wrist_x) + sin(theta1)*(p_wrist_y)
+             y_w2 = - sin(theta1)*(p_wrist_x) + cos(theta1)*(p_wrist_y) – 0.13585
+             z_w2 = p_wrist_z
+         (Note: for a reachable target, y_w2 should equal –0.1197.)
+      5. Let X = x_w2 and Z = z_w2, then solve:
+             cos(theta3) = (X^2+Z^2 - L1^2 - L2^2) / (2*L1*L2)
+         and choose theta3 = atan2( +sqrt(1-cos(theta3)^2), cos(theta3) ) (elbow “up” configuration).
+      6. Solve for theta2:
+             theta2 = atan2(X, Z) – atan2( L2*sin(theta3), L1+L2*cos(theta3) )
+      7. Finally, theta4 = theta_total – (theta2+theta3)
+    
+    :param p: TCP position (x, y, z) in world coordinates.
+    :param r: Desired TCP orientation (roll, pitch, yaw) in radians.
+    :return: A 4-tuple (theta1, theta2, theta3, theta4) for the joints.
+    """
+    import math
+
+    # Define constant link offsets (in meters)
+    d2 = 0.13585      # Offset from joint 1 to joint 2 along Y.
+    d_TCP = 0.093     # TCP offset along Y (local to joint 4 before TCP attachment).
+    d3y = 0.1197      # Y offset in the transformation from joint 2 to joint 3.
+    d3z = 0.425       # Z offset in the transformation from joint 2 to joint 3.
+    d4 = 0.39225      # Z offset in the transformation from joint 3 to joint 4.
+
+    # 1. Determine theta1 from the desired yaw.
+    theta1 = r[2]
+    # 2. The net pitch rotation of joints 2-4 must equal the desired pitch.
+    theta_total = r[1]
+
+    # 3. Compute wrist center position in the world frame.
+    # The TCP offset (from joint 4) lies along Y in joint 4’s frame.
+    # In world coordinates, this offset becomes Rz(theta1)·[0, d_TCP, 0] = [ -sin(theta1)*d_TCP, cos(theta1)*d_TCP, 0 ].
+    # Subtract this from the desired TCP position.
+    sin1 = math.sin(theta1)
+    cos1 = math.cos(theta1)
+    p_wrist = (
+        p[0] + sin1 * d_TCP,      # p_x + sin(theta1)*d_TCP
+        p[1] - cos1 * d_TCP,      # p_y - cos(theta1)*d_TCP
+        p[2]                    # p_z (unchanged)
+    )
+
+    # 4. Transform the wrist position into joint 2’s coordinate frame.
+    # Joint 2’s origin in world is at Rz(theta1)*[0, d2, 0].
+    # Using rotation by –theta1:
+    #  Rz(-theta1) = [ [cos1, sin1, 0], [-sin1, cos1, 0], [0, 0, 1] ]
+    # Then subtract the fixed translation [0, d2, 0].
+    x_joint2 = cos1 * p_wrist[0] + sin1 * p_wrist[1]
+    y_joint2 = -sin1 * p_wrist[0] + cos1 * p_wrist[1]  # Before subtracting d2.
+    z_joint2 = p_wrist[2]
+    # Subtract the translation along Y.
+    p_w2 = (x_joint2, y_joint2 - d2, z_joint2)
+    # For the planar IK, we use the X and Z components; note that (p_w2)_y should match -d3y.
+    X = p_w2[0]
+    Z = p_w2[2]
+
+    # 5. Solve the 2R planar inverse kinematics for joints 2 and 3.
+    L1 = d3z    # Effective length from joint 2 to joint 3 (in Z direction of joint 2's frame).
+    L2 = d4     # Effective length from joint 3 to joint 4.
+    r_sq = X * X + Z * Z
+    # Compute cosine of theta3 using the law of cosines.
+    cos_theta3 = (r_sq - L1 * L1 - L2 * L2) / (2 * L1 * L2)
+    # Clamp for numerical safety.
+    cos_theta3 = max(min(cos_theta3, 1.0), -1.0)
+    # Choose the elbow–up solution (positive square root).
+    theta3 = math.atan2(math.sqrt(1 - cos_theta3 * cos_theta3), cos_theta3)
+    # 6. Solve for theta2.
+    theta2 = math.atan2(X, Z) - math.atan2(L2 * math.sin(theta3), L1 + L2 * math.cos(theta3))
+    
+    # 7. Determine theta4 so that the sum theta2+theta3+theta4 equals theta_total.
+    theta4 = theta_total - (theta2 + theta3)
+
+    return (theta1, theta2, theta3, theta4)

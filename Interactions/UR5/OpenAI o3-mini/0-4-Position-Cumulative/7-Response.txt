@@ -1,0 +1,136 @@
+```python
+import math
+
+def inverse_kinematics(p: tuple[float, float, float]) -> tuple[float, float, float, float, float]:
+    """
+    Computes a closed–form inverse kinematics solution for the 5–DOF robot.
+    
+    The robot is defined by:
+      • Revolute 1 at the base: translation [0, 0, 0], rotation about Z.
+      • Revolute 2: translation [0, 0.13585, 0], rotation about Y.
+      • Revolute 3: translation [0, -0.1197, 0.425], rotation about Y.
+      • Revolute 4: translation [0, 0, 0.39225], rotation about Y.
+      • Revolute 5: translation [0, 0.093, 0], rotation about Z.
+      • TCP: translation [0, 0, 0.09465].
+    
+    When all joints are zero the TCP is at (0, 0.10915, 0.9119).
+    In our approach the position is decoupled into two parts:
+      – A rotation about Z (joint 1) that orients a fixed “offset vector” in the xy–plane.
+      – A 2R chain (joints 2 and 3) that must “reach” a point defined by the remainder of the chain.
+    In particular, defining:
+         A = [ L1*sin(q2) + L2*sin(q2+q3),
+               0.10915,
+               L1*cos(q2) + L2*cos(q2+q3) ]
+         with L1 = 0.425 and L2 = 0.39225,
+    the TCP position is given by:
+         TCP = Rz(q1)*A + [0, 0, 0.09465]
+    so that
+         x = cos(q1)*A_x - sin(q1)*0.10915,
+         y = sin(q1)*A_x + cos(q1)*0.10915,
+         z = (L1*cos(q2) + L2*cos(q2+q3)) + 0.09465.
+    Note that the “redundant” joint 4 does not affect TCP position (its offset [0,0.093,0]
+    is invariant under rotations about Y) so q4 (and joint 5, which rotates about Z) can be used
+    to meet a secondary (orientation) objective. Here we resolve the redundancy by selecting q4 so that
+         q2 + q3 + q4 = T,
+    where T is chosen from one of two natural candidates:
+         T = psi   or   T = psi + pi,    with psi = atan2(x, z).
+    Finally, we set q5 = 0.
+    
+    The algorithm proceeds as follows:
+      1. From the xy–components of the target p = (x, y, z) and the fact that when q2,…,q5=0 the TCP’s xy–position is (0, 0.10915),
+         we deduce that if we write
+            [x, y] = Rz(q1)*[A_x, 0.10915],
+         then q1 = atan2(y, x) – atan2(0.10915, A_x). We compute A_x from the relation
+            sqrt(x²+y²)² = A_x² + (0.10915)².
+         (To choose the proper sign for A_x we select A_x < 0 when x < 0.)
+      2. Defining Z_target = z – 0.09465, the 2R chain (joints 2 and 3) must reach
+            (A_x, Z_target) = (L1*sin(q2) + L2*sin(q2+q3), L1*cos(q2) + L2*cos(q2+q3)).
+         Standard 2R IK gives
+            q3 = –acos((R_eff² – L1² – L2²) / (2*L1*L2))
+         with R_eff = sqrt(A_x² + Z_target²), and then
+            q2 = atan2(A_x, Z_target) – atan2(L2*sin(q3), L1 + L2*cos(q3)).
+      3. With q2 and q3 computed, the redundant joint 4 is chosen so that
+            q2 + q3 + q4 = T,
+         where T is chosen from the two candidates T = psi or psi + pi (with psi = atan2(x, z)).
+         We then select the candidate whose complete forward kinematics best matches the target.
+      4. Finally, we set q5 = 0.
+    
+    :param p: The desired TCP position (x, y, z) in meters.
+    :return: A tuple (q1, q2, q3, q4, q5) of joint angles (in radians).
+    """
+    # Unpack target position
+    x, y, z = p
+
+    # Fixed offsets from the robot’s structure:
+    offset_y = 0.10915   # from (0.13585 - 0.1197 + 0.093)
+    offset_z = 0.09465   # TCP z–offset
+    L1 = 0.425
+    L2 = 0.39225
+
+    # --- Solve for joint 1 ---
+    r_xy = math.sqrt(x*x + y*y)
+    # Determine A_x from the relation: r_xy^2 = A_x^2 + (offset_y)^2.
+    if r_xy < offset_y:
+        A_x = 0.0
+    else:
+        A_x = math.sqrt(r_xy*r_xy - offset_y*offset_y)
+        # Choose the sign of A_x so that the proper branch is selected.
+        if x < 0:
+            A_x = -A_x
+    q1 = math.atan2(y, x) - math.atan2(offset_y, A_x)
+
+    # --- Solve for joints 2 and 3 (the 2R chain) ---
+    Z_target = z - offset_z
+    R_eff = math.sqrt(A_x*A_x + Z_target*Z_target)
+    # Compute q3 using the cosine law (elbow-down solution)
+    cos_q3 = (R_eff*R_eff - L1*L1 - L2*L2) / (2 * L1 * L2)
+    cos_q3 = max(-1.0, min(1.0, cos_q3))
+    q3 = -math.acos(cos_q3)
+    # Then solve for q2
+    q2 = math.atan2(A_x, Z_target) - math.atan2(L2 * math.sin(q3), L1 + L2 * math.cos(q3))
+    
+    # --- Redundancy resolution for joint 4 ---
+    # Define psi from the target’s x and z (ignoring y)
+    psi = math.atan2(x, z)
+    # Two natural choices for the overall "pitch" T = q2+q3+q4 are:
+    T_candidate1 = psi
+    T_candidate2 = psi + math.pi
+    # Compute candidate q4 values:
+    q4_candidate1 = T_candidate1 - (q2 + q3)
+    q4_candidate2 = T_candidate2 - (q2 + q3)
+    
+    # --- Pick the candidate that yields the best match in position ---
+    def compute_fk(angles):
+        # Compute forward kinematics using our decoupled model.
+        # Our model: 
+        #   A = [ L1*sin(q2) + L2*sin(q2+q3),
+        #         offset_y,
+        #         L1*cos(q2) + L2*cos(q2+q3) ]
+        #   TCP = Rz(q1) * A + [0, 0, offset_z]
+        q1_, q2_, q3_, _, _ = angles
+        A_x_ = L1 * math.sin(q2_) + L2 * math.sin(q2_ + q3_)
+        A_y_ = offset_y
+        A_z_ = L1 * math.cos(q2_) + L2 * math.cos(q2_ + q3_)
+        x_fk = math.cos(q1_) * A_x_ - math.sin(q1_) * A_y_
+        y_fk = math.sin(q1_) * A_x_ + math.cos(q1_) * A_y_
+        z_fk = A_z_ + offset_z
+        return (x_fk, y_fk, z_fk)
+    
+    candidate1 = (q1, q2, q3, q4_candidate1, 0.0)
+    candidate2 = (q1, q2, q3, q4_candidate2, 0.0)
+    
+    fk1 = compute_fk(candidate1)
+    fk2 = compute_fk(candidate2)
+    err1 = math.sqrt((fk1[0]-x)**2 + (fk1[1]-y)**2 + (fk1[2]-z)**2)
+    err2 = math.sqrt((fk2[0]-x)**2 + (fk2[1]-y)**2 + (fk2[2]-z)**2)
+    
+    if err1 <= err2:
+        q4 = q4_candidate1
+    else:
+        q4 = q4_candidate2
+
+    # --- Joint 5 does not affect TCP position; set it to zero ---
+    q5 = 0.0
+
+    return (q1, q2, q3, q4, q5)
+```

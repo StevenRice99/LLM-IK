@@ -1,0 +1,137 @@
+```python
+import numpy as np
+
+def inverse_kinematics(p: tuple[float, float, float], r: tuple[float, float, float]) -> tuple[float, float, float, float, float]:
+    """
+    Computes a closed-form analytical inverse kinematics solution for the 5-DOF manipulator.
+    
+    The robot’s geometric parameters are as follows (all dimensions in meters, all angles in radians):
+      - Revolute 1: origin [0, 0, 0] with axis Y.
+      - Revolute 2: origin [0, -0.1197, 0.425] with axis Y.
+      - Revolute 3: origin [0, 0, 0.39225] with axis Y.
+      - Revolute 4: origin [0, 0.093, 0] with axis Z.
+      - Revolute 5: origin [0, 0, 0.09465] with axis Y.
+      - TCP: origin [0, 0.0823, 0] with a fixed rotation Rz(1.570796325).
+    
+    The kinematic decoupling used:
+      1. The TCP’s y‐position fixes joint 4 via:
+             p_y = (wrist_center_y) + d2 · cos(theta4)
+         where wrist_center_y is fixed at -0.0267 (obtained by adding -0.1197 from link2 and +0.093 from link4).
+      2. A net “arm” rotation ψ is defined by the desired TCP x and z coordinates:
+             ψ = arctan2(pₓ, p_z)
+      3. The wrist center p_wc is computed by “removing” the TCP offset:
+             p_wc = [ pₓ + d2*sin(theta4)*cos(ψ),
+                      p_y - d2*cos(theta4),
+                      p_z - d2*sin(theta4)*sin(ψ) ]
+         Then the effective 2R point Q is given by subtracting a fixed offset along the arm:
+             Q = [ p_wcₓ - d3*sin(ψ),
+                   p_wc_z - d3*cos(ψ) ]
+         with d3 = 0.09465.
+      4. The standard 2R inverse kinematics in the x–z planar arm (with links L1 and L2) gives joint 1 and 2:
+             L1 = 0.425, L2 = 0.39225.
+      5. Joint 3 is set so that:
+             θ₃ = ψ – (θ₁ + θ₂).
+      6. Finally, the wrist orientation is achieved by:
+             R_TCP = Ry(ψ) · Rz(θ₄) · Ry(θ₅) · Rz(1.570796325),
+         and by comparing with the desired orientation R_des computed from the given rpy (with R_des = Rz(yaw)·Ry(pitch)·Rx(roll)),
+         one solves for θ₅.
+         
+    :param p: The desired TCP translation [x, y, z].
+    :param r: The desired TCP orientation (roll, pitch, yaw) in radians.
+    :return: A tuple (θ₁, θ₂, θ₃, θ₄, θ₅) of joint angles.
+    """
+    
+    # Kinematic constants (in meters)
+    L1 = 0.425       # effective length from revolute 1 to 2 in the x-z plane
+    L2 = 0.39225     # effective length from revolute 2 to 3 in the x-z plane
+    d3 = 0.09465     # offset from the end of link 3 (joint 5 origin) along the chain
+    d2 = 0.0823      # TCP offset (translation along y in the wrist frame)
+    
+    # The fixed wrist center y-offset is given by: -0.1197 + 0.093 = -0.0267.
+    wrist_y_offset = -0.0267
+    
+    # Convert desired position to numpy array for convenience.
+    p_arr = np.array(p)  # [p_x, p_y, p_z]
+    
+    # ----- Solve for joint 4 (theta4) using the y-equation -----
+    # p_y = wrist_y_offset + d2 * cos(theta4)  ==> cos(theta4) = (p_y - wrist_y_offset) / d2
+    cos_theta4 = (p_arr[1] - wrist_y_offset) / d2
+    # Clip cos_theta4 to the valid range [-1, 1] to avoid numerical issues.
+    cos_theta4 = np.clip(cos_theta4, -1.0, 1.0)
+    theta4 = np.arccos(cos_theta4)
+    # Choose the positive sine solution (consistent with typical assembly)
+    sin_theta4 = np.sqrt(1 - cos_theta4**2)
+    
+    # ----- Compute net arm rotation ψ (psi) from x and z of the TCP -----
+    psi = np.arctan2(p_arr[0], p_arr[2])
+    
+    # ----- Compute the wrist center (p_wc) -----
+    # Remove the TCP offset (d2 along the y-axis of the wrist) rotated by theta4.
+    p_wc = np.array([
+        p_arr[0] + d2 * sin_theta4 * np.cos(psi),
+        p_arr[1] - d2 * cos_theta4,
+        p_arr[2] - d2 * sin_theta4 * np.sin(psi)
+    ])
+    
+    # ----- Compute the effective arm endpoint (point Q) -----
+    # The last link d3 provides an offset along the arm’s direction:
+    Qx = p_wc[0] - d3 * np.sin(psi)
+    Qz = p_wc[2] - d3 * np.cos(psi)
+    r_val = np.sqrt(Qx**2 + Qz**2)
+    
+    # ----- Solve the planar 2R inverse kinematics for joints 1 and 2 -----
+    # Law of Cosines:
+    cos_theta2 = (r_val**2 - L1**2 - L2**2) / (2 * L1 * L2)
+    cos_theta2 = np.clip(cos_theta2, -1.0, 1.0)
+    theta2_prime = np.arccos(cos_theta2)  # Choose the "elbow-down" solution.
+    
+    # Calculate auxiliary angles:
+    phi = np.arctan2(Qx, Qz)
+    delta = np.arctan2(L2 * np.sin(theta2_prime), L1 + L2 * np.cos(theta2_prime))
+    theta1 = phi - delta
+    theta2 = theta2_prime
+    theta3 = psi - (theta1 + theta2)
+    
+    # ----- Solve for joint 5 (theta5) using the orientation constraint -----
+    # Helper functions for rotation matrices.
+    def rot_x(t):
+        return np.array([
+            [1, 0, 0],
+            [0, np.cos(t), -np.sin(t)],
+            [0, np.sin(t),  np.cos(t)]
+        ])
+    
+    def rot_y(t):
+        return np.array([
+            [ np.cos(t), 0, np.sin(t)],
+            [         0, 1,         0],
+            [-np.sin(t), 0, np.cos(t)]
+        ])
+    
+    def rot_z(t):
+        return np.array([
+            [np.cos(t), -np.sin(t), 0],
+            [np.sin(t),  np.cos(t), 0],
+            [        0,          0, 1]
+        ])
+    
+    # Desired end-effector rotation computed from rpy with the convention:
+    # R_des = Rz(yaw) @ Ry(pitch) @ Rx(roll)
+    roll, pitch, yaw = r
+    R_des = rot_z(yaw) @ rot_y(pitch) @ rot_x(roll)
+    
+    # The forward chain for the wrist is: 
+    # R_TCP = Ry(psi) · Rz(theta4) · Ry(theta5) · Rz(1.570796325)
+    # Let A = Ry(psi) · Rz(theta4). Then we require:
+    # Aᵀ · R_des · Rz(-1.570796325) = Ry(theta5)
+    A = rot_y(psi) @ rot_z(theta4)
+    B = A.T @ R_des @ rot_z(-1.570796325)
+    # For a rotation about the Y-axis: Ry(theta5) has the form:
+    # [[ cos(theta5), 0, sin(theta5)],
+    #  [          0, 1,          0],
+    #  [-sin(theta5), 0, cos(theta5)]]
+    # So we can recover theta5 from the (0,2) and (0,0) entries:
+    theta5 = np.arctan2(B[0, 2], B[0, 0])
+    
+    return (theta1, theta2, theta3, theta4, theta5)
+```

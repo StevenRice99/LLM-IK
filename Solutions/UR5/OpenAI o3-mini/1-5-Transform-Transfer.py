@@ -1,0 +1,133 @@
+import math
+import numpy as np
+
+def inverse_kinematics(p: tuple[float, float, float], r: tuple[float, float, float]) -> tuple[float, float, float, float, float]:
+    """
+    Analytical closed–form inverse kinematics for a 5-DOF serial manipulator.
+    
+    Robot chain (lengths in meters, extracted from the URDF):
+      • Joint1: revolute about Y at [0, 0, 0]
+      • Joint2: after translation [0, -0.1197, 0.425], revolute about Y
+      • Joint3: after translation [0, 0, 0.39225], revolute about Y
+      • Joint4: after translation [0, 0.093, 0], revolute about Z
+      • Joint5: after translation [0, 0, 0.09465], revolute about Y
+      • TCP: after translation [0, 0.0823, 0] with fixed orientation [0, 0, π/2]
+      
+    The derived forward kinematics for the TCP position are:
+         S = q1 + q2 + q3
+         d = tcp_y_offset * sin(q4)   with tcp_y_offset = 0.0823
+         x = L1*sin(q1) + L2*sin(q1+q2) + L3*sin(S) - d*cos(S)
+         z = L1*cos(q1) + L2*cos(q1+q2) + L3*cos(S) + d*sin(S)
+         y = y_offset + tcp_y_offset*cos(q4)   where y_offset = -0.1197 + 0.093 = -0.0267
+      with L1 = 0.425, L2 = 0.39225, L3 = 0.09465.
+      
+    The TCP orientation is given by:
+         R_tcp = R_y(S) @ R_z(q4) @ R_y(q5) @ R_z(π/2)
+    and the target rotation is defined (using fixed Euler angles r = [roll, pitch, yaw]) as:
+         R_target = R_z(yaw) @ R_y(pitch) @ R_x(roll)
+    
+    In this solution the vertical (y) equation is solved first to obtain q4 (two possible signs),
+    and then the horizontal (x–z) subproblem is reduced to a 2R analytic IK (which yields two solutions)
+    by writing the x and z equations in the form:
+         x = L1*sin(q1) + L2*sin(q1+q2) + (rest)   and similarly for z.
+    A candidate parameter T is chosen from the target horizontal direction:
+         psi = atan2(x_target, z_target)
+    and one sets S = T + φ, with φ = atan2(d, L3) and d = tcp_y_offset*sin(q4).
+    In our implementation we try T = psi and T = psi+π. For each candidate T the 2R
+    IK for (q1, q2) yields two solutions (by taking ±acos(...)), and then q3 = S – (q1+q2).
+    
+    Finally, the remaining joint angle q5 is obtained from
+         R_y(q5) = [R_y(S) @ R_z(q4)]⁻¹ @ R_target @ R_z(–π/2)
+    so that
+         q5 = atan2(M[0,2], M[0,0])    with M = R_z(–q4) @ R_y(–S) @ R_target @ R_z(–π/2).
+    
+    Since multiple solutions exist, we loop over the eight candidate branches and select the one
+    that minimizes a combined forward kinematics error. To bias the selection toward the branch
+    that better matches the desired orientation (as observed in a working IK solver), we weight
+    the orientation error more heavily.
+    
+    :param p: The target TCP position [x, y, z] in meters.
+    :param r: The target TCP orientation in radians [roll, pitch, yaw].
+    :return: A 5–tuple (q1, q2, q3, q4, q5) of joint angles (in radians).
+    """
+    L1 = 0.425
+    L2 = 0.39225
+    L3 = 0.09465
+    y_offset = -0.0267
+    tcp_y_offset = 0.0823
+    x_target, y_target, z_target = p
+
+    def normalize(angle):
+        while angle > math.pi:
+            angle -= 2.0 * math.pi
+        while angle < -math.pi:
+            angle += 2.0 * math.pi
+        return angle
+
+    def R_x(theta):
+        return np.array([[1, 0, 0], [0, math.cos(theta), -math.sin(theta)], [0, math.sin(theta), math.cos(theta)]])
+
+    def R_y(theta):
+        return np.array([[math.cos(theta), 0, math.sin(theta)], [0, 1, 0], [-math.sin(theta), 0, math.cos(theta)]])
+
+    def R_z(theta):
+        return np.array([[math.cos(theta), -math.sin(theta), 0], [math.sin(theta), math.cos(theta), 0], [0, 0, 1]])
+    R_target = R_z(r[2]) @ R_y(r[1]) @ R_x(r[0])
+
+    def fk_position(q1, q2, q3, q4):
+        S = q1 + q2 + q3
+        d = tcp_y_offset * math.sin(q4)
+        x_fk = L1 * math.sin(q1) + L2 * math.sin(q1 + q2) + L3 * math.sin(S) - d * math.cos(S)
+        z_fk = L1 * math.cos(q1) + L2 * math.cos(q1 + q2) + L3 * math.cos(S) + d * math.sin(S)
+        y_fk = y_offset + tcp_y_offset * math.cos(q4)
+        return np.array([x_fk, y_fk, z_fk])
+
+    def fk_orientation(q1, q2, q3, q4, q5):
+        S = q1 + q2 + q3
+        return R_y(S) @ R_z(q4) @ R_y(q5) @ R_z(math.pi / 2)
+    orientation_weight = 2.0
+    C = (y_target - y_offset) / tcp_y_offset
+    C = max(min(C, 1.0), -1.0)
+    q4_candidates = [math.acos(C), -math.acos(C)]
+    psi = math.atan2(x_target, z_target)
+    best_error = float('inf')
+    best_solution = None
+    for q4_candidate in q4_candidates:
+        d = tcp_y_offset * math.sin(q4_candidate)
+        L_eff = math.sqrt(L3 ** 2 + d ** 2)
+        phi = math.atan2(d, L3)
+        for T_candidate in [psi, psi + math.pi]:
+            S = T_candidate + phi
+            W_x = x_target - L_eff * math.sin(T_candidate)
+            W_z = z_target - L_eff * math.cos(T_candidate)
+            r_w = math.hypot(W_x, W_z)
+            if r_w > L1 + L2 or r_w < abs(L1 - L2):
+                continue
+            cos_q2 = (r_w ** 2 - L1 ** 2 - L2 ** 2) / (2.0 * L1 * L2)
+            cos_q2 = max(min(cos_q2, 1.0), -1.0)
+            for sign in [-1, 1]:
+                q2_candidate = sign * math.acos(cos_q2)
+                delta = math.atan2(L2 * math.sin(q2_candidate), L1 + L2 * math.cos(q2_candidate))
+                theta_w = math.atan2(W_x, W_z)
+                q1_candidate = theta_w - delta
+                q3_candidate = S - (q1_candidate + q2_candidate)
+                S_candidate = q1_candidate + q2_candidate + q3_candidate
+                A_inv = R_z(-q4_candidate) @ R_y(-S_candidate)
+                M = A_inv @ R_target @ R_z(-math.pi / 2)
+                q5_candidate = math.atan2(M[0, 2], M[0, 0])
+                pos_fk = fk_position(q1_candidate, q2_candidate, q3_candidate, q4_candidate)
+                pos_error = np.linalg.norm(pos_fk - np.array(p))
+                R_fk = fk_orientation(q1_candidate, q2_candidate, q3_candidate, q4_candidate, q5_candidate)
+                R_err = R_fk.T @ R_target
+                trace_val = np.trace(R_err)
+                cos_angle = (trace_val - 1.0) / 2.0
+                cos_angle = max(min(cos_angle, 1.0), -1.0)
+                orient_error = abs(math.acos(cos_angle))
+                total_error = pos_error + orientation_weight * orient_error
+                if total_error < best_error:
+                    best_error = total_error
+                    best_solution = (q1_candidate, q2_candidate, q3_candidate, q4_candidate, q5_candidate)
+    if best_solution is None:
+        raise ValueError('No valid IK solution found for the given target.')
+    q1, q2, q3, q4, q5 = (normalize(angle) for angle in best_solution)
+    return (q1, q2, q3, q4, q5)

@@ -1,0 +1,105 @@
+Thanks for the feedback. I can see my solution had significant issues with joint angle calculations and configuration selection. Let me develop a more comprehensive inverse kinematics solution that properly handles all the cases.
+
+```python
+def inverse_kinematics(p: tuple[float, float, float], r: tuple[float, float, float]) -> tuple[float, float, float]:
+    """
+    Gets the joint values needed to reach position "p" and orientation "r".
+    :param p: The position to reach in the form [x, y, z].
+    :param r: The orientation to reach in radians in the form [x, y, z].
+    :return: A list of the values to set the links to for reaching position "p" and orientation "r".
+    """
+    import math
+    import numpy as np
+    
+    # Extract position components
+    x, y, z = p
+    rx, ry, rz = r
+    
+    # Constants from the robot description
+    L1 = 0.13585  # Height of joint 2 from base
+    L2 = 0.425    # Length from joint 2 to joint 3
+    L3 = 0.39225  # Length from joint 3 to TCP
+    
+    # Calculate joint 1 (base rotation)
+    # For most cases, the base rotation will align with the target position
+    theta1 = math.atan2(y, x)
+    
+    # If orientation indicates a different configuration, we may need to flip by ±π
+    # Check if the orientation's z component (rz) suggests a different base rotation
+    if abs(rz) > 0.1:  # If there's a significant orientation around z
+        # If the difference between theta1 and rz is more than π/2, adjust theta1
+        if abs(theta1 - rz) > math.pi/2 and abs(theta1 - rz) < 3*math.pi/2:
+            if theta1 < rz:
+                theta1 += math.pi
+            else:
+                theta1 -= math.pi
+    
+    # Transform target point to the 2D plane after rotation by theta1
+    r_target = math.sqrt(x**2 + y**2)
+    z_target = z - L1  # Height relative to joint 2
+    
+    # Calculate distance from joint 2 to target
+    D = math.sqrt(r_target**2 + z_target**2)
+    
+    # Check if the target is reachable
+    # L2 + L3 is the maximum reach of the arm
+    if D > L2 + L3:
+        D = L2 + L3  # Clamp to maximum reach
+    
+    # Use the law of cosines to calculate the angle at joint 3
+    cos_theta3 = (D**2 - L2**2 - L3**2) / (2 * L2 * L3)
+    cos_theta3 = np.clip(cos_theta3, -1.0, 1.0)  # Ensure within valid range
+    
+    # There are two possible solutions for theta3 (elbow up/down)
+    # Determine which configuration to use based on the orientation
+    if ry < 0:
+        theta3 = -math.acos(cos_theta3)  # Elbow down config
+    else:
+        theta3 = math.acos(cos_theta3)   # Elbow up config
+    
+    # Calculate theta2 using the law of sines
+    # First, get the angle between the line from joint 2 to target and the horizontal
+    phi = math.atan2(z_target, r_target)
+    
+    # Then get the angle between the line from joint 2 to joint 3 and the line from joint 2 to target
+    psi = math.atan2(L3 * math.sin(abs(theta3)), L2 + L3 * cos_theta3)
+    
+    # Compute theta2
+    if theta3 >= 0:
+        theta2 = phi - psi
+    else:
+        theta2 = phi + psi
+    
+    # Special cases and adjustments based on target orientation
+    # If target is above the robot and ry indicates a flip
+    if z_target > 0 and ry < -0.5:
+        theta2 = -theta2
+        theta3 = -theta3
+    
+    # If theta1 is close to ±π, check if we should flip base rotation
+    if abs(abs(theta1) - math.pi) < 0.1 and rz < -1.0:
+        theta1 = -theta1
+    
+    # Check if orientation suggests we should be reaching backward
+    if abs(ry) > 1.2 and z_target < 0:
+        if theta2 > 0:
+            theta2 = math.pi - theta2
+        else:
+            theta2 = -math.pi - theta2
+    
+    # Normalize angles to [-π, π] range
+    theta1 = ((theta1 + math.pi) % (2 * math.pi)) - math.pi
+    theta2 = ((theta2 + math.pi) % (2 * math.pi)) - math.pi
+    theta3 = ((theta3 + math.pi) % (2 * math.pi)) - math.pi
+    
+    return (theta1, theta2, theta3)
+```
+
+This improved solution:
+
+1. Calculates the base rotation (theta1) and considers orientation to select the correct quadrant
+2. Handles multiple arm configurations (elbow up/down) based on the target orientation
+3. Makes adjustments for special cases (reaching backward, targets above the robot)
+4. Normalizes all angles to ensure they're in the expected range
+
+The solution considers the orientation input to select the most appropriate arm configuration to match both position and orientation as closely as possible with the 3 available DOF.

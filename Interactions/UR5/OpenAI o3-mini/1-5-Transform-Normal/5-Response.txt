@@ -1,0 +1,180 @@
+We can derive a (closed‐form) solution by “decoupling” the arm position (joints 1–3) from the wrist orientation (joints 4–5). One acceptable answer is as follows. In our derivation we note that (with all angles in radians):
+
+• The TCP’s fixed origin (TCP link) is given by a translation of d₂ = 0.0823 along y (in the wrist frame) plus a fixed rotation Rz(1.570796325). Hence the TCP y–component (in the base) obeys
+
+  p_y = –0.0267 + d₂·cos(θ₄).
+
+Thus we immediately get
+
+  θ₄ = arccos((p_y + 0.0267)/d₂).
+
+• Next, note that if we “remove” the wrist’s offset from the desired TCP position then the wrist‐center (i.e. the origin of joint 5) is
+
+  p_wc = [ pₓ + d₂·sin(θ₄)·cos(ψ),
+        p_y – d₂·cos(θ₄),
+        p_z – d₂·sin(θ₄)·sin(ψ) ],
+
+where ψ = (θ₁+θ₂+θ₃) is the net rotation from joints 1–3. (Because joints 1, 2 and 3 all rotate about y the “arm plane” is determined by ψ; note that when all joint angles vanish the FK shows ψ = 0.) A natural “decoupling” (and one acceptable choice) is to set
+
+  ψ = arctan2(pₓ, p_z).
+
+Now, the first three joints produce the wrist–center via the chain
+
+  p_wc = Q + d₃·[sin ψ, 0, cos ψ],
+
+with d₃ = 0.09465 and where Q is the effective “2‐R result” from links 1 and 2. In particular, writing
+
+  Q = [0.425·sin(θ₁) + 0.39225·sin(θ₁+θ₂),
+      …           –0.0267,        
+     0.425·cos(θ₁) + 0.39225·cos(θ₁+θ₂) ],
+
+we equate the x– and z–components with
+
+  Q = [ pₓ + d₂·sin(θ₄)·cos(ψ) – d₃·sin(ψ),
+      p_z – d₂·sin(θ₄)·sin(ψ) – d₃·cos(ψ) ].
+
+Then (letting Qₓ and Q_z denote the right–hand side components and letting r = √(Qₓ²+Q_z²)) the standard planar “2R–IK” gives
+
+  θ₂′ = arccos( (r² – 0.425² – 0.39225²)/(2·0.425·0.39225) ),
+   φ = arctan2(Qₓ, Q_z),
+   δ = arctan2(0.39225·sin(θ₂′), 0.425 + 0.39225·cos(θ₂′) ),
+   θ₁ = φ – δ,
+   θ₂ = θ₂′                   (choose “elbow–down”)
+   θ₃ = ψ – (θ₁+θ₂).
+
+• Finally, the overall TCP rotation is given by
+
+  R_TCP = Ry(ψ) · Rz(θ₄) · Ry(θ₅) · Rz(1.570796325).
+
+Thus, after we compute a desired rotation matrix R_des (from the given rpy r – here we use the convention R = Rz(yaw)·Ry(pitch)·Rx(roll)) we “remove” the contribution from joints 1–3 and joint 4 by setting
+
+  A = Ry(ψ) · Rz(θ₄)
+  B = Aᵀ · R_des · Rz(–1.570796325).
+
+Since B = Ry(θ₅) its (0,0) and (0,2) entries satisfy B[0,0] = cos(θ₅) and B[0,2] = sin(θ₅); hence
+
+  θ₅ = arctan2(B[0,2], B[0,0]).
+
+One acceptable answer is therefore to complete the inverse_kinematics method as shown below. (Any solution that returns joint values solving
+
+  joint1 = θ₁, joint2 = θ₂, joint3 = θ₃, joint4 = θ₄, joint5 = θ₅
+
+and that satisfies the above equations is acceptable.)
+
+Below is one complete Python solution (using numpy) implementing the above steps:
+
+------------------------------------------------------------
+def inverse_kinematics(p: tuple[float, float, float], r: tuple[float, float, float]) -> tuple[float, float, float, float, float]:
+    """
+    Gets the joint values needed to reach position "p" and orientation "r"
+    for a 5-DOF robot whose link frames are given by:
+      • Revolute 1: origin [0,0,0], axis Y.
+      • Revolute 2: origin [0, -0.1197, 0.425], axis Y.
+      • Revolute 3: origin [0, 0, 0.39225], axis Y.
+      • Revolute 4: origin [0, 0.093, 0], axis Z.
+      • Revolute 5: origin [0, 0, 0.09465], axis Y.
+      • TCP: origin [0, 0.0823, 0] with fixed rotation Rz(1.570796325)
+    The solution below decouples the IK into the arm (joints 1–3) and wrist (joints 4–5).
+    
+    :param p: The desired TCP position [x, y, z].
+    :param r: The desired TCP orientation (roll, pitch, yaw) in radians.
+    :return: (θ₁, θ₂, θ₃, θ₄, θ₅)
+    """
+    import numpy as np
+
+    # -- kinematic constants (lengths in meters) ---------------
+    L1 = 0.425      # between joints 1 and 2 (affects sin/cos contributions)
+    L2 = 0.39225    # between joints 2 and 3
+    d3 = 0.09465    # translation from the endpoint of link 3 (after joint3)
+    d2 = 0.0823     # wrist-to-TCP translation (from joint5 to TCP)
+    # The vertical offsets from the URDF:
+    # After joint1: no offset;
+    # After joint2: y offset = –0.1197 and z offset = 0.425
+    # After joint3: additional translation [0, 0, 0.39225]
+    # After joint3: additional y translation of 0.093 leads to a fixed wrist center y of –0.0267.
+    # (i.e. the wrist center has y = –0.0267 in any configuration.)
+
+    p_arr = np.array(p)  # desired TCP position
+    
+    # ---- Solve for joint 4 from the y-equation -----------------
+    # TCP y = wrist_center_y + d2*cos(theta4)
+    # and wrist_center_y is fixed at –0.0267.
+    theta4 = np.arccos((p_arr[1] + 0.0267) / d2)
+    sin_theta4 = np.sqrt(1 - ((p_arr[1] + 0.0267) / d2)**2)  # choose positive
+
+    # ---- Choose ψ (the net rotation from joints 1–3) -----------
+    # A natural decoupling is to set:
+    psi = np.arctan2(p_arr[0], p_arr[2])
+    
+    # ---- Compute wrist-center position -------------------------
+    # The fixed TCP offset in the wrist frame is a translation of [0, d2, 0]
+    # (and then a fixed rotation Rz(1.570796325) which does not affect the origin).
+    # In our chain the wrist–center:
+    p_wc = np.array([ p_arr[0] + d2 * sin_theta4 * np.cos(psi),
+                      p_arr[1] - d2 * np.cos(theta4),
+                      p_arr[2] - d2 * sin_theta4 * np.sin(psi) ])
+    # Now the arm (joints 1–3) must place the endpoint of link 3 (i.e. the wrist center)
+    # according to:
+    # p_wc = Q + [d3*sin(psi), 0, d3*cos(psi)]
+    # where Q = [L1*sin(theta1) + L2*sin(theta1+theta2),
+    #            –0.0267, 
+    #            L1*cos(theta1) + L2*cos(theta1+theta2)]
+    # Therefore, we define the effective 2R point Q as:
+    Qx = p_wc[0] - d3 * np.sin(psi)
+    Qz = p_wc[2] - d3 * np.cos(psi)
+    r_val = np.sqrt(Qx**2 + Qz**2)
+    
+    # ---- Solve the 2R planar IK for joints 1 and 2 ------------
+    # Law of cosines for the planar 2R arm:
+    cos_theta2 = (r_val**2 - L1**2 - L2**2) / (2 * L1 * L2)
+    cos_theta2 = np.clip(cos_theta2, -1.0, 1.0)
+    theta2_prime = np.arccos(cos_theta2)  # choose the "elbow-down" solution
+    
+    # Let φ be the direction of Q in the xz-plane:
+    phi = np.arctan2(Qx, Qz)
+    # Then δ is given by:
+    delta = np.arctan2(L2 * np.sin(theta2_prime), L1 + L2 * np.cos(theta2_prime))
+    theta1 = phi - delta
+    theta2 = theta2_prime
+    theta3 = psi - (theta1 + theta2)
+    
+    # ---- Solve for joint 5 from the orientation ----------------
+    # The overall TCP rotation (ignoring the TCP’s fixed rotation) is
+    # R_TCP = Ry(psi) · Rz(theta4) · Ry(theta5) · Rz(1.570796325)
+    # and we require R_TCP = R_des, where R_des is computed from the desired rpy.
+    # We compute R_des using the convention: R_des = Rz(yaw) · Ry(pitch) · Rx(roll)
+    def rot_x(t):
+        return np.array([[1,          0,           0],
+                         [0, np.cos(t), -np.sin(t)],
+                         [0, np.sin(t),  np.cos(t)]])
+    def rot_y(t):
+        return np.array([[ np.cos(t), 0, np.sin(t)],
+                         [         0, 1,         0],
+                         [-np.sin(t), 0, np.cos(t)]])
+    def rot_z(t):
+        return np.array([[np.cos(t), -np.sin(t), 0],
+                         [np.sin(t),  np.cos(t), 0],
+                         [        0,          0, 1]])
+    
+    roll, pitch, yaw = r
+    R_des = rot_z(yaw) @ rot_y(pitch) @ rot_x(roll)
+    
+    # Let A = Ry(psi) · Rz(theta4), then we have
+    # Aᵀ · R_des · Rz(–1.570796325) = Ry(theta5)
+    A = rot_y(psi) @ rot_z(theta4)
+    B = A.T @ R_des @ rot_z(-1.570796325)
+    theta5 = np.arctan2(B[0,2], B[0,0])
+    
+    return (theta1, theta2, theta3, theta4, theta5)
+
+------------------------------------------------------------
+
+Note the following:
+1. In the solution above the “net” rotation ψ of joints 1–3 is chosen as the arctan of the TCP’s x and z coordinates. (Other choices are possible; any set of values that yields the same TCP position and that, after solving for joint 5 from the orientation constraint, gives a valid solution is acceptable.)
+2. The 2R–IK is standard: with Q = [Qx, Qz] one has
+  θ₂ = arccos((r²–L1²–L2²)/(2·L1·L2))
+  θ₁ = arctan2(Qx, Qz) – arctan2(L2·sinθ₂, L1 + L2·cosθ₂)
+and then θ₃ = ψ – (θ₁+θ₂).
+3. In the orientation part we use the fixed TCP rotation Rz(1.570796325) as given in the URDF.
+
+Any solution that returns joint angles (θ₁, …, θ₅) satisfying the same equations is acceptable. (No “testing‐code” is provided here.)

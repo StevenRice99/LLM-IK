@@ -1,0 +1,164 @@
+Below is one acceptable solution. In our solution we first “decouple” the base yaw by choosing θ₁ so that when we rotate the target position by –θ₁ the remainder falls in the “arm‐plane” (the plane in which the two “arm” links lie). In our case the first joint rotates about Z and we choose
+
+  θ₁ = atan2(–pₓ, p_y)
+
+so that after forming p′ = Rz(–θ₁)·p the first (x) component is (nearly) zero. (In forward kinematics with all other joints zero the TCP lies at [0,0.10915,0.81725] in the rotated frame.) Then noting that the remaining two “arm” joints effect a 2‑R planar chain in the (x,z)–plane, we set
+
+  X_target = p′ₓ  and  Z_target = p′_z
+
+with link lengths L₁=0.425 and L₂=0.39225. (Notice that the constant offsets in y add to 0.13585 + (–0.1197) + 0.093 = 0.10915.) Then by the law‐of‐cosines we write
+
+  cos(θ₃) = (r² – L₁² – L₂²)/(2 L₁ L₂)  with r = sqrt(X_target²+Z_target²)
+
+and choose, for example, the “elbow‐down” solution θ₃ = acos(…). Next, using
+
+  θ₂ = atan2(X_target, Z_target) – atan2(L₂ sin(θ₃), L₁+L₂ cos(θ₃))
+
+we have solved the position for joints 2–3. Finally, note that since joints 2, 3, and 4 all rotate about Y the overall “arm–orientation” in the decoupled chain is given by
+
+  θ_total = θ₂+θ₃+θ₄.
+
+We now compute the desired end‐effector orientation from the given roll–pitch–yaw (with the convention R = Rz(yaw)*Ry(pitch)*Rx(roll)). In order for the 4DOF to be consistent the target orientation must be achievable as Rz(θ₁)*Ry(θ_total). Thus we “remove” the already–solved base rotation by forming
+
+  R′ = Rz(–θ₁)*R_desired
+
+and then identify
+
+  θ_total = atan2(R′[0,2], R′[0,0]).
+
+Then we set
+
+  θ₄ = θ_total – (θ₂+θ₃).
+
+The complete function is shown below.
+
+-------------------------------------------------
+
+def inverse_kinematics(p: tuple[float, float, float], r: tuple[float, float, float]) -> tuple[float, float, float, float]:
+    """
+    Gets the joint values needed to reach position "p" and orientation "r" for the 4-DOF
+    manipulator whose joints are:
+      - Joint 1: Revolute about Z (base)
+      - Joints 2-4: Revolute about Y (arm joints)
+    The given link dimensions (translated from the URDF) are:
+      Link2 translation: [0, 0.13585, 0]
+      Link3 translation: [0, -0.1197, 0.425]
+      Link4 translation: [0, 0, 0.39225]
+      TCP offset:      [0, 0.093, 0]
+    Note that the sum of the y offsets is 0.13585 - 0.1197 + 0.093 = 0.10915.
+    
+    :param p: The target TCP position as [x, y, z]
+    :param r: The target TCP roll-pitch-yaw (in radians) as [roll, pitch, yaw]
+    :return: A tuple (θ₁, θ₂, θ₃, θ₄) with the joint angles (in radians)
+    """
+    import math
+    # Unpack target position
+    x, y, z = p
+
+    # -------------------------------
+    # 1. Solve for the base joint (θ₁) 
+    # Choose θ₁ so that when we rotate p by -θ₁, the new x-coordinate becomes zero.
+    theta1 = math.atan2(-x, y)
+    
+    # Build the rotation matrix Rz(-θ₁)
+    c1 = math.cos(theta1)
+    s1 = math.sin(theta1)
+    # Rz(-θ₁):
+    # [ cos(θ₁)   sin(θ₁)   0 ]
+    # [ -sin(θ₁)  cos(θ₁)   0 ]
+    # [    0         0      1 ]
+    
+    # Rotate p into the arm’s plane: p′ = Rz(-θ₁) * p.
+    # (After this rotation, the x-component in p′ should be (nearly) zero.)
+    p_prime_x = c1 * x + s1 * y
+    p_prime_y = -s1 * x + c1 * y
+    p_prime_z = z
+
+    # For the 2-R sub-chain (joints 2 and 3) the only “active” coordinates are:
+    #  X_target = p′_x = L₁*sin(θ₂)+L₂*sin(θ₂+θ₃)
+    #  Z_target = p′_z = L₁*cos(θ₂)+L₂*cos(θ₂+θ₃)
+    # (Note: p′_y is predetermined by the constant link offsets and does not depend on these joints.)
+    X_target = p_prime_x
+    Z_target = p_prime_z
+
+    # Link lengths (from URDF offsets):
+    L1 = 0.425
+    L2 = 0.39225
+
+    # Compute the planar distance from the origin of joint 2 to the target in the x-z plane.
+    r_planar = math.sqrt(X_target**2 + Z_target**2)
+    
+    # -------------------------------
+    # 2. Solve for joints 2 and 3 (the 2-R planar arm)
+    # Using the law-of-cosines to solve for θ₃:
+    cos_theta3 = (r_planar**2 - L1**2 - L2**2) / (2 * L1 * L2)
+    # Clamp due to numerical errors.
+    if cos_theta3 > 1.0: 
+        cos_theta3 = 1.0
+    if cos_theta3 < -1.0:
+        cos_theta3 = -1.0
+    theta3 = math.acos(cos_theta3)
+    # (One can also choose the negative solution; here we select the principal value.)
+
+    # Solve for θ₂.
+    # Let γ = atan2(X_target, Z_target). Then:
+    gamma = math.atan2(X_target, Z_target)
+    theta2 = gamma - math.atan2(L2 * math.sin(theta3), L1 + L2 * math.cos(theta3))
+    
+    # -------------------------------
+    # 3. Solve for joint 4 via the orientation requirement.
+    # The overall orientation from joints 2,3,4 is along Y:
+    #   θ_total = θ₂ + θ₃ + θ₄
+    # and together with joint 1 we have
+    #   R_tcp = Rz(θ₁) * Ry(θ_total)
+    # The desired end-effector orientation is provided as roll-pitch-yaw r.
+    # First, build R_desired = Rz(yaw) * Ry(pitch) * Rx(roll)
+    roll, pitch, yaw = r
+    cr = math.cos(roll)
+    sr = math.sin(roll)
+    cp = math.cos(pitch)
+    sp = math.sin(pitch)
+    cy = math.cos(yaw)
+    sy = math.sin(yaw)
+    
+    R_des = [
+        [ cy * cp,                cy * sp * sr - sy * cr,    cy * sp * cr + sy * sr ],
+        [ sy * cp,                sy * sp * sr + cy * cr,    sy * sp * cr - cy * sr ],
+        [ -sp,                    cp * sr,                   cp * cr ]
+    ]
+    
+    # Remove the effect of the base rotation by forming R′ = Rz(–θ₁)*R_desired.
+    Rz_neg = [
+        [ c1,  s1, 0 ],
+        [ -s1, c1, 0 ],
+        [ 0,   0,  1 ]
+    ]
+    # Do a proper matrix multiplication: (Rz_neg * R_desired)[i][j] = sum_k Rz_neg[i][k] * R_des[k][j]
+    R_prime = [[0, 0, 0],
+               [0, 0, 0],
+               [0, 0, 0]]
+    for i in range(3):
+        for j in range(3):
+            R_prime[i][j] = Rz_neg[i][0]*R_des[0][j] + Rz_neg[i][1]*R_des[1][j] + Rz_neg[i][2]*R_des[2][j]
+    
+    # For a pure rotation about Y by an angle θ_total, the rotation matrix is:
+    #   Ry(θ_total) = [ [cosθ_total, 0, sinθ_total],
+    #                    [0,          1, 0         ],
+    #                    [-sinθ_total,0, cosθ_total] ]
+    # So we may extract θ_total from R′[0,0] and R′[0,2].
+    theta_total = math.atan2(R_prime[0][2], R_prime[0][0])
+    
+    # Then joint 4 must satisfy:
+    theta4 = theta_total - (theta2 + theta3)
+    
+    return (theta1, theta2, theta3, theta4)
+
+-------------------------------------------------
+
+Comments:
+
+• The key idea is to choose θ₁ so that the target position “drops” into the plane where the remaining arm (joints 2–4) operate.
+• The two “arm” links (with lengths 0.425 and 0.39225) then form a standard 2-R chain in the (x,z)–plane (after decoupling) and are solved via the law–of–cosines.
+• Finally, the overall orientation R_tcp = Rz(θ₁)*Ry(θ₂+θ₃+θ₄) must match the target R_desired. After “removing” the base rotation by Rz(–θ₁), we extract the needed accumulated Y–rotation and set θ₄ accordingly.
+
+This closed–form solution satisfies the problem statement.

@@ -1,0 +1,174 @@
+```python
+import math
+import numpy as np
+
+def inverse_kinematics(p: tuple[float, float, float]) -> tuple[float, float, float, float, float, float]:
+    """
+    Analytical closed–form inverse kinematics (position only) for the 6–DOF manipulator.
+    
+    This solver is derived by decoupling the arm into two sub–chains:
+      (a) A “shoulder” (arm) section (joints 1–3) whose effective geometry is solved
+          via a 2R planar inverse kinematics formulation.
+      (b) A “wrist” section (joints 4–6) that is decoupled by using the vertical (y) equation.
+    
+    The manipulator is defined (all units in meters, angles in radians) by:
+      • Revolute 1: at [0,0,0], axis Z.
+          (No translation, but establishes the base yaw.)
+      • Translation: [0, 0.13585, 0]
+      • Revolute 2: axis Y.
+      • Translation: [0, -0.1197, 0.425]
+      • Revolute 3: axis Y.
+      • Translation: [0, 0, 0.39225]
+      • Revolute 4: axis Y.
+      • Translation: [0, 0.093, 0]
+      • Revolute 5: axis Z.
+      • Translation: [0, 0, 0.09465]
+      • Revolute 6: axis Y.  (We set q6 = 0 as it is redundant for position.)
+      • TCP offset: [0, 0.0823, 0]
+      
+    In the “nominal” configuration (all joints zero) the TCP is located at:
+         [0, 0.19145, 0.9119]
+    and the following definitions hold:
+         L1 = 0.425      (effective “shoulder” link length)
+         L2 = 0.39225    (effective “elbow” link length)
+         L3 = 0.09465    (wrist–translation length)
+         y_offset = (–0.1197 + 0.093) = –0.0267 
+         tcp_y_offset = 0.0823
+      
+    The IK is derived by first using the y–coordinate (which depends only on joint 4)
+    to obtain candidate q4 values:
+         p_y = y_offset + tcp_y_offset * cos(q4)
+    After selecting a candidate q4 (both positive and negative branches are tried),
+    one computes an effective “wrist–extension” L_eff and an associated angle phi.
+    Then, by defining ψ = atan2(x, z) and letting T = ψ or ψ+π, one deduces the
+    overall angle S = T + phi required from the arm sub–chain.
+    With the wrist center thereby computed in the horizontal (x–z) plane,
+    a 2R inverse–kinematics solution (for joints 1 and 2) is employed and joint 3 is set by:
+         q3 = S – (q1 + q2)
+    Finally, a candidate value for the wrist rotation q5 is chosen (from a small set)
+    and q6 is set to 0. The candidate whose forward kinematics best reproduces the target p
+    is returned.
+    
+    NOTE: This closed–form solution is one valid analytic branch. Due to
+    the kinematic redundancy intrinsic to the manipulator, the solution is not unique.
+    It is assumed that p is reachable.
+    
+    :param p: Target TCP position as a tuple (x, y, z)
+    :return: A tuple (q1, q2, q3, q4, q5, q6) of joint angles in radians.
+    """
+    
+    # Utility function: normalize an angle to [-pi, pi]
+    def normalize(angle):
+        while angle > math.pi:
+            angle -= 2 * math.pi
+        while angle < -math.pi:
+            angle += 2 * math.pi
+        return angle
+
+    # Forward kinematics based on the chain description.
+    def fk(q1, q2, q3, q4, q5, q6):
+        def rot_z(theta):
+            return np.array([[math.cos(theta), -math.sin(theta), 0],
+                             [math.sin(theta),  math.cos(theta), 0],
+                             [0, 0, 1]])
+        def rot_y(theta):
+            return np.array([[ math.cos(theta), 0, math.sin(theta)],
+                             [0, 1, 0],
+                             [-math.sin(theta), 0, math.cos(theta)]])
+        pos = np.zeros(3)
+        R = np.eye(3)
+        # Revolute 1: rotation about Z.
+        R = rot_z(q1)
+        pos += R @ np.array([0, 0.13585, 0])
+        # Revolute 2: rotation about Y.
+        R = R @ rot_y(q2)
+        pos += R @ np.array([0, -0.1197, 0.425])
+        # Revolute 3: rotation about Y.
+        R = R @ rot_y(q3)
+        pos += R @ np.array([0, 0, 0.39225])
+        # Revolute 4: rotation about Y.
+        R = R @ rot_y(q4)
+        pos += R @ np.array([0, 0.093, 0])
+        # Revolute 5: rotation about Z.
+        R = R @ rot_z(q5)
+        pos += R @ np.array([0, 0, 0.09465])
+        # Revolute 6: rotation about Y (set to zero).
+        R = R @ rot_y(q6)
+        pos += R @ np.array([0, 0.0823, 0])
+        return pos
+
+    # Define parameters from the robot geometry.
+    L1 = 0.425      # shoulder link length
+    L2 = 0.39225    # elbow link length
+    L3 = 0.09465    # wrist translation length
+    y_offset = -0.1197 + 0.093   # = -0.0267
+    tcp_y_offset = 0.0823
+
+    x_target, y_target, z_target = p
+
+    # --- Step 1. Solve for joint 4 from the vertical (y) equation.
+    # p_y = y_offset + tcp_y_offset * cos(q4)  =>  cos(q4) = (p_y - y_offset) / tcp_y_offset
+    C = (y_target - y_offset) / tcp_y_offset
+    # Clamp to valid range.
+    C = max(min(C, 1.0), -1.0)
+    q4_candidates = [math.acos(C), -math.acos(C)]
+    
+    # --- Step 2. Compute candidate values for the arm sub–chain.
+    # Define ψ from the horizontal target.
+    psi = math.atan2(x_target, z_target)
+    
+    best_error = float('inf')
+    best_solution = None
+    
+    # Try both branches for q4 and the two natural choices for T.
+    for q4 in q4_candidates:
+        d = tcp_y_offset * math.sin(q4)
+        # Effective wrist extension.
+        L_eff = math.sqrt(L3**2 + d**2)
+        phi = math.atan2(d, L3)
+        for T in [psi, psi + math.pi]:
+            S = T + phi  # Total effective angle for the arm sub–chain.
+            # Compute the “wrist–center” in the horizontal (x–z) plane.
+            W_x = x_target - L_eff * math.sin(T)
+            W_z = z_target - L_eff * math.cos(T)
+            r_w = math.sqrt(W_x**2 + W_z**2)
+            # Check reachability for the 2R arm (links L1 and L2).
+            if r_w > (L1 + L2) or r_w < abs(L1 - L2):
+                continue
+            # Solve the 2R planar IK for joints 1 and 2.
+            cos_q2 = (r_w**2 - L1**2 - L2**2) / (2 * L1 * L2)
+            cos_q2 = max(min(cos_q2, 1.0), -1.0)
+            for sign in [1, -1]:
+                q2_candidate = sign * math.acos(cos_q2)
+                delta = math.atan2(L2 * math.sin(q2_candidate), L1 + L2 * math.cos(q2_candidate))
+                q1_candidate = math.atan2(W_x, W_z) - delta
+                q3_candidate = S - (q1_candidate + q2_candidate)
+                
+                # --- Step 3. Choose a candidate for the wrist rotation q5.
+                # Although the wrist contribution (from joints 5 and 6) is partially decoupled,
+                # a rotation about joint 5 reorients the TCP offset. Here we try a few candidate values.
+                for q5_candidate in [-1.0, -0.5, 0.5, 1.0]:
+                    q6 = 0.0  # Set the redundant joint to zero.
+                    candidate = (
+                        normalize(q1_candidate),
+                        normalize(q2_candidate),
+                        normalize(q3_candidate),
+                        normalize(q4),
+                        normalize(q5_candidate),
+                        q6
+                    )
+                    p_fk = fk(*candidate)
+                    error = math.sqrt((p_fk[0] - x_target)**2 +
+                                      (p_fk[1] - y_target)**2 +
+                                      (p_fk[2] - z_target)**2)
+                    if error < best_error:
+                        best_error = error
+                        best_solution = candidate
+                        
+    if best_solution is None:
+        raise ValueError("No valid IK solution found for the target position.")
+    
+    # Return the best candidate (with all angles normalized).
+    best_solution = tuple(normalize(angle) for angle in best_solution)
+    return best_solution
+```

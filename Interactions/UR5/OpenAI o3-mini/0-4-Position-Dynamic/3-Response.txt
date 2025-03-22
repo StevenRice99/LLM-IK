@@ -1,0 +1,133 @@
+Below is one acceptable complete analytical solution. In our solution we first “decouple” the base rotation (joint 1) by requiring that when we “undo” the fixed translation from link 1 to link 2 the (rotated) TCP’s y coordinate equals the preset value (–0.0267). (Indeed, note that in the zero–angle forward kinematics the TCP’s y coordinate is 0.10915 while the fixed offset from base to joint 2 is 0.13585, so 0.10915 = 0.13585 – 0.0267.) That requirement leads to the scalar equation
+
+  y cos(θ₁) – x sin(θ₁) = 0.10915 
+
+which has two solutions. Then (after “removing” the effect of the θ₁ rotation) we reduce the problem for the remaining joints (which act “planarly”) to a three–revolute (about Y) chain with three (x–z) link lengths (L₁ = 0.425, L₂ = 0.39225, and L₃ = 0.09465). We resolve the redundancy by choosing two possible wrist–orientations T = ψ or T = ψ + π (with ψ = atan2(x_eff,z_eff)) then solve a 2R (wrist–center) problem, and finally compute the “redundant” third joint (about Y). (The final joint about Z, joint 5, does not affect position and we set it to zero.) Finally, we “test” every candidate solution by computing the forward kinematics (via the provided function) and choose the candidate with the smallest error. 
+
+The code below is one acceptable answer:
+
+------------------------------------------------------------
+def inverse_kinematics(p: tuple[float, float, float]) -> tuple[float, float, float, float, float]:
+    """
+    Gets the joint values needed to reach TCP position "p" for the 5–DOF manipulator.
+    The chain is decoupled as follows:
+      • Joint 1 (rotation about Z) is chosen so that when we remove the fixed translation 
+        from base to joint2 ([0, 0.13585, 0]), the remaining chain sees a constant y value
+        of –0.0267 (since 0.13585 – 0.0267 = 0.10915, which is exactly the TCP y when all other
+        joints are zero).
+      • The remaining three joints (joints 2,3,4, all rotating about Y) affect only the
+        x–z coordinates and the effective link lengths are L1 = 0.425 (from [0, -0.1197, 0.425]),
+        L2 = 0.39225 (from [0, 0, 0.39225]), and L3 = 0.09465 (from the TCP [0,0,0.09465]).
+      • To resolve redundancy we pick T = φ₂+φ₃+φ₄ = ψ or ψ + π (with ψ = atan2(x_eff, z_eff)),
+        subtract the L3 term to get a 2R wrist center and solve for φ₂ and φ₃; then φ₄ = T – (φ₂+φ₃).
+      • Joint 5 (rotation about Z) does not affect TCP position so we set it to zero.
+    
+    :param p: The target TCP position (x, y, z).
+    :return: A tuple (θ₁, θ₂, θ₃, θ₄, θ₅) in radians.
+    """
+    import math
+    # Unpack target
+    x, y, z = p
+
+    # --- FIRST, solve for joint 1 (rotation about Z) ---
+    # The fixed translation from link 1 to 2 is T12 = [0, 0.13585, 0]. After joint 1,
+    # the TCP (when all other joints are zero) has y = 0.13585 – 0.0267 = 0.10915.
+    # To decouple, we require that when we “undo” joint 1’s rotation the TCP y becomes –0.0267.
+    # That implies: cos(θ₁)*y – sin(θ₁)*x = 0.10915.
+    D = 0.10915
+    r_xy = math.sqrt(x**2 + y**2)
+    # There are two θ₁ satisfying: cos(θ₁+α) = D/r_xy, with α = atan2(x, y).
+    if r_xy == 0:
+        possible_theta1 = [0.0]
+    else:
+        ratio = D / r_xy
+        ratio = max(-1.0, min(1.0, ratio))
+        base_angle = math.acos(ratio)
+        alpha = math.atan2(x, y)
+        possible_theta1 = [-alpha + base_angle, -alpha - base_angle]
+
+    # --- SET UP constants for the "planar" sub-chain (joints 2-4) ---
+    L1 = 0.425     # from translation [0, -0.1197, 0.425] (x–z part: 0.425 in z)
+    L2 = 0.39225   # from translation [0, 0, 0.39225]
+    L3 = 0.09465   # from TCP translation [0,0,0.09465]
+    # Joint 5 (rotation about Z) does not affect position.
+    theta5_solution = 0.0
+
+    # Helper to normalize angles to [–pi, pi]
+    def normalize(angle):
+        while angle > math.pi:
+            angle -= 2 * math.pi
+        while angle < -math.pi:
+            angle += 2 * math.pi
+        return angle
+
+    best_error = float("inf")
+    best_solution = None
+
+    # Loop over the two candidate joint1 angles
+    for theta1 in possible_theta1:
+        # In the chain, the fixed offset from joint1 to joint2 is
+        offset12 = 0.13585  # along y in the joint1 frame.
+        # The position of joint2 in the base is: p2 = Rotz(θ₁)*[0, offset12, 0] = [ -offset12*sin(θ₁), offset12*cos(θ₁), 0 ]
+        # Compute the vector from joint2 to TCP:
+        d_x = x + offset12 * math.sin(theta1)
+        d_y = y - offset12 * math.cos(theta1)
+        d_z = z
+        # Rotate this vector by –θ₁ to “cancel” the base rotation.
+        x_eff = math.cos(theta1) * d_x + math.sin(theta1) * d_y
+        # (Ideally, the effective y will be d_y' = –sin(θ₁)*d_x + cos(θ₁)*d_y = –0.0267.)
+        y_eff = -math.sin(theta1) * d_x + math.cos(theta1) * d_y
+        z_eff = d_z
+        # Now the remaining three joints affect the (x,z) coordinates. Define:
+        psi = math.atan2(x_eff, z_eff)
+        T_options = [psi, psi + math.pi]  # two natural choices for T = φ₂+φ₃+φ₄
+
+        for T in T_options:
+            # Subtract the last link (L3 along the T direction) to get the wrist center for the 2R sub–chain.
+            x_w = x_eff - L3 * math.sin(T)
+            z_w = z_eff - L3 * math.cos(T)
+            r_w = math.sqrt(x_w**2 + z_w**2)
+            # Now solve the 2R problem for links L1 and L2.
+            cos_phi3 = (r_w**2 - L1**2 - L2**2) / (2 * L1 * L2)
+            cos_phi3 = max(-1.0, min(1.0, cos_phi3))
+            for sign in [1, -1]:
+                phi3 = sign * math.acos(cos_phi3)
+                phi2 = math.atan2(x_w, z_w) - math.atan2(L2 * math.sin(phi3), L1 + L2 * math.cos(phi3))
+                phi4 = T - (phi2 + phi3)
+                # Set joints 2, 3, 4 (all rotations about Y)
+                theta2 = normalize(phi2)
+                theta3 = normalize(phi3)
+                theta4 = normalize(phi4)
+                candidate = (normalize(theta1), theta2, theta3, theta4, theta5_solution)
+                # Compute forward kinematics (using the provided function) to check error.
+                # (Assume functions.FORWARD_KINEMATICS returns the TCP (x_fk, y_fk, z_fk).)
+                fk_result = functions.FORWARD_KINEMATICS(joint1=candidate[0],
+                                                          joint2=candidate[1],
+                                                          joint3=candidate[2],
+                                                          joint4=candidate[3],
+                                                          joint5=candidate[4])
+                try:
+                    x_fk, y_fk, z_fk = fk_result
+                except Exception:
+                    x_fk, y_fk, z_fk = fk_result["TCP"]
+                error = math.sqrt((x_fk - x)**2 + (y_fk - y)**2 + (z_fk - z)**2)
+                if error < best_error:
+                    best_error = error
+                    best_solution = candidate
+
+    return best_solution
+
+------------------------------------------------------------
+
+Explanatory notes:
+1. We begin by solving for θ₁ using the equation
+  y cos(θ₁) – x sin(θ₁) = 0.10915,
+which (after writing cos(θ₁+α) = (y cos(θ₁) – x sin(θ₁))/√(x²+y²) with α = atan2(x, y))
+gives two candidate values.
+2. For each θ₁ candidate we “undo” the rotation and the offset from base to joint2 (0.13585 along y) so that the remaining effective 2–D target becomes (x_eff, z_eff) (with y_eff ideally equal to –0.0267).
+3. In the joint2 frame the sub–chain is a 3R (about Y) system. We set T = φ₂+φ₃+φ₄ equal to either ψ or ψ+π (with ψ = atan2(x_eff, z_eff)) and then compute the 2R wrist–center (for links L₁ and L₂) by subtracting L₃.
+4. For the 2R inverse kinematics we compute φ₃ using the cosine law (with both ± solutions) and obtain φ₂ and then φ₄.
+5. Joint 5 is set to zero.
+6. Finally, we “test” every candidate using the provided forward kinematics function and return the candidate with the smallest error.
+
+This is one acceptable solution to the 5–DOF inverse kinematics problem as described.

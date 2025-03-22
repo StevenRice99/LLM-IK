@@ -1,0 +1,68 @@
+Thank you for providing that forward kinematics result. I can now see how joints 2, 3, and 4 all contribute to the position of the end effector. Looking at the feedback from the previous solution and this new data, I understand where my approach was failing.
+
+The key issue was that I was setting joint 4 to 0 and not properly accounting for how it affects the final TCP position. I also need to more accurately handle the TCP offset from joint 5.
+
+Here's my revised inverse kinematics solution:
+
+```python
+import numpy as np
+
+def inverse_kinematics(p: tuple[float, float, float]) -> tuple[float, float, float, float, float]:
+    """
+    Gets the joint values needed to reach position "p".
+    :param p: The position to reach in the form [x, y, z].
+    :return: A list of the values to set the links to for reaching position "p".
+    """
+    x, y, z = p
+    
+    # Constants from the robot description
+    l1 = 0.13585  # Distance from joint 1 to joint 2
+    l2 = 0.425    # Distance from joint 2 to joint 3
+    l3 = 0.39225  # Distance from joint 3 to joint 4
+    l4 = 0.093    # Distance from joint 4 to joint 5
+    l5 = 0.09465  # Distance from joint 5 to TCP
+    
+    # Calculate joint 1 (base rotation)
+    q1 = np.arctan2(y, x)
+    
+    # Adjust wrist position to account for TCP offset
+    # Since joint 5 only rotates around Z, TCP is always l5 distance in local Z direction
+    # We need to calculate the wrist position
+    r = np.sqrt(x**2 + y**2)
+    joint5_x = x - l5 * np.sin(q1) * np.sin(0)  # This will be x since sin(0) = 0
+    joint5_y = y + l5 * np.cos(q1) * np.sin(0)  # This will be y since sin(0) = 0
+    joint5_z = z - l5 * np.cos(0)               # This will be z - l5 since cos(0) = 1
+    
+    # Calculate distance from joint 1 to joint 5 (projected onto XZ plane)
+    joint5_r = np.sqrt(joint5_x**2 + joint5_y**2)
+    
+    # Adjust for the offset of joint 2 in Y direction
+    joint5_r_adj = np.sqrt((joint5_r - l4)**2 + (joint5_z - l1)**2)
+    
+    # Use law of cosines to calculate joint 3
+    cos_q3 = (joint5_r_adj**2 - l2**2 - l3**2) / (2 * l2 * l3)
+    cos_q3 = np.clip(cos_q3, -1.0, 1.0)
+    q3 = np.arccos(cos_q3)
+    
+    # Calculate joint 2
+    beta = np.arctan2(joint5_z - l1, joint5_r - l4)
+    alpha = np.arctan2(l3 * np.sin(q3), l2 + l3 * np.cos(q3))
+    q2 = beta - alpha
+    
+    # Calculate joint 4 to ensure the end effector reaches the target
+    q4 = -q2 - q3  # This ensures the end effector points in the right direction
+    
+    # Joint 5 can be set to 0 since we're solving for position only
+    q5 = 0.0
+    
+    return (q1, q2, q3, q4, q5)
+```
+
+I've made significant changes from my previous solution:
+
+1. I'm now properly calculating joint 4 instead of setting it to 0
+2. I'm using the actual link lengths from the robot description
+3. I've improved how I account for the TCP offset from joint 5
+4. I've restructured the solution to reflect the actual geometric constraints
+
+This solution should properly handle the kinematics for all 5 joints to reach the target position.

@@ -1,0 +1,142 @@
+Below is one valid closed‐form solution. In our approach we “decouple” the five‑joint chain by first “backing off” the constant tool offset so that the “wrist” (joint‑5 origin) is computed from
+
+  p_wrist = p_TCP – [0, 0.0823, 0].
+
+Because the subchain from joints 1–3 (with effective “links” of 0.425 and 0.39225 plus the fixed translation of 0.09465 from joint‐5) lies almost entirely in the x–z plane, we proceed as follows. First we compute the target’s rotation R_target (from provided roll–pitch–yaw) and then define
+
+  theta_sum = atan2(R_target[0,2], R_target[2,2]),
+
+which will be the sum of joints 1–3. In the position equations the (constant) translation from joint‐5 back to joint‐4 is “subtracted” along this direction. (In our notation the length C_tcp = 0.09465.) Then by “solving” the two–link planar geometry we find θ₁, θ₂ and set θ₃ = theta_sum – θ₁ – θ₂. Finally, noting that the complete chain has a fixed TCP rotation R_fixed = R_z(1.570796325) (so that FORWARD_KINEMATICS(0,0,0,0,0) gives the expected TCP orientation) the remaining two joints must satisfy
+
+  R_target = R_y(theta₁+theta₂+theta₃) · R_z(theta₄) · R_y(theta₅) · R_fixed.
+
+We then “remove” the fixed tool rotation and the already‐determined Y–rotation (computed by R_y(theta₁+…+theta₃)) so that
+
+  R_y(theta₁+…+theta₃)ᵀ · [R_target · R_z(–1.570796325)] = R_z(theta₄) · R_y(theta₅).
+
+Because the product R_z(theta₄)·R_y(theta₅) has the form
+
+  [[cosθ₄ cosθ₅, –sinθ₄, cosθ₄ sinθ₅],
+   [sinθ₄ cosθ₅,  cosθ₄, sinθ₄ sinθ₅],
+   [ –sinθ₅,         0,      cosθ₅]],
+
+we can read off
+
+  θ₅ = –arcsin( (R_bar)[2,0] )
+  θ₄ = atan2( (R_bar)[1,0], (R_bar)[0,0] ).
+
+The complete Python function is given below.
+
+------------------------------------------------------------
+def inverse_kinematics(p: tuple[float, float, float], r: tuple[float, float, float]) -> tuple[float, float, float, float, float]:
+    """
+    Gets the joint values needed to reach TCP position "p" and orientation "r".
+    The five joints correspond to:
+      Revolute 1 (axis Y), Revolute 2 (axis Y), Revolute 3 (axis Y),
+      Revolute 4 (axis Z), and Revolute 5 (axis Y).
+    The robot’s fixed tool (TCP) offset is given by a translation [0, 0.0823, 0]
+    and an extra rotation R_z(1.570796325).
+    :param p: The TCP position in the form [x, y, z].
+    :param r: The TCP orientation in radians (roll, pitch, yaw).
+    :return: A tuple (θ₁, θ₂, θ₃, θ₄, θ₅) (in radians).
+    """
+    import math
+    import numpy as np
+
+    # Unpack target position and rpy angles.
+    x_target, y_target, z_target = p
+    roll, pitch, yaw = r
+
+    # Build the target rotation from roll-pitch-yaw (using Rz*Ry*Rx convention).
+    cr, sr = math.cos(roll), math.sin(roll)
+    cp, sp = math.cos(pitch), math.sin(pitch)
+    cy, sy = math.cos(yaw), math.sin(yaw)
+    R_x = np.array([[1, 0, 0],
+                    [0, cr, -sr],
+                    [0, sr,  cr]])
+    R_y = np.array([[cp, 0, sp],
+                    [0,  1, 0],
+                    [-sp,0, cp]])
+    R_z = np.array([[cy, -sy, 0],
+                    [sy,  cy, 0],
+                    [0,    0, 1]])
+    R_target = R_z @ R_y @ R_x
+
+    # Define the fixed TCP rotation.
+    yaw_tcp = 1.570796325
+    R_tcp_fixed = np.array([[math.cos(yaw_tcp), -math.sin(yaw_tcp), 0],
+                            [math.sin(yaw_tcp),  math.cos(yaw_tcp), 0],
+                            [0,                 0,                1]])
+
+    # The TCP’s (tool) translation offset is [0, 0.0823, 0]. Notice that because the
+    # joint-5 rotates about Y (leaving the y-axis invariant) this offset is not affected.
+    # Thus the wrist (joint-5 origin) is:
+    p_tcp = np.array([x_target, y_target, z_target])
+    p_wrist = p_tcp - np.array([0, 0.0823, 0])
+    # p_wrist is now the position of joint 5.
+
+    # For the “arm” IK we will use the fact that joints 1–3 (which all rotate about Y)
+    # produce an effective rotation R_y(θ₁+θ₂+θ₃). Its sum, called theta_sum, is extracted
+    # from the target’s third column.
+    theta_sum = math.atan2(R_target[0, 2], R_target[2, 2])
+
+    # The arm’s (planar) chain from joints 1–3 must “back off” the translation between joint‐5
+    # and joint‐4. (This constant length is given by the translation of Revolute 5: C_tcp = 0.09465.)
+    C_tcp = 0.09465
+    # Use the x and z from the wrist (joint-5) position.
+    x_wrist = p_wrist[0]
+    z_wrist = p_wrist[2]
+    # “Back off” the link 5 translation along the approach direction.
+    x_eff = x_wrist - C_tcp * math.sin(theta_sum)
+    z_eff = z_wrist - C_tcp * math.cos(theta_sum)
+
+    # The remaining two links (with lengths from the URDF: a = 0.425 and b = 0.39225) are
+    # solved with the law of cosines.
+    a = 0.425
+    b = 0.39225
+    d_sq = x_eff**2 + z_eff**2
+    cos_theta2 = (d_sq - a**2 - b**2) / (2 * a * b)
+    # Clamp to avoid numerical errors.
+    cos_theta2 = max(min(cos_theta2, 1.0), -1.0)
+    theta2 = math.acos(cos_theta2)
+    # There are two possible solutions; here we choose the “elbow‐down” configuration.
+    theta1 = math.atan2(x_eff, z_eff) - math.atan2(b * math.sin(theta2), a + b * math.cos(theta2))
+    theta3 = theta_sum - theta1 - theta2
+
+    # Up to now the computed angles ensure that the (virtual) wrist point (joint-5 origin)
+    # is reached. Next, we solve for the remaining wrist orientation.
+    # The full chain’s orientation is:
+    #   R_target = R_y(θ₁+θ₂+θ₃) · R_z(θ₄) · R_y(θ₅) · R_tcp_fixed.
+    # Remove the known (wrist) tool rotation by right-multiplying by R_tcp_fixedᵀ.
+    M = R_target @ np.linalg.inv(R_tcp_fixed)  # equivalently, R_target @ R_z(-yaw_tcp)
+
+    # Premultiply by R_y(theta_sum)ᵀ (note: theta_sum = θ₁+θ₂+θ₃) so that:
+    #   R_y(theta_sum)ᵀ · M = R_z(θ₄) · R_y(θ₅).
+    R_y_sum = np.array([[math.cos(theta_sum), 0, math.sin(theta_sum)],
+                        [0, 1, 0],
+                        [-math.sin(theta_sum), 0, math.cos(theta_sum)]])
+    R_bar = R_y_sum.T @ M
+
+    # Now, note that if R_bar = R_z(θ₄) · R_y(θ₅) then its elements satisfy:
+    #   (R_bar)[2,0] = - sin(θ₅)
+    # so we can extract:
+    theta5 = -math.asin(R_bar[2, 0])
+    # Next, use (R_bar)[0,0] = cos(θ₄) cos(θ₅) and (R_bar)[1,0] = sin(θ₄) cos(θ₅)
+    # to get:
+    theta4 = math.atan2(R_bar[1, 0], R_bar[0, 0])
+    
+    return (theta1, theta2, theta3, theta4, theta5)
+
+------------------------------------------------------------
+
+Explanation:
+
+1. We first compute R_target (from the given rpy) and “back‐off” the tool’s constant offset in position (0, 0.0823, 0) so that p_wrist = p – [0,0.0823,0] is the origin of joint 5.
+
+2. The effective approach direction (theta_sum) is obtained from the elements of R_target; then subtracting the fixed link-5 translation (C_tcp = 0.09465) along that direction yields an (x,z) pair (x_eff,z_eff) that the “arm” (joints 1–3) must reach. Using the two–link geometry (with lengths 0.425 and 0.39225) the angles θ₁ and θ₂ are solved and θ₃ set so that θ₁+θ₂+θ₃ = theta_sum.
+
+3. Finally, after “removing” the fixed TCP rotation R_tcp_fixed from R_target and “undoing” the arm’s Y–rotation R_y(theta_sum), the remaining product equals R_z(θ₄)·R_y(θ₅) from which θ₅ and θ₄ are recovered.
+
+In the zero configuration (p = [0, 0.0556, 0.9119] with r = [0, 0, 1.570796325]), this method returns (0, 0, 0, 0, 0) so that FORWARD_KINEMATICS(0,0,0,0,0) yields the expected TCP pose.
+
+Any solution meeting the given specifications is acceptable.

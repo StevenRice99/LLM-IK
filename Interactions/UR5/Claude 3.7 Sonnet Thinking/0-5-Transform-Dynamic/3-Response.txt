@@ -1,0 +1,161 @@
+Based on the FORWARD_KINEMATICS result, I can see the robot's configuration when all joints are at zero. I'll need to combine the provided code snippets to create a complete inverse kinematics solution for all 6 joints.
+
+From examining the result, I see that:
+- The first 5 joints follow the pattern solved in "EXISTING 1"
+- The 6th joint and TCP need to be incorporated properly
+- The TCP is at [0, 0.19145, 0.9119] with orientation [0, 0, 1.5707963249999999] when all joints are at zero
+
+I'll now complete the inverse kinematics function by building on the existing 5-DOF solution and adding the calculation for the 6th joint:
+
+```python
+def inverse_kinematics(p: tuple[float, float, float], r: tuple[float, float, float]) -> tuple[float, float, float, float, float, float]:
+    """
+    Gets the joint values needed to reach position "p" and orientation "r".
+    :param p: The position to reach in the form [x, y, z].
+    :param r: The orientation to reach in radians in the form [x, y, z].
+    :return: A list of the values to set the links to for reaching position "p" and orientation "r".
+    """
+    import math
+    import numpy as np
+    
+    # Constants for the robot dimensions
+    L1 = 0.425
+    L2 = 0.39225
+    L_tcp_z = 0.09465  # Z offset from joint 5 to joint 6
+    L_tcp_y = 0.0823   # Y offset from joint 6 to TCP
+    y_const = 0.13585 - 0.1197 + 0.093  # Fixed Y offset
+    
+    # Adjust target for TCP offset
+    # We need to find the position of joint 6 instead of the TCP
+    # First, create the target orientation matrix
+    roll, pitch, yaw = r
+    R_x = np.array([[1, 0, 0], 
+                    [0, math.cos(roll), -math.sin(roll)], 
+                    [0, math.sin(roll), math.cos(roll)]])
+    R_y = np.array([[math.cos(pitch), 0, math.sin(pitch)], 
+                    [0, 1, 0], 
+                    [-math.sin(pitch), 0, math.cos(pitch)]])
+    R_z = np.array([[math.cos(yaw), -math.sin(yaw), 0], 
+                    [math.sin(yaw), math.cos(yaw), 0], 
+                    [0, 0, 1]])
+    R_des = R_z @ R_y @ R_x
+    
+    # TCP offset in local frame
+    tcp_offset = np.array([0, L_tcp_y, 0])
+    
+    # Transform TCP offset to world frame and subtract from target
+    world_tcp_offset = R_des @ tcp_offset
+    adjusted_p = (p[0] - world_tcp_offset[0], 
+                 p[1] - world_tcp_offset[1], 
+                 p[2] - world_tcp_offset[2])
+    
+    # Now solve for joints 1-5 using the adjusted target position
+    p_x, p_y, p_z = adjusted_p
+    r_xy = math.sqrt(p_x**2 + p_y**2)
+    theta = math.atan2(p_y, p_x)
+    
+    # Calculate q1 candidates
+    ratio = y_const / r_xy
+    ratio = max(-1.0, min(1.0, ratio))
+    a = math.asin(ratio)
+    q1_candidate1 = theta - a
+    q1_candidate2 = theta - (math.pi - a)
+    
+    # Helper function to compute orientation error
+    def compute_M(q1_val):
+        cos_q1 = math.cos(q1_val)
+        sin_q1 = math.sin(q1_val)
+        Rz_neg_q1 = np.array([[cos_q1, sin_q1, 0], 
+                              [-sin_q1, cos_q1, 0], 
+                              [0, 0, 1]])
+        M_val = Rz_neg_q1 @ R_des
+        return M_val
+    
+    # Choose the best q1 candidate
+    M1 = compute_M(q1_candidate1)
+    M2 = compute_M(q1_candidate2)
+    err1 = abs(M1[1, 2])
+    err2 = abs(M2[1, 2])
+    q1 = q1_candidate1 if err1 <= err2 else q1_candidate2
+    
+    # Compute the new local frame after joint 1 rotation
+    cos_q1 = math.cos(q1)
+    sin_q1 = math.sin(q1)
+    Rz_neg_q1 = np.array([[cos_q1, sin_q1, 0], 
+                          [-sin_q1, cos_q1, 0], 
+                          [0, 0, 1]])
+    p_vec = np.array([p_x, p_y, p_z])
+    p_bar = Rz_neg_q1 @ p_vec
+    p_bar_x, p_bar_y, p_bar_z = p_bar
+    
+    # Decouple the orientation to get phi and q5
+    M = Rz_neg_q1 @ R_des
+    phi = math.atan2(M[0, 2], M[2, 2])
+    q5 = math.atan2(M[1, 0], M[1, 1])
+    
+    # Account for the tcp offset in z-direction for planar calculation
+    P_x = p_bar_x - L_tcp_z * math.sin(phi)
+    P_z = p_bar_z - L_tcp_z * math.cos(phi)
+    r2 = math.sqrt(P_x**2 + P_z**2)
+    
+    # Calculate q3 candidates
+    cos_q3 = (r2**2 - L1**2 - L2**2) / (2 * L1 * L2)
+    cos_q3 = max(-1.0, min(1.0, cos_q3))
+    q3_candidateA = math.acos(cos_q3)
+    q3_candidateB = -q3_candidateA
+    
+    # Helper function for the planar solution
+    def planar_solution(q3_val):
+        q2_val = math.atan2(P_x, P_z) - math.atan2(L2 * math.sin(q3_val), L1 + L2 * math.cos(q3_val))
+        q4_val = phi - (q2_val + q3_val)
+        calc_x = L1 * math.sin(q2_val) + L2 * math.sin(q2_val + q3_val) + L_tcp_z * math.sin(phi)
+        calc_z = L1 * math.cos(q2_val) + L2 * math.cos(q2_val + q3_val) + L_tcp_z * math.cos(phi)
+        err_val = math.sqrt((calc_x - p_bar_x)**2 + (calc_z - p_bar_z)**2)
+        return (q2_val, q4_val, err_val)
+    
+    # Choose the best q3, q2, q4 solution
+    q2_A, q4_A, err_A = planar_solution(q3_candidateA)
+    q2_B, q4_B, err_B = planar_solution(q3_candidateB)
+    if err_A <= err_B:
+        q3 = q3_candidateA
+        q2 = q2_A
+        q4 = q4_A
+    else:
+        q3 = q3_candidateB
+        q2 = q2_B
+        q4 = q4_B
+    
+    # Calculate q6 to achieve the desired orientation
+    # M is the orientation after applying q1,q2,q3,q4,q5
+    # We need to find q6 such that rotation about Y-axis by q6 gives us the target orientation
+    
+    # Calculate the orientation after applying q1,q2,q3,q4,q5
+    Rz_q1 = np.array([[math.cos(q1), -math.sin(q1), 0], 
+                      [math.sin(q1), math.cos(q1), 0], 
+                      [0, 0, 1]])
+    Ry_phi = np.array([[math.cos(phi), 0, math.sin(phi)], 
+                       [0, 1, 0], 
+                       [-math.sin(phi), 0, math.cos(phi)]])
+    Rz_q5 = np.array([[math.cos(q5), -math.sin(q5), 0], 
+                      [math.sin(q5), math.cos(q5), 0], 
+                      [0, 0, 1]])
+    
+    R_5 = Rz_q1 @ Ry_phi @ Rz_q5
+    
+    # The remaining rotation to reach the target orientation is:
+    R_6 = R_5.T @ R_des
+    
+    # Since joint 6 rotates around the Y-axis, we can extract q6 from R_6
+    # For a rotation around Y by angle q6, the matrix has the form:
+    # [[cos(q6), 0, sin(q6)], [0, 1, 0], [-sin(q6), 0, cos(q6)]]
+    
+    # Extract q6 from this matrix:
+    q6 = math.atan2(R_6[0, 2], R_6[2, 2])
+    
+    return (q1, q2, q3, q4, q5, q6)
+```
+
+This solution:
+1. Adjusts the target position to account for the TCP offset
+2. Solves for joints 1-5 using the adjusted target (similar to the existing 5-DOF solution)
+3. Calculates joint 6 by determining the remaining rotation needed after applying joints 1-5

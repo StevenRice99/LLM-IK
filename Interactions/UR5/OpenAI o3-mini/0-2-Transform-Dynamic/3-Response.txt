@@ -1,0 +1,91 @@
+def inverse_kinematics(p: tuple[float, float, float],
+                       r: tuple[float, float, float]) -> tuple[float, float, float]:
+    """
+    Gets the joint values needed to reach position "p" and orientation "r" for a 3DOF manipulator.
+    The robot’s kinematics are defined by:
+      - Revolute 1: base joint at [0,0,0] rotating about Z.
+      - Revolute 2: offset from joint1 by [0, 0.13585, 0] (in joint1’s frame) and rotates about Y.
+      - Revolute 3: offset (in joint2’s frame) of [0, -0.1197, 0.425] (only the 0.425 along the z‐axis
+         contributes to reach since the –0.1197 is along the axis of rotation) and rotates about Y.
+      - The TCP is offset by [0, 0, 0.39225] from joint3.
+    
+    The decoupling approach is as follows:
+      1. Solve for joint1 using the projection of the TCP onto the base xy–plane.
+      2. Compute the position of joint2 in world coordinates (using the offset [0, 0.13585, 0]).
+      3. Transform the TCP position into joint2’s frame (by subtracting joint2’s position and rotating
+         by –joint1). In this frame the motion of joints 2 and 3 is planar (in the x–z plane).
+      4. Extract the desired total wrist angle (theta_sum) from the provided TCP orientation.
+         Here, using the rpy angles, we define:
+             R00 = cos(ry)*cos(rz)   and   R02 = sin(ry)
+         so that theta_sum = atan2(R02, R00)
+      5. With effective link lengths L1 = 0.425 (from joint2 to joint3, using the z–offset)
+         and L2 = 0.39225 (the TCP offset from joint3), apply the cosine law to determine joint3.
+      6. Joint2 is then computed as the difference between theta_sum and joint3.
+    
+    :param p: The TCP position in the form (x, y, z) in base coordinates.
+    :param r: The TCP orientation (roll, pitch, yaw) in radians.
+    :return: A tuple (joint1, joint2, joint3) in radians.
+    """
+    import math
+
+    # Unpack the TCP target position and orientation.
+    x, y, z = p
+    rx, ry, rz = r
+
+    # -----------------------------------------------
+    # Step 1. Solve for joint1 (base rotation about Z)
+    # A natural choice is to align the manipulator’s plane with the line joining the origin
+    # and the target projection. Here we use atan2(y, x) to get a value near the expected result.
+    joint1 = math.atan2(y, x)
+
+    # -----------------------------------------------
+    # Step 2. Determine the world position of joint2.
+    # In joint1’s frame, joint2 is at [0, 0.13585, 0]. In world coordinates, after a rotation by joint1:
+    d12 = 0.13585
+    p_joint2_world = (-math.sin(joint1) * d12,
+                       math.cos(joint1) * d12,
+                       0)
+
+    # -----------------------------------------------
+    # Step 3. Compute TCP position relative to joint2.
+    p_rel = (x - p_joint2_world[0],
+             y - p_joint2_world[1],
+             z)
+    
+    # Rotate p_rel into joint2’s coordinate frame by undoing the base rotation (i.e. Rz(-joint1)).
+    cos1 = math.cos(joint1)
+    sin1 = math.sin(joint1)
+    # In this rotated frame the x and z coordinates lie in the plane where joints 2 and 3 operate.
+    x_plane = p_rel[0] * cos1 + p_rel[1] * sin1
+    # (y_plane is along the joint2’s rotation axis and does not affect the in‐plane IK)
+    z_plane = p_rel[2]
+
+    # -----------------------------------------------
+    # Step 4. Extract the desired total wrist angle.
+    # Using a simplified extraction from the rpy values:
+    R00 = math.cos(ry) * math.cos(rz)
+    R02 = math.sin(ry)
+    theta_sum = math.atan2(R02, R00)
+    
+    # -----------------------------------------------
+    # Step 5. Solve the 2R IK for joints 2 and 3 in the plane.
+    # Effective link lengths:
+    # L1: from joint2 to joint3 (using the z–offset 0.425 from [0, -0.1197, 0.425])
+    # L2: TCP offset from joint3 along its z–axis (0.39225)
+    L1 = 0.425
+    L2 = 0.39225
+
+    # Compute the squared distance from joint2 (in the plane) to the TCP.
+    d_sq = x_plane**2 + z_plane**2
+
+    # Using the cosine law:
+    cos_joint3 = (d_sq - L1**2 - L2**2) / (2 * L1 * L2)
+    # Clamp to avoid numerical issues.
+    cos_joint3 = max(min(cos_joint3, 1.0), -1.0)
+    joint3 = math.acos(cos_joint3)
+
+    # -----------------------------------------------
+    # Step 6. Determine joint2 so that the sum of joint2 and joint3 equals the desired theta_sum.
+    joint2 = theta_sum - joint3
+
+    return (joint1, joint2, joint3)

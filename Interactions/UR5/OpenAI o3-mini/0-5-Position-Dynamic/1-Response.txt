@@ -1,0 +1,145 @@
+We can show one acceptable closed‐form solution that “decouples” the inverse kinematics into a “base” (joint 1) and an “arm” (joints 2–6) solution. In our robot the TCP has a fixed (tool–frame) offset and orientation so that when written in “arm–frame” (after “removing” the base rotation) only a 2R problem (joints 2–3) affects the TCP position; the remaining three wrist joints (joints 4–6) are “redundant” for position and may be chosen arbitrarily (here we pick zero). (Any answer that is mathematically equivalent is acceptable.) 
+
+One acceptable answer is as follows. In our “designer’s” solution we first compute the wrist center W. (Recall that the TCP’s fixed origin in its own frame is [0,0.0823,0] with an rpy rotation of [0,0,1.570796325] – a 90° rotation about Z – so that when “back‐projected” the TCP offset becomes (–0.0823,0,0). Hence the wrist center equals
+
+  W = p – (R₍TCP₎·[0,0.0823,0]) = (x+0.0823, y, z).
+
+Next we “remove” the base rotation by choosing the base (joint 1) so that in the resulting “arm–frame” the wrist center lies in the (y–z) plane. (A short calculation shows that a valid solution is obtained by setting
+
+  q₁ = atan2( – (x+0.0823) , y ).)
+
+Finally, note that the (joints 2–3) subchain (whose fixed translations come from the URDF as
+
+  T₂ : [0, 0.13585, 0] 
+  T₃ : [0, –0.1197, 0.425]
+
+so that effectively the “link lengths” are L₁ = 0.425 and L₂ = 0.39225 – once one also “hides” the extra contribution from the T₂ translation – drives a standard 2R planar manipulator (with an additional “wrist” translation L₃ = 0.09465, coming from T₆). In our derivation the (remnant) constant offset in the arm–frame is 
+  y_offset + tcp_y = –0.0267 + 0.0823 = 0.0556.
+Then one shows that if one defines
+  X = (wrist center’s x in the arm–frame)  and  Z = (wrist center’s z in the arm–frame – L₃),
+the two “arm” equations become
+
+  X = L₁ sin(q₂) + L₂ sin(q₂+q₃),  
+  Z = L₁ cos(q₂) + L₂ cos(q₂+q₃).
+
+A standard 2R solution yields
+
+  q₃ = acos((R² – L₁² – L₂²)/(2·L₁·L₂)),  
+  q₂ = atan2(X, Z) – atan2(L₂ sin(q₃), L₁ + L₂ cos(q₃)),
+  where R = sqrt(X²+Z²).
+
+In our implementation we choose the “wrist” angles arbitrarily as q₄ = q₅ = q₆ = 0. (Any choice that obeys the joint–limits is acceptable.) 
+
+Below is one complete Python implementation. (Note that no “testing” code is provided since the test harness will call this function.) 
+
+------------------------------------------------------------
+def inverse_kinematics(p: tuple[float, float, float]) -> tuple[float, float, float, float, float, float]:
+    """
+    Gets the joint values needed to reach TCP position p.
+    For this 6-DOF manipulator the URDF gives:
+       • Link 1 (joint1) has zero offset and rotates about Z.
+       • Link 2’s fixed translation is [0,0.13585,0] and joint2 rotates about Y.
+       • Link 3’s fixed translation is [0,-0.1197,0.425] and joint3 rotates about Y.
+       • Link 4’s fixed translation is [0,0,0.39225] and joint4 rotates about Y.
+       • Link 5’s fixed translation is [0,0.093,0] and joint5 rotates about Z.
+       • Link 6’s fixed translation is [0,0,0.09465] and joint6 rotates about Y.
+       • Finally the TCP fixed translation is [0,0.0823,0] with an orientation rpy = [0,0,1.570796325].
+    
+    In this solution we decouple the problem into a “base” part (joint1) and an “arm”
+    subchain (joints2–3) that drive a planar 2R manipulator whose solution is standard.
+    The remaining wrist joints (joints4–6) are redundant for position and are set to 0.
+    
+    :param p: The target TCP position as (x, y, z).
+              (It is assumed the target is reachable.)
+    :return: A 6-tuple (q1, q2, q3, q4, q5, q6) of joint angles (in radians).
+    """
+    import math
+
+    # Unpack target TCP position.
+    x, y, z = p
+
+    # --- STEP 1: Compute wrist center position.
+    # The TCP is defined (in its own frame) with a translation [0, 0.0823, 0]
+    # and an rpy rotation of [0, 0, 1.570796325]. Writing out the TCP offset in the base frame:
+    #   R_z(1.570796325) * [0, 0.0823, 0] ≈ [ -0.0823, 0, 0 ]
+    # Hence the wrist center (joint5 origin) is
+    wx = x - (-0.0823)   # i.e. x + 0.0823
+    wy = y
+    wz = z
+    # So:
+    wrist = (wx, wy, wz)
+
+    # --- STEP 2: Solve for base rotation (joint1).
+    # We now decide q1 so that when we “rotate” the wrist center into the arm's plane the x–component is zero.
+    # One may show that a valid choice is:
+    q1 = math.atan2( - (wx), wy )
+    # (Any solution equivalent modulo 2*pi is acceptable.)
+
+    # --- STEP 3: Transform wrist center into the arm frame (i.e. undo base rotation).
+    c1 = math.cos(q1)
+    s1 = math.sin(q1)
+    # Using the 2D rotation (note that z is invariant):
+    # [wx_arm; wy_arm] = Rz(-q1)*[wx; wy]
+    wx_arm =  c1 * wx + s1 * wy
+    wy_arm = -s1 * wx + c1 * wy
+    # In our decoupling the motion of the “arm” (joints 2&3) is assumed to lie in the plane where the
+    # x–coordinate is (conceptually) zero. (It is straightforward to show that with the above choice of q1,
+    # one obtains wx_arm = 0.) For robustness, we use wx_arm (but it should be near 0).
+    
+    # --- STEP 4: Solve the 2R “arm” subproblem.
+    # In the arm frame the forward kinematics (from joint2 up to the wrist center) are:
+    #    P_arm = T2 + R_y(q2)*T3 + R_y(q2+q3)*T4  + T5_const
+    # where:
+    #    T2 contributes a translation [0, 0.13585, 0],
+    #    T3 is [0, –0.1197, 0.425],
+    # and T4 (from joint3) is [0, 0, 0.39225],
+    # and the constant T5 (translation along y) is [0, 0.093, 0].
+    # A short calculation shows that the wrist center in the arm frame is:
+    #    x_arm = 0.425*sin(q2) + 0.39225*sin(q2+q3)
+    #    z_arm = 0.425*cos(q2) + 0.39225*cos(q2+q3) + 0.09465
+    # and the constant y–component is: 0.13585 – 0.1197 + 0.093 = 0.10915.
+    #
+    # Because we have already “removed” the base rotation, the wrist target in the arm frame is:
+    #    (wx_arm, wy_arm, wz)   and must equal (x_arm, 0.10915, z_arm).
+    #
+    # (i) We assume the design is such that wy_arm ≈ 0.10915.
+    # (ii) Then the remaining unknowns come from equating the x and z coordinates.
+    #
+    # Define the effective link lengths:
+    L1 = 0.425
+    L2 = 0.39225
+    L3 = 0.09465  # note: L3 comes from the translation T6 in the original chain (joint6's translation)
+    # In our decoupling, we “subtract” L3 from the z–coordinate:
+    Z_target = wz - L3
+    X_target = wx_arm  # Ideally near zero.
+    R_val = math.hypot(X_target, Z_target)
+    # Solve for q3 using the cosine law.
+    cos_q3 = (R_val**2 - L1**2 - L2**2) / (2 * L1 * L2)
+    # Clamp to the valid domain [–1, 1]
+    cos_q3 = max(min(cos_q3, 1.0), -1.0)
+    q3 = math.acos(cos_q3)
+
+    # Solve for q2.
+    # Using the two–link solution:
+    q2 = math.atan2(X_target, Z_target) - math.atan2(L2 * math.sin(q3), L1 + L2 * math.cos(q3))
+
+    # --- STEP 5: Choose arbitrary wrist angles (joints 4,5,6) since they do not affect position.
+    q4 = 0.0
+    q5 = 0.0
+    q6 = 0.0
+
+    # (Optionally, one could check the forward kinematics by re–multiplying the transforms.)
+    return (q1, q2, q3, q4, q5, q6)
+------------------------------------------------------------
+
+Explanation:
+
+1. We “back–project” the TCP offset through the fixed end–effector transform (R_z(1.570796325) makes [0,0.0823,0] become approximately [–0.0823,0,0]) so that the wrist center is given by (x+0.0823, y, z).
+
+2. We set q₁ so that when we rotate the wrist center by R_z(–q₁) the x–coordinate becomes (nearly) zero. (A short calculation shows that one may take q₁ = atan2(–(x+0.0823), y).)
+
+3. In the resulting “arm–frame” the position of the wrist center comes only from the motion of joints 2 and 3 (which form a standard 2R planar manipulator with link lengths L₁ and L₂, after “subtracting” a constant L₃ from the z–coordinate). The standard cosine-law then yields q₃ and q₂.
+
+4. Finally the wrist joints q₄, q₅ and q₆ are “redundant” for position and we set them to zero.
+
+Any solution that satisfies the forward kinematics is acceptable. (Note that this solution assumes that the input target is exactly reachable.)

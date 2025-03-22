@@ -1,0 +1,168 @@
+```python
+import math
+import numpy as np
+
+def inverse_kinematics(p: tuple[float, float, float],
+                       r: tuple[float, float, float]) -> tuple[float, float, float, float]:
+    """
+    Computes a closed‐form analytical inverse kinematics solution for the 4-DOF
+    serial manipulator. The robot is defined by:
+      • Joint 1: Revolute about Z at [0,0,0]
+      • Joint 2: Revolute about Y with translation [0, 0.13585, 0]
+      • Joint 3: Revolute about Y with translation [0, -0.1197, 0.425]
+      • Joint 4: Revolute about Y with translation [0, 0, 0.39225]
+      • TCP offset: [0, 0.093, 0]
+      
+    When all arm joints (2–4) are zero, the TCP lies at [0, 0.10915, 0.81725].
+    
+    Our solution “decouples” the IK problem into:
+      (a) a “planar” problem for joints 2 and 3,
+      (b) a wrist orientation (joint 4) adjustment so that the overall
+          arm’s Y–rotation (θ_total = θ2+θ3+θ4) matches that implied by the desired
+          end–effector roll–pitch–yaw.
+      
+    In addition, because the base joint (about Z) serves to “rotate” the arm 
+    into its plane of motion we generate several candidates for θ1. In our method
+    we use the fact that if the TCP position is p (in world coordinates) then a 
+    candidate “decoupling” is obtained by temporarily ignoring the arm translations 
+    and setting:
+         candidate θ1 = atan2(p_x, p_y) + kπ,    k ∈ { -1, 0, 1 }.
+    For each candidate θ1 we “rotate” the target as
+         p' = Rz(–θ1) · p,
+    and then solve the 2-R planar problem for joints 2–3. In that (rotated) frame 
+    the arm (when all arm joints are zero) would reach the TCP at [0, 0.10915, 0.81725].
+    Therefore, letting
+         X_target = p'_x   and   Z_target = p'_z,
+    we can compute the “planar” distance
+         r_planar = sqrt( (p'_x)² + (p'_z)² )
+    and then use the law–of–cosines to obtain
+         cos(θ3) = (r_planar² – L1² – L2²) / (2 L1 L2)
+    (with L1 = 0.425 and L2 = 0.39225). We choose the elbow–down solution for which 
+         θ3 = + acos( … ).
+    Next, if we define
+         γ = atan2( –p'_x, p'_z )
+    then joint 2 is obtained as
+         θ2 = – [ γ – atan2( L2 sin(θ3), L1 + L2 cos(θ3) ) ].
+    (The minus–sign here appears because with our chosen (world) axes a positive 
+     rotation of the arm about Y moves the TCP “down” relative to its zero–pose.)
+      
+    Finally, the overall TCP orientation when the arm joints are (θ2, θ3, θ4) is 
+         Ry(θ_total)   with   θ_total = θ2 + θ3 + θ4.
+    Since the overall forward kinematics are
+         R_TCP = Rz(θ1) · Ry(θ_total),
+    we first compute the desired end–effector rotation matrix 
+         R_des = Rz(yaw) · Ry(pitch) · Rx(roll)
+    (using the standard roll–pitch–yaw convention) and “remove” the base rotation by
+         R' = Rz(–θ1) · R_des.
+    Then we extract the “arm rotation” as
+         θ_total = atan2( R' [0,2], R' [0,0] )
+    and finally set
+         θ4 = θ_total – (θ2 + θ3).
+      
+    Because of ambiguities in θ1 and in the 2-R (θ3) solution, our code generates an 
+    array of candidate solutions. It then uses a forward kinematics evaluation (defined
+    below) to pick the candidate that minimizes the TCP position error.
+    
+    :param p: The target TCP position as (x, y, z)
+    :param r: The target TCP roll–pitch–yaw (in radians) as (roll, pitch, yaw)
+    :return: A tuple (θ1, θ2, θ3, θ4) of joint angles in radians.
+    """
+    # Link and TCP parameters:
+    L1 = 0.425
+    L2 = 0.39225
+    tcp_offset = 0.093   # along Y
+    # Helper rotation matrices:
+    def Rz(theta):
+        return np.array([[math.cos(theta), -math.sin(theta), 0],
+                         [math.sin(theta),  math.cos(theta), 0],
+                         [0, 0, 1]])
+    def Ry(theta):
+        # Standard rotation about Y:
+        return np.array([[ math.cos(theta), 0, math.sin(theta)],
+                         [0, 1, 0],
+                         [-math.sin(theta), 0, math.cos(theta)]])
+    def Rx(theta):
+        return np.array([[1, 0, 0],
+                         [0, math.cos(theta), -math.sin(theta)],
+                         [0, math.sin(theta),  math.cos(theta)]])
+    
+    # Build desired end–effector rotation matrix using Rz(yaw)*Ry(pitch)*Rx(roll)
+    roll, pitch, yaw = r
+    R_des = Rz(yaw) @ Ry(pitch) @ Rx(roll)
+    
+    # We now generate candidate solutions. We form three candidates for θ1 by exploiting
+    # the ambiguity in rotations about Z. Here we define candidate θ1 values as:
+    #     θ1_candidate = atan2(p_x, p_y) + kπ,    with k ∈ { -1, 0, 1 }.
+    # (Note: by experimentation, this decoupling was found to yield proper solutions.)
+    candidates = []
+    p_vec = np.array(p)
+    for k in [-1, 0, 1]:
+        theta1_candidate = math.atan2(p_vec[0], p_vec[1]) + k * math.pi
+        # Rotate target position by –θ1_candidate:
+        p_prime = Rz(-theta1_candidate) @ p_vec
+        # In the arm’s decoupled (rotated) frame the TCP “should” lie along the Z–axis.
+        # Define:
+        X_target = p_prime[0]
+        Z_target = p_prime[2]
+        r_planar = math.sqrt(X_target**2 + Z_target**2)
+        # Solve for joint 3 using the law–of–cosines:
+        cos_theta3 = (r_planar**2 - L1**2 - L2**2) / (2 * L1 * L2)
+        cos_theta3 = max(min(cos_theta3, 1.0), -1.0)
+        # We choose the elbow–down solution, i.e. the positive value of acos:
+        theta3_candidate = math.acos(cos_theta3)
+        # Define “arm plane” angle from the rotated target:
+        gamma = math.atan2(-X_target, Z_target)
+        # Then joint 2 is determined by:
+        theta2_candidate = - ( gamma - math.atan2( L2 * math.sin(theta3_candidate),
+                                                    L1 + L2 * math.cos(theta3_candidate) ) )
+        # Next, remove the base rotation from the desired orientation:
+        R_prime = Rz(-theta1_candidate) @ R_des
+        # Extract the net arm rotation about Y. (Here the decoupled rotation matrix 
+        # from a pure Ry(θ_total) would have [0,0] element = cos(θ_total) and [0,2] element = sin(θ_total).)
+        theta_total = math.atan2(R_prime[0, 2], R_prime[0, 0])
+        theta4_candidate = theta_total - (theta2_candidate + theta3_candidate)
+        candidates.append((theta1_candidate, theta2_candidate, theta3_candidate, theta4_candidate))
+    
+    # Forward kinematics function (using homogeneous transforms) to compute TCP position:
+    def forward_kinematics(j1, j2, j3, j4):
+        # Transformation about Z:
+        T1 = np.array([[math.cos(j1), -math.sin(j1), 0, 0],
+                       [math.sin(j1),  math.cos(j1), 0, 0],
+                       [0, 0, 1, 0],
+                       [0, 0, 0, 1]])
+        # Joint2: translate then rotate about Y.
+        T2 = np.array([[ math.cos(j2), 0, math.sin(j2), 0],
+                       [0, 1, 0, 0.13585],
+                       [-math.sin(j2), 0, math.cos(j2), 0],
+                       [0, 0, 0, 1]])
+        # Joint3: translate then rotate about Y.
+        T3 = np.array([[ math.cos(j3), 0, math.sin(j3), 0],
+                       [0, 1, 0, -0.1197],
+                       [-math.sin(j3), 0, math.cos(j3), 0.425],
+                       [0, 0, 0, 1]])
+        # Joint4: translate then rotate about Y.
+        T4 = np.array([[ math.cos(j4), 0, math.sin(j4), 0],
+                       [0, 1, 0, 0],
+                       [-math.sin(j4), 0, math.cos(j4), 0.39225],
+                       [0, 0, 0, 1]])
+        # TCP offset:
+        T_tcp = np.array([[1, 0, 0, 0],
+                          [0, 1, 0, tcp_offset],
+                          [0, 0, 1, 0],
+                          [0, 0, 0, 1]])
+        T_fk = T1 @ T2 @ T3 @ T4 @ T_tcp
+        return T_fk[0:3, 3]
+    
+    # Evaluate all candidates and pick the one with minimal position error.
+    best_candidate = None
+    best_error = float('inf')
+    for cand in candidates:
+        j1, j2, j3, j4 = cand
+        pos_fk = forward_kinematics(j1, j2, j3, j4)
+        error = np.linalg.norm(pos_fk - p_vec)
+        if error < best_error:
+            best_error = error
+            best_candidate = cand
+
+    return best_candidate
+```

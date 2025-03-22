@@ -1,0 +1,131 @@
+def inverse_kinematics(p: tuple[float, float, float]) -> tuple[float, float, float, float, float]:
+    """
+    Closed-form inverse kinematics solution for the given 5-DOF serial manipulator.
+    The kinematic chain (in order) is:
+      - Joint 1 (Revolute about Y) at [0,0,0]
+      - Translation to Revolute 2 at [0, -0.1197, 0.425]
+      - Joint 2 (Revolute about Y)
+      - Translation along Z by 0.39225 (Revolute 3’s offset)
+      - Joint 3 (Revolute about Y)
+      - Translation by [0, 0.093, 0] (Revolute 4’s position)
+      - Joint 4 (Revolute about Z)
+      - Translation by [0, 0, 0.09465] (Revolute 5’s position)
+      - Joint 5 (Revolute about Y)
+      - Translation by [0, 0.0823, 0] to the TCP.
+      
+    In our solution we choose the two redundant joints as follows:
+      • q5 is set to zero (since the TCP offset [0,0.0823, 0] is invariant under rotation about Y).
+      • q4 is solved via the vertical (y) component.
+      
+    The forward kinematics (for zero joint angles) yield the TCP position:
+      [0, 0.0556, 0.9119]
+    Notice that without adjusting q4 the y-coordinate would be fixed; hence we solve for q4.
+    
+    Kinematic derivation:
+      • Because all translation vectors (except the last constant offset in Z) lie in the Y–Z plane, 
+        the base rotation (q1 about Y) only affects the x and z components. We compute q1 from the 
+        desired x–z plan view.
+        
+      • The vertical (y) coordinate in the chain (which is not affected by rotations about Y) is given by:
+            p_y = 0.0823*cos(q4) - 0.0267.
+        Hence, we solve:
+            cos(q4) = (p_y + 0.0267) / 0.0823.
+        
+      • Next, after “removing” the base rotation, the effective distance in the x–z plane (denote r) is:
+            r = sqrt(p_x^2 + p_z^2)
+          but note the constant offset of 0.425 (from the translation before joint 2). Thus the effective
+          length that must be “spanned” by joints 2 and 3 is:
+            d_target = r - 0.425.
+        
+      • With q4 determined, define:
+            A = 0.0823 * sin(q4)
+            B = 0.09465     (the constant from the Revolute 5 translation)
+            C = 0.39225     (the translation before Revolute 3)
+          It can be shown that the portion of the kinematic chain affected by q2 and q3 yields a 2D
+          relationship:
+            (V_x)^2 + (V_z)^2 = A^2 + B^2 + C^2 + 2*C [ A*sin(q3) + B*cos(q3) ] = d_target^2.
+          Solving for the combination A*sin(q3) + B*cos(q3) gives:
+            A*sin(q3) + B*cos(q3) = ((d_target**2 - (A**2+B**2+C**2)) / (2*C)) = K.
+        
+      • Write the combination in sinusoidal form. Define:
+            R_ab  = sqrt(A**2 + B**2)
+            δ     = atan2(B, A)
+          so that:
+            A*sin(q3) + B*cos(q3) = R_ab * sin(q3 + δ).
+          Then one solution is:
+            q3 = asin(K / R_ab) - δ.
+        
+      • In the reduced (rotated) x–z plane (after removing q1), the remainder of the chain (after q3)
+          produces a vector:
+              V_x = -A*cos(q3) + B*sin(q3)
+              V_z = C + A*sin(q3) + B*cos(q3)
+          When the q2 rotation (about Y) is applied (using the 2D rotation matrix with the form
+              [ cos(q2)   sin(q2)
+               -sin(q2)   cos(q2) ]
+          ), the x component is forced to zero (by design of our decoupling) and one obtains:
+              tan(q2) = - V_x / V_z,
+          so that
+              q2 = atan2(-V_x, V_z).
+        
+      • Finally, the base joint:
+              q1 = atan2(p_x, p_z)
+          which orients the manipulator in the x–z plane.
+    
+    This yields one valid closed-form inverse kinematics solution.
+    (Assumes the given target is reachable; no extra checks are performed.)
+    """
+    import math
+
+    # Unpack TCP target coordinates
+    p_x, p_y, p_z = p
+
+    # --- Step 1. Base joint (q1): align x–z plane.
+    # Since all non-y translations lie initially along z in the default configuration,
+    # the desired base rotation is computed directly.
+    q1 = math.atan2(p_x, p_z)
+    
+    # --- Step 2. Solve for q4 from the vertical position.
+    # In forward kinematics the y component (in base frame) is:
+    #   p_y = 0.0823*cos(q4) - 0.0267.
+    # Solve for q4 (using the principal value of acos).
+    cos_q4 = (p_y + 0.0267) / 0.0823
+    # (Assume target is reachable so |cos_q4| <= 1.)
+    q4 = math.acos(cos_q4)
+    
+    # --- Step 3. Set q5 to zero (redundant joint; TCP offset along y is invariant under rotation about Y).
+    q5 = 0.0
+
+    # --- Step 4. Compute effective reach in the rotated plane.
+    # Remove the effect of the base rotation.
+    # When q1 = atan2(p_x, p_z), the rotated x-component becomes zero and the effective distance is:
+    r = math.hypot(p_x, p_z)  # sqrt(p_x^2+p_z^2)
+    # Account for the constant offset (translation before joint 2) along z.
+    d_target = r - 0.425
+
+    # --- Step 5. Define auxiliary constants.
+    # With q4 determined, set:
+    A = 0.0823 * math.sin(q4)  # scales with q4
+    B = 0.09465              # constant from link parameters (Revolute 5 offset)
+    C = 0.39225              # constant translation before Revolute 3
+
+    # --- Step 6. Solve for q3.
+    # From the chain, the squared norm of the vector generated by joints 2 and 3 is:
+    #   (V_x)^2 + (V_z)^2 = A^2 + B^2 + C^2 + 2*C*(A*sin(q3) + B*cos(q3))
+    # Set equal to d_target^2 and solve for the combination:
+    K = (d_target**2 - (A**2 + B**2 + C**2)) / (2 * C)
+    # Write the left-hand side as R_ab * sin(q3 + δ) with:
+    R_ab = math.hypot(A, B)
+    delta = math.atan2(B, A)
+    # Then one solution is:
+    q3 = math.asin(K / R_ab) - delta
+
+    # --- Step 7. Solve for q2.
+    # After joint 3, the resulting vector (in the reduced plane) is:
+    V_x = -A * math.cos(q3) + B * math.sin(q3)
+    V_z = C + A * math.sin(q3) + B * math.cos(q3)
+    # The 2D rotation by q2 is chosen such that the x component becomes zero.
+    # From the relation: cos(q2)*V_x + sin(q2)*V_z = 0,
+    # we obtain:
+    q2 = math.atan2(-V_x, V_z)
+    
+    return (q1, q2, q3, q4, q5)

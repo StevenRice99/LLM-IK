@@ -1,0 +1,200 @@
+```python
+import math
+import numpy as np
+
+def inverse_kinematics(p: tuple[float, float, float],
+                       r: tuple[float, float, float]) -> tuple[float, float, float, float, float]:
+    """
+    Computes a closed‐form analytical inverse kinematics solution for the 5-DOF manipulator.
+    
+    Robot structure (all distances in meters, angles in radians):
+      • Joint 1: Revolute about Y, at base.
+      • Joint 2: Revolute about Y; offset from Joint 1 by translation T2 = [0, -0.1197, 0.425]
+      • Joint 3: Revolute about Y; offset from Joint 2 by translation T3 = [0, 0, 0.39225]
+      • Joint 4: Revolute about Z; offset from Joint 3 by translation T4 = [0, 0.093, 0]
+      • Joint 5: Revolute about Y; offset from Joint 4 by translation T5 = [0, 0, 0.09465]
+      • TCP: Offset from Joint 5 by translation [0, 0.0823, 0] and fixed rotation about Z of psi = 1.570796325.
+    
+    The forward kinematics for the TCP position can be written as:
+      p_x = L1*sin(θ1) + L2*sin(θ1+θ2) + L3*sin(S) - K*cos(S)
+      p_z = L1*cos(θ1) + L2*cos(θ1+θ2) + L3*cos(S) + K*sin(S)
+      p_y = T2_y + T4_y + TCP_y = -0.1197 + 0.093 + 0.0823*cos(θ4)
+    where S = θ1 + θ2 + θ3.
+    Here we define:
+      L1 = 0.425      (T2 z component)
+      L2 = 0.39225    (T3 z component)
+      T2_y = -0.1197
+      T4_y =  0.093
+      TCP_y = 0.0823  (TCP translation along y, which is applied after the wrist rotations)
+      L3 = 0.09465    (T5 z component)
+      K = 0.0823 * sin(θ4)  (the effective “wrist offset” along with the TCP rotation)
+      psi = 1.570796325     (fixed TCP yaw offset)
+    
+    The overall end-effector rotation is:
+      R_target = R_z(yaw)*R_y(pitch)*R_x(roll)
+    and the joint rotations produce an orientation:
+      R_total = R_y(S) · R_z(θ4) · R_y(θ5) · R_z(psi)
+      
+    This IK solution decouples the position into an "arm" part (joints 1-3) and a "wrist" part (joints 4-5).
+    We first directly compute θ4 from the y-coordinate, then determine S = θ1+θ2+θ3 via a one-dimensional search,
+    then use a standard 2-link IK to extract θ1 and θ2 (and finally θ3 = S - (θ1+θ2)). Finally, θ5 is obtained
+    from the orientation decoupling.
+    
+    Assumptions:
+      • The target pose is reachable.
+      • Among the possible solutions we select the one minimizing the magnitude of the third joint.
+    
+    :param p: The target TCP position (x, y, z).
+    :param r: The target TCP orientation in roll, pitch, yaw (radians).
+    :return: A tuple (θ₁, θ₂, θ₃, θ₄, θ₅) of joint angles.
+    """
+    # ---------------------------
+    # Helper rotation matrices
+    # ---------------------------
+    def rot_x(a: float) -> np.ndarray:
+        ca = math.cos(a)
+        sa = math.sin(a)
+        return np.array([[1, 0, 0],
+                         [0, ca, -sa],
+                         [0, sa, ca]])
+    
+    def rot_y(a: float) -> np.ndarray:
+        ca = math.cos(a)
+        sa = math.sin(a)
+        return np.array([[ca, 0, sa],
+                         [0, 1, 0],
+                         [-sa, 0, ca]])
+    
+    def rot_z(a: float) -> np.ndarray:
+        ca = math.cos(a)
+        sa = math.sin(a)
+        return np.array([[ca, -sa, 0],
+                         [sa, ca, 0],
+                         [0, 0, 1]])
+    
+    # ---------------------------
+    # Robot constant parameters
+    # ---------------------------
+    L1 = 0.425      # from Joint1 to Joint2 (T2 z component)
+    L2 = 0.39225    # from Joint2 to Joint3 (T3 z component)
+    T2_y = -0.1197
+    T4_y =  0.093
+    TCP_y = 0.0823
+    L3 = 0.09465    # from Joint4 to Joint5 (T5 z component)
+    psi = 1.570796325  # fixed TCP yaw offset
+
+    # ---------------------------
+    # Step 1: Solve for the wrist vertical joint (θ4)
+    # p_y = T2_y + T4_y + TCP_y*cos(θ4)  =>  p_y = -0.1197 + 0.093 + 0.0823*cos(θ4)
+    # So: cos(θ4) = (p_y - (T2_y+T4_y)) / TCP_y
+    p_x, p_y, p_z = p
+    cos_theta4 = (p_y - (T2_y + T4_y)) / TCP_y  # note: T2_y+T4_y = -0.1197+0.093 = -0.0267
+    # Clamp to [-1, 1] to avoid numerical issues.
+    cos_theta4 = max(min(cos_theta4, 1.0), -1.0)
+    theta4 = math.acos(cos_theta4)
+    # For our solution, we choose the solution in [0, π]
+    
+    # Effective wrist offset magnitude (from joints 4->5 and TCP translation)
+    # The wrist contribution in the horizontal plane appears as two parts:
+    #   • L3 from T5 (which, when rotated about Y gives [L3*sin, 0, L3*cos])
+    #   • An offset from the TCP along y gets coupled with θ4; its effective horizontal length is:
+    K = TCP_y * math.sin(theta4)
+    # Combined wrist offset vector (constant magnitude Rw) 
+    Rw = math.sqrt(L3**2 + K**2)
+    # Also compute an angle delta such that:
+    #   L3*sin(S) - K*cos(S) can be written as Rw*sin(S - delta)
+    #   L3*cos(S) + K*sin(S) = Rw*cos(S - delta)
+    delta = math.atan2(K, L3)
+    
+    # ---------------------------
+    # Step 2: Find S = θ1 + θ2 + θ3 by decoupling the horizontal (x,z) equations.
+    # The forward kinematics give:
+    #   p_x = [arm_x] + (L3*sin(S) - K*cos(S))
+    #   p_z = [arm_z] + (L3*cos(S) + K*sin(S))
+    # where the "arm" (joints 1-2) contribute:
+    #   arm_x = L1*sin(θ1) + L2*sin(θ1+θ2)
+    #   arm_z = L1*cos(θ1) + L2*cos(θ1+θ2)
+    # Thus, the arm must deliver the difference:
+    #   X_arm = p_x - (L3*sin(S) - K*cos(S))
+    #   Z_arm = p_z - (L3*cos(S) + K*sin(S))
+    #
+    # The arm (a 2-link planar manipulator) can reach any horizontal vector with magnitude between:
+    r_min = abs(L1 - L2)
+    r_max = L1 + L2
+    # We now choose S (over a continuous range) which will yield an arm vector that is reachable.
+    # Furthermore, we prefer the solution where the third joint angle (θ3 = S - (θ1+θ2)) has a modest magnitude.
+    # We use a grid search for S over [-pi, pi].
+    S_candidates = np.linspace(-math.pi, math.pi, 1000)
+    best_cost = 1e9
+    best_S = None
+    best_theta1 = None
+    best_theta2 = None
+    best_theta3 = None
+    for S_val in S_candidates:
+        # Compute the wrist (wrist's horizontal contribution)
+        wrist_x = L3 * math.sin(S_val) - K * math.cos(S_val)
+        wrist_z = L3 * math.cos(S_val) + K * math.sin(S_val)
+        # The arm must contribute:
+        X_arm = p_x - wrist_x
+        Z_arm = p_z - wrist_z
+        r_arm = math.hypot(X_arm, Z_arm)
+        # Check reachability of arm: it must be within [r_min, r_max]
+        if r_arm < r_min - 1e-6 or r_arm > r_max + 1e-6:
+            continue
+        # 2-link IK for the arm:
+        # Law of cosines for the elbow angle (we choose the elbow-down solution)
+        cos_angle = (r_arm**2 - L1**2 - L2**2) / (2 * L1 * L2)
+        cos_angle = max(min(cos_angle, 1.0), -1.0)
+        theta2_candidate = -math.acos(cos_angle)  # elbow-down: negative inner angle
+        # Compute the angle for the arm target
+        phi_arm = math.atan2(X_arm, Z_arm)
+        # Compute the offset for joint1 using the standard 2-link formula
+        offset = math.atan2(L2 * math.sin(theta2_candidate), L1 + L2 * math.cos(theta2_candidate))
+        theta1_candidate = phi_arm - offset
+        # Now, the arm produces a rotation sum of (θ1 + θ2)
+        S_arm = theta1_candidate + theta2_candidate
+        # Then the remaining joint must be:
+        theta3_candidate = S_val - S_arm
+        # We choose S_val that minimizes the absolute third joint angle
+        cost = abs(theta3_candidate)
+        if cost < best_cost:
+            best_cost = cost
+            best_S = S_val
+            best_theta1 = theta1_candidate
+            best_theta2 = theta2_candidate
+            best_theta3 = theta3_candidate
+
+    # If no candidate was found, then the target is unreachable (by assumption, this should not happen)
+    if best_S is None:
+        raise ValueError("Target is unreachable.")
+
+    S = best_S  # θ1 + θ2 + θ3 has been chosen
+    theta1 = best_theta1
+    theta2 = best_theta2
+    theta3 = best_theta3
+
+    # ---------------------------
+    # Step 3: Solve for the wrist’s remaining orientation joint (θ5)
+    # The overall end-effector rotation is given by:
+    #   R_total = R_y(S) · R_z(θ4) · R_y(θ5) · R_z(psi)
+    # and we want R_total == R_target, where R_target = R_z(yaw) * R_y(pitch) * R_x(roll).
+    # Isolate the wrist rotation:
+    #   R_y(θ5) = [R_y(S) · R_z(θ4)]⁻¹ · R_target · R_z(-psi)
+    # Note that [R_y(S) · R_z(θ4)]⁻¹ = R_z(-θ4) · R_y(-S).
+    #
+    # First, compute the target rotation matrix.
+    roll, pitch, yaw = r
+    R_target = rot_z(yaw) @ rot_y(pitch) @ rot_x(roll)
+    R_wrist_inv = rot_z(-theta4) @ rot_y(- (theta1 + theta2 + theta3))
+    R_wrist = R_wrist_inv @ R_target
+    # Then, remove the fixed TCP yaw (psi)
+    M = R_wrist @ rot_z(-psi)
+    # For a rotation about Y, the standard form is:
+    #   R_y(θ5) = [[cosθ5, 0, sinθ5],
+    #              [0,      1,    0],
+    #              [-sinθ5,0, cosθ5]]
+    # So we extract θ5 from the (0,0) and (0,2) elements.
+    theta5 = math.atan2(M[0, 2], M[0, 0])
+    
+    return (theta1, theta2, theta3, theta4, theta5)
+```

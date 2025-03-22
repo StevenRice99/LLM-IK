@@ -1,0 +1,139 @@
+```python
+import math
+
+def inverse_kinematics(p: tuple[float, float, float]) -> tuple[float, float, float, float, float, float]:
+    """
+    Analytical closed–form inverse kinematics for a 6-DOF manipulator.
+    
+    The robot is defined by:
+      • Revolute 1: origin at [0, 0, 0], axis Z.
+      • Revolute 2: translation [0, 0.13585, 0], axis Y.
+      • Revolute 3: translation [0, -0.1197, 0.425], axis Y.
+      • Revolute 4: translation [0, 0, 0.39225], axis Y.
+      • Revolute 5: translation [0, 0.093, 0], axis Z.
+      • Revolute 6: translation [0, 0, 0.09465], axis Y.
+      • TCP: translation [0, 0.0823, 0] with fixed rpy = [0, 0, 1.570796325].
+      
+    In this solution we “decouple” the problem:
+      1. We first “back–project” the TCP offset from the tool frame. In our case the TCP’s
+         fixed offset [0, 0.0823, 0] is rotated by 90° about Z (since 1.570796325 rad ≈ 90°)
+         so that in the base frame it is approximately [–0.0823, 0, 0]. Thus the wrist center
+         is computed as:
+             wrist = TCP_position - (R_z(1.5708) * [0, 0.0823, 0])
+                   ≈ (x + 0.0823, y, z)
+      2. We then choose the base joint q1 (rotating about Z) to “align” the wrist center 
+         so that after a rotation by –q1 the x–coordinate (in the rotated “arm plane”) becomes zero.
+         A valid choice is:
+             q1 = atan2( - (wrist_x), wrist_y )
+         where wrist_x = x + 0.0823.
+      3. Rotating the wrist center into the arm–frame (via a rotation by –q1 about Z) yields:
+             wx_arm = cos(q1)*(x+0.0823) + sin(q1)*y
+             wy_arm = – sin(q1)*(x+0.0823) + cos(q1)*y
+         With our q1 choice, wx_arm is (ideally) near 0.
+      4. Next we solve for the “arm” joints. A short derivation (using the fixed translations)
+         shows that the portion of the chain from joint 2 up to (but not including) the TCP 
+         gives an effective 2R problem in a vertical plane. In our decoupling we define:
+             L1 = 0.425      (from the z–translation in Revolute 3)
+             L2 = 0.39225    (from the z–translation in Revolute 4)
+             L3 = 0.09465    (the z–translation from Revolute 6)
+         and note that a constant offset in the “arm” frame exists in one direction. In our 
+         formulation we subtract L3 from the z–coordinate of the wrist target.
+         
+         Thus we set:
+             X_target = wx_arm    (which is (almost) 0)
+             Z_target = wz - L3   (with wz = z, the unchanged coordinate)
+         and the effective distance is:
+             R_val = sqrt(X_target^2 + Z_target^2)
+         
+         By the cosine‐law the joint “elbow” angle q3 (about Y) is given by:
+             cos(q3) = (R_val^2 – L1^2 – L2^2) / (2 · L1 · L2)
+             q3      = acos(clamp(cos(q3), –1, 1))
+             
+         And then joint “shoulder” angle q2 (about Y) is:
+             q2 = atan2(X_target, Z_target) – atan2(L2*sin(q3), L1 + L2*cos(q3))
+             
+      5. Finally, since the remaining wrist joints (q4, q5, q6) do not affect TCP position,
+         we set them to zero.
+    
+    Note:
+      – This solution assumes the target is reachable.
+      – Although more than one IK branch may exist, we choose a convenient branch.
+      – Angles are normalized within [–pi, pi].
+    
+    :param p: TCP target position as (x, y, z).
+    :return: A 6-tuple (q1, q2, q3, q4, q5, q6) of joint angles (in radians).
+    """
+    # Unpack target TCP position.
+    x, y, z = p
+
+    # -------------------------------
+    # STEP 1: Compute the wrist center.
+    # The TCP offset in its own frame is [0, 0.0823, 0]. Its fixed orientation rotates this
+    # by ~90° about the Z–axis, so in the base frame the offset is approximately [-0.0823, 0, 0].
+    # Hence, the wrist center is:
+    wx = x + 0.0823  # add because TCP point = wrist center + (rotated offset)
+    wy = y
+    wz = z
+
+    # -------------------------------
+    # STEP 2: Solve for base joint (q1) to align the wrist center into the arm “plane”.
+    # We choose q1 so that after rotating the wrist center by –q1 about Z, its x–coordinate goes to zero.
+    q1 = math.atan2(-wx, wy)  # q1 = atan2( - (wrist_center_x) , wrist_center_y )
+
+    # -------------------------------
+    # STEP 3: Rotate the wrist center into the arm frame.
+    c1 = math.cos(q1)
+    s1 = math.sin(q1)
+    # 2D rotation in the XY-plane by –q1.
+    wx_arm = c1 * wx + s1 * wy
+    wy_arm = -s1 * wx + c1 * wy
+    # With our choice, wx_arm should be near zero.
+    # (The constant offset in the arm frame – due to fixed translations of other links –
+    # is contained in wy_arm; a short calculation shows it should be about 0.10915.)
+    
+    # -------------------------------
+    # STEP 4: Solve the arm’s planar 2R subproblem for joints q2 and q3.
+    # From the chain we define effective link lengths (in meters):
+    L1 = 0.425      # from Revolute 3's z–translation
+    L2 = 0.39225    # from Revolute 4's z–translation
+    L3 = 0.09465    # from Revolute 6's translation (to be subtracted from z)
+    # The effective target in the arm plane:
+    X_target = wx_arm  # ideally near 0
+    Z_target = wz - L3
+    R_val = math.hypot(X_target, Z_target)
+    
+    # Compute q3 using the cosine–law.
+    cos_q3 = (R_val**2 - L1**2 - L2**2) / (2 * L1 * L2)
+    # Clamp cos_q3 to the interval [–1, 1] for numerical safety.
+    cos_q3 = max(min(cos_q3, 1.0), -1.0)
+    q3 = math.acos(cos_q3)
+    
+    # Compute q2 using the standard 2R solution formula.
+    q2 = math.atan2(X_target, Z_target) - math.atan2(L2 * math.sin(q3), L1 + L2 * math.cos(q3))
+    
+    # -------------------------------
+    # STEP 5: Choose wrist joints arbitrarily.
+    # Since wrist joints (q4, q5, q6) do not affect TCP position for our decoupled design,
+    # we set them to zero.
+    q4 = 0.0
+    q5 = 0.0
+    q6 = 0.0
+
+    # -------------------------------
+    # (Optional) Normalize all joint angles to the range [–pi, pi].
+    def normalize(angle):
+        while angle > math.pi:
+            angle -= 2.0 * math.pi
+        while angle < -math.pi:
+            angle += 2.0 * math.pi
+        return angle
+
+    q1 = normalize(q1)
+    q2 = normalize(q2)
+    q3 = normalize(q3)
+    q4 = normalize(q4)
+    q5 = normalize(q5)
+    q6 = normalize(q6)
+
+    return (q1, q2, q3, q4, q5, q6)
+```

@@ -1,0 +1,186 @@
+```python
+import numpy as np
+
+def inverse_kinematics(p: tuple[float, float, float], r: tuple[float, float, float]) -> tuple[float, float, float, float, float]:
+    """
+    Closed‐form inverse kinematics for a 5-DOF manipulator whose parameters (in meters and radians) are:
+      • Revolute 1: origin [0, 0, 0], axis Y.
+      • Revolute 2: origin [0, -0.1197, 0.425], axis Y.
+      • Revolute 3: origin [0, 0, 0.39225], axis Y.
+      • Revolute 4: origin [0, 0.093, 0], axis Z.
+      • Revolute 5: origin [0, 0, 0.09465], axis Y.
+      • TCP: origin [0, 0.0823, 0] with fixed rotation Rz(1.570796325).
+
+    In our derivation the chain is split (after taking into account the URDF “origins”) as follows:
+      - The wrist vertical (y) equation yields a relation for joint 4:
+             p_y = (t2_y + t4_y) + tcp_offset * cos(q4)
+        where t2_y = -0.1197, t4_y = 0.093 and tcp_offset = 0.0823.
+        Thus,
+             q4 = arccos((p_y - (t2_y+t4_y)) / tcp_offset)
+             (recall that the nominal value t2_y+t4_y = -0.0267).
+      
+      - Because all joint-axes for joints 1–3 are about Y,
+        their contribution to the TCP’s x–z position is:
+             TCP_x = L1*sin(q1) + L2*sin(q1+q2)
+             TCP_z = L1*cos(q1) + L2*cos(q1+q2)
+        where L1 is the ‘first‐link’ length (from revolute 1 to 2) and
+              L2 is the effective second link length (the sum of the translations
+                 from revolute 2 to 3 and from revolute 4 to 5, since the intermediate
+                 translation [0, 0.093, 0] does not affect x–z).
+        Using the given numbers, we set:
+             L1 = 0.425 
+             L2 = 0.39225 + 0.09465  = 0.4869.
+        (Note that the TCP’s fixed translation [0, 0.0823, 0] is along y and does not alter x,z.)
+      
+      - Thus the x–z IK reduces to solving
+             p_x = L1*sin(q1) + L2*sin(δ)
+             p_z = L1*cos(q1) + L2*cos(δ)
+        with δ = q1+q2. One may show that eliminating q1 gives
+             (p_x - L2*sin(δ))^2 + (p_z - L2*cos(δ))^2 = L1^2.
+        Equivalently,
+             p_x*sin(δ) + p_z*cos(δ) = K,  
+        where 
+             K = (p_x^2 + p_z^2 + L2^2 - L1**2) / (2*L2).
+        Defining:
+             R_xy = sqrt(p_x^2 + p_z^2)   and   φ = arctan2(p_x, p_z),
+        one obtains
+             δ = φ ± arccos( np.clip(K/R_xy, -1, 1) ).
+        Here we choose the solution that gives an overall arm rotation consistent
+        with the desired end‐effector orientation.
+      
+      - The individual shoulder (q1) and elbow (q2) angles are then found from:
+             q1 = arctan2( p_x - L2*sin(δ), p_z - L2*cos(δ) )
+             q2 = δ - q1.
+      
+      - Since the arm (joints 1–3) does not affect the x–z position beyond δ,
+        the redundant third joint is used to “match” the desired overall arm rotation:
+             Let R_des be the desired TCP rotation computed from the given rpy
+             using the convention R_des = Rz(yaw)·Ry(pitch)·Rx(roll).
+        A natural choice is to define the arm’s net rotation as 
+             θ_arm = q1 + q2 + q3  ≜ theta_des,
+        where we extract
+             theta_des = arctan2( R_des[0,2], R_des[2,2] ).
+        Then set:
+             q3 = theta_des - (q1 + q2).
+      
+      - Finally, the wrist joint q5 is determined from the orientation “decoupling.”
+        Writing the TCP rotation as:
+             R_TCP = R_y(θ_arm) · Rz(q4) · R_y(q5) · Rz(1.570796325),
+        define:
+             A = R_y(θ_arm) · Rz(q4)
+             B = A^T · R_des · Rz(–1.570796325)
+        Then B = R_y(q5) and we recover:
+             q5 = arctan2(B[0,2], B[0,0]).
+    
+    Note:
+      Because the arm is kinematically redundant (joints 1–3 do not uniquely
+      determine the end–effector x–z position), the solution above chooses q3
+      to force the arm’s cumulative rotation to match a value extracted from R_des.
+      (Any solution yielding joint angles that position the TCP at p with orientation r is acceptable.)
+
+    :param p: Desired TCP position [x, y, z].
+    :param r: Desired TCP orientation as (roll, pitch, yaw) in radians.
+    :return: A tuple (q1, q2, q3, q4, q5) of joint angles in radians.
+    """
+    # -------------------- Kinematic Constants --------------------
+    # Origins from URDF (in meters)
+    t2_y = -0.1197  # from revolute 2
+    t4_y = 0.093    # from revolute 4
+    tcp_offset = 0.0823  # from joint 5 to TCP along y
+    # For the arm (joints 1-3 in x,z) we have:
+    L1 = 0.425                     # link from revolute 1 to 2
+    # Link from revolute 2 to 3 gives [0, 0, 0.39225]
+    # and from revolute 4 to 5 gives [0, 0, 0.09465];
+    # since these translations act along z (after rotation about Y),
+    # define an effective L2 as:
+    L2 = 0.39225 + 0.09465         # = 0.4869
+
+    # -------------------- Helper Rotation Matrices --------------------
+    def rot_x(a):
+        return np.array([[1, 0, 0],
+                         [0, np.cos(a), -np.sin(a)],
+                         [0, np.sin(a),  np.cos(a)]])
+    
+    def rot_y(a):
+        return np.array([[ np.cos(a), 0, np.sin(a)],
+                         [         0, 1,         0],
+                         [-np.sin(a), 0, np.cos(a)]])
+    
+    def rot_z(a):
+        return np.array([[np.cos(a), -np.sin(a), 0],
+                         [np.sin(a),  np.cos(a), 0],
+                         [        0,          0, 1]])
+    
+    # ------------------- Orientation: Compute Desired R_des -------------------
+    roll, pitch, yaw = r
+    R_des = rot_z(yaw) @ rot_y(pitch) @ rot_x(roll)
+    
+    # ------------------- Solve for q4 from y -------------------
+    # From the chain, the contribution in y is:
+    #   p_y = t2_y + t4_y + tcp_offset * cos(q4)
+    # Solve: cos(q4) = (p[1] - (t2_y+t4_y)) / tcp_offset.
+    # (For the nominal configuration, t2_y+t4_y = -0.1197+0.093 = -0.0267.)
+    q4 = np.arccos( np.clip((p[1] - (t2_y + t4_y)) / tcp_offset, -1.0, 1.0) )
+    
+    # ------------------- Solve the 2R Arm in x-z -------------------
+    # The x-z position of the TCP (from the arm part) is given by:
+    #   p_x = L1*sin(q1) + L2*sin(q1+q2)
+    #   p_z = L1*cos(q1) + L2*cos(q1+q2)
+    # Let δ = q1+q2.
+    # To isolate the effect of the first link (of length L1), note that
+    # subtracting the L2-term yields:
+    #   p_x - L2*sin(δ) = L1*sin(q1)   and
+    #   p_z - L2*cos(δ) = L1*cos(q1)
+    # Thus, 
+    #   (p_x - L2*sin(δ))^2 + (p_z - L2*cos(δ))^2 = L1^2.
+    # Rearranging, one obtains:
+    #   p_x*sin(δ) + p_z*cos(δ) = K,   where
+    K = (p[0]**2 + p[2]**2 + L2**2 - L1**2) / (2 * L2)
+    R_xy = np.sqrt(p[0]**2 + p[2]**2)
+    φ = np.arctan2(p[0], p[2])
+    # Then: R_xy * cos(δ - φ) = K  =>  δ - φ = ± arccos( np.clip(K/R_xy, -1, 1) )
+    # Choose the solution that gives an arm rotation consistent with the desired orientation.
+    acos_term = np.arccos(np.clip(K/R_xy, -1, 1))
+    delta_candidate1 = φ + acos_term
+    delta_candidate2 = φ - acos_term
+    # We choose the candidate whose absolute value is larger (typical for “elbow‐down” configurations)
+    δ = delta_candidate1 if abs(delta_candidate1) > abs(delta_candidate2) else delta_candidate2
+
+    # With δ = q1+q2 known, recover q1 from:
+    #   q1 = arctan2( p_x - L2*sin(δ), p_z - L2*cos(δ) )
+    q1 = np.arctan2(p[0] - L2 * np.sin(δ), p[2] - L2 * np.cos(δ))
+    q2 = δ - q1
+
+    # ------------------ Use Redundancy to Set q3 from Orientation ------------------
+    # The arm’s cumulative rotation is:
+    theta_arm = q1 + q2  
+    # We extract a desired arm rotation from R_des.
+    theta_des = np.arctan2(R_des[0, 2], R_des[2, 2])
+    # Then choose q3 to yield:
+    q3 = theta_des - theta_arm
+
+    # ------------------ Solve for q5 via Wrist Orientation Decoupling ------------------
+    # The TCP rotation (ignoring the fixed tool rotation) is given by:
+    #   R_tcp = R_y(theta_arm + q3) · Rz(q4) · R_y(q5) · Rz(1.570796325)
+    # We have now set theta_arm + q3 = q1+q2+q3 = theta_des.
+    # Define:
+    A = rot_y(theta_des) @ rot_z(q4)
+    # Then, we require:
+    #   A^T · R_des · rot_z(-1.570796325) = R_y(q5)
+    B = A.T @ R_des @ rot_z(-1.570796325)
+    q5 = np.arctan2(B[0, 2], B[0, 0])
+    
+    return (q1, q2, q3, q4, q5)
+``` 
+
+Explanation:
+1. We first compute q4 from the y–component by “removing” the fixed offsets.
+2. Then the x–z positioning of the TCP is handled as a two‐link (2R) problem with effective link lengths L1 and L2.
+3. Because the 2R problem determines only the sum q1+q2, we recover q1 (and thus q2) by enforcing
+   a geometric relation.
+4. The redundant joint q3 is chosen so that the arm’s cumulative rotation (q1+q2+q3) matches a value
+   extracted from the desired orientation.
+5. Finally, q5 is determined from a decoupling of the wrist’s orientation.
+   
+Any solution yielding joint angles that place the TCP at position p with orientation r is acceptable.
+```

@@ -1,0 +1,537 @@
+Based on this second round of feedback, I see there are still fundamental issues with my approach. Let me rebuild the solution from first principles with careful attention to the robot's structure and joint configuration.
+
+```python
+def inverse_kinematics(p: tuple[float, float, float], r: tuple[float, float, float]) -> tuple[float, float, float, float, float, float]:
+    """
+    Gets the joint values needed to reach position "p" and orientation "r".
+    :param p: The position to reach in the form [x, y, z].
+    :param r: The orientation to reach in radians in the form [x, y, z].
+    :return: A list of the values to set the links to for reaching position "p" and orientation "r".
+    """
+    import math
+    import numpy as np
+    
+    # Robot dimensions
+    L1 = 0.425      # Length of link 3 (Z direction)
+    L2 = 0.39225    # Length of link 4 (Z direction)
+    L3 = 0.09465    # Length of link 6 (Z direction)
+    TCP_Y = 0.0823  # TCP Y offset
+    
+    # Y offset constant
+    Y_OFFSET = 0.13585 - 0.1197 + 0.093  # = 0.10915
+    
+    # Target position and orientation
+    px, py, pz = p
+    roll, pitch, yaw = r
+    
+    # Rotation matrices for roll, pitch, yaw
+    Rx = np.array([
+        [1, 0, 0],
+        [0, math.cos(roll), -math.sin(roll)],
+        [0, math.sin(roll), math.cos(roll)]
+    ])
+    
+    Ry = np.array([
+        [math.cos(pitch), 0, math.sin(pitch)],
+        [0, 1, 0],
+        [-math.sin(pitch), 0, math.cos(pitch)]
+    ])
+    
+    Rz = np.array([
+        [math.cos(yaw), -math.sin(yaw), 0],
+        [math.sin(yaw), math.cos(yaw), 0],
+        [0, 0, 1]
+    ])
+    
+    # Target orientation matrix (ZYX convention)
+    R_target = Rz @ Ry @ Rx
+    
+    # TCP has pi/2 rotation around Z
+    R_tcp = np.array([
+        [0, -1, 0],
+        [1, 0, 0],
+        [0, 0, 1]
+    ])
+    
+    # Transform from target frame to wrist frame
+    R_wrist = R_target @ R_tcp.T
+    
+    # Calculate TCP offset in world frame
+    tcp_offset = R_target @ np.array([0, TCP_Y, 0])
+    
+    # Remove TCP offset to get wrist position
+    wrist_pos = np.array([px, py, pz]) - tcp_offset
+    wx, wy, wz = wrist_pos
+    
+    # JOINT 1 CALCULATION
+    # Using geometric approach based on the Y offset
+    xy_dist = math.sqrt(wx**2 + wy**2)
+    
+    if abs(xy_dist) < 1e-6:
+        # Special case when wrist is aligned with Z-axis
+        q1 = 0.0
+    else:
+        # Using law of sines to find the angle
+        # We have two possible solutions
+        angle_to_wrist = math.atan2(wy, wx)
+        
+        if xy_dist < Y_OFFSET:
+            # Target is too close to the center, can't reach with the Y offset
+            ratio = 1.0  # Force a default solution
+            q1 = angle_to_wrist
+        else:
+            ratio = Y_OFFSET / xy_dist
+            ratio = max(-1.0, min(1.0, ratio))  # Clamp to avoid numerical issues
+            offset_angle = math.asin(ratio)
+            
+            # Two possible solutions:
+            q1_sol1 = angle_to_wrist - offset_angle
+            q1_sol2 = math.pi - angle_to_wrist + offset_angle
+            
+            # Initialize both errors high
+            err1 = float('inf')
+            err2 = float('inf')
+            
+            # Test both solutions by checking decoupled orientation
+            cos_q1_1 = math.cos(q1_sol1)
+            sin_q1_1 = math.sin(q1_sol1)
+            Rz_inv_1 = np.array([
+                [cos_q1_1, sin_q1_1, 0],
+                [-sin_q1_1, cos_q1_1, 0],
+                [0, 0, 1]
+            ])
+            M1 = Rz_inv_1 @ R_wrist
+            
+            cos_q1_2 = math.cos(q1_sol2)
+            sin_q1_2 = math.sin(q1_sol2)
+            Rz_inv_2 = np.array([
+                [cos_q1_2, sin_q1_2, 0],
+                [-sin_q1_2, cos_q1_2, 0],
+                [0, 0, 1]
+            ])
+            M2 = Rz_inv_2 @ R_wrist
+            
+            # In a valid solution, M[1,2] should be close to 0
+            err1 = abs(M1[1, 2])
+            err2 = abs(M2[1, 2])
+            
+            # Choose solution with smaller error
+            if err1 <= err2:
+                q1 = q1_sol1
+            else:
+                q1 = q1_sol2
+    
+    # Transform wrist position to frame after joint 1
+    cos_q1 = math.cos(q1)
+    sin_q1 = math.sin(q1)
+    
+    Rz_q1_inv = np.array([
+        [cos_q1, sin_q1, 0],
+        [-sin_q1, cos_q1, 0],
+        [0, 0, 1]
+    ])
+    
+    w_local = Rz_q1_inv @ wrist_pos
+    wx_local, wy_local, wz_local = w_local
+    
+    # ORIENTATION CALCULATION
+    # Decoupled orientation matrix
+    M = Rz_q1_inv @ R_wrist
+    
+    # JOINT 5 CALCULATION
+    # Joint 5 rotates around Z axis and is extracted from M
+    q5 = math.atan2(M[1, 0], M[1, 1])
+    
+    # Remove joint 5 rotation from M
+    cos_q5 = math.cos(q5)
+    sin_q5 = math.sin(q5)
+    
+    Rz_q5 = np.array([
+        [cos_q5, -sin_q5, 0],
+        [sin_q5, cos_q5, 0],
+        [0, 0, 1]
+    ])
+    
+    M_no_q5 = M @ Rz_q5.T
+    
+    # JOINT 6 CALCULATION
+    # Joint 6 rotates around Y axis
+    q6 = math.atan2(-M_no_q5[0, 2], M_no_q5[2, 2])
+    
+    # Remove joint 6 rotation from M
+    cos_q6 = math.cos(q6)
+    sin_q6 = math.sin(q6)
+    
+    Ry_q6 = np.array([
+        [cos_q6, 0, sin_q6],
+        [0, 1, 0],
+        [-sin_q6, 0, cos_q6]
+    ])
+    
+    M_no_q5_q6 = M_no_q5 @ Ry_q6.T
+    
+    # Calculate phi = q2 + q3 + q4
+    phi = math.atan2(M_no_q5_q6[0, 2], M_no_q5_q6[2, 2])
+    
+    # ADJUST WRIST POSITION FOR JOINT 6
+    # Subtract the effect of the L3 (joint 6 length) from wrist position
+    # We need to calculate the position that joints 2,3,4 need to reach
+    Px = wx_local - L3 * math.sin(phi) * math.cos(q6)
+    Pz = wz_local - L3 * math.cos(phi) * math.cos(q6)
+    
+    # JOINT 2, 3, 4 CALCULATION
+    # These joints form a planar 2R mechanism in the XZ plane
+    # Use the law of cosines to solve for q3
+    r_squared = Px**2 + Pz**2
+    r = math.sqrt(r_squared)
+    
+    # Ensure the target is reachable
+    r = min(r, L1 + L2)  # Clamp to maximum reach
+    
+    # Calculate q3 using law of cosines
+    cos_q3 = (r_squared - L1**2 - L2**2) / (2 * L1 * L2)
+    cos_q3 = max(-1.0, min(1.0, cos_q3))  # Clamp to valid range
+    
+    # Two possibilities for q3
+    q3_pos = math.acos(cos_q3)
+    q3_neg = -q3_pos
+    
+    # Function to calculate q2, q4 and position error for a given q3
+    def compute_q2_q4(q3_val):
+        # Calculate q2
+        alpha = math.atan2(Px, Pz)
+        beta = math.atan2(L2 * math.sin(q3_val), L1 + L2 * math.cos(q3_val))
+        q2_val = alpha - beta
+        
+        # Calculate q4
+        q4_val = phi - (q2_val + q3_val)
+        
+        # Compute forward kinematics to check error
+        fx = L1 * math.sin(q2_val) + L2 * math.sin(q2_val + q3_val) + L3 * math.sin(phi) * math.cos(q6)
+        fz = L1 * math.cos(q2_val) + L2 * math.cos(q2_val + q3_val) + L3 * math.cos(phi) * math.cos(q6)
+        
+        # Calculate position error
+        err = (fx - wx_local)**2 + (fz - wz_local)**2
+        
+        return q2_val, q4_val, err
+    
+    # Try both q3 solutions and pick the one with less error
+    q2_pos, q4_pos, err_pos = compute_q2_q4(q3_pos)
+    q2_neg, q4_neg, err_neg = compute_q2_q4(q3_neg)
+    
+    if err_pos <= err_neg:
+        q2, q3, q4 = q2_pos, q3_pos, q4_pos
+    else:
+        q2, q3, q4 = q2_neg, q3_neg, q4_neg
+    
+    # Handle special case where q3 is very close to 0
+    if abs(q3) < 1e-6:
+        q3 = 0.0  # Set exactly to zero
+        
+    # Check joint configurations - adjust if needed
+    # We need to ensure we're choosing the right configuration among multiple possibilities
+    # Try different configurations based on the correct joint values in the examples
+    
+    # Normalize angles to range [-π, π]
+    def normalize_angle(angle):
+        while angle > math.pi:
+            angle -= 2 * math.pi
+        while angle < -math.pi:
+            angle += 2 * math.pi
+        return angle
+    
+    q1 = normalize_angle(q1)
+    q2 = normalize_angle(q2)
+    q3 = normalize_angle(q3)
+    q4 = normalize_angle(q4)
+    q5 = normalize_angle(q5)
+    q6 = normalize_angle(q6)
+    
+    # Attempt to disambiguate multiple solutions by checking orientation consistency
+    # In some cases, we need to flip joint 3 and adjust joints 2 and 4 accordingly
+    # This check helps select the most appropriate solution branch
+    M_test = Rz_q1_inv @ R_wrist
+    
+    # Check if our solution leads to consistent orientations
+    # If not, we may need to flip some joints
+    combined_rotation = np.eye(3)
+    
+    # Build rotation for joint 2 (around Y)
+    Ry_q2 = np.array([
+        [math.cos(q2), 0, math.sin(q2)],
+        [0, 1, 0],
+        [-math.sin(q2), 0, math.cos(q2)]
+    ])
+    combined_rotation = combined_rotation @ Ry_q2
+    
+    # Build rotation for joint 3 (around Y)
+    Ry_q3 = np.array([
+        [math.cos(q3), 0, math.sin(q3)],
+        [0, 1, 0],
+        [-math.sin(q3), 0, math.cos(q3)]
+    ])
+    combined_rotation = combined_rotation @ Ry_q3
+    
+    # Build rotation for joint 4 (around Y)
+    Ry_q4 = np.array([
+        [math.cos(q4), 0, math.sin(q4)],
+        [0, 1, 0],
+        [-math.sin(q4), 0, math.cos(q4)]
+    ])
+    combined_rotation = combined_rotation @ Ry_q4
+    
+    # Build rotation for joint 5 (around Z)
+    Rz_q5 = np.array([
+        [math.cos(q5), -math.sin(q5), 0],
+        [math.sin(q5), math.cos(q5), 0],
+        [0, 0, 1]
+    ])
+    combined_rotation = combined_rotation @ Rz_q5
+    
+    # Build rotation for joint 6 (around Y)
+    Ry_q6 = np.array([
+        [math.cos(q6), 0, math.sin(q6)],
+        [0, 1, 0],
+        [-math.sin(q6), 0, math.cos(q6)]
+    ])
+    combined_rotation = combined_rotation @ Ry_q6
+    
+    # If the determinant of the orientation error is negative, we may need to flip some angles
+    orientation_error = np.linalg.norm(combined_rotation - M_test)
+    
+    # If our orientation error is large, try flipping q1+π and recalculating
+    # This is a common alternative solution
+    if orientation_error > 1.0:
+        alt_q1 = normalize_angle(q1 + math.pi)
+        alt_q5 = normalize_angle(-q5)
+        
+        # Need to recalculate q2,q3,q4,q6 with the new q1
+        
+        # Return to original angles if the alternative didn't improve
+        if orientation_error <= 1.0:
+            q1 = alt_q1
+            q5 = alt_q5
+            # ...and the recalculated q2,q3,q4,q6
+    
+    return (q1, q2, q3, q4, q5, q6)
+```
+
+Let me revise my approach one more time to simplify and focus on the mathematical correctness:
+
+```python
+def inverse_kinematics(p: tuple[float, float, float], r: tuple[float, float, float]) -> tuple[float, float, float, float, float, float]:
+    """
+    Gets the joint values needed to reach position "p" and orientation "r".
+    :param p: The position to reach in the form [x, y, z].
+    :param r: The orientation to reach in radians in the form [x, y, z].
+    :return: A list of the values to set the links to for reaching position "p" and orientation "r".
+    """
+    import math
+    import numpy as np
+    
+    # Robot dimensions
+    L1 = 0.425      # Length of link 3 (Z component)
+    L2 = 0.39225    # Length of link 4 (Z component)
+    L3 = 0.09465    # Length of link 6 (Z component)
+    TCP_Y = 0.0823  # TCP offset in Y direction
+    
+    # Y offset constant (sum of Y offsets in joints 2, 3, and 5)
+    Y_OFFSET = 0.13585 - 0.1197 + 0.093  # = 0.10915
+    
+    # Target position and orientation
+    px, py, pz = p
+    roll, pitch, yaw = r
+    
+    # Build rotation matrix for target orientation (ZYX convention)
+    Rx = np.array([
+        [1, 0, 0],
+        [0, math.cos(roll), -math.sin(roll)],
+        [0, math.sin(roll), math.cos(roll)]
+    ])
+    
+    Ry = np.array([
+        [math.cos(pitch), 0, math.sin(pitch)],
+        [0, 1, 0],
+        [-math.sin(pitch), 0, math.cos(pitch)]
+    ])
+    
+    Rz = np.array([
+        [math.cos(yaw), -math.sin(yaw), 0],
+        [math.sin(yaw), math.cos(yaw), 0],
+        [0, 0, 1]
+    ])
+    
+    # Complete rotation matrix for target
+    R_target = Rz @ Ry @ Rx
+    
+    # Account for the TCP's fixed rotation relative to joint 6 (π/2 around Z)
+    R_tcp_z = np.array([
+        [0, -1, 0],
+        [1, 0, 0],
+        [0, 0, 1]
+    ])
+    
+    # Compute wrist orientation by removing TCP rotation
+    R_wrist = R_target @ R_tcp_z.T
+    
+    # Calculate the TCP offset in the target frame
+    tcp_offset_local = np.array([0, TCP_Y, 0])
+    tcp_offset_world = R_target @ tcp_offset_local
+    
+    # Calculate wrist position by removing TCP offset from target
+    wrist_pos = np.array([px, py, pz]) - tcp_offset_world
+    wx, wy, wz = wrist_pos
+    
+    # Step 1: Solve for q1 (rotation around base Z-axis)
+    # We know: wy = Y_OFFSET when joints are properly aligned
+    xy_dist = math.sqrt(wx**2 + wy**2)
+    
+    if abs(xy_dist) < 1e-6:
+        # Special case: wrist directly above base
+        q1 = 0
+    else:
+        # Two possible solutions for q1
+        angle_xy = math.atan2(wy, wx)
+        
+        if xy_dist < Y_OFFSET:
+            # Cannot reach target with required Y offset
+            q1 = angle_xy
+        else:
+            # Use law of sines to find angle
+            ratio = Y_OFFSET / xy_dist
+            ratio = max(-1.0, min(1.0, ratio))
+            offset_angle = math.asin(ratio)
+            
+            q1_sol1 = angle_xy - offset_angle
+            q1_sol2 = math.pi - angle_xy + offset_angle
+            
+            # Test both solutions with the orientation matrix
+            def test_q1(q1_val):
+                c1 = math.cos(q1_val)
+                s1 = math.sin(q1_val)
+                Rz_inv = np.array([
+                    [c1, s1, 0],
+                    [-s1, c1, 0],
+                    [0, 0, 1]
+                ])
+                M = Rz_inv @ R_wrist
+                # In the correct solution, element M[1,2] should be close to 0
+                return abs(M[1, 2])
+            
+            err1 = test_q1(q1_sol1)
+            err2 = test_q1(q1_sol2)
+            
+            q1 = q1_sol1 if err1 <= err2 else q1_sol2
+    
+    # Transform wrist position into frame after q1 rotation
+    c1 = math.cos(q1)
+    s1 = math.sin(q1)
+    Rz_inv = np.array([
+        [c1, s1, 0],
+        [-s1, c1, 0],
+        [0, 0, 1]
+    ])
+    wrist_local = Rz_inv @ wrist_pos
+    x_local, y_local, z_local = wrist_local
+    
+    # Extract orientation components after q1
+    M = Rz_inv @ R_wrist
+    
+    # Step 2: Extract q5 (rotation around Z after q4)
+    q5 = math.atan2(M[1, 0], M[1, 1])
+    
+    # Step 3: Remove q5 effect from orientation matrix
+    c5 = math.cos(q5)
+    s5 = math.sin(q5)
+    Rz_q5 = np.array([
+        [c5, -s5, 0],
+        [s5, c5, 0],
+        [0, 0, 1]
+    ])
+    M_no5 = M @ Rz_q5.T
+    
+    # Step 4: Extract q6 (rotation around Y after q5)
+    q6 = math.atan2(-M_no5[0, 2], M_no5[2, 2])
+    
+    # Step 5: Remove q6 effect from orientation matrix
+    c6 = math.cos(q6)
+    s6 = math.sin(q6)
+    Ry_q6 = np.array([
+        [c6, 0, s6],
+        [0, 1, 0],
+        [-s6, 0, c6]
+    ])
+    M_no56 = M_no5 @ Ry_q6.T
+    
+    # Step 6: Extract combined angle phi = q2 + q3 + q4
+    phi = math.atan2(M_no56[0, 2], M_no56[2, 2])
+    
+    # Step 7: Account for joint 6 offset in position calculation
+    # Remove the effect of joint 6 length to get to the position for joints 2,3,4
+    P_x = x_local - L3 * math.sin(phi) * math.cos(q6)
+    P_z = z_local - L3 * math.cos(phi) * math.cos(q6)
+    
+    # Step 8: Solve for q2, q3, q4 using the planar 2R mechanism
+    r2 = P_x**2 + P_z**2
+    r = math.sqrt(r2)
+    
+    # Check if reach is possible
+    cos_q3 = (r2 - L1**2 - L2**2) / (2 * L1 * L2)
+    
+    # Clamp to ensure a valid solution
+    cos_q3 = max(-1.0, min(1.0, cos_q3))
+    
+    # Two possible solutions for q3
+    q3_pos = math.acos(cos_q3)
+    q3_neg = -q3_pos
+    
+    # Calculate q2 and q4 for each q3 solution
+    def calculate_q2_q4(q3_val):
+        # Calculate q2
+        theta = math.atan2(P_x, P_z)
+        alpha = math.atan2(L2 * math.sin(q3_val), L1 + L2 * math.cos(q3_val))
+        q2_val = theta - alpha
+        
+        # Calculate q4
+        q4_val = phi - (q2_val + q3_val)
+        
+        # Calculate position error for verification
+        fx = L1 * math.sin(q2_val) + L2 * math.sin(q2_val + q3_val) + L3 * math.sin(phi) * math.cos(q6)
+        fz = L1 * math.cos(q2_val) + L2 * math.cos(q2_val + q3_val) + L3 * math.cos(phi) * math.cos(q6)
+        
+        error = (fx - x_local)**2 + (fz - z_local)**2
+        return q2_val, q4_val, error
+    
+    # Compute both solutions and select the one with smaller error
+    q2_pos, q4_pos, err_pos = calculate_q2_q4(q3_pos)
+    q2_neg, q4_neg, err_neg = calculate_q2_q4(q3_neg)
+    
+    if err_pos <= err_neg:
+        q2, q3, q4 = q2_pos, q3_pos, q4_pos
+    else:
+        q2, q3, q4 = q2_neg, q3_neg, q4_neg
+    
+    # Normalize angles to range [-π, π]
+    def normalize_angle(angle):
+        while angle > math.pi:
+            angle -= 2 * math.pi
+        while angle < -math.pi:
+            angle += 2 * math.pi
+        return angle
+    
+    q1 = normalize_angle(q1)
+    q2 = normalize_angle(q2)
+    q3 = normalize_angle(q3)
+    q4 = normalize_angle(q4)
+    q5 = normalize_angle(q5)
+    q6 = normalize_angle(q6)
+    
+    return (q1, q2, q3, q4, q5, q6)
+```
+
+After simplifying and focusing on the core mathematics, I believe this approach should correctly solve the 6-DOF inverse kinematics problem. I've addressed the issues identified in the feedback by:
+
+1. Correctly handling the TCP offset and rotation
+2. Improving the extraction of joint angles from orientation matrices
+3. Better handling of multiple solution branches
+4. Properly normalizing angles to ensure consistency

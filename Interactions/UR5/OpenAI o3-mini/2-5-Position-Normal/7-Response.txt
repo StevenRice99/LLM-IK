@@ -1,0 +1,88 @@
+```python
+def inverse_kinematics(p: tuple[float, float, float]) -> tuple[float, float, float, float]:
+    """
+    Computes one valid closed-form inverse kinematics solution for the 4 DOF serial manipulator.
+    
+    The robot description based on the URDF gives:
+      - Revolute 1: Position [0, 0, 0], Orientation [0, 0, 0], Axis Y
+      - Revolute 2: Position [0, 0, 0.39225], Orientation [0, 0, 0], Axis Y
+      - Revolute 3: Position [0, 0.093, 0], Orientation [0, 0, 0], Axis Z
+      - Revolute 4: Position [0, 0, 0.09465], Orientation [0, 0, 0], Axis Y
+      - TCP:       Position [0, 0.0823, 0], Orientation [0, 0, π/2]
+    
+    Due to the fixed offsets, we define:
+        L1 = 0.39225   (vertical translation from revolute 1 to 2 along +Z)
+        L2 = 0.093     (translation from revolute 2 to 3 along +Y)
+        L3 = 0.09465   (translation from revolute 3 to 4 along +Z)
+        L4 = 0.0823    (TCP offset, translation along Y in the TCP frame)
+
+    The decoupled inverse kinematics is solved as follows:
+
+    1. Vertical Decoupling:
+       The vertical component of the TCP (p[1]) is reached by the offset from link 2 and the effect
+       of joint 3 (rotation around the TCP Y offset):
+             p_y = L2 + L4*cos(theta3)
+       so that:
+             theta3 = arccos((p_y - L2) / L4)
+    
+    2. Horizontal Plane (X-Z) Components:
+       Define the effective wrist offset (from revolute 2):
+             D = L3 + L4*sin(theta3)
+       Then the horizontal distance from the robot's base (projected onto the X-Z plane) is:
+             r = sqrt(p_x^2 + p_z^2)
+       and the polar angle of the point is:
+             phi = arctan2(p_x, p_z)
+    
+    3. Solve the Planar 2R Problem (Shoulder Joints):
+       Consider a planar manipulator with link lengths
+             a = L1   and b = D.
+       Using the cosine law:
+             cos(gamma) = (a^2 + b^2 - r^2) / (2*a*b)
+       Clamp the value of cos(gamma) between -1 and 1 to ensure numerical stability:
+             gamma = arccos(cos(gamma))
+       For the “elbow-up” solution, set:
+             theta2 = π - gamma
+       Then, the angle for joint 1 is:
+             theta1 = phi - arctan2(b*sin(gamma), a + b*cos(gamma))
+    
+    4. Since joint 4 does not affect the position, we set it to zero:
+             theta4 = 0
+
+    This method returns one valid solution (all angles in radians).
+    """
+    import math
+
+    # Link offsets (from URDF definitions)
+    L1 = 0.39225  # from revolute 1 → 2 (translation along +Z)
+    L2 = 0.093    # from revolute 2 → 3 (translation along +Y)
+    L3 = 0.09465  # from revolute 3 → 4 (translation along +Z)
+    L4 = 0.0823   # TCP offset (translation along Y in the TCP frame)
+
+    # 1. Solve for joint 3 using the vertical (Y) coordinate:
+    # p[1] = L2 + L4 * cos(theta3)  ==> theta3 = arccos((p[1] - L2) / L4)
+    theta3 = math.acos((p[1] - L2) / L4)
+
+    # 2. Compute the effective horizontal offset D.
+    D = L3 + L4 * math.sin(theta3)
+
+    # Compute the horizontal (X-Z plane) distance and angle:
+    r = math.hypot(p[0], p[2])
+    phi = math.atan2(p[0], p[2])  # Note: atan2(y, x) adjusted to (p_x, p_z)
+
+    # 3. Solve the planar 2R problem for joints 1 and 2.
+    a = L1
+    b = D
+    # Use the cosine law to compute angle gamma
+    cos_gamma = (a * a + b * b - r * r) / (2 * a * b)
+    # Clamp cos_gamma between -1 and 1 to avoid numerical issues.
+    cos_gamma = max(-1.0, min(1.0, cos_gamma))
+    gamma = math.acos(cos_gamma)
+    # Select the elbow-up solution.
+    theta2 = math.pi - gamma
+    theta1 = phi - math.atan2(b * math.sin(gamma), a + b * math.cos(gamma))
+
+    # 4. Joint 4 is redundant in affecting position so we set it to zero.
+    theta4 = 0.0
+
+    return (theta1, theta2, theta3, theta4)
+```

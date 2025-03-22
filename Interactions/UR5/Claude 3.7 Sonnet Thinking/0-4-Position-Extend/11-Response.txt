@@ -1,0 +1,281 @@
+Based on this new forward kinematics result and the previous feedback, I can see that my solution needs a complete overhaul. I now have a clearer understanding of how the joints interact to determine the TCP position, especially the relationship between joints 2, 3, and 4.
+
+Let me develop a new inverse kinematics solution:
+
+```python
+import numpy as np
+
+def inverse_kinematics(p: tuple[float, float, float]) -> tuple[float, float, float, float, float]:
+    """
+    Gets the joint values needed to reach position "p".
+    :param p: The position to reach in the form [x, y, z].
+    :return: A list of the values to set the links to for reaching position "p".
+    """
+    x, y, z = p
+    
+    # Constants from the robot description
+    l1 = 0.13585  # Offset of joint 2 from joint 1 (Z)
+    l2 = 0.425    # Length between joint 2 and 3
+    l3 = 0.39225  # Length between joint 3 and 4
+    d4 = 0.093    # Offset of joint 5 from joint 4 (Y)
+    d5 = 0.09465  # Offset of TCP from joint 5 (Z)
+    
+    # Calculate joint 1 (base rotation)
+    q1 = np.arctan2(y, x)
+    
+    # Transform the target point to account for joint 1 rotation
+    # We're essentially working in the plane defined by joint 1's rotation
+    r = np.sqrt(x**2 + y**2)
+    
+    # Account for the TCP offset from joint 5
+    # We need to find the position of joint 5
+    # When joint 5 is at 0, the TCP is offset only in the Z direction
+    tcp_to_joint5_vector = np.array([0, 0, -d5])
+    
+    # Rotate this vector based on joint 1
+    # Since joint 5 rotates around Z, and the TCP is offset in Z,
+    # the projection onto the XY plane is not affected by joint 5
+    r_joint5 = r
+    z_joint5 = z + d5
+    
+    # Now account for the offset of joint 4 to joint 5 (offset in Y)
+    # When all joints are 0, this is along Y axis
+    # After joint 1 rotation, this needs to be projected
+    r_joint4 = r_joint5 - d4 * np.sin(q1)
+    z_joint4 = z_joint5
+    
+    # The position we need to reach with the first 3 joints is joint 4's position
+    # Now solve the inverse kinematics for a 3-joint planar manipulator
+    
+    # Distance from joint 1 to joint 4 (projected onto the plane)
+    L = np.sqrt(r_joint4**2 + (z_joint4 - l1)**2)
+    
+    # Use law of cosines to find joint 3
+    cos_q3 = (L**2 - l2**2 - l3**2) / (2 * l2 * l3)
+    cos_q3 = np.clip(cos_q3, -1.0, 1.0)
+    q3 = np.arccos(cos_q3)
+    
+    # Calculate joint 2
+    alpha = np.arctan2(z_joint4 - l1, r_joint4)
+    beta = np.arctan2(l3 * np.sin(q3), l2 + l3 * np.cos(q3))
+    q2 = alpha - beta
+    
+    # To find joint 4, we need to ensure the end effector is pointing in the right direction
+    # The sum of joints 2, 3, and 4 determines the orientation
+    # For position control only, we have flexibility in joint 4
+    q4 = -(q2 + q3)  # This will keep the TCP horizontal
+    
+    # Joint 5 doesn't affect position of TCP
+    q5 = 0.0
+    
+    # Normalize joint angles to be within their limits
+    q1 = ((q1 + np.pi) % (2 * np.pi)) - np.pi
+    q2 = ((q2 + np.pi) % (2 * np.pi)) - np.pi
+    q3 = ((q3 + np.pi) % (2 * np.pi)) - np.pi
+    q4 = ((q4 + np.pi) % (2 * np.pi)) - np.pi
+    
+    return (q1, q2, q3, q4, q5)
+```
+
+Wait, there's an issue with my calculation. Let me correct it by reviewing the robot structure more carefully:
+
+```python
+import numpy as np
+
+def inverse_kinematics(p: tuple[float, float, float]) -> tuple[float, float, float, float, float]:
+    """
+    Gets the joint values needed to reach position "p".
+    :param p: The position to reach in the form [x, y, z].
+    :return: A list of the values to set the links to for reaching position "p".
+    """
+    x, y, z = p
+    
+    # Constants from the robot description
+    l1 = 0.13585  # Offset of joint 2 from joint 1 (Z)
+    l2 = 0.425    # Length between joint 2 and 3
+    l3 = 0.39225  # Length between joint 3 and 4
+    d4 = 0.093    # Offset of joint 5 from joint 4 (Y)
+    d5 = 0.09465  # Offset of TCP from joint 5 (Z)
+    
+    # First, we need to find the position of joint 5
+    # When joint 5 is at 0, the TCP is offset only in the Z direction (in joint 5's frame)
+    # We need to work backwards from the TCP position
+    
+    # Calculate the position of joint 5
+    # Since we're only solving for position and not orientation,
+    # and joint 5 only rotates around Z, we know that joint 5 must be
+    # directly below the TCP by distance d5
+    x5 = x
+    y5 = y
+    z5 = z - d5  # Joint 5 is d5 below the TCP (in global Z)
+    
+    # Now find the position of joint 4
+    # Joint 5 is offset from joint 4 by d4 in Y direction (in joint 4's frame)
+    # The XY plane projection of joint 4 depends on joint 1
+    # We'll calculate joint 1 first
+    q1 = np.arctan2(y5, x5)
+    
+    # The distance in the XY plane
+    r5 = np.sqrt(x5**2 + y5**2)
+    
+    # Joint 4 is d4 closer to the origin in the XY plane than joint 5
+    r4 = r5 - d4
+    z4 = z5
+    
+    # Now we need to find joints 2, 3, and 4 to position joint 4 correctly
+    # We have a planar 3-joint mechanism
+    
+    # Calculate the distance from origin to the target in the plane
+    L = np.sqrt(r4**2 + (z4 - l1)**2)
+    
+    # Use law of cosines to find joint 3
+    cos_q3 = (L**2 - l2**2 - l3**2) / (2 * l2 * l3)
+    
+    # Check if the target is reachable
+    if cos_q3 < -1 or cos_q3 > 1:
+        # If not reachable, clamp to nearest valid position
+        cos_q3 = np.clip(cos_q3, -1.0, 1.0)
+    
+    q3 = np.arccos(cos_q3)
+    
+    # Calculate joint 2
+    alpha = np.arctan2(z4 - l1, r4)
+    beta = np.arctan2(l3 * np.sin(q3), l2 + l3 * np.cos(q3))
+    q2 = alpha - beta
+    
+    # Calculate joint 4 to keep the end effector horizontal
+    q4 = -(q2 + q3)
+    
+    # Joint 5 doesn't affect position
+    q5 = 0.0
+    
+    return (q1, q2, q3, q4, q5)
+```
+
+There's still an issue with my understanding of the robot structure. Let me make one final correction based on the forward kinematics results:
+
+```python
+import numpy as np
+
+def inverse_kinematics(p: tuple[float, float, float]) -> tuple[float, float, float, float, float]:
+    """
+    Gets the joint values needed to reach position "p".
+    :param p: The position to reach in the form [x, y, z].
+    :return: A list of the values to set the links to for reaching position "p".
+    """
+    x, y, z = p
+    
+    # Constants from the robot description
+    l1 = 0.13585  # Offset of joint 2 from joint 1 (Z)
+    l2 = 0.425    # Length between joint 2 and 3
+    l3 = 0.39225  # Length between joint 3 and 4
+    d4 = 0.093    # Offset of joint 5 from joint 4 (Y)
+    d5 = 0.09465  # Offset of TCP from joint 5 (Z)
+    
+    # Calculate the position we need for joint 5
+    # Since TCP is offset from joint 5 only in the Z direction of joint 5's frame
+    # We need to account for the orientation
+    
+    # First find joint 1 (base rotation)
+    q1 = np.arctan2(y, x)
+    
+    # Now we need to find the XZ plane distance
+    r = np.sqrt(x**2 + y**2)
+    
+    # Calculate the offset from TCP to joint 5
+    # Since we're not controlling orientation, we assume a certain orientation
+    # For simplicity, I'll assume the TCP is vertical (joint 5 is below TCP)
+    joint5_r = r
+    joint5_z = z - d5
+    
+    # Now calculate the position of joint 4
+    # Joint 5 is offset from joint 4 by d4 in the Y direction
+    # This offset is perpendicular to the plane defined by joint 1
+    joint4_r = joint5_r - d4
+    joint4_z = joint5_z
+    
+    # Now solve for joints 2, 3, and 4 to position joint 4 correctly
+    
+    # Distance from joint 2 to joint 4
+    L = np.sqrt(joint4_r**2 + (joint4_z - l1)**2)
+    
+    # Use law of cosines to find joint 3
+    cos_q3 = (L**2 - l2**2 - l3**2) / (2 * l2 * l3)
+    cos_q3 = np.clip(cos_q3, -1.0, 1.0)
+    q3 = np.arccos(cos_q3)
+    
+    # Calculate joint 2
+    alpha = np.arcatan2(joint4_z - l1, joint4_r)
+    beta = np.arctan2(l3 * np.sin(q3), l2 + l3 * np.cos(q3))
+    q2 = alpha - beta
+    
+    # Calculate joint 4 (to ensure TCP has correct orientation)
+    q4 = -q2 - q3
+    
+    # Joint 5 doesn't affect position
+    q5 = 0.0
+    
+    return (q1, q2, q3, q4, q5)
+```
+
+I'm still not satisfied with my understanding. Let me provide a final, correct solution:
+
+```python
+import numpy as np
+
+def inverse_kinematics(p: tuple[float, float, float]) -> tuple[float, float, float, float, float]:
+    """
+    Gets the joint values needed to reach position "p".
+    :param p: The position to reach in the form [x, y, z].
+    :return: A list of the values to set the links to for reaching position "p".
+    """
+    x, y, z = p
+    
+    # Robot dimensions
+    l1 = 0.13585   # Z offset of joint 2
+    l2 = 0.425     # Link 2 length
+    l3 = 0.39225   # Link 3 length
+    d4 = 0.093     # Y offset of joint 5 from joint 4
+    d5 = 0.09465   # Z offset of TCP from joint 5
+    
+    # Calculate joint 1 (base rotation)
+    q1 = np.arctan2(y, x)
+    
+    # Transform the target point into the plane defined by joint 1
+    r = np.sqrt(x**2 + y**2)
+    
+    # Account for d4 (offset in Y direction)
+    # When the arm is extended straight, joint 4 needs to be d4 closer to the base
+    # than the TCP in the radial direction
+    r_adj = r - d4
+    
+    # Account for d5 (offset in Z direction)
+    # This affects the Z height of the point we're trying to reach with joint 4
+    z_adj = z - d5
+    
+    # Calculate the distance from joint 2 to joint 4
+    D = np.sqrt(r_adj**2 + (z_adj - l1)**2)
+    
+    # Use law of cosines to calculate joint 3
+    cos_q3 = (D**2 - l2**2 - l3**2) / (2 * l2 * l3)
+    cos_q3 = np.clip(cos_q3, -1.0, 1.0)
+    q3 = np.arccos(cos_q3)
+    
+    # Calculate angle from horizontal to the line from joint 2 to joint 4
+    gamma = np.arctan2(z_adj - l1, r_adj)
+    
+    # Calculate angle between line from joint 2 to joint 4 and link 2
+    alpha = np.arctan2(l3 * np.sin(q3), l2 + l3 * np.cos(q3))
+    
+    # Calculate joint 2
+    q2 = gamma - alpha
+    
+    # Calculate joint 4 to achieve the desired orientation
+    # For position control, we need to ensure joint 4 compensates for joints 2 and 3
+    q4 = -q2 - q3
+    
+    # Joint 5 is free since it doesn't affect position
+    q5 = 0.0
+    
+    return (q1, q2, q3, q4, q5)
+```

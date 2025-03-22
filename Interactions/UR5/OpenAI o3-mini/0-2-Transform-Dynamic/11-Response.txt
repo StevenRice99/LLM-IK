@@ -1,0 +1,117 @@
+```python
+import math
+
+def normalize_angle(a: float) -> float:
+    """Return angle a normalized to the interval (-pi, pi]."""
+    a = math.fmod(a, 2 * math.pi)
+    if a <= -math.pi:
+        a += 2 * math.pi
+    elif a > math.pi:
+        a -= 2 * math.pi
+    return a
+
+def inverse_kinematics(p: tuple[float, float, float],
+                       r: tuple[float, float, float]) -> tuple[float, float, float]:
+    """
+    Computes a closed‐form analytical inverse kinematics solution for a 3DOF
+    serial manipulator with the following structure:
+
+      • Joint 1 (Base): Revolute about Z at [0, 0, 0].
+      • Joint 2: Revolute about Y; its frame is offset from Joint 1 by a translation [0, 0.13585, 0].
+      • Joint 3: Revolute about Y; its “origin” is at [0, -0.1197, 0.425] relative
+                 to Joint 2 (but only the 0.425 along Z is effective for reach, since the –0.1197 is along the joint’s axis).
+      • TCP: Positioned at [0, 0, 0.39225] relative to Joint 3.
+    
+    In this decoupling approach the effective 2R chain (joints 2 and 3) has link lengths:
+         L1 = 0.425   (from Joint 2 to Joint 3) and
+         L2 = 0.39225 (TCP offset from Joint 3).
+    Moreover, it is assumed that the combined rotation of joints 2 and 3
+    sets the effective pitch so that
+         q2 + q3 = r_pitch
+    (where r = [roll, pitch, yaw] is the desired end‐effector orientation).
+
+    The base angle q1 is chosen from the desired yaw r_yaw. In many wrists there
+    is a branch ambiguity. Here we compute two candidates from r_yaw and r_yaw + π
+    (normalized to (–π, π]) and select the one closer to the “wrist center”
+    obtained from the (x, y) projection of the TCP position.
+
+    The procedure is:
+      1. Compute an auxiliary “wrist base” angle from the TCP’s x–y projection:
+             θ_wrist_base = atan2(p_y, p_x)
+      2. Form two candidate solutions for q1:
+             candidate1 = normalize_angle(r_yaw)
+             candidate2 = normalize_angle(r_yaw + math.pi)
+         and pick the candidate that is closest (in angular distance) to θ_wrist_base.
+      3. Compute the location of Joint 2 in the base frame:
+             p_joint2 = Rz(q1) · [0, d12, 0]    with d12 = 0.13585.
+      4. Notice that when subtracting p_joint2 from the TCP position p, the rotation by –q1
+         (to express the “wrist” in Joint 2’s (planar) frame) yields:
+             X = p_x*cos(q1) + p_y*sin(q1)
+         and the vertical coordinate is p_z.
+      5. For the effective 2R chain, the forward kinematics (in Joint 2’s plane) are:
+             X = L1*sin(q2) + L2*sin(r_pitch)
+             p_z = L1*cos(q2) + L2*cos(r_pitch)
+         so we solve for q2 by
+             q2 = atan2( X – L2*sin(r_pitch), p_z – L2*cos(r_pitch) )
+         and then set q3 = r_pitch – q2.
+    
+    (Angles are in radians.)
+
+    :param p: Desired TCP position [x, y, z] (in meters) in the base frame.
+    :param r: Desired TCP orientation given as (roll, pitch, yaw) in radians.
+              (Only pitch and yaw are used in this formulation.)
+    :return: A tuple (q1, q2, q3) of joint angles (in radians).
+    """
+    # Link offsets and effective lengths
+    d12 = 0.13585    # offset from Joint 1 to Joint 2 along Y (in Joint 1’s frame)
+    L1 = 0.425       # effective length from Joint 2 to Joint 3 (only the 0.425 part matters)
+    L2 = 0.39225     # TCP offset from Joint 3 along its Z-axis
+
+    # Unpack target position and orientation.
+    px, py, pz = p
+    # We use only the pitch and yaw components from r; roll is unused.
+    _, r_pitch, r_yaw = r
+
+    # --- Step 1. Compute a “wrist base” angle from the TCP position in the XY–plane.
+    wrist_base = math.atan2(py, px)
+
+    # --- Step 2. Generate two candidate solutions for the base joint from the desired yaw.
+    cand1 = normalize_angle(r_yaw)
+    cand2 = normalize_angle(r_yaw + math.pi)
+    # Pick the candidate nearest to the wrist base angle (angular difference).
+    def ang_diff(a, b):
+        return abs(normalize_angle(a - b))
+    if ang_diff(cand1, wrist_base) <= ang_diff(cand2, wrist_base):
+        q1 = cand1
+    else:
+        q1 = cand2
+
+    # --- Step 3. Compute the position of Joint 2 in the base frame.
+    sin_q1 = math.sin(q1)
+    cos_q1 = math.cos(q1)
+    # Since Joint 2 is offset along +Y in the Joint 1 frame, its base coordinates are:
+    p2x = -sin_q1 * d12
+    p2y =  cos_q1 * d12
+    p2z = 0.0
+    # (Note: The rotation Rz(q1) sends [0, d12, 0] to [ -d12*sin(q1), d12*cos(q1), 0 ].)
+    
+    # --- Step 4. Express the effective target for the 2R (planar) subchain.
+    # When subtracting the base-offset p_joint2 from the TCP position p,
+    # the components along the X direction in the rotated frame (i.e. after rotating by –q1)
+    # simplify to:
+    X = px * cos_q1 + py * sin_q1
+    # The vertical (z) coordinate remains pz.
+    
+    # --- Step 5. Solve the 2R inverse kinematics (planar) using the decoupled wrist pitch.
+    # The effective equations (in Joint 2’s plane) are:
+    #    X = L1 * sin(q2) + L2 * sin(r_pitch)
+    #    pz = L1 * cos(q2) + L2 * cos(r_pitch)
+    # Solve for q2:
+    num = X - L2 * math.sin(r_pitch)
+    den = pz - L2 * math.cos(r_pitch)
+    q2 = math.atan2(num, den)
+    # Then enforce that the sum q2 + q3 equals the desired pitch (r_pitch).
+    q3 = r_pitch - q2
+
+    return (q1, q2, q3)
+```

@@ -1,0 +1,172 @@
+```python
+import numpy as np
+
+def inverse_kinematics(p: tuple[float, float, float], r: tuple[float, float, float]) -> tuple[float, float, float, float, float]:
+    """
+    Computes a closed‐form analytical inverse kinematics solution for a 5‐DOF manipulator.
+    
+    The manipulator’s kinematics (all units in meters and angles in radians) are defined by:
+      • Revolute 1: origin [0, 0, 0], axis Y.
+      • Revolute 2: origin [0, -0.1197, 0.425], axis Y.
+      • Revolute 3: origin [0, 0, 0.39225], axis Y.
+      • Revolute 4: origin [0, 0.093, 0], axis Z.
+      • Revolute 5: origin [0, 0, 0.09465], axis Y.
+      • TCP: origin [0, 0.0823, 0] with a fixed rotation Rz(1.570796325).
+      
+    In this solution the IK is “decoupled” into an arm (joints 1–3) and a wrist (joints 4–5).
+    (Note: for a 5‐DOF arm only two independent translational dimensions can be controlled;
+     the extra joint is “redundant” and here we assign it to resolve the wrist orientation.)
+     
+    The solution proceeds as follows:
+      1. First the desired TCP rotation R_des is computed from the given rpy (using the
+         convention R = Rz(yaw)·Ry(pitch)·Rx(roll)).
+      2. A “virtual” arm rotation about Y (which in our chain is the cumulative rotation from joints 1–3)
+         is extracted from R_des. Since a pure rotation about Y has the form:
+               Ry(ψ) = [[ cosψ, 0, sinψ],
+                        [    0, 1,    0],
+                        [-sinψ, 0, cosψ]],
+         we choose:
+               ψ = arctan2( R_des[0,2], R_des[2,2] ).
+      3. The wrist “offset” from the TCP is removed. (It is standard in IK to “subtract off” the fixed
+         tool transform; here we assume the TCP’s translation is defined in its own (tool) frame.)
+         Thus, the wrist center is set to:
+               p_wc = p – (R_des · [0, 0.0823, 0])
+      4. The y–coordinate of the wrist center is constrained by the fact that joints 2 and 4 contribute a
+         fixed vertical offset. In our chain the net offset is:
+               y_wrist = (–0.1197 [from link 2] + 0.093 [from link 4]) = –0.0267.
+         Then the wrist offset along Y (of magnitude 0.0823) is “resolved” by joint 4 via:
+               p_y = (–0.0267) + 0.0823·cos(q4)
+         so that
+               q4 = arccos((p[1] – (–0.0267)) / 0.0823).
+      5. For the arm (joints 1–3) we assume that (by design) only x and z are “assigned” by these joints.
+         In our model the forward kinematics of the “arm” (ignoring the wrist’s rotations) yield:
+           TCP_x = 0.425·sin(q1) + 0.39225·sin(q1+q2)   and
+           TCP_z = 0.425·cos(q1) + 0.39225·cos(q1+q2) + 0.09465.
+         We set these equal to the corresponding components of our wrist‐center p_wc.
+         (This “planar 2R” IK is computed as follows.)
+      6. Define:
+             X = p_wc[0]   and   Z = p_wc[2] – 0.09465.
+         Then, with
+             r = sqrt(X² + Z²),
+         the law of cosines gives
+             cos(q2) = (r² – 0.425² – 0.39225²) / (2 · 0.425 · 0.39225).
+         To be consistent with the “elbow‐down” solution, we choose
+             q2 = – arccos( cos(q2) ).
+         Also, with
+             φ = arctan2(X, Z)
+         and
+             δ = arctan2( 0.39225·sin(|q2|), 0.425 + 0.39225·cos(|q2|) ),
+         we set
+             q1 = φ – δ.
+      7. The free parameter q3 is then “used up” to achieve the overall arm rotation:
+             q3 = ψ – (q1 + q2).
+      8. Finally, the wrist orientation is imposed. Noting that the total TCP rotation is given by:
+             R_TCP = R_y(ψ) · Rz(q4) · R_y(q5) · Rz(1.570796325)
+         we isolate q5 by letting
+             A = R_y(ψ) · Rz(q4)
+             B = Aᵀ · R_des · Rz(–1.570796325)
+         so that B = R_y(q5) and hence
+             q5 = arctan2(B[0,2], B[0,0]).
+    
+    Any solution yielding joint angles (q1, q2, q3, q4, q5) that satisfy these equations is acceptable.
+    This implementation (using NumPy) is one acceptable closed‐form solution.
+    
+    :param p: Desired TCP position as (x, y, z)
+    :param r: Desired TCP orientation as (roll, pitch, yaw) [in radians]
+    :return: (q1, q2, q3, q4, q5)
+    """
+    
+    # -------------------- Kinematic constants -----------------------
+    L1 = 0.425       # length from revolute 1 to 2 (affects x,z)
+    L2 = 0.39225     # length from revolute 2 to 3 (affects x,z)
+    d3 = 0.09465     # translation from joint 4 to joint 5 (pure z-offset)
+    tcp_offset = 0.0823  # TCP translation (from joint 5 to TCP) magnitude
+    # Vertical offsets (not rotated by Y–axis rotations):
+    offset_joint2_y = -0.1197
+    offset_joint4_y = 0.093
+    wrist_y = offset_joint2_y + offset_joint4_y  # = -0.0267
+    d2 = tcp_offset   # for use in solving q4
+
+    # ------------------ Helper rotation matrices --------------------
+    def rot_x(a):
+        return np.array([[1, 0, 0],
+                         [0, np.cos(a), -np.sin(a)],
+                         [0, np.sin(a),  np.cos(a)]])
+    def rot_y(a):
+        return np.array([[ np.cos(a), 0, np.sin(a)],
+                         [         0, 1,         0],
+                         [-np.sin(a), 0, np.cos(a)]])
+    def rot_z(a):
+        return np.array([[np.cos(a), -np.sin(a), 0],
+                         [np.sin(a),  np.cos(a), 0],
+                         [        0,          0, 1]])
+    
+    # ----------------- Compute desired orientation ------------------
+    # Convention: R_des = Rz(yaw) · Ry(pitch) · Rx(roll)
+    roll, pitch, yaw = r
+    R_des = rot_z(yaw) @ rot_y(pitch) @ rot_x(roll)
+    
+    # Extract the arm’s cumulative rotation about Y from R_des.
+    # For a pure Ry(ψ), the (0,2) and (2,2) elements satisfy: [sinψ, cosψ].
+    psi = np.arctan2(R_des[0, 2], R_des[2, 2])
+    
+    # ------------------- Solve for joint 4 -------------------------
+    # The TCP’s y–coordinate comes from the wrist having a constant y = wrist_y,
+    # plus a contribution of d2 along y:
+    #    p_y = wrist_y + d2*cos(q4)
+    q4 = np.arccos((p[1] - wrist_y) / d2)
+    
+    # --------------- Compute wrist center position -----------------
+    # Remove the TCP’s fixed offset. (Here we “back‐out” the offset from the desired TCP
+    # by “transforming” the TCP offset vector by R_des.)
+    p_wc = np.array(p) - (R_des @ np.array([0, tcp_offset, 0]))
+    
+    # --------------- Inverse kinematics for the arm ---------------
+    # In our model the arm (joints 1 and 2) sets the x,z position via:
+    #   p_wc_x = L1*sin(q1) + L2*sin(q1+q2)
+    #   p_wc_z = L1*cos(q1) + L2*cos(q1+q2) + d3
+    # Solve for q1 and q2:
+    X = p_wc[0]
+    Z = p_wc[2] - d3
+    r_val = np.hypot(X, Z)
+    # Law of cosines
+    cos_q2 = (r_val**2 - L1**2 - L2**2) / (2 * L1 * L2)
+    cos_q2 = np.clip(cos_q2, -1.0, 1.0)
+    # Choose the “elbow‐down” solution by taking a negative angle.
+    q2_candidate = np.arccos(cos_q2)
+    q2 = -q2_candidate
+    
+    phi = np.arctan2(X, Z)
+    delta = np.arctan2(L2 * np.sin(q2_candidate), L1 + L2 * np.cos(q2_candidate))
+    q1 = phi - delta
+    
+    # Use the arm’s overall rotation (psi) to set q3.
+    q3 = psi - (q1 + q2)
+    
+    # ---------------- Solve for joint 5 via orientation ------------
+    # The complete TCP rotation is:
+    #   R_TCP = Ry(q1+q2+q3) · Rz(q4) · Ry(q5) · Rz(1.570796325)
+    # Let A = Ry(psi) · Rz(q4); then we require:
+    #   Aᵀ · R_des · Rz(–1.570796325) = Ry(q5)
+    A = rot_y(psi) @ rot_z(q4)
+    B = A.T @ R_des @ rot_z(-1.570796325)
+    q5 = np.arctan2(B[0, 2], B[0, 0])
+    
+    return (q1, q2, q3, q4, q5)
+``` 
+
+Explanation:
+
+1. The code first computes R_des from the desired rpy orientation.
+2. It “extracts” ψ—the net rotation about Y that the first three joints must provide—by reading the (0,2) and (2,2) elements of R_des.
+3. Joint 4 is set from the y–coordinate equation (using the fixed offset from joints 2 and 4).
+4. The wrist center (the effective TCP position without the fixed tool offset) is found by subtracting R_des applied to [0, tcp_offset, 0].
+5. A standard “planar 2R” solution (with link lengths L1 and L2) is then used to solve for q1 and q2 from the x and z components of the wrist center (after discounting the d3 offset).
+6. Joint 3 “absorbs” any remaining rotation needed so that the arm’s cumulative rotation equals ψ.
+7. Finally, the wrist joint q5 is recovered by “removing” the known rotations from the desired TCP orientation.
+
+Any solution that meets the above decoupling (and returns joint values q1 … q5 satisfying the TCP’s position and orientation) is acceptable.
+
+Note:
+Because of the manipulator’s limited DOF and the chosen decoupling, there exists redundancy; different valid choices are possible. This solution (which uses ψ = arctan2(R_des[0,2], R_des[2,2])) is one acceptable closed–form inverse kinematics method.
+```

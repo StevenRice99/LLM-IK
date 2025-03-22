@@ -1,0 +1,77 @@
+Below is one complete solution. It reuses the position‐only IK (using the same numeric constants) and then uses the fact that the overall TCP rotation is
+
+  R = Rz(q1) · Ry(q2 + q3 + q4)
+
+so that the “yaw” is q1 and the “pitch” is (q2 + q3 + q4) (while the “roll” remains zero). In other words, if the target orientation is given in rpy as
+
+  (target_roll, target_pitch, target_yaw)
+
+then for reachable targets we must have target_roll = 0 and target_yaw equal to q1 (which is determined by the position). Thus we solve for joint 4 via
+
+  q4 = target_pitch − (q2 + q3).
+
+Below is the Python function for inverse_kinematics:
+
+------------------------------------------------
+def inverse_kinematics(p: tuple[float, float, float], 
+                       r: tuple[float, float, float]) -> tuple[float, float, float, float]:
+    """
+    Gets the joint values needed to reach TCP position p and orientation r.
+    p: The TCP position [x, y, z].
+    r: The desired TCP rpy orientation in radians [roll, pitch, yaw].
+       (For this robot, only pitch and yaw are actuated—
+        roll is expected to be zero.)
+    Returns:
+         A tuple (q1, q2, q3, q4) of joint angles.
+    """
+    import numpy as np
+
+    # Unpack the target TCP position.
+    x, y, z = p
+
+    # The following constants (0.346395, 0.3341625, 0.10915, 0.425, 0.39225)
+    # come from the links' fixed offsets and lengths.
+    # Solve the position problem as before.
+    numerator = x**2 + y**2 + z**2 - 0.346395
+    denominator = 0.3341625
+    cos_q3 = numerator / denominator
+    cos_q3 = np.clip(cos_q3, -1.0, 1.0)
+    q3 = np.arccos(cos_q3)
+    
+    A = 0.425 + 0.39225 * np.cos(q3)
+    B = 0.39225 * np.sin(q3)
+    
+    S_squared = x**2 + y**2 - 0.10915**2
+    S = np.sqrt(S_squared) if S_squared >= 0 else 0.0
+    C = z
+
+    numerator_q2 = S * A - C * B
+    denominator_q2 = S * B + C * A
+    q2 = np.arctan2(numerator_q2, denominator_q2)
+    
+    phi = np.arctan2(0.10915, S) if S != 0 else np.pi / 2
+    q1 = np.arctan2(y, x) - phi
+    # Normalize q1 to range [-pi, pi]
+    q1 = (q1 + np.pi) % (2 * np.pi) - np.pi
+
+    # Orientation: the overall TCP rotation (ignoring translations) is:
+    #     R = Rz(q1) * Ry(q2 + q3 + q4).
+    # Thus its Euler rpy (in [roll, pitch, yaw] with the convention R = Rz · Ry · Rx)
+    # comes out as:
+    #     roll  = 0,
+    #     pitch = q2 + q3 + q4,
+    #     yaw   = q1.
+    # Extract the target rpy.
+    target_roll, target_pitch, target_yaw = r
+    # For a reachable target we expect target_roll to be (or be nearly) 0,
+    # and target_yaw to be consistent with the q1 computed from position.
+    # We then solve for q4:
+    q4 = target_pitch - (q2 + q3)
+    
+    return (q1, q2, q3, q4)
+------------------------------------------------
+
+In this solution the target orientation is met by requiring:
+ • the desired yaw equals q1 (set by the TCP’s position), and
+ • q4 is chosen so that q2 + q3 + q4 equals the desired pitch.
+Any nonzero target roll (first element of r) is assumed not to occur for reachable poses.

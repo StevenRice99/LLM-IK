@@ -1,0 +1,189 @@
+I need to completely revisit my approach to this inverse kinematics problem. Let me implement a more robust analytical solution:
+
+```python
+def inverse_kinematics(p: tuple[float, float, float], r: tuple[float, float, float]) -> tuple[float, float, float, float, float, float]:
+    """
+    Gets the joint values needed to reach position "p" and orientation "r".
+    :param p: The position to reach in the form [x, y, z].
+    :param r: The orientation to reach in radians in the form [x, y, z].
+    :return: A list of the values to set the links to for reaching position "p" and orientation "r".
+    """
+    import math
+    import numpy as np
+    
+    # Robot's DH parameters (offsets and link lengths)
+    L1_z = 0.425     # Link 2 to 3 Z offset
+    L2_z = 0.39225   # Link 3 to 4 Z offset
+    L3_z = 0.09465   # Link 5 to 6 Z offset
+    L_tcp_y = 0.0823  # Link 6 to TCP Y offset
+    
+    # Y offsets
+    y1 = 0.13585     # Link 1 to 2 Y offset
+    y2 = -0.1197     # Link 2 to 3 Y offset
+    y3 = 0.093       # Link 4 to 5 Y offset
+    
+    # TCP orientation offset
+    tcp_rz = 1.570796325
+    
+    # Target position and orientation
+    px, py, pz = p
+    roll, pitch, yaw = r
+    
+    # Define rotation matrix functions
+    def Rx(angle):
+        c, s = math.cos(angle), math.sin(angle)
+        return np.array([
+            [1, 0, 0],
+            [0, c, -s],
+            [0, s, c]
+        ])
+    
+    def Ry(angle):
+        c, s = math.cos(angle), math.sin(angle)
+        return np.array([
+            [c, 0, s],
+            [0, 1, 0],
+            [-s, 0, c]
+        ])
+    
+    def Rz(angle):
+        c, s = math.cos(angle), math.sin(angle)
+        return np.array([
+            [c, -s, 0],
+            [s, c, 0],
+            [0, 0, 1]
+        ])
+    
+    # Target orientation matrix
+    R_target = Rz(yaw) @ Ry(pitch) @ Rx(roll)
+    
+    # Compute wrist center position by removing TCP offset
+    # First, determine the orientation of the wrist
+    R_tcp = Rz(tcp_rz)  # TCP's fixed orientation offset
+    R_wrist = R_target @ R_tcp.T  # Remove TCP orientation offset
+    
+    # TCP offset vector in TCP frame
+    tcp_offset = np.array([0, L_tcp_y, 0])
+    
+    # Convert TCP offset to world frame using target orientation
+    tcp_offset_world = R_target @ tcp_offset
+    
+    # Calculate wrist center position
+    wrist_center = np.array([px, py, pz]) - tcp_offset_world
+    
+    # Calculate position of joint 5 (subtracting joint 6 offset in wrist frame)
+    j6_offset = np.array([0, 0, L3_z])  # Offset from joint 5 to 6 in joint 5 frame
+    j5_pos = wrist_center - R_wrist @ j6_offset
+    
+    # Now calculate joint 1
+    j1_xy_projection = math.sqrt(j5_pos[0]**2 + j5_pos[1]**2)
+    theta1 = math.atan2(j5_pos[1], j5_pos[0])
+    
+    # Calculate the position of the arm in joint 1's frame
+    R1 = Rz(theta1)
+    j5_in_j1 = R1.T @ j5_pos
+    
+    # Y offset compensation (virtual offset)
+    y_virtual = y1 + y2 + y3
+    theta1_offset = math.asin(y_virtual / j1_xy_projection)
+    
+    # Try both possible solutions for joint 1
+    theta1_solutions = [theta1 - theta1_offset, theta1 + math.pi - theta1_offset]
+    
+    # Track the best solution
+    best_solution = None
+    min_error = float('inf')
+    
+    for q1 in theta1_solutions:
+        # Calculate joint 1 rotation matrix
+        R1 = Rz(q1)
+        
+        # Transform joint 5 position to joint 1 frame
+        j5_in_base = j5_pos - np.array([0, y_virtual, 0])
+        j5_in_j1 = R1.T @ j5_in_base
+        
+        # Calculate the projection onto the XZ plane
+        x5, _, z5 = j5_in_j1
+        
+        # Calculate the necessary wrist orientation
+        R_1to_wrist = R1.T @ R_wrist
+        
+        # Extract arm plane angle (q2+q3+q4)
+        phi = math.atan2(R_1to_wrist[0, 2], R_1to_wrist[2, 2])
+        
+        # Calculate q5 from orientation matrix
+        q5 = math.atan2(R_1to_wrist[1, 0], R_1to_wrist[1, 1])
+        
+        # Calculate the planar arm problem for q2, q3, q4
+        r = math.sqrt(x5**2 + z5**2)
+        D = (r**2 - L1_z**2 - L2_z**2) / (2 * L1_z * L2_z)
+        
+        # Check if the point is reachable
+        if abs(D) > 1:
+            continue
+        
+        # Calculate q3 (two possibilities)
+        q3_candidates = [math.acos(D), -math.acos(D)]
+        
+        for q3 in q3_candidates:
+            # Calculate q2
+            k1 = L1_z + L2_z * math.cos(q3)
+            k2 = L2_z * math.sin(q3)
+            q2 = math.atan2(x5, z5) - math.atan2(k2, k1)
+            
+            # Calculate q4 to satisfy the orientation constraint
+            q4 = phi - q2 - q3
+            
+            # Calculate forward kinematics to verify
+            x_calc = L1_z * math.sin(q2) + L2_z * math.sin(q2 + q3)
+            z_calc = L1_z * math.cos(q2) + L2_z * math.cos(q2 + q3)
+            
+            # Position error
+            pos_error = math.sqrt((x_calc - x5)**2 + (z_calc - z5)**2)
+            
+            # Calculate wrist orientation with these joint angles
+            R2 = Ry(q2)
+            R3 = Ry(q3)
+            R4 = Ry(q4)
+            R5 = Rz(q5)
+            
+            # Calculate orientation up to joint 5
+            R_0to5 = R1 @ R2 @ R3 @ R4 @ R5
+            
+            # Calculate joint 6 rotation needed
+            R6_needed = R_0to5.T @ R_wrist
+            
+            # Extract q6 (assuming rotation around Y)
+            q6 = math.atan2(R6_needed[0, 2], R6_needed[2, 2])
+            
+            # Calculate full orientation error
+            R6 = Ry(q6)
+            R_full = R_0to5 @ R6
+            orient_error = np.linalg.norm(R_full - R_wrist, 'fro')
+            
+            # Total error
+            total_error = pos_error + orient_error
+            
+            # Check if this is the best solution
+            if total_error < min_error:
+                min_error = total_error
+                best_solution = (q1, q2, q3, q4, q5, q6)
+    
+    # If no solution was found, return the first candidate as a fallback
+    if best_solution is None:
+        return (theta1, 0, 0, 0, 0, 0)
+    
+    return best_solution
+```
+
+This revised solution makes several important improvements:
+
+1. Properly handles the robot's kinematic chain, accounting for the correct offset distances and joint rotation axes
+2. Computes the wrist center position by removing the TCP offset, accounting for its orientation
+3. Calculates joint 1 angle considering the virtual Y offset constraint
+4. Solves the planar arm problem for joints 2-4, considering the full range of possible solutions
+5. Derives joint 5 angle directly from the orientation matrix
+6. Computes joint 6 angle based on the remaining orientation to be achieved
+7. Evaluates multiple candidate solutions and selects the one with minimum error
+
+I've been careful to handle coordinate transformations correctly and to consider the multiple possible configurations of this 6-DOF manipulator.

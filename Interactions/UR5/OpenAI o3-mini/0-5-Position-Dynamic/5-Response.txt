@@ -1,0 +1,181 @@
+```python
+import math
+
+def inverse_kinematics(p: tuple[float, float, float]) -> tuple[float, float, float, float, float, float]:
+    """
+    Closed-form analytical inverse kinematics for the 6-DOF manipulator.
+    
+    For this robot the TCP is defined by:
+      • Link 1: origin [0,0,0], rpy [0,0,0], axis Z.
+      • Link 2: translation [0, 0.13585, 0], rpy [0,0,0], axis Y.
+      • Link 3: translation [0, -0.1197, 0.425], rpy [0,0,0], axis Y.
+      • Link 4: translation [0, 0, 0.39225], rpy [0,0,0], axis Y.
+      • Link 5: translation [0, 0.093, 0], rpy [0,0,0], axis Z.
+      • Link 6: translation [0, 0, 0.09465], rpy [0,0,0], axis Y.
+      • TCP: translation [0, 0.0823, 0] with fixed orientation rpy [0, 0, 1.570796325].
+      
+    A standard approach for robots with a spherical wrist is to decouple the IK into
+    (i) a position–subproblem that locates the wrist center and solves for the “arm” joints,
+    and then (ii) an orientation–subproblem that sets the redundant wrist joints.
+    
+    In our closed–form solution we first compute the wrist center.
+    (Because the fixed TCP offset is [0, 0.0823, 0] in the tool frame but the tool frame
+     is rotated by 90° about Z, this offset appears as approximately [–0.0823, 0, 0] in the base.)
+    Hence we define:
+         p_wc = [ x_target + 0.0823,  y_target,  z_target ]
+    
+    Next, one writes the position of p_wc in closed–form as a function of joints 1–4.
+    (In our derivation the forward kinematics for the position become:)
+         S = q1 + q2 + q3
+         x_wc = L1*sin(q1) + L2*sin(q1+q2) + L3*sin(S) - 0.0823*sin(q4)*cos(S)
+         z_wc = L1*cos(q1) + L2*cos(q1+q2) + L3*cos(S) + 0.0823*sin(q4)*sin(S)
+         y_wc = (-0.1197 + 0.093) + 0.0823*cos(q4)
+              = -0.0267 + 0.0823*cos(q4)
+    (Here L1 = 0.425, L2 = 0.39225, and L3 = 0.09465.)
+    
+    Since only q4 appears in the wrist’s y coordinate, one may solve for q4 immediately:
+         q4 = acos( (p_wc_y - (-0.0267)) / 0.0823 )
+    (Both the positive and negative solutions are candidates.)
+    
+    Then, writing d = 0.0823*sin(q4), one finds that the effective horizontal distance from
+    the wrist center to the “shoulder” (the 2R subchain) is
+         L_eff = sqrt(L3**2 + d**2)
+    and defining φ = atan2(d, L3), one obtains a candidate for
+         S = q1+q2+q3 = (psi + φ)
+    where psi = atan2( x_target, z_target )
+    (One may also add π to psi, which yields another candidate branch.)
+    
+    Finally, designating the “wrist” in the horizontal plane as 
+         W = [ x_target – L_eff*sin(T),  z_target – L_eff*cos(T) ]
+    (with T = psi or psi+π), the 2R inverse kinematics for the arm subchain (joints 1 and 2)
+    become standard:
+         cos(q2) = (|W|^2 – L1^2 – L2^2)/(2*L1*L2)
+         q2 = ± acos(cos(q2))
+         delta = atan2( L2*sin(q2), L1 + L2*cos(q2) )
+         q1 = atan2(W_x, W_z) – delta
+         and q3 = S – (q1+q2)
+    
+    Finally, since wrist joints do not affect TCP position, we choose one convenient branch:
+         q5 = 0  and q6 = 0.
+    
+    Because multiple IK branches exist, this implementation searches over the candidate
+    branches (for q4, for T = psi and psi+π, and for the two possible 2R solutions)
+    and returns the candidate whose forward kinematics best matches the target.
+    
+    (Note: In a real robot these equations follow from the specific DH parameters.
+     Any closed–form solution yielding joint values that satisfy the forward kinematics is acceptable.)
+    
+    :param p: The target TCP position in base coordinates, as (x, y, z).
+    :return: A 6–tuple of joint angles (q1, q2, q3, q4, q5, q6), in radians.
+    """
+    # Robot link lengths and fixed offsets (all in meters)
+    L1 = 0.425
+    L2 = 0.39225
+    L3 = 0.09465
+    # Combined y offset from Links 2 and 3.
+    y_offset = -0.1197 + 0.093  # = -0.0267
+    tcp_y_offset = 0.0823
+
+    # Unpack target TCP position.
+    x_target, y_target, z_target = p
+    # Define the wrist center – recall that the tool–frame offset [0, 0.0823, 0]
+    # becomes approximately [–0.0823, 0, 0] in the base frame.
+    # Hence the wrist center is:
+    wc_x = x_target + 0.0823
+    wc_y = y_target
+    wc_z = z_target
+
+    # This solver uses the simplified forward kinematics:
+    #   S = q1 + q2 + q3
+    #   x_fk = L1*sin(q1) + L2*sin(q1+q2) + L3*sin(S) - tcp_y_offset*sin(q4)*cos(S)
+    #   z_fk = L1*cos(q1) + L2*cos(q1+q2) + L3*cos(S) + tcp_y_offset*sin(q4)*sin(S)
+    #   y_fk = y_offset + tcp_y_offset*cos(q4)
+    #
+    # Accordingly, the vertical (y) equation gives:
+    #      tcp_y_offset*cos(q4) = wc_y - y_offset
+    # which implies candidate wrist angles:
+    C = (wc_y - y_offset) / tcp_y_offset
+    # Clamp for numerical safety.
+    C = max(min(C, 1.0), -1.0)
+    q4_candidates = [math.acos(C), -math.acos(C)]
+    
+    # A candidate for the horizontal direction is given by:
+    psi = math.atan2(x_target, z_target)
+    
+    def normalize(angle):
+        while angle > math.pi:
+            angle -= 2.0*math.pi
+        while angle < -math.pi:
+            angle += 2.0*math.pi
+        return angle
+    
+    # Forward kinematics function (for position only) based on the decoupled formulation.
+    def fk(q1, q2, q3, q4):
+        S = q1 + q2 + q3
+        d = tcp_y_offset * math.sin(q4)
+        x_fk = L1 * math.sin(q1) + L2 * math.sin(q1+q2) + L3 * math.sin(S) - tcp_y_offset * math.sin(q4) * math.cos(S)
+        z_fk = L1 * math.cos(q1) + L2 * math.cos(q1+q2) + L3 * math.cos(S) + tcp_y_offset * math.sin(q4) * math.sin(S)
+        y_fk = y_offset + tcp_y_offset * math.cos(q4)
+        return (x_fk, y_fk, z_fk)
+    
+    best_error = float('inf')
+    best_solution = None
+
+    # Search over candidate branches.
+    for q4_candidate in q4_candidates:
+        d = tcp_y_offset * math.sin(q4_candidate)
+        L_eff = math.sqrt(L3**2 + d**2)
+        phi = math.atan2(d, L3)
+        # The candidate for the sum S = q1+q2+q3 is chosen as:
+        for T_candidate in [psi, psi + math.pi]:
+            S_candidate = T_candidate + phi
+            # Define the projected wrist center in the horizontal plane.
+            W_x = x_target - L_eff * math.sin(T_candidate)
+            W_z = z_target - L_eff * math.cos(T_candidate)
+            r_w = math.hypot(W_x, W_z)
+            # Check feasibility for the 2R arm subchain.
+            if r_w > (L1 + L2) or r_w < abs(L1 - L2):
+                continue
+            cos_q2 = (r_w**2 - L1**2 - L2**2) / (2 * L1 * L2)
+            cos_q2 = max(min(cos_q2, 1.0), -1.0)
+            for sign in [1, -1]:
+                q2_candidate = sign * math.acos(cos_q2)
+                delta = math.atan2(L2 * math.sin(q2_candidate), L1 + L2 * math.cos(q2_candidate))
+                theta_w = math.atan2(W_x, W_z)
+                q1_candidate = theta_w - delta
+                q3_candidate = S_candidate - (q1_candidate + q2_candidate)
+                
+                # With q5 and q6 being redundant for position, we choose:
+                q5_candidate = 0.0
+                q6_candidate = 0.0
+                x_fk, y_fk, z_fk = fk(q1_candidate, q2_candidate, q3_candidate, q4_candidate)
+                error = math.sqrt((x_fk - x_target)**2 + (y_fk - y_target)**2 + (z_fk - z_target)**2)
+                if error < best_error:
+                    best_error = error
+                    best_solution = (q1_candidate, q2_candidate, q3_candidate, q4_candidate, q5_candidate, q6_candidate)
+                    
+    if best_solution is None:
+        raise ValueError("No valid IK solution found for the input target position.")
+    
+    q1, q2, q3, q4, q5, q6 = best_solution
+    # Normalize all joint angles to [–pi, pi].
+    q1 = normalize(q1)
+    q2 = normalize(q2)
+    q3 = normalize(q3)
+    q4 = normalize(q4)
+    q5 = normalize(q5)
+    q6 = normalize(q6)
+    
+    return (q1, q2, q3, q4, q5, q6)
+```
+
+# Explanation
+
+This solution implements a closed–form candidate–branch search that decouples the position IK into two parts. We first “back–project” the TCP offset (which becomes [–0.0823,0,0]) so that the wrist center is  
+  wc = (x_target+0.0823, y_target, z_target).  
+Then, using the fact that only the wrist’s vertical coordinate depends on q4 (via  
+  y = –0.0267 + 0.0823*cos(q4)  
+), we solve for two candidate values of q4. Next, with d = 0.0823*sin(q4) we define an effective horizontal offset L_eff and a corresponding angle φ; a candidate for the sum S = q1+q2+q3 is then S = (psi + φ) (with psi = atan2(x_target, z_target)) up to an additive π. Finally, the 2R subchain (joints 1 and 2) is solved using standard cosine–law techniques, and the remaining joint angle q3 is set by subtracting. Since joints 5 and 6 are redundant for reaching a specified position, we choose them to be zero.
+
+Any solution that satisfies the forward kinematics is acceptable. (Note that, owing to multiple IK branches, the solver searches over candidate solutions and returns the one with minimal error.)
+```

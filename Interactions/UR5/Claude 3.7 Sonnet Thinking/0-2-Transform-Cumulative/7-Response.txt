@@ -1,0 +1,135 @@
+It appears my previous inverse kinematics solution has several issues. Let me revise it completely based on the feedback and test cases.
+
+```python
+def inverse_kinematics(p: tuple[float, float, float], r: tuple[float, float, float]) -> tuple[float, float, float]:
+    """
+    Gets the joint values needed to reach position "p" and orientation "r".
+    :param p: The position to reach in the form [x, y, z].
+    :param r: The orientation to reach in radians in the form [x, y, z].
+    :return: A list of the values to set the links to for reaching position "p" and orientation "r".
+    """
+    import math
+    import numpy as np
+    
+    x_target, y_target, z_target = p
+    rx, ry, rz = r
+    
+    # Link parameters
+    L1_y = 0.13585
+    L2_y = -0.1197
+    L2_z = 0.425
+    L3_z = 0.39225
+    
+    # Calculate joint 1 (rotation around Z-axis)
+    theta1 = math.atan2(x_target, y_target)
+    
+    # Determine if we need to flip theta1 by π based on orientation
+    # This handles cases where the arm needs to reach behind itself
+    c1 = math.cos(theta1)
+    s1 = math.sin(theta1)
+    
+    # Transform target position to joint 2's frame (after joint 1 rotation)
+    x2 = c1 * x_target + s1 * y_target - s1 * L1_y
+    y2 = -s1 * x_target + c1 * y_target - c1 * L1_y
+    z2 = z_target
+    
+    # Vector from joint 2 to end effector
+    v = [x2, y2, z2]
+    
+    # Calculate the distance from joint 2 to the target point
+    d = np.linalg.norm([x2, y2 - L2_y, z2 - L2_z])
+    
+    # Calculate joint 3 using the law of cosines
+    L2_len = math.sqrt(L2_y**2 + L2_z**2)
+    cos_theta3 = (d**2 - L2_len**2 - L3_z**2) / (2 * L2_len * L3_z)
+    
+    # Ensure cos_theta3 is within valid range
+    cos_theta3 = max(min(cos_theta3, 1.0), -1.0)
+    
+    # Two possible solutions for joint 3
+    theta3 = math.acos(cos_theta3)
+    
+    # For the calculation of joint 2, we need to find the angle to the target point
+    # and adjust for the angle introduced by link 3
+    target_angle = math.atan2(y2 - L2_y, z2 - L2_z)
+    
+    # Calculate the angle between link 2 and the line to target
+    cos_alpha = (L2_len**2 + d**2 - L3_z**2) / (2 * L2_len * d)
+    cos_alpha = max(min(cos_alpha, 1.0), -1.0)
+    alpha = math.acos(cos_alpha)
+    
+    # Two possible solutions for joint 2
+    theta2_1 = target_angle + alpha
+    theta2_2 = target_angle - alpha
+    
+    # Check which solution gives a valid joint 3
+    # If the calculated theta3 doesn't work, try negative theta3
+    solutions = []
+    for theta2 in [theta2_1, theta2_2]:
+        for theta3_sign in [1, -1]:
+            theta3_candidate = theta3_sign * theta3
+            
+            # Calculate forward kinematics to validate this solution
+            c2 = math.cos(theta2)
+            s2 = math.sin(theta2)
+            c3 = math.cos(theta3_candidate)
+            s3 = math.sin(theta3_candidate)
+            
+            # Position after joint 2
+            x_j2 = 0
+            y_j2 = L2_y * c2
+            z_j2 = L2_z * c2
+            
+            # Position after joint 3
+            x_j3 = x_j2
+            y_j3 = y_j2 + L3_z * math.sin(theta2 + theta3_candidate)
+            z_j3 = z_j2 + L3_z * math.cos(theta2 + theta3_candidate)
+            
+            # Check if this solution reaches the target
+            if (math.isclose(x_j3, x2, abs_tol=1e-4) and 
+                math.isclose(y_j3, y2, abs_tol=1e-4) and 
+                math.isclose(z_j3, z2, abs_tol=1e-4)):
+                solutions.append((theta2, theta3_candidate))
+    
+    # If we have solutions, choose the one with joint values in the valid range
+    if solutions:
+        # Sort solutions by the absolute sum of joint angles
+        # This prefers solutions with smaller joint movements
+        solutions.sort(key=lambda x: abs(x[0]) + abs(x[1]))
+        theta2, theta3 = solutions[0]
+    else:
+        # If no exact solution was found, use theta2_1 with negative theta3
+        # as a fallback
+        theta2 = theta2_1
+        theta3 = -theta3
+    
+    # Adjust joint 1 based on target orientation
+    # For some configurations, we need to rotate joint 1 by π
+    if abs(abs(rz) - math.pi) < 0.1 or abs(rz) > 3:
+        if theta1 >= 0:
+            theta1 -= math.pi
+        else:
+            theta1 += math.pi
+        # Flip the other joints too
+        theta2 = math.pi - theta2
+        theta3 = -theta3
+    
+    # Normalize angles to be within standard ranges
+    theta1 = ((theta1 + math.pi) % (2 * math.pi)) - math.pi
+    theta2 = ((theta2 + math.pi) % (2 * math.pi)) - math.pi
+    theta3 = ((theta3 + math.pi) % (2 * math.pi)) - math.pi
+    
+    return (theta1, theta2, theta3)
+```
+
+This revised solution:
+
+1. Calculates joint 1 based on target x and y coordinates
+2. Transforms the target position to the frame after joint 1 rotation
+3. Uses the law of cosines to calculate joint 3
+4. Calculates joint 2 by considering the angle to the target and adjusting for joint 3
+5. Validates potential solutions by checking forward kinematics
+6. Handles orientation constraints by adjusting joint angles accordingly
+7. Normalizes angles to be within standard ranges
+
+The approach takes into account the specific robot geometry and considers multiple possible solutions, selecting the most appropriate one based on the target position and orientation.

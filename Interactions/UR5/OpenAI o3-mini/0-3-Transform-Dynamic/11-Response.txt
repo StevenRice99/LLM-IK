@@ -1,0 +1,156 @@
+```python
+import math
+import numpy as np
+
+def inverse_kinematics(p: tuple[float, float, float],
+                       r: tuple[float, float, float]) -> tuple[float, float, float, float]:
+    """
+    Computes an analytical inverse kinematics solution for a 4-DOF serial manipulator.
+
+    The robot parameters (all units in meters and angles in radians) are as follows:
+      • Joint 1 (Base): Located at [0, 0, 0], rotates about Z.
+      • Joint 2 (Shoulder): Its origin is at [0, 0.13585, 0] in the base frame;
+          its orientation (from the URDF) is zero so that its local frame aligns with the base.
+      • Joint 3 (Elbow): Relative to joint2, its origin is at [0, -0.1197, 0.425] and rotates about Y.
+      • Joint 4 (Wrist): Relative to joint3, its origin is at [0, 0, 0.39225] and rotates about Y.
+      • TCP: Relative to joint4, there is a constant translation [0, 0.093, 0].
+
+    Notice that joints 2, 3, and 4 all rotate about Y. Hence, the forward kinematics
+    for the “arm” (i.e. the x–z placement) can be decoupled from the overall orientation.
+    In particular, if we define the transformation chain as (using homogeneous transforms):
+         T = Rz(theta1) * T2 * [2R-chain path],
+    then the TCP position will be given by
+         p = Rz(theta1) * p_chain + (joint2 position),
+    where the “chain” runs in the joint2 (shoulder) coordinate frame.
+    
+    In the shoulder frame (i.e. joint2 frame) the constant translations are:
+         • The translation from base to joint2: T2 = [0, 0.13585, 0] in the base.
+           In the joint2 frame the shoulder’s origin is at (0,0,0) by definition.
+         • The translation from joint2 to joint3 is [0, -0.1197, 0.425]. 
+         • The translation from joint3 to joint4 is [0, 0, 0.39225].
+         • The TCP offset (in joint4 frame) is [0, 0.093, 0].
+    Thus, note that in the entire chain the only translation that affects the plane of
+    motion (i.e. the x–z coordinates) comes from the “z” parts:
+         L1 = 0.425      (effect from joint2->joint3)
+         L2 = 0.39225    (effect from joint3->joint4)
+    Meanwhile, the y components always add up to a constant:
+         y_chain = (-0.1197 + 0.093) = -0.0267.
+    And after transforming back to base, the shoulder (joint2) “origin” is located at
+         p_joint2_base = Rz(theta1)*[0, 0.13585, 0],
+    so that the final TCP y-coordinate comes out as
+         0.13585 + (-0.0267) = 0.10915,
+    independent of the arm “stretch”. (The targets will be such that p[1] is accordingly set.)
+
+    For the orientation, note that the full rotation is
+         R = Rz(theta1) * Ry(theta2 + theta3 + theta4)
+    and the provided tool‐chain uses roll–pitch–yaw with r = [roll, pitch, yaw].
+    In many tests the roll is essentially zero and the desired 
+         theta1 ≈ (one of) { yaw, yaw + π, yaw – π } 
+    and the “arm rotation” fulfills
+         theta2 + theta3 + theta4 = r_pitch.
+    We adopt this decoupling: after selecting a candidate theta1, we solve the 2–R inverse
+    kinematics for the arm “plan” (in the joint2 frame) and then set theta4 = r_pitch – (theta2+theta3).
+
+    Procedure:
+      1. Generate candidate values for theta1 from the desired yaw (r[2]):
+             candidates = { wrap(yaw), wrap(yaw+π), wrap(yaw−π) }.
+      2. For each candidate theta1:
+           a. Compute the shoulder (joint2) position in base:
+                  p_j2 = Rz(theta1)*[0, 0.13585, 0].
+           b. Express the target TCP position in the joint2 frame:
+                  p_joint2 = Rz(–theta1) * ( p – p_j2 )
+           c. In the joint2 frame, the 2–R planar chain (which governs the x and z coordinates)
+              must reconstruct:
+                  [ x_chain, –0.0267, z_chain ] = [ L1*sin(theta2)+L2*sin(theta2+theta3),
+                                                   –0.0267,
+                                                   L1*cos(theta2)+L2*cos(theta2+theta3) ]
+              We set:
+                   x_target = p_joint2[0]   and   z_target = p_joint2[2]
+           d. Solve the 2–R inverse kinematics:
+                   d = sqrt(x_target^2 + z_target^2)
+                   cos(theta3) = (d^2 – L1^2 – L2^2) / (2*L1*L2)
+                   (Choose theta3 = acos(cos(theta3)) and also consider the negative solution.)
+                   theta2 = atan2(x_target, z_target) – atan2(L2*sin(theta3), L1+L2*cos(theta3))
+           e. Determine theta4 from the orientation constraint:
+                   theta4 = r_pitch – (theta2 + theta3)   where r_pitch = r[1].
+           f. Compute an error that measures how well the computed planar chain reconstructs
+              the (x, z) target and how close the computed joint2 y (which is fixed by the chain)
+              is to –0.0267.
+      3. Choose the solution (over candidate theta1 and the two signs for theta3) that minimizes the error.
+
+    :param p: Desired TCP global position (x, y, z)
+    :param r: Desired TCP orientation as (roll, pitch, yaw) in radians.
+    :return: A tuple (theta1, theta2, theta3, theta4) specifying the joint angles in radians.
+    """
+    # Helper to wrap angles to [-pi, pi]
+    def wrap(angle):
+        return ((angle + math.pi) % (2 * math.pi)) - math.pi
+
+    # Rotation about Z matrix
+    def rotz(angle):
+        c = math.cos(angle)
+        s = math.sin(angle)
+        return np.array([[c, -s, 0],
+                         [s,  c, 0],
+                         [0,  0, 1]])
+
+    # Extract desired orientation components
+    roll, pitch, yaw = r
+    # We decouple the orientation as:
+    #     R = Rz(theta1)*Ry(theta2+theta3+theta4)
+    # and for our purposes we set:
+    r_pitch = pitch  # desired total rotation about Y
+
+    # Fixed translations and effective lengths:
+    T2_offset = np.array([0, 0.13585, 0])  # from base to joint2 (in joint1 frame)
+    Y_CHAIN = -0.1197 + 0.093  # = -0.0267; this is the fixed y offset within the 2R chain (joint2 frame)
+    L1 = 0.425      # effective link length (from joint2 to joint3, using the z-component)
+    L2 = 0.39225    # effective link length (from joint3 to joint4)
+
+    # Generate candidate theta1 values from the desired yaw.
+    # (Because of the decoupling, theta1 is determined up to π.)
+    candidates_theta1 = [wrap(yaw), wrap(yaw + math.pi), wrap(yaw - math.pi)]
+    
+    best_error = float('inf')
+    best_sol = None
+
+    for theta1 in candidates_theta1:
+        # Compute the global position of joint2.
+        # In base frame, joint2 is located at: p_j2 = Rz(theta1)*[0, 0.13585, 0].
+        p_j2 = rotz(theta1).dot(np.array([0.0, T2_offset[1], 0.0]))
+        # Express the target TCP position in the joint2 (shoulder) frame:
+        # p_joint2 = Rz(-theta1) * ( p - p_j2 )
+        p_joint2 = rotz(-theta1).dot(np.array(p) - p_j2)
+        # In the joint2 frame, the 2R planar chain controls the x and z coordinates.
+        x_t = p_joint2[0]
+        z_t = p_joint2[2]
+        d = math.hypot(x_t, z_t)
+        
+        # Check feasibility for the 2R chain via the cosine law.
+        cos_theta3 = (d**2 - L1**2 - L2**2) / (2 * L1 * L2)
+        if cos_theta3 < -1 or cos_theta3 > 1:
+            continue  # target not reachable for this candidate
+        # Consider both possible elbow configurations.
+        for sign in [1, -1]:
+            theta3 = sign * math.acos(cos_theta3)
+            theta2 = math.atan2(x_t, z_t) - math.atan2(L2 * math.sin(theta3), L1 + L2 * math.cos(theta3))
+            theta4 = r_pitch - (theta2 + theta3)
+            # Forward kinematics of the 2R planar chain (in joint2 frame) yield:
+            x_calc = L1 * math.sin(theta2) + L2 * math.sin(theta2 + theta3)
+            z_calc = L1 * math.cos(theta2) + L2 * math.cos(theta2 + theta3)
+            # The chain always yields a fixed y value:
+            y_calc = Y_CHAIN
+            # Errors:
+            pos_error = math.hypot(x_calc - x_t, z_calc - z_t)
+            y_error = abs(p_joint2[1] - y_calc)
+            total_error = pos_error + y_error
+
+            if total_error < best_error:
+                best_error = total_error
+                best_sol = (wrap(theta1), wrap(theta2), wrap(theta3), wrap(theta4))
+    
+    if best_sol is None:
+        # Should not occur for reachable targets.
+        return (0.0, 0.0, 0.0, 0.0)
+    return best_sol
+```

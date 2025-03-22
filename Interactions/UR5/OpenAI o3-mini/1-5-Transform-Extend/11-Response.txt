@@ -1,0 +1,168 @@
+```python
+import math
+import numpy as np
+
+def inverse_kinematics(p: tuple[float, float, float], r: tuple[float, float, float]) -> tuple[float, float, float, float, float]:
+    """
+    Computes the 5-DOF closed-form inverse kinematics solution for the serial manipulator.
+    The joints (in order) are:
+      - Revolute 1 (axis Y)
+      - Revolute 2 (axis Y)
+      - Revolute 3 (axis Y)
+      - Revolute 4 (axis Z)
+      - Revolute 5 (axis Y)
+    
+    The robot’s URDF specifies:
+      • A fixed tool (TCP) rotation: Rz(1.570796325)
+      • A TCP translation offset of [0, 0.0823, 0]
+      • Joint-to-joint (arm) translations of 0.425 and 0.39225 (for the sub-chain solved by the law of cosines)
+      • A constant offset from joint 4 to joint 5 of 0.09465.
+    
+    The procedure is as follows:
+      1. Build the target rotation from the provided roll-pitch-yaw (using Rz * Ry * Rx).
+      2. “Extract” the effective arm rotation angle (θ₁+θ₂+θ₃) from the target’s third column:
+             theta_sum = atan2(R_target[0,2], R_target[2,2])
+      3. “Back off” the link‑5 offset (C_tcp = 0.09465) along the approach direction to compute:
+             pos3_x = x_target − C_tcp * sin(theta_sum)
+             pos3_z = z_target − C_tcp * cos(theta_sum)
+         These (x,z) coordinates are assumed to lie in the effective plane of the first three joints.
+      4. With “arm” link lengths a = 0.425 and b = 0.39225, solve the 2‑link planar IK:
+             d² = pos3_x² + pos3_z²
+             cosθ₂ = (d² − a² − b²) / (2ab)
+         (Clamp cosθ₂ to [–1,1] to avoid numerical issues.)
+         Then two candidate solutions exist for θ₂:
+             theta2_candidate1 = acos(cosθ₂)
+             theta2_candidate2 = –acos(cosθ₂)
+         For each candidate compute:
+             theta1_candidate = atan2(pos3_x, pos3_z) – atan2(b*sin(theta2_candidate), a + b*cos(theta2_candidate))
+         and check (via forward substitution) which one recovers (pos3_x,pos3_z) within tolerance.
+      5. With θ₁ and θ₂ chosen, compute:
+             theta3 = theta_sum − (theta1 + theta2)
+      6. Finally, decouple the wrist’s two rotations. The full chain’s orientation satisfies:
+             R_target = R_y(theta_sum) · R_z(theta4) · R_y(theta5) · R_tcp_fixed
+         where R_tcp_fixed = Rz(1.570796325). First “remove” the fixed tool rotation by:
+             M = R_target · inv(R_tcp_fixed)
+         Then, premultiply by R_y(theta_sum)ᵀ (with
+             R_y(theta_sum) = [[ cos(theta_sum), 0, sin(theta_sum)],
+                               [ 0,             1, 0             ],
+                               [ -sin(theta_sum),0, cos(theta_sum)]])
+         to get:
+             R_bar = R_y(theta_sum)ᵀ · M
+         From the structure R_bar = R_z(theta4) · R_y(theta5)
+         one may extract:
+             theta5 = –asin(R_bar[2,0])
+             theta4 = atan2(R_bar[1,0], R_bar[0,0])
+    
+    In the zero configuration, where
+         p = [0, 0.0556, 0.9119] and r = [0, 0, 1.570796325],
+    this function returns (0, 0, 0, 0, 0) so that the forward kinematics yields the expected TCP pose.
+    
+    :param p: The desired TCP position [x, y, z].
+    :param r: The desired TCP orientation as (roll, pitch, yaw) in radians.
+    :return: A tuple (θ₁, θ₂, θ₃, θ₄, θ₅) in radians.
+    """
+    # Unpack TCP target position and orientation (in radians)
+    x_target, y_target, z_target = p
+    roll, pitch, yaw = r
+
+    # ---------------------------------------------------------------------
+    # (1) Build the target rotation matrix using the Rz * Ry * Rx convention.
+    cr, sr = math.cos(roll), math.sin(roll)
+    cp, sp = math.cos(pitch), math.sin(pitch)
+    cy, sy = math.cos(yaw), math.sin(yaw)
+
+    R_x = np.array([[1,   0,    0],
+                    [0,  cr,  -sr],
+                    [0,  sr,   cr]])
+    
+    R_y = np.array([[cp,  0,  sp],
+                    [0,   1,   0],
+                    [-sp, 0,  cp]])
+    
+    R_z = np.array([[cy, -sy, 0],
+                    [sy,  cy, 0],
+                    [0,    0, 1]])
+    
+    R_target = R_z @ R_y @ R_x
+
+    # ---------------------------------------------------------------------
+    # (2) Extract the effective arm rotation angle, theta_sum = θ₁+θ₂+θ₃,
+    #     from the third column of R_target.
+    theta_sum = math.atan2(R_target[0, 2], R_target[2, 2])
+
+    # ---------------------------------------------------------------------
+    # (3) "Back off" along the approach direction by the wrist offset.
+    #     The fixed translation from joint-4 to joint-5 is:
+    C_tcp = 0.09465
+    # In the EXISTING solution the x and z components of the TCP are used directly.
+    pos3_x = x_target - C_tcp * math.sin(theta_sum)
+    pos3_z = z_target - C_tcp * math.cos(theta_sum)
+
+    # ---------------------------------------------------------------------
+    # (4) Solve the 2-link planar arm IK.
+    # The given link lengths (from the URDF) are:
+    a = 0.425    # effective length of the first arm segment
+    b = 0.39225  # effective length of the second arm segment
+
+    d_sq = pos3_x**2 + pos3_z**2
+    # Use the law of cosines:
+    cos_theta2 = (d_sq - a**2 - b**2) / (2 * a * b)
+    # Clamp to avoid numerical issues:
+    cos_theta2 = max(min(cos_theta2, 1.0), -1.0)
+    theta2_cand1 = math.acos(cos_theta2)
+    theta2_cand2 = -theta2_cand1
+
+    tol = 1e-5
+    solution_found = False
+    theta1_sol = 0.0
+    theta2_sol = 0.0
+    # Try both candidate solutions for theta2.
+    for theta2 in [theta2_cand1, theta2_cand2]:
+        # Compute corresponding theta1.
+        # The 2-link kinematics (with the shoulder assumed at the origin) satisfy:
+        #   x = a*sin(theta1) + b*sin(theta1+theta2)
+        #   z = a*cos(theta1) + b*cos(theta1+theta2)
+        theta1 = math.atan2(pos3_x, pos3_z) - math.atan2(b * math.sin(theta2), a + b * math.cos(theta2))
+        # Forward compute to check consistency.
+        x_calc = a * math.sin(theta1) + b * math.sin(theta1 + theta2)
+        z_calc = a * math.cos(theta1) + b * math.cos(theta1 + theta2)
+        if math.isclose(x_calc, pos3_x, abs_tol=tol) and math.isclose(z_calc, pos3_z, abs_tol=tol):
+            theta1_sol = theta1
+            theta2_sol = theta2
+            solution_found = True
+            break
+    if not solution_found:
+        theta1_sol, theta2_sol = 0.0, 0.0  # fallback (should not occur if target is reachable)
+        
+    # (5) Determine theta3 so that theta_sum = theta1 + theta2 + theta3.
+    theta3 = theta_sum - (theta1_sol + theta2_sol)
+
+    # ---------------------------------------------------------------------
+    # (6) Solve for the wrist orientations (joints 4 and 5).
+    # The full rotation chain is:
+    #    R_target = R_y(theta_sum) · R_z(theta4) · R_y(theta5) · R_tcp_fixed
+    # where the fixed tool rotation is:
+    yaw_tcp = 1.570796325
+    R_tcp_fixed = np.array([[math.cos(yaw_tcp), -math.sin(yaw_tcp), 0],
+                            [math.sin(yaw_tcp),  math.cos(yaw_tcp), 0],
+                            [0,                0,                1]])
+    # Remove the fixed TCP rotation.
+    M = R_target @ np.linalg.inv(R_tcp_fixed)
+
+    # Construct R_y(theta_sum):
+    R_y_sum = np.array([[math.cos(theta_sum), 0, math.sin(theta_sum)],
+                        [0, 1, 0],
+                        [-math.sin(theta_sum), 0, math.cos(theta_sum)]])
+    # Premultiply with the transpose of R_y_sum:
+    R_bar = R_y_sum.T @ M
+
+    # The product R_z(theta4) · R_y(theta5) has the structure:
+    #   [ cosθ₄*cosθ₅,  -sinθ₄,  cosθ₄*sinθ₅ ]
+    #   [ sinθ₄*cosθ₅,   cosθ₄,  sinθ₄*sinθ₅ ]
+    #   [    -sinθ₅,       0,       cosθ₅   ]
+    # Therefore, one may read off:
+    theta5 = -math.asin(R_bar[2, 0])
+    theta4 = math.atan2(R_bar[1, 0], R_bar[0, 0])
+    
+    return (theta1_sol, theta2_sol, theta3, theta4, theta5)
+```

@@ -1,0 +1,104 @@
+```python
+def inverse_kinematics(p: tuple[float, float, float],
+                       r: tuple[float, float, float]) -> tuple[float, float, float]:
+    """
+    Computes a closed‐form analytical inverse kinematics solution for a 3-dof serial manipulator.
+    
+    The robot’s forward kinematics is given by:
+    
+      TCP = Rz(theta1) · { [0, 0.13585, 0] +
+                           Ry(theta2)*[0, -0.1197, 0.425] +
+                           Ry(theta2+theta3)*[0, 0, 0.39225] }.
+    
+    Hence the TCP’s orientation is:
+    
+         R_tcp = Rz(theta1) * Ry(theta2 + theta3)
+    
+    Whereas the desired TCP pose is given by position p and rpy angles r = (roll, pitch, yaw) 
+    according to the URDF convention (i.e. R_target = Rz(yaw)*Ry(pitch)*Rx(roll)).
+    
+    Notice that because the manipulator only “mixes” a rotation about Z and a rotation about Y,
+    the only orientations it can achieve have no independent roll; reachable targets will have 
+    roll either equal (approximately) to 0 or to ±π. In the two cases the following equivalence holds:
+    
+      Case 1 (roll near 0):
+           R_target = Rz(yaw)*Ry(pitch)
+        →  set  theta1 = yaw   and   theta2 + theta3 = pitch.
+        
+      Case 2 (roll near ±π):
+           R_target = Rz(yaw)*Ry(pitch)*Rx(±π)
+        and since Rx(π) = Rx(-π) = diag(1, -1, -1), one may show that an equivalent representation is:
+           R_target = Rz(theta1) * Ry(phi)
+        with
+           theta1 = yaw ± π   and   phi = π - pitch.
+        (Here the ± for theta1 is chosen to “flip” the base rotation appropriately.)
+        
+    Once the effective base rotation theta1 and the combined Y–angle phi (which equals theta2+theta3)
+    are determined, the position part of the inverse kinematics follows from “removing” the base rotation.
+    
+    In the intermediate (base-rotated) frame, the TCP’s x and z coordinates satisfy:
+         p'_x = 0.425*sin(theta2) + 0.39225*sin(phi)
+         p'_z = 0.425*cos(theta2) + 0.39225*cos(phi)
+    so that one can solve for theta2 via:
+         theta2 = atan2( p'_x - 0.39225*sin(phi),  p'_z - 0.39225*cos(phi) )
+    and then theta3 = phi - theta2.
+    
+    This implementation first checks the desired roll to decide which formulation to use.
+    
+    :param p: Desired TCP position as (px, py, pz).
+    :param r: Desired TCP rpy orientation (roll, pitch, yaw) in radians.
+              For a reachable target, roll will be near 0 or ±π.
+    :return: A tuple (theta1, theta2, theta3) of joint angles (in radians).
+    """
+    import math
+
+    px, py, pz = p
+    roll, pitch, yaw = r
+
+    # Tolerance to decide if roll is “zero” or near ±π.
+    tol = 1e-3
+
+    # Choose the representation based on the desired roll.
+    if abs(roll) < tol:
+        # Case 1: roll ~ 0 → achievable as Rz(yaw)*Ry(pitch)
+        theta1 = yaw
+        phi = pitch  # phi = theta2 + theta3
+    elif abs(abs(roll) - math.pi) < tol:
+        # Case 2: roll ~ ±π → use the equivalent formulation.
+        # (Choose the sign so that forward kinematics yields the proper TCP pose.)
+        if roll > 0:
+            # For roll near +π, set:
+            theta1 = yaw + math.pi
+        else:
+            # For roll near -π, set:
+            theta1 = yaw - math.pi
+        # In either case, the effective combined Y-rotation is:
+        phi = math.pi - pitch
+    else:
+        # Fallback (should not occur for properly reachable targets)
+        theta1 = yaw
+        phi = pitch
+
+    # Wrap theta1 into the interval (-π, π]
+    theta1 = (theta1 + math.pi) % (2 * math.pi) - math.pi
+
+    # Remove the base rotation by computing the rotated coordinates.
+    # (Rz(-theta1) rotates the target position into the frame where the base rotation has been undone.)
+    cos_t1 = math.cos(theta1)
+    sin_t1 = math.sin(theta1)
+    p_prime_x = cos_t1 * px + sin_t1 * py
+    p_prime_z = pz
+
+    # From forward kinematics in the intermediate frame:
+    #   p'_x = 0.425*sin(theta2) + 0.39225*sin(phi)
+    #   p'_z = 0.425*cos(theta2) + 0.39225*cos(phi)
+    # Solve for theta2:
+    A = p_prime_x - 0.39225 * math.sin(phi)
+    B = p_prime_z - 0.39225 * math.cos(phi)
+    theta2 = math.atan2(A, B)
+    
+    # And finally, joint 3:
+    theta3 = phi - theta2
+
+    return (theta1, theta2, theta3)
+```

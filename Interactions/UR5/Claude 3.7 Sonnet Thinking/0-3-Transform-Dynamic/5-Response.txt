@@ -1,0 +1,147 @@
+Based on the feedback, I need to improve my inverse kinematics solution. I'll analyze the robot geometry more carefully and develop a complete solution that properly handles all joints.
+
+```python
+def inverse_kinematics(p: tuple[float, float, float], r: tuple[float, float, float]) -> tuple[float, float, float, float]:
+    """
+    Gets the joint values needed to reach position "p" and orientation "r".
+    :param p: The position to reach in the form [x, y, z].
+    :param r: The orientation to reach in radians in the form [x, y, z].
+    :return: A list of the values to set the links to for reaching position "p" and orientation "r".
+    """
+    import numpy as np
+    import math
+    
+    # Robot dimensions
+    d1 = 0.13585  # Joint 2 offset in y
+    d2 = 0.1197   # Joint 3 negative offset in y
+    a2 = 0.425    # Joint 3 offset in z
+    a3 = 0.39225  # Joint 4 offset in z
+    d4 = 0.093    # TCP offset in y
+    
+    # Extract target position and orientation
+    x, y, z = p
+    roll, pitch, yaw = r
+    
+    # Create rotation matrix for target orientation
+    c_r, s_r = np.cos(roll), np.sin(roll)
+    c_p, s_p = np.cos(pitch), np.sin(pitch)
+    c_y, s_y = np.cos(yaw), np.sin(yaw)
+    
+    Rx = np.array([[1, 0, 0], [0, c_r, -s_r], [0, s_r, c_r]])
+    Ry = np.array([[c_p, 0, s_p], [0, 1, 0], [-s_p, 0, c_p]])
+    Rz = np.array([[c_y, -s_y, 0], [s_y, c_y, 0], [0, 0, 1]])
+    R_target = Rz @ Ry @ Rx
+    
+    # Extract the orientation vectors of the end-effector frame
+    nx, ny, nz = R_target[0, 0], R_target[1, 0], R_target[2, 0]  # x-axis
+    ox, oy, oz = R_target[0, 1], R_target[1, 1], R_target[2, 1]  # y-axis
+    ax, ay, az = R_target[0, 2], R_target[1, 2], R_target[2, 2]  # z-axis
+    
+    # Calculate wrist position by subtracting TCP offset
+    # The TCP offset is along the y-axis of the end-effector frame
+    wx = x - d4 * ox
+    wy = y - d4 * oy
+    wz = z - d4 * oz
+    
+    # Calculate joint 1 (base rotation)
+    theta1 = yaw
+    
+    # Create rotation matrix for joint 1
+    c1, s1 = np.cos(theta1), np.sin(theta1)
+    R1 = np.array([
+        [c1, -s1, 0],
+        [s1, c1, 0],
+        [0, 0, 1]
+    ])
+    
+    # Transform wrist position to joint 1 frame
+    wx_1 = c1 * wx + s1 * wy
+    wy_1 = -s1 * wx + c1 * wy
+    wz_1 = wz
+    
+    # Adjust for joint 2 offset
+    wy_1 -= d1
+    
+    # Set up planar manipulator problem for joints 2-4
+    l1 = np.sqrt(d2*d2 + a2*a2)  # Effective length from joint 2 to 3
+    l2 = a3                      # Length from joint 3 to 4
+    phi1 = np.arctan2(a2, -d2)   # Angle of joint 3 offset relative to joint 2
+    
+    # Distance from joint 2 to wrist position
+    d = np.sqrt(wy_1*wy_1 + wz_1*wz_1)
+    
+    # Using law of cosines to find joint 3 angle
+    cos_theta3 = (d*d - l1*l1 - l2*l2) / (2 * l1 * l2)
+    cos_theta3 = np.clip(cos_theta3, -1.0, 1.0)
+    
+    # Two possible solutions for joint 3
+    theta3_1 = np.arccos(cos_theta3)
+    theta3_2 = -theta3_1
+    
+    # The total orientation angle in the YZ plane is defined by pitch
+    theta_sum = pitch
+    
+    solutions = []
+    
+    for theta3 in [theta3_1, theta3_2]:
+        # Calculate joint 2
+        beta = np.arctan2(wy_1, wz_1)
+        alpha = np.arctan2(l2 * np.sin(theta3), l1 + l2 * np.cos(theta3))
+        theta2 = beta - alpha - phi1
+        
+        # Calculate joint 4 to achieve desired orientation
+        theta4 = theta_sum - theta2 - theta3
+        
+        # Normalize angles to [-pi, pi]
+        theta2 = (theta2 + np.pi) % (2 * np.pi) - np.pi
+        theta3 = (theta3 + np.pi) % (2 * np.pi) - np.pi
+        theta4 = (theta4 + np.pi) % (2 * np.pi) - np.pi
+        
+        # Add solution
+        solutions.append((theta2, theta3, theta4))
+    
+    # Choose solution with minimum joint movement
+    best_solution = min(solutions, key=lambda s: sum(abs(a) for a in s))
+    theta2, theta3, theta4 = best_solution
+    
+    # Try alternate joint 1 value (theta1 = yaw ± π)
+    if abs(roll) > 0.1:  # If roll is significant, we may need to flip joint 1
+        alt_theta1 = theta1 + np.pi if theta1 < 0 else theta1 - np.pi
+        alt_theta1 = (alt_theta1 + np.pi) % (2 * np.pi) - np.pi
+        
+        # When flipping joint 1, we also need to adjust the other joints
+        alt_solutions = []
+        for theta3 in [theta3_1, theta3_2]:
+            # For the alternate theta1, we need the equivalent orientation
+            alt_theta2 = -theta2
+            alt_theta3 = theta3
+            alt_theta4 = -theta4
+            
+            # Normalize angles
+            alt_theta2 = (alt_theta2 + np.pi) % (2 * np.pi) - np.pi
+            alt_theta3 = (alt_theta3 + np.pi) % (2 * np.pi) - np.pi
+            alt_theta4 = (alt_theta4 + np.pi) % (2 * np.pi) - np.pi
+            
+            alt_solutions.append((alt_theta2, alt_theta3, alt_theta4))
+        
+        alt_best = min(alt_solutions, key=lambda s: sum(abs(a) for a in s))
+        alt_theta2, alt_theta3, alt_theta4 = alt_best
+        
+        # Compare original and alternate solutions
+        if sum(abs(a) for a in (theta1, theta2, theta3, theta4)) > sum(abs(a) for a in (alt_theta1, alt_theta2, alt_theta3, alt_theta4)):
+            theta1, theta2, theta3, theta4 = alt_theta1, alt_theta2, alt_theta3, alt_theta4
+    
+    return (theta1, theta2, theta3, theta4)
+```
+
+This solution:
+
+1. Uses the target orientation (yaw) to determine joint 1
+2. Calculates the wrist position by subtracting the TCP offset along the y-axis of the end-effector frame
+3. Transforms the wrist position to the frame after joint 1 rotation
+4. Solves the planar manipulator problem for joints 2, 3, and 4 in the YZ plane
+5. Uses the pitch value to constrain the sum of joints 2, 3, and 4
+6. Considers alternative configurations by potentially flipping joint 1 by ±π
+7. Chooses the solution with minimum joint movement
+
+This approach properly accounts for the robot's kinematic structure and the coordinate frames of each joint.

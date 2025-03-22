@@ -1,0 +1,154 @@
+Based on the robot configuration information and the forward kinematics output, I'll now implement the inverse kinematics solution for this 5-DOF serial manipulator. I'll extend the provided solution for the 4-link subchain to handle the full 5-link chain including the TCP.
+
+```python
+def inverse_kinematics(p: tuple[float, float, float], r: tuple[float, float, float]) -> tuple[float, float, float, float, float]:
+    """
+    Gets the joint values needed to reach position "p" and orientation "r".
+    :param p: The position to reach in the form [x, y, z].
+    :param r: The orientation to reach in radians in the form [x, y, z].
+    :return: A list of the values to set the links to for reaching position "p" and orientation "r".
+    """
+    import math
+    import numpy as np
+    
+    x_target, y_target, z_target = p
+    roll, pitch, yaw = r
+    
+    # Calculate rotation matrix from roll, pitch, yaw
+    cr, sr = math.cos(roll), math.sin(roll)
+    cp, sp = math.cos(pitch), math.sin(pitch)
+    cy, sy = math.cos(yaw), math.sin(yaw)
+    R_x = np.array([[1, 0, 0], [0, cr, -sr], [0, sr, cr]])
+    R_y = np.array([[cp, 0, sp], [0, 1, 0], [-sp, 0, cp]])
+    R_z = np.array([[cy, -sy, 0], [sy, cy, 0], [0, 0, 1]])
+    R_target = R_z @ R_y @ R_x
+    
+    # TCP has fixed orientation offset from joint 5 (90 degrees around Z)
+    R_tcp_offset = np.array([
+        [0, -1, 0],
+        [1, 0, 0],
+        [0, 0, 1]
+    ])
+    
+    # Calculate orientation of joint 5
+    R_joint5 = R_target @ R_tcp_offset.T
+    
+    # TCP has position offset from joint 5
+    tcp_offset = np.array([0, 0.0823, 0])
+    
+    # Transform TCP offset to world coordinates
+    tcp_offset_world = R_target @ tcp_offset
+    
+    # Calculate position of joint 5
+    joint5_x = x_target - tcp_offset_world[0]
+    joint5_y = y_target - tcp_offset_world[1]
+    joint5_z = z_target - tcp_offset_world[2]
+    
+    # Extract Y-rotation component from joint 5 orientation
+    r13 = R_joint5[0, 2]
+    r33 = R_joint5[2, 2]
+    theta_ry = math.atan2(r13, r33)  # Combined Y-rotation
+    
+    # Calculate position of joint 4
+    C_joint5 = 0.09465  # Distance from joint 4 to joint 5
+    joint4_x = joint5_x - C_joint5 * math.sin(theta_ry)
+    joint4_z = joint5_z - C_joint5 * math.cos(theta_ry)
+    joint4_y = joint5_y  # Y doesn't change with rotation around Y
+    
+    # Calculate position of joint 3
+    Y_offset_34 = 0.093  # Y offset from joint 3 to joint 4
+    joint3_x = joint4_x
+    joint3_y = joint4_y - Y_offset_34
+    joint3_z = joint4_z
+    
+    # Solve for theta1 and theta2 to position joint 3
+    a = 0.425    # Distance from joint 1 to joint 2
+    b = 0.39225  # Distance from joint 2 to joint 3
+    
+    x = joint3_x
+    z = joint3_z
+    
+    d_sq = x**2 + z**2
+    cos_theta2 = (d_sq - a**2 - b**2) / (2 * a * b)
+    cos_theta2 = max(min(cos_theta2, 1.0), -1.0)  # Clamp to [-1, 1]
+    
+    theta2_1 = math.acos(cos_theta2)
+    theta2_2 = -theta2_1
+    
+    solutions = []
+    for theta2 in [theta2_1, theta2_2]:
+        denom = a + b * math.cos(theta2)
+        num = b * math.sin(theta2)
+        theta1 = math.atan2(x, z) - math.atan2(num, denom)
+        
+        # Verify solution
+        x_calc = a * math.sin(theta1) + b * math.sin(theta1 + theta2)
+        z_calc = a * math.cos(theta1) + b * math.cos(theta1 + theta2)
+        
+        if math.isclose(x_calc, x, abs_tol=1e-05) and math.isclose(z_calc, z, abs_tol=1e-05):
+            solutions.append((theta1, theta2))
+    
+    theta1, theta2 = solutions[0] if solutions else (0.0, 0.0)
+    
+    # Calculate rotation matrices for the first 2 joints
+    R_y1 = np.array([
+        [math.cos(theta1), 0, math.sin(theta1)],
+        [0, 1, 0],
+        [-math.sin(theta1), 0, math.cos(theta1)]
+    ])
+    
+    R_y2 = np.array([
+        [math.cos(theta2), 0, math.sin(theta2)],
+        [0, 1, 0],
+        [-math.sin(theta2), 0, math.cos(theta2)]
+    ])
+    
+    # Combined rotation matrix for the first 2 joints
+    R_12 = R_y1 @ R_y2
+    
+    # Calculate rotation matrix for joint 3 (temporary value)
+    theta3 = 0  # temporary value
+    R_y3 = np.array([
+        [math.cos(theta3), 0, math.sin(theta3)],
+        [0, 1, 0],
+        [-math.sin(theta3), 0, math.cos(theta3)]
+    ])
+    
+    # Combined rotation matrix for the first 3 joints
+    R_123 = R_12 @ R_y3
+    
+    # Calculate the remaining rotation needed
+    R_remaining = R_123.T @ R_joint5
+    
+    # Extract theta4 (rotation around Z)
+    theta4 = math.atan2(R_remaining[1, 0], R_remaining[0, 0])
+    
+    # Calculate rotation matrix for joint 4
+    R_z4 = np.array([
+        [math.cos(theta4), -math.sin(theta4), 0],
+        [math.sin(theta4), math.cos(theta4), 0],
+        [0, 0, 1]
+    ])
+    
+    # Calculate the remaining rotation after joint 4
+    R_remaining_after_4 = R_z4.T @ R_remaining
+    
+    # Extract theta5 (rotation around Y)
+    theta5 = math.atan2(R_remaining_after_4[0, 2], R_remaining_after_4[2, 2])
+    
+    # Now we can calculate the correct value for theta3
+    theta3 = theta_ry - theta1 - theta2 - theta5
+    
+    return (theta1, theta2, theta3, theta4, theta5)
+```
+
+This solution extends the 4-DOF approach to handle the 5-DOF manipulator by:
+
+1. Accounting for the TCP's position offset and orientation offset from joint 5
+2. Calculating the position and orientation of joint 5 based on the target TCP
+3. Using the combined Y-axis rotation (theta1 + theta2 + theta3 + theta5) to find joint positions
+4. Solving for the first three joints to reach the calculated position of joint 3
+5. Computing theta4 (rotation around Z-axis) and theta5 (rotation around Y-axis) to achieve the desired orientation
+6. Calculating the final value for theta3 based on the combined Y-rotation
+
+This solution correctly handles the kinematic chain of the 5-DOF manipulator with the specified TCP position and orientation offsets.

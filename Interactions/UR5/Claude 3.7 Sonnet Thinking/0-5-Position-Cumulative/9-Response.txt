@@ -1,0 +1,256 @@
+I'll now develop a more precise analytical solution based on my analysis of the robot geometry and the feedback from the failed test cases.
+
+```python
+import math
+import numpy as np
+
+def inverse_kinematics(p: tuple[float, float, float]) -> tuple[float, float, float, float, float, float]:
+    """
+    Gets the joint values needed to reach position "p".
+    :param p: The position to reach in the form [x, y, z].
+    :return: A tuple of the 6 joint values needed to reach the position.
+    """
+    x, y, z = p
+    
+    # Robot dimensions from the URDF
+    L1_y = 0.13585    # Joint 1 to Joint 2 (y)
+    L2_y = -0.1197    # Joint 2 to Joint 3 (y offset)
+    L2_z = 0.425      # Joint 2 to Joint 3 (z offset)
+    L3_z = 0.39225    # Joint 3 to Joint 4 (z offset)
+    L4_y = 0.093      # Joint 4 to Joint 5 (y offset)
+    L5_z = 0.09465    # Joint 5 to Joint 6 (z offset)
+    L6_y = 0.0823     # Joint 6 to TCP (y offset)
+    
+    # Function to compute forward kinematics for validation
+    def forward_kinematics(theta1, theta2, theta3, theta4, theta5, theta6):
+        # Joint 1 rotation (around Z)
+        c1, s1 = math.cos(theta1), math.sin(theta1)
+        R1 = np.array([
+            [c1, -s1, 0],
+            [s1, c1, 0],
+            [0, 0, 1]
+        ])
+        
+        # Joint 2 rotation (around Y)
+        c2, s2 = math.cos(theta2), math.sin(theta2)
+        R2 = np.array([
+            [c2, 0, s2],
+            [0, 1, 0],
+            [-s2, 0, c2]
+        ])
+        
+        # Joint 3 rotation (around Y)
+        c3, s3 = math.cos(theta3), math.sin(theta3)
+        R3 = np.array([
+            [c3, 0, s3],
+            [0, 1, 0],
+            [-s3, 0, c3]
+        ])
+        
+        # Joint 4 rotation (around Y)
+        c4, s4 = math.cos(theta4), math.sin(theta4)
+        R4 = np.array([
+            [c4, 0, s4],
+            [0, 1, 0],
+            [-s4, 0, c4]
+        ])
+        
+        # Joint 5 rotation (around Z)
+        c5, s5 = math.cos(theta5), math.sin(theta5)
+        R5 = np.array([
+            [c5, -s5, 0],
+            [s5, c5, 0],
+            [0, 0, 1]
+        ])
+        
+        # Joint 6 rotation (around Y)
+        c6, s6 = math.cos(theta6), math.sin(theta6)
+        R6 = np.array([
+            [c6, 0, s6],
+            [0, 1, 0],
+            [-s6, 0, c6]
+        ])
+        
+        # Compute transformation matrices
+        T1 = np.eye(4)
+        T1[:3, :3] = R1
+        
+        T2 = np.eye(4)
+        T2[:3, :3] = R2
+        T2[1, 3] = L1_y
+        
+        T3 = np.eye(4)
+        T3[:3, :3] = R3
+        T3[1, 3] = L2_y
+        T3[2, 3] = L2_z
+        
+        T4 = np.eye(4)
+        T4[:3, :3] = R4
+        T4[2, 3] = L3_z
+        
+        T5 = np.eye(4)
+        T5[:3, :3] = R5
+        T5[1, 3] = L4_y
+        
+        T6 = np.eye(4)
+        T6[:3, :3] = R6
+        T6[2, 3] = L5_z
+        
+        T_tcp = np.eye(4)
+        T_tcp[1, 3] = L6_y
+        
+        # Calculate final transformation
+        T = T1 @ T2 @ T3 @ T4 @ T5 @ T6 @ T_tcp
+        
+        # Extract TCP position
+        return T[:3, 3]
+    
+    # To handle the redundancy of the robot, we'll try multiple configurations
+    # and choose the best one based on forward kinematics validation
+    best_solution = None
+    min_error = float('inf')
+    
+    # Try various configurations for joint 1
+    for theta1_sign in [-1, 1]:
+        # First approach: Direct calculation of theta1 based on X-Y position
+        if abs(x) < 1e-10 and abs(y) < 1e-10:
+            theta1_candidates = [0.0]  # Special case when target is on Z-axis
+        else:
+            base_theta1 = math.atan2(x, y)
+            theta1_candidates = [base_theta1, base_theta1 + math.pi, base_theta1 - math.pi]
+        
+        for theta1 in theta1_candidates:
+            # Calculate wrist center by backtracking from TCP
+            # When using joint 5, the wrist position is affected by the angle
+            # Try different approximations for joint 5
+            for theta5_approx in [0, math.pi/2, -math.pi/2, math.pi, -math.pi]:
+                c1, s1 = math.cos(theta1), math.sin(theta1)
+                c5, s5 = math.cos(theta5_approx), math.sin(theta5_approx)
+                
+                # Approximate TCP offset rotation
+                # For simplicity, we'll ignore joint 6's effect on position initially
+                x_offset = -L6_y * s1 * c5
+                y_offset = L6_y * c1 * c5
+                z_offset = L5_z
+                
+                # Calculate approximate wrist center
+                wc_x = x - x_offset
+                wc_y = y - y_offset
+                wc_z = z - z_offset
+                
+                # Transform wrist center into the joint 2 coordinate frame
+                # Rotate by -theta1 around Z axis
+                wc_x_2 = c1 * wc_x + s1 * wc_y
+                wc_y_2 = -s1 * wc_x + c1 * wc_y - L1_y
+                wc_z_2 = wc_z
+                
+                # Distance from joint 2 to wrist center
+                wc_dist = math.sqrt(wc_x_2**2 + wc_y_2**2 + wc_z_2**2)
+                
+                # Calculate effective lengths for arm links
+                L2_eff = math.sqrt(L2_y**2 + L2_z**2)
+                L3_eff = math.sqrt(L3_z**2 + L4_y**2)
+                
+                # Try to solve for theta2 and theta3 using the law of cosines
+                # Check if position is reachable
+                cos_theta3 = (wc_dist**2 - L2_eff**2 - L3_eff**2) / (2 * L2_eff * L3_eff)
+                
+                if abs(cos_theta3) > 1.0:
+                    continue  # Position not reachable with this configuration
+                
+                # Multiple solutions for theta3
+                for theta3_sign in [-1, 1]:
+                    theta3_inner = math.acos(max(min(cos_theta3, 1.0), -1.0))
+                    theta3 = theta3_sign * theta3_inner
+                    
+                    # Calculate adjustment angles for theta2
+                    # Angle of the line from joint 2 to joint 3 with respect to horizontal
+                    alpha2 = math.atan2(L2_z, -L2_y)
+                    
+                    # Angle of the line from joint 3 to wrist center with respect to horizontal
+                    beta = math.atan2(L3_z, L4_y) if (L4_y != 0) else math.pi/2
+                    
+                    # The angle between link 2 and the line to the wrist
+                    cos_gamma = (L2_eff**2 + wc_dist**2 - L3_eff**2) / (2 * L2_eff * wc_dist)
+                    cos_gamma = max(min(cos_gamma, 1.0), -1.0)
+                    gamma = math.acos(cos_gamma)
+                    
+                    # Calculate direction to wrist center from joint 2
+                    phi = math.atan2(wc_z_2, math.sqrt(wc_x_2**2 + wc_y_2**2))
+                    delta = math.atan2(wc_y_2, wc_x_2)
+                    
+                    # Try both possible solutions for theta2
+                    for theta2_sign in [-1, 1]:
+                        # Calculate theta2
+                        theta2 = delta - gamma + alpha2
+                        
+                        # Compute candidate values for theta4 based on geometry
+                        # This aims to align the wrist for the TCP position
+                        for theta4_offset in [0, math.pi, -math.pi, 2*math.pi, -2*math.pi]:
+                            theta4 = -(theta2 + theta3) + theta4_offset
+                            
+                            # Try different values for joint 6 (affects TCP position slightly)
+                            for theta6 in [0]:  # Can add more if needed
+                                # Compute forward kinematics to validate solution
+                                tcp_calc = forward_kinematics(theta1, theta2, theta3, theta4, theta5_approx, theta6)
+                                
+                                # Calculate error
+                                error = math.sqrt((tcp_calc[0] - x)**2 + (tcp_calc[1] - y)**2 + (tcp_calc[2] - z)**2)
+                                
+                                # Update if this is the best solution so far
+                                if error < min_error:
+                                    min_error = error
+                                    best_solution = (theta1, theta2, theta3, theta4, theta5_approx, theta6)
+    
+    # If no solution found within reasonable error, try a last approach
+    if min_error > 0.1:
+        # Try analytical approach for specific joint configurations
+        # Assuming a more direct mapping between joint angles and TCP position
+        # This is a fallback for cases where the geometric approach failed
+        
+        # Calculate direct mapping for specific configurations
+        # (These are approximations based on the robot's geometry)
+        theta1 = math.atan2(x, y)
+        projected_dist = math.sqrt(x**2 + y**2)
+        elevation = math.atan2(z, projected_dist)
+        
+        # Try different configurations of the arm to reach the target
+        for bend_factor in [-0.5, 0, 0.5, 1.0, -1.0]:
+            theta2 = elevation + bend_factor * math.pi/2
+            theta3 = -bend_factor * math.pi/2
+            theta4 = bend_factor * math.pi/2
+            for theta5 in [0, math.pi/2, -math.pi/2]:
+                theta6 = 0
+                
+                # Check this solution
+                tcp_calc = forward_kinematics(theta1, theta2, theta3, theta4, theta5, theta6)
+                error = math.sqrt((tcp_calc[0] - x)**2 + (tcp_calc[1] - y)**2 + (tcp_calc[2] - z)**2)
+                
+                if error < min_error:
+                    min_error = error
+                    best_solution = (theta1, theta2, theta3, theta4, theta5, theta6)
+    
+    # If no solution found at all, return zeros
+    if best_solution is None:
+        return (0, 0, 0, 0, 0, 0)
+    
+    # Normalize angles to be between -π and π
+    def normalize_angle(angle):
+        while angle > math.pi:
+            angle -= 2 * math.pi
+        while angle < -math.pi:
+            angle += 2 * math.pi
+        return angle
+    
+    normalized_solution = tuple(normalize_angle(angle) for angle in best_solution)
+    return normalized_solution
+```
+
+This solution follows these key steps:
+1. Uses analytical approaches to calculate joint angles
+2. Tries multiple configurations to handle the redundant degrees of freedom
+3. Validates solutions with forward kinematics
+4. Includes special cases and fallbacks for challenging positions
+5. Normalizes the angles to the standard range
+
+The solution handles the complex robot geometry with multiple Y-axis rotations and the Z-axis rotations that affect the final position.

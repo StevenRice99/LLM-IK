@@ -1,0 +1,166 @@
+```python
+import math
+import numpy as np
+
+def inverse_kinematics(p: tuple[float, float, float],
+                       r: tuple[float, float, float]) -> tuple[float, float, float, float, float, float]:
+    """
+    Computes a closed–form analytical inverse kinematics solution for the 6-DOF manipulator.
+
+    Robot structure (in meters and radians):
+      • Revolute 1: rotation about Z at [0,0,0]
+      • Revolute 2: translate [0, 0.13585, 0] then rotate about Y
+      • Revolute 3: translate [0, -0.1197, 0.425] then rotate about Y
+      • Revolute 4: translate [0, 0, 0.39225] then rotate about Y
+      • Revolute 5: translate [0, 0.093, 0] then rotate about Z
+      • Revolute 6: translate [0, 0, 0.09465] then rotate about Y
+      • TCP: translate [0, 0.0823, 0] with a fixed additional yaw offset ψ = 1.570796325
+
+    The forward kinematics are decoupled so that:
+      R_total = Rz(q1) · [Ry(q2+q3+q4) · Rz(q5)] · [Ry(q6) · Rz(ψ)]
+      The TCP position is obtained from a decoupled planar 2R subchain (using joints 2–4)
+      with an effective constant offset along Y:
+             y_const = 0.13585 - 0.1197 + 0.093 = 0.10915
+    
+    This routine first determines q1 using the decoupling requirement on p̄ = Rz(–q1)*p.
+    Then, by “removing” the decoupled orientation, the combined rotation φ = q2+q3+q4 and q5
+    are found. A planar 2R solution then recovers q2, q3, and q4.
+    Finally, the residual rotation needed about the manipulator’s final Y–axis yields q6.
+    """
+    # Robot dimensions and constants
+    L1 = 0.425         # effective length from Revolute 3
+    L2 = 0.39225       # effective length from Revolute 4
+    L_tcp = 0.09465    # offset from Revolute 6 (TCP base offset along the z-axis)
+    y_const = 0.13585 - 0.1197 + 0.093  # constant offset (0.10915)
+    psi = 1.570796325  # fixed TCP yaw offset
+
+    # Unpack target position and orientation (roll, pitch, yaw) as per URDF rpy convention
+    p_x, p_y, p_z = p
+    roll, pitch, yaw = r
+
+    # --- Step 1: Solve for joint 1 (rotation about Z) ---
+    # The decoupled condition enforces that in the rotated frame, the Y–component equals y_const.
+    r_xy = math.sqrt(p_x**2 + p_y**2)
+    theta = math.atan2(p_y, p_x)
+    # Two candidates for q1
+    ratio = (y_const / r_xy) if r_xy != 0 else 0
+    ratio = max(-1.0, min(1.0, ratio))
+    a = math.asin(ratio)
+    q1_candidate1 = theta - a
+    q1_candidate2 = theta - (math.pi - a)
+    
+    # Helper: compute decoupled orientation M = Rz(-q1)*R_des
+    def compute_M(q1_val):
+        cos_q1 = math.cos(q1_val)
+        sin_q1 = math.sin(q1_val)
+        Rz_neg_q1 = np.array([[cos_q1, sin_q1, 0],
+                              [-sin_q1, cos_q1, 0],
+                              [0, 0, 1]])
+        # Construct desired orientation from URDF roll–pitch–yaw: R_des = Rz(yaw) * Ry(pitch) * Rx(roll)
+        R_x = np.array([[1, 0, 0],
+                        [0, math.cos(roll), -math.sin(roll)],
+                        [0, math.sin(roll), math.cos(roll)]])
+        R_y = np.array([[math.cos(pitch), 0, math.sin(pitch)],
+                        [0, 1, 0],
+                        [-math.sin(pitch), 0, math.cos(pitch)]])
+        R_z = np.array([[math.cos(yaw), -math.sin(yaw), 0],
+                        [math.sin(yaw), math.cos(yaw), 0],
+                        [0, 0, 1]])
+        R_des = R_z @ R_y @ R_x
+        M_val = Rz_neg_q1 @ R_des
+        return M_val, R_des
+
+    M1, R_des = compute_M(q1_candidate1)
+    M2, _ = compute_M(q1_candidate2)
+    # Select candidate based on minimal error (e.g. comparing element [1,2])
+    err1 = abs(M1[1, 2])
+    err2 = abs(M2[1, 2])
+    q1 = q1_candidate1 if err1 <= err2 else q1_candidate2
+
+    # --- Step 2: Work in the decoupled frame (eliminate q1) ---
+    cos_q1 = math.cos(q1)
+    sin_q1 = math.sin(q1)
+    Rz_neg_q1 = np.array([[cos_q1, sin_q1, 0],
+                          [-sin_q1, cos_q1, 0],
+                          [0, 0, 1]])
+    p_vec = np.array([p_x, p_y, p_z])
+    p_bar = Rz_neg_q1 @ p_vec
+    p_bar_x, p_bar_y, p_bar_z = p_bar
+
+    # Rebuild R_des from target r (roll, pitch, yaw)
+    R_x = np.array([[1, 0, 0],
+                    [0, math.cos(roll), -math.sin(roll)],
+                    [0, math.sin(roll), math.cos(roll)]])
+    R_y = np.array([[math.cos(pitch), 0, math.sin(pitch)],
+                    [0, 1, 0],
+                    [-math.sin(pitch), 0, math.cos(pitch)]])
+    R_z = np.array([[math.cos(yaw), -math.sin(yaw), 0],
+                    [math.sin(yaw), math.cos(yaw), 0],
+                    [0, 0, 1]])
+    R_des = R_z @ R_y @ R_x
+
+    # --- Step 3: Decouple orientation to extract the combined rotation φ and joint 5 ---
+    M = Rz_neg_q1 @ R_des
+    # φ = q2+q3+q4 is found from the (0,2) and (2,2) elements.
+    phi = math.atan2(M[0, 2], M[2, 2])
+    # Joint 5, a rotation about Z, is recovered from M[1,0] and M[1,1]
+    q5 = math.atan2(M[1, 0], M[1, 1])
+
+    # --- Step 4: Solve the planar 2R arm for q2, q3, and q4 ---
+    # Remove the TCP offset along the φ direction.
+    P_x = p_bar_x - L_tcp * math.sin(phi)
+    P_z = p_bar_z - L_tcp * math.cos(phi)
+    r2 = math.sqrt(P_x**2 + P_z**2)
+    # Use law-of-cosines for the elbow angle (q3)
+    cos_q3 = (r2**2 - L1**2 - L2**2) / (2 * L1 * L2)
+    cos_q3 = max(-1.0, min(1.0, cos_q3))
+    q3_candidateA = math.acos(cos_q3)
+    q3_candidateB = -q3_candidateA
+
+    def planar_solution(q3_val):
+        q2_val = math.atan2(P_x, P_z) - math.atan2(L2 * math.sin(q3_val),
+                                                     L1 + L2 * math.cos(q3_val))
+        q4_val = phi - (q2_val + q3_val)
+        # Forward recompute the effective position for validation purposes:
+        calc_x = L1 * math.sin(q2_val) + L2 * math.sin(q2_val + q3_val) + L_tcp * math.sin(phi)
+        calc_z = L1 * math.cos(q2_val) + L2 * math.cos(q2_val + q3_val) + L_tcp * math.cos(phi)
+        err_val = math.sqrt((calc_x - p_bar_x)**2 + (calc_z - p_bar_z)**2)
+        return (q2_val, q4_val, err_val)
+    
+    q2_A, q4_A, err_A = planar_solution(q3_candidateA)
+    q2_B, q4_B, err_B = planar_solution(q3_candidateB)
+    if err_A <= err_B:
+        q3, q2, q4 = q3_candidateA, q2_A, q4_A
+    else:
+        q3, q2, q4 = q3_candidateB, q2_B, q4_B
+
+    # --- Step 5: Recover joint 6 (wrist roll about Y) from the residual orientation ---
+    # Compute the orientation up to joint 5:
+    R1 = np.array([[math.cos(q1), -math.sin(q1), 0],
+                   [math.sin(q1),  math.cos(q1), 0],
+                   [0, 0, 1]])
+    # R_y(phi) represents the combined rotation from joints 2,3,4.
+    R_y_phi = np.array([[math.cos(phi), 0, math.sin(phi)],
+                        [0, 1, 0],
+                        [-math.sin(phi), 0, math.cos(phi)]])
+    Rz_q5 = np.array([[math.cos(q5), -math.sin(q5), 0],
+                      [math.sin(q5),  math.cos(q5), 0],
+                      [0, 0, 1]])
+    R_mid = R1 @ R_y_phi @ Rz_q5
+    # The remaining rotation must satisfy:
+    #   R_des = R_mid · [Ry(q6) · Rz(ψ)]
+    # Hence, compute the residual:
+    R_rem = R_mid.T @ R_des
+    # Remove the fixed yaw offset: Rz(-ψ)
+    Rz_neg_psi = np.array([[math.cos(psi), math.sin(psi), 0],
+                           [-math.sin(psi), math.cos(psi), 0],
+                           [0, 0, 1]])
+    R_temp = R_rem @ Rz_neg_psi
+    # Ideally, R_temp = Ry(q6) which has the form:
+    #   [[cos(q6), 0, sin(q6)],
+    #    [   0,    1,   0   ],
+    #    [-sin(q6),0, cos(q6)]]
+    q6 = math.atan2(R_temp[0, 2], R_temp[0, 0])
+    
+    return (q1, q2, q3, q4, q5, q6)
+```

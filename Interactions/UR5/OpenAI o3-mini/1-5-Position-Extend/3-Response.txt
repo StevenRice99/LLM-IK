@@ -1,0 +1,103 @@
+Below is one acceptable closed–form analytical solution. In our approach the first three joints (all rotating about Y) are used to “reach” the target in the horizontal (x–z) plane (using the same 2R/wrist–center method as before), while the extra joints (joint 4 which rotates about Z and joint 5 which rotates about Y) do not change the TCP’s position when their fixed translations (given in the URDF) are taken into account. (In this design the only “active” positioning is done by joints 1–3; joints 4 and 5 are redundant for position‐only tasks so we choose to set them to zero.) Notice that the fixed translations in the chain yield a constant vertical offset:  
+  –0.1197 (from link 2) + 0.093 (from link 4) + 0.0823 (from TCP) = 0.0556  
+which is what the FK returns for y. (Any target “p” must have y = 0.0556 for reachability.) 
+
+Below is the complete Python function for inverse kinematics. (This solution uses the same candidate–selection method as the previous 4–DOF solution then appends joint4 = 0 and joint5 = 0.) 
+
+------------------------------------------------
+
+def inverse_kinematics(p: tuple[float, float, float]) -> tuple[float, float, float, float, float]:
+    """
+    Analytical closed–form inverse kinematics for a 5-DOF serial manipulator.
+    
+    The robot chain (with all lengths in meters) is defined by:
+      • Revolute 1 (axis Y) at the base.
+      • Fixed translation from base to joint 2: [0, -0.1197, 0.425]
+      • Revolute 2 about Y.
+      • Fixed translation from joint 2 to joint 3: [0, 0, 0.39225]
+      • Revolute 3 about Y.
+      • Fixed translation from joint 3 to joint 4: [0, 0.093, 0]
+      • Revolute 4 about Z.
+      • Fixed translation from joint 4 to joint 5: [0, 0, 0.09465]
+      • Revolute 5 about Y.
+      • Fixed translation from joint 5 to TCP: [0, 0.0823, 0]
+      
+    Notice that for reaching a TCP position only the horizontal (x–z) coordinates are affected.
+    The effective horizontal chain is given by:
+         x = 0.425*sin(θ1) + 0.39225*sin(θ1+θ2) + 0.09465*sin(θ1+θ2+θ3)
+         z = 0.425*cos(θ1) + 0.39225*cos(θ1+θ2) + 0.09465*cos(θ1+θ2+θ3)
+    and the vertical offset is fixed:
+         y = -0.1197 + 0.093 + 0.0823 = 0.0556.
+    Since the last two joints do not affect the x–z location (their fixed translations along the z and y axes remain unchanged
+    under rotations about Z and Y, respectively), we resolve the redundancy by selecting joint 4 and joint 5 to be zero.
+    
+    :param p: The target TCP position as (x, y, z). (For a reachable target p[1] should equal 0.0556.)
+    :return: A tuple (θ1, θ2, θ3, θ4, θ5) in radians.
+    """
+    import math
+    x, y, z = p
+    # Define the effective horizontal link lengths (in meters)
+    L1 = 0.425      # from fixed translation [0, -0.1197, 0.425]
+    L2 = 0.39225    # from fixed translation [0, 0, 0.39225]
+    L3 = 0.09465    # from fixed translation of joint 5 (TCP translation contributes no horizontal offset)
+
+    # Define a helper function that computes the horizontal forward kinematics for joints 1-3.
+    def fk_planar(theta1, theta2, theta3):
+        x_fk = L1 * math.sin(theta1) + L2 * math.sin(theta1 + theta2) + L3 * math.sin(theta1 + theta2 + theta3)
+        z_fk = L1 * math.cos(theta1) + L2 * math.cos(theta1 + theta2) + L3 * math.cos(theta1 + theta2 + theta3)
+        return (x_fk, z_fk)
+    
+    # Compute psi = atan2(x, z) of the TCP horizontal target.
+    psi = math.atan2(x, z)
+    # There are two natural choices for the overall (sum) angle T = θ1+θ2+θ3.
+    T_options = [psi, psi + math.pi]
+    candidates = []
+    
+    # For each T option, compute the corresponding “wrist center” (for joints 1–3) by subtracting the last link’s contribution.
+    for T in T_options:
+        x_w = x - L3 * math.sin(T)
+        z_w = z - L3 * math.cos(T)
+        r_w = math.sqrt(x_w**2 + z_w**2)
+        # Use the 2R closed–form IK for the wrist center.
+        cos_beta = (r_w**2 - L1**2 - L2**2) / (2 * L1 * L2)
+        # Clamp for numerical safety.
+        cos_beta = max(-1.0, min(1.0, cos_beta))
+        for sign in (1, -1):
+            beta = sign * math.acos(cos_beta)
+            phi_w = math.atan2(x_w, z_w)
+            delta = math.atan2(L2 * math.sin(beta), L1 + L2 * math.cos(beta))
+            theta1_candidate = phi_w - delta
+            theta2_candidate = beta
+            theta3_candidate = T - (theta1_candidate + theta2_candidate)
+            # Compute the forward kinematics error in the horizontal plane.
+            x_fk, z_fk = fk_planar(theta1_candidate, theta2_candidate, theta3_candidate)
+            err = math.hypot(x_fk - x, z_fk - z)
+            candidates.append((err, theta1_candidate, theta2_candidate, theta3_candidate))
+    
+    # Select the candidate solution with the smallest horizontal error.
+    best = min(candidates, key=lambda tup: tup[0])
+    theta1, theta2, theta3 = best[1], best[2], best[3]
+    
+    # For redundancy resolution (position-only tasks), we choose:
+    theta4 = 0.0
+    theta5 = 0.0
+
+    # Helper: normalize angles to the range (-π, π)
+    def normalize(angle):
+        while angle > math.pi:
+            angle -= 2.0 * math.pi
+        while angle < -math.pi:
+            angle += 2.0 * math.pi
+        return angle
+
+    theta1 = normalize(theta1)
+    theta2 = normalize(theta2)
+    theta3 = normalize(theta3)
+    theta4 = normalize(theta4)
+    theta5 = normalize(theta5)
+    
+    return (theta1, theta2, theta3, theta4, theta5)
+
+------------------------------------------------
+
+In this solution the desired target “p” (which is a 3-tuple [x, y, z]) is reached when the horizontal chain computed from joints 1–3 places the TCP at (x, z) and the fixed vertical offset yields y = 0.0556; joints 4 and 5 have been set to zero (a valid choice since their fixed translations and the invariances of rotations about their respective axes do not alter the TCP position).

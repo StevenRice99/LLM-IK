@@ -1,0 +1,192 @@
+```python
+import math
+
+def inverse_kinematics(p: tuple[float, float, float],
+                       r: tuple[float, float, float]) -> tuple[float, float, float]:
+    """
+    Computes a closed‐form inverse kinematics solution for the 3-DOF serial manipulator.
+    
+    Manipulator geometry (all units in meters and radians):
+      • Joint 1 (Revolute 1): position [0, 0, 0], rotates about Z.
+      • Joint 2 (Revolute 2): position [0, 0.13585, 0], rotates about Y.
+      • Joint 3 (Revolute 3): position [0, -0.1197, 0.425], rotates about Y.
+      • TCP: offset [0, 0, 0.39225] from Joint 3.
+      
+    (Note: The forward chain gives the TCP rotation as Rz(θ1)*Ry(θ2+θ3). Consequently, the
+     only achievable end-effector orientation is one with zero roll; any nonzero roll in the input
+     is interpreted via an equivalent representation.)
+     
+    The method works by first “solving” the position using an analytical method (as in the
+    provided position-only IK) and then choosing between the two possible candidate solutions
+    so that the end‐effector’s achievable orientation Rz(θ1)*Ry(θ2+θ3) matches the desired pose.
+    
+    The input orientation r is provided as (roll, pitch, yaw) in radians.
+    
+    :param p: The desired TCP position (x, y, z)
+    :param r: The desired TCP orientation (roll, pitch, yaw) in radians.
+    :return: A tuple (θ1, θ2, θ3) of joint angles in radians.
+    """
+    # Geometric constants
+    L1 = 0.425     # effective link from joint 2 to joint 3
+    L2 = 0.39225   # TCP offset from joint 3
+    k  = 0.01615   # horizontal offset (0.13585 - 0.1197)
+
+    # Unpack target position and desired orientation (rpy)
+    x, y, z = p
+    r_roll, r_pitch, r_yaw = r
+
+    # ---------------------------
+    # STEP 1. POSITION IK
+    # ---------------------------
+    # The horizontal offset from the base is modified by k.
+    temp = x*x + y*y - k*k
+    A = math.sqrt(temp) if temp > 0 else 0.0
+    # Compute theta1 from the projected (x,y) using the small offset k.
+    # (This derivation comes from the geometry of the offset between joint 1 and 2.)
+    theta1 = math.atan2(A*y - k*x, A*x + k*y)
+
+    # Compute an “effective” TCP distance (using full p) and use the law of cosines to get an angle term.
+    r_all_sq = x*x + y*y + z*z
+    # Note: L1^2 + L2^2 is nearly 0.334746 and 2*L1*L2 ≈ 0.3334125.
+    cos_val = (r_all_sq - (L1*L1 + L2*L2)) / (2 * L1 * L2)
+    # Clamp to avoid domain errors:
+    cos_val = max(min(cos_val, 1.0), -1.0)
+    alpha = math.acos(cos_val)
+    
+    # There are two possible solution branches.
+    # In branch 1 we set theta3_candidate =  +alpha;
+    # in branch 2 we set theta3_candidate = -alpha.
+    # In both cases, define:
+    C = L1 + L2 * math.cos(alpha)   # (cosine is even so same for ±alpha)
+    
+    # Candidate 1:
+    theta3_1 = alpha
+    D1 = L2 * math.sin(theta3_1)
+    theta2_1 = math.atan2(C * A - D1 * z, C * z + D1 * A)
+    sum1 = theta2_1 + theta3_1   # This is the overall contribution to TCP pitch.
+
+    # Candidate 2:
+    theta3_2 = -alpha
+    D2 = L2 * math.sin(theta3_2)  # = -L2*sin(alpha)
+    theta2_2 = math.atan2(C * A - D2 * z, C * z + D2 * A)
+    sum2 = theta2_2 + theta3_2
+
+    # ---------------------------
+    # STEP 2. CANDIDATE SELECTION VIA ORIENTATION
+    # ---------------------------
+    # For our manipulator, the achievable TCP rotation is:
+    #         R_tcp = Rz(theta1) * Ry(theta2 + theta3)
+    # so only the sum δ = theta2+theta3 matters.
+    #
+    # Define helper functions to build rotation matrices.
+    def Rz(angle):
+        return [[math.cos(angle), -math.sin(angle), 0],
+                [math.sin(angle),  math.cos(angle), 0],
+                [0, 0, 1]]
+    
+    def Ry(angle):
+        return [[math.cos(angle), 0, math.sin(angle)],
+                [0, 1, 0],
+                [-math.sin(angle), 0, math.cos(angle)]]
+    
+    def mat_mult(A, B):
+        result = [[0, 0, 0],
+                  [0, 0, 0],
+                  [0, 0, 0]]
+        for i in range(3):
+            for j in range(3):
+                for k_ in range(3):
+                    result[i][j] += A[i][k_] * B[k_][j]
+        return result
+    
+    def frobenius_norm(M):
+        s = 0
+        for i in range(3):
+            for j in range(3):
+                s += M[i][j]**2
+        return math.sqrt(s)
+    
+    # Build the candidate end-effector rotation matrices from position IK.
+    Rz_t1 = Rz(theta1)
+    R_candidate1 = mat_mult(Rz_t1, Ry(sum1))
+    R_candidate2 = mat_mult(Rz_t1, Ry(sum2))
+    
+    # Now compute the desired rotation matrix, R_des.
+    # Here we assume the classical roll-pitch-yaw (RPY) convention:
+    #   R = Rz(r_yaw) * Ry(r_pitch) * Rx(r_roll)
+    #
+    # (Note: For our manipulator, only rotations of the form Rz * Ry are achievable.
+    #  Thus if r_roll is not zero, the input is interpreted in an equivalent way.)
+    cr = math.cos(r_roll)
+    sr = math.sin(r_roll)
+    cp = math.cos(r_pitch)
+    sp = math.sin(r_pitch)
+    cy = math.cos(r_yaw)
+    sy = math.sin(r_yaw)
+    # Build Rx, Ry, Rz (for input r)
+    Rz_r = [[cy, -sy, 0],
+            [sy,  cy, 0],
+            [0, 0, 1]]
+    Ry_r = [[cp, 0, sp],
+            [0, 1, 0],
+            [-sp, 0, cp]]
+    Rx_r = [[1, 0, 0],
+            [0, cr, -sr],
+            [0, sr, cr]]
+    # Multiply in order: R_des = Rz_r * (Ry_r * Rx_r)
+    R_temp = mat_mult(Ry_r, Rx_r)
+    R_des = mat_mult(Rz_r, R_temp)
+    
+    # Compare each candidate’s rotation (R_candidate = Rz(theta1)*Ry(theta2+theta3)) with R_des.
+    diff1 = [[R_candidate1[i][j] - R_des[i][j] for j in range(3)] for i in range(3)]
+    diff2 = [[R_candidate2[i][j] - R_des[i][j] for j in range(3)] for i in range(3)]
+    error1 = frobenius_norm(diff1)
+    error2 = frobenius_norm(diff2)
+    
+    # Select the candidate with the lower error.
+    if error1 <= error2:
+        chosen_theta3 = theta3_1
+        # We pick the position-computed theta2 (from candidate 1) as a provisional value,
+        # but will later impose the orientation constraint exactly.
+        provisional_theta2 = theta2_1
+        chosen_sum = sum1
+    else:
+        chosen_theta3 = theta3_2
+        provisional_theta2 = theta2_2
+        chosen_sum = sum2
+
+    # ---------------------------
+    # STEP 3. ORIENTATION ENFORCEMENT
+    # ---------------------------
+    # Our manipulator can only achieve rotations of the form Rz(theta1)*Ry(delta).
+    # We now “extract” the effective desired pitch (delta_eff) from the target rotation.
+    # To do this, we remove the base rotation Rz(theta1) from R_des.
+    def transpose(M):
+        return [list(row) for row in zip(*M)]
+    
+    def wrap(angle):
+        while angle > math.pi:
+            angle -= 2 * math.pi
+        while angle < -math.pi:
+            angle += 2 * math.pi
+        return angle
+    
+    Rz_minus_t1 = Rz(-theta1)
+    R_temp2 = mat_mult(Rz_minus_t1, R_des)
+    # For a rotation of the form Ry(delta), the (2,0) element is -sin(delta)
+    # and the (2,2) element is cos(delta). Hence, we can extract delta as:
+    delta_eff = math.atan2(-R_temp2[2][0], R_temp2[2][2])
+    # (delta_eff is the effective pitch that our manipulator should achieve.)
+    #
+    # To enforce the orientation constraint, we force:
+    #     theta2 + theta3 = delta_eff
+    # so we set:
+    theta2 = delta_eff - chosen_theta3
+
+    # Optionally wrap the angles to the interval [-pi, pi].
+    theta1 = wrap(theta1)
+    theta2 = wrap(theta2)
+    theta3 = wrap(chosen_theta3)
+    
+    return (theta1, theta2, theta3)
+```

@@ -1,0 +1,221 @@
+Thank you for the detailed feedback. I can see that my solution has several issues that need to be addressed. Let me revise my approach to properly handle the 6-DOF manipulator and correctly solve for all joint angles.
+
+Let me rewrite the inverse kinematics function from scratch:
+
+```python
+def inverse_kinematics(p: tuple[float, float, float], r: tuple[float, float, float]) -> tuple[float, float, float, float, float, float]:
+    """
+    Gets the joint values needed to reach position "p" and orientation "r".
+    :param p: The position to reach in the form [x, y, z].
+    :param r: The orientation to reach in radians in the form [x, y, z].
+    :return: A list of the values to set the links to for reaching position "p" and orientation "r".
+    """
+    import math
+    import numpy as np
+    
+    # Robot dimensions
+    L1 = 0.425      # Link 3 length (Z component)
+    L2 = 0.39225    # Link 4 length (Z component)
+    L3 = 0.09465    # Link 6 length (Z component)
+    TCP_Y = 0.0823  # TCP offset in Y direction
+    y_const = 0.13585 - 0.1197 + 0.093  # Combined Y offset from joints 2, 3, and 5
+    
+    # Get the target position and orientation
+    px, py, pz = p
+    roll, pitch, yaw = r
+    
+    # Build rotation matrices for the target orientation
+    Rx = np.array([
+        [1, 0, 0],
+        [0, math.cos(roll), -math.sin(roll)],
+        [0, math.sin(roll), math.cos(roll)]
+    ])
+    
+    Ry = np.array([
+        [math.cos(pitch), 0, math.sin(pitch)],
+        [0, 1, 0],
+        [-math.sin(pitch), 0, math.cos(pitch)]
+    ])
+    
+    Rz = np.array([
+        [math.cos(yaw), -math.sin(yaw), 0],
+        [math.sin(yaw), math.cos(yaw), 0],
+        [0, 0, 1]
+    ])
+    
+    # Target orientation matrix
+    R_target = Rz @ Ry @ Rx
+    
+    # TCP has a pi/2 rotation around Z axis in its local frame
+    tcp_rot_z = np.array([
+        [math.cos(math.pi/2), -math.sin(math.pi/2), 0],
+        [math.sin(math.pi/2), math.cos(math.pi/2), 0],
+        [0, 0, 1]
+    ])
+    
+    # The wrist orientation is the target orientation with TCP rotation removed
+    R_wrist = R_target @ np.linalg.inv(tcp_rot_z)
+    
+    # Calculate the TCP offset in the target frame
+    tcp_offset = np.array([0, TCP_Y, 0])
+    tcp_offset_world = R_target @ tcp_offset
+    
+    # Calculate wrist position by removing TCP offset from target position
+    wrist_pos = np.array([px, py, pz]) - tcp_offset_world
+    wx, wy, wz = wrist_pos
+    
+    # Step 1: Solve for joint 1 (base rotation)
+    # The y_const is the Y offset when all joints are at 0, which must be maintained
+    r_xy = math.sqrt(wx**2 + wy**2)
+    theta = math.atan2(wy, wx)
+    
+    # We have two potential solutions for q1
+    if r_xy < y_const:
+        # Handle special case where target is too close to Z-axis
+        q1 = theta
+    else:
+        # Calculate two possible solutions for q1
+        ratio = y_const / r_xy
+        ratio = max(-1.0, min(1.0, ratio))
+        alpha = math.asin(ratio)
+        
+        q1_sol1 = theta - alpha
+        q1_sol2 = math.pi - theta - alpha
+        
+        # Function to compute decoupled orientation for testing
+        def compute_M(q1_val):
+            cos_q1 = math.cos(q1_val)
+            sin_q1 = math.sin(q1_val)
+            Rz_neg_q1 = np.array([
+                [cos_q1, sin_q1, 0],
+                [-sin_q1, cos_q1, 0],
+                [0, 0, 1]
+            ])
+            return Rz_neg_q1 @ R_wrist
+        
+        # Test both solutions and select the one with smallest error in M[1,2]
+        M1 = compute_M(q1_sol1)
+        M2 = compute_M(q1_sol2)
+        err1 = abs(M1[1, 2])
+        err2 = abs(M2[1, 2])
+        
+        q1 = q1_sol1 if err1 <= err2 else q1_sol2
+    
+    # Ensure q1 is in the range [-π, π]
+    while q1 > math.pi:
+        q1 -= 2 * math.pi
+    while q1 < -math.pi:
+        q1 += 2 * math.pi
+        
+    # Step 2: Compute the decoupled orientation matrix
+    cos_q1 = math.cos(q1)
+    sin_q1 = math.sin(q1)
+    Rz_neg_q1 = np.array([
+        [cos_q1, sin_q1, 0],
+        [-sin_q1, cos_q1, 0],
+        [0, 0, 1]
+    ])
+    
+    # Transform wrist position into the coordinate frame after q1 rotation
+    w_vec = np.array([wx, wy, wz])
+    w_q1 = Rz_neg_q1 @ w_vec
+    wx_q1, wy_q1, wz_q1 = w_q1
+    
+    # Get the decoupled orientation matrix
+    M = Rz_neg_q1 @ R_wrist
+    
+    # Step 3: Extract q5 from M
+    q5 = math.atan2(M[1, 0], M[1, 1])
+    
+    # Step 4: Create rotation matrix for q5
+    Rz_q5 = np.array([
+        [math.cos(q5), -math.sin(q5), 0],
+        [math.sin(q5), math.cos(q5), 0],
+        [0, 0, 1]
+    ])
+    
+    # Remove the effect of q5 from M
+    M_no_q5 = M @ np.linalg.inv(Rz_q5)
+    
+    # Step 5: Extract q6 from the remaining matrix
+    # The remaining matrix should be a rotation around Y: Ry(q2+q3+q4) * Ry(q6)
+    q6 = math.atan2(-M_no_q5[0, 2], M_no_q5[2, 2])
+    
+    # Create rotation matrix for q6
+    Ry_q6 = np.array([
+        [math.cos(q6), 0, math.sin(q6)],
+        [0, 1, 0],
+        [-math.sin(q6), 0, math.cos(q6)]
+    ])
+    
+    # Remove the effect of q6 to isolate the combined rotation of q2+q3+q4
+    M_no_q5_q6 = M_no_q5 @ np.linalg.inv(Ry_q6)
+    
+    # Extract the combined angle phi = q2+q3+q4
+    phi = math.atan2(M_no_q5_q6[0, 2], M_no_q5_q6[2, 2])
+    
+    # Step 6: Account for link 6 and solve the planar mechanism for q2, q3, q4
+    # The position we need to reach with the first 4 joints is:
+    # w_q1 - L3 * [sin(phi)*cos(q6), 0, cos(phi)*cos(q6)]
+    # where L3 is the length of link 6 (0.09465)
+    
+    P_x = wx_q1 - L3 * math.sin(phi) * math.cos(q6)
+    P_z = wz_q1 - L3 * math.cos(phi) * math.cos(q6)
+    
+    # Solve planar 2R mechanism using cosine law
+    r2 = math.sqrt(P_x**2 + P_z**2)
+    
+    # Check if the target is reachable
+    r2 = min(r2, L1 + L2)  # Ensure it's not beyond reach
+    
+    cos_q3 = (r2**2 - L1**2 - L2**2) / (2 * L1 * L2)
+    cos_q3 = max(-1.0, min(1.0, cos_q3))
+    
+    # Two possible solutions for q3
+    q3_sol1 = math.acos(cos_q3)
+    q3_sol2 = -q3_sol1
+    
+    # Function to calculate q2, q4 and position error
+    def compute_planar_solution(q3_val):
+        q2_val = math.atan2(P_x, P_z) - math.atan2(L2 * math.sin(q3_val), L1 + L2 * math.cos(q3_val))
+        q4_val = phi - (q2_val + q3_val)
+        
+        # Compute forward kinematics to check position error
+        forward_x = L1 * math.sin(q2_val) + L2 * math.sin(q2_val + q3_val) + L3 * math.sin(phi) * math.cos(q6)
+        forward_z = L1 * math.cos(q2_val) + L2 * math.cos(q2_val + q3_val) + L3 * math.cos(phi) * math.cos(q6)
+        
+        error = math.sqrt((forward_x - wx_q1)**2 + (forward_z - wz_q1)**2)
+        return q2_val, q4_val, error
+    
+    # Compute both solutions and select the one with lower error
+    q2_1, q4_1, err1 = compute_planar_solution(q3_sol1)
+    q2_2, q4_2, err2 = compute_planar_solution(q3_sol2)
+    
+    if err1 <= err2:
+        q2, q3, q4 = q2_1, q3_sol1, q4_1
+    else:
+        q2, q3, q4 = q2_2, q3_sol2, q4_2
+    
+    # Normalize all angles to be within [-π, π]
+    q2 = (q2 + math.pi) % (2 * math.pi) - math.pi
+    q3 = (q3 + math.pi) % (2 * math.pi) - math.pi
+    q4 = (q4 + math.pi) % (2 * math.pi) - math.pi
+    q5 = (q5 + math.pi) % (2 * math.pi) - math.pi
+    q6 = (q6 + math.pi) % (2 * math.pi) - math.pi
+    
+    return (q1, q2, q3, q4, q5, q6)
+```
+
+The key improvements in this revised solution:
+
+1. **Proper TCP handling**: I've correctly accounted for the TCP's position offset and orientation relative to joint 6.
+
+2. **More accurate wrist position calculation**: The position transformation from TCP to wrist is now computed correctly in the target frame.
+
+3. **Better joint angle extraction**: I've improved how I extract the individual joint angles from the decoupled orientation matrices, properly accounting for the sequence of rotations.
+
+4. **Improved branch selection**: The solution now better handles the multiple solution branches.
+
+5. **Angle normalization**: All angles are normalized to the range [-π, π] to ensure consistency.
+
+This revised solution should provide more accurate results for the 6-DOF inverse kinematics problem.

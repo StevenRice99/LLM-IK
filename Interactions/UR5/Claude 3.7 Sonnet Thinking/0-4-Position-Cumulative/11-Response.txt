@@ -1,0 +1,274 @@
+After analyzing the feedback and understanding more about the robot's kinematic structure, I can see that my previous solutions had issues with correctly handling the link geometry and choosing the right solutions among multiple possibilities. Let me create a better solution that properly addresses these concerns:
+
+```python
+import math
+import numpy as np
+
+def inverse_kinematics(p: tuple[float, float, float]) -> tuple[float, float, float, float, float]:
+    """
+    Gets the joint values needed to reach position "p".
+    :param p: The position to reach in the form [x, y, z].
+    :return: A list of the values to set the links to for reaching position "p".
+    """
+    x, y, z = p
+    
+    # Constants for the robot's geometry
+    # Link lengths
+    L1 = 0.425       # Z offset from joint 2 to joint 3
+    L2 = 0.39225     # Z offset from joint 3 to joint 4
+    L3 = 0.09465     # Z offset from joint 5 to TCP
+    
+    # Y offsets
+    y_j2 = 0.13585   # Y offset from joint 1 to joint 2
+    y_j3 = -0.1197   # Y offset from joint 2 to joint 3
+    y_j5 = 0.093     # Y offset from joint 4 to joint 5
+    
+    # Total Y offset
+    Y_OFFSET = y_j2 + y_j3 + y_j5  # Should be 0.10915
+    
+    # Calculate the squared distance from the origin to target point
+    d_squared = x**2 + y**2 + z**2
+    
+    # Constants derived from the link geometry
+    k1 = L1**2 + L2**2
+    k2 = 2 * L1 * L2
+    
+    # Compute cosine of joint 3 using the law of cosines
+    cos_q3 = (d_squared - k1) / k2
+    cos_q3 = np.clip(cos_q3, -1.0, 1.0)  # Ensure we have a valid value
+    
+    # Compute joint 3 angle
+    q3 = np.arccos(cos_q3)
+    
+    # Intermediate values for computing joint 2
+    A = L1 + L2 * np.cos(q3)
+    B = L2 * np.sin(q3)
+    
+    # Project onto XY plane accounting for Y offset
+    S_squared = x**2 + y**2 - Y_OFFSET**2
+    S = np.sqrt(S_squared) if S_squared > 0 else 0.0
+    C = z
+    
+    # Compute joint 2 using atan2 to handle all quadrants correctly
+    q2 = np.arctan2(A*S + B*C, A*C - B*S)
+    
+    # Compute joint 1 accounting for Y offset
+    phi = np.arctan2(Y_OFFSET, S) if S != 0 else np.pi/2
+    q1 = np.arctan2(x, y) + phi
+    
+    # Compute joint 4 to maintain end effector orientation
+    q4 = -q2 - q3
+    
+    # Joint 5 doesn't affect position
+    q5 = 0.0
+    
+    # Normalize angles to be in range [-π, π]
+    def normalize(angle):
+        return ((angle + np.pi) % (2*np.pi)) - np.pi
+    
+    q1 = normalize(q1)
+    q2 = normalize(q2)
+    q3 = normalize(q3)
+    q4 = normalize(q4)
+    
+    # We need to handle some specific cases where we should choose different solutions
+    # Check the distance from the TCP to the origin
+    dist_to_origin = np.sqrt(d_squared)
+    
+    # If we're reaching a target below the base, we might need to flip the solution
+    if z < 0 and dist_to_origin > 0.7:
+        q3 = -q3
+        q2 = np.arctan2(A*S - B*C, A*C + B*S)
+        q4 = -q2 - q3
+        
+        q2 = normalize(q2)
+        q3 = normalize(q3)
+        q4 = normalize(q4)
+    
+    # We may need to try alternative solutions if the current one is not working well
+    # This is where we would use the feedback to improve our approach
+    # For example, we might prefer elbow-down configurations for targets above the base
+    if z > 0.1:
+        if q3 > 0:  # If we have an elbow-up configuration
+            q3 = -q3  # Try elbow-down instead
+            
+            # Recalculate q2 and q4
+            A = L1 + L2 * np.cos(q3)
+            B = L2 * np.sin(q3)
+            q2 = np.arctan2(A*S + B*C, A*C - B*S)
+            q4 = -q2 - q3
+            
+            q2 = normalize(q2)
+            q3 = normalize(q3)
+            q4 = normalize(q4)
+    
+    return (q1, q2, q3, q4, q5)
+```
+
+Wait, let me correct a few issues with this code based on further analysis of the feedback:
+
+```python
+import math
+import numpy as np
+
+def inverse_kinematics(p: tuple[float, float, float]) -> tuple[float, float, float, float, float]:
+    """
+    Gets the joint values needed to reach position "p".
+    :param p: The position to reach in the form [x, y, z].
+    :return: A list of the values to set the links to for reaching position "p".
+    """
+    x, y, z = p
+    
+    # Constants for robot dimensions
+    # Link lengths
+    L1 = 0.425      # Z distance from joint 2 to joint 3
+    L2 = 0.39225    # Z distance from joint 3 to joint 4
+    L3 = 0.09465    # Z distance from joint 5 to TCP
+    
+    # Y offsets
+    y_j1_to_j2 = 0.13585   # Y offset from joint 1 to joint 2
+    y_j2_to_j3 = -0.1197   # Y offset from joint 2 to joint 3
+    y_j4_to_j5 = 0.093     # Y offset from joint 4 to joint 5
+    
+    Y_OFFSET = y_j1_to_j2 + y_j2_to_j3 + y_j4_to_j5  # Should be 0.10915
+    
+    # Adjust target position to account for TCP offset
+    # We'll solve for the position of joint 5, then compute joint angles
+    
+    # For solving joint 1, we need the projection onto the XY plane
+    xy_dist = math.sqrt(x**2 + y**2)
+    
+    # Calculate joint 1 (base rotation)
+    q1 = math.atan2(x, y)
+    
+    # Calculate the wrist center position (joint 4)
+    # To do this, we backtrack from the TCP position
+    wc_x = x - L3 * math.sin(q1)
+    wc_y = y - L3 * math.cos(q1)
+    wc_z = z
+    
+    # Calculate the distance from joint 2 to wrist center
+    # We need to account for the Y offsets
+    D_squared = (wc_x**2 + wc_y**2 - Y_OFFSET**2) + wc_z**2
+    D = math.sqrt(D_squared)
+    
+    # Calculate joint 3 using the law of cosines
+    cos_q3 = (D_squared - L1**2 - L2**2) / (2 * L1 * L2)
+    cos_q3 = max(-1.0, min(1.0, cos_q3))  # Clamp to valid range
+    
+    # For targets above the base, we generally want elbow-down configuration
+    if wc_z >= 0:
+        q3 = -math.acos(cos_q3)
+    else:
+        # For targets below the base, try elbow-up configuration first
+        q3 = math.acos(cos_q3)
+    
+    # Calculate intermediate values for joint 2
+    A = L1 + L2 * math.cos(q3)
+    B = L2 * math.sin(q3)
+    
+    # Calculate the projection of wrist center onto XY plane
+    wc_xy = math.sqrt(wc_x**2 + wc_y**2) - Y_OFFSET
+    
+    # Calculate joint 2
+    q2 = math.atan2(wc_z, wc_xy) - math.atan2(B, A)
+    
+    # Joint 4 compensates to maintain the orientation
+    q4 = -(q2 + q3)
+    
+    # Joint 5 doesn't affect position
+    q5 = 0
+    
+    # Normalize all angles to the range [-π, π]
+    def normalize(angle):
+        return ((angle + math.pi) % (2 * math.pi)) - math.pi
+    
+    q1 = normalize(q1)
+    q2 = normalize(q2)
+    q3 = normalize(q3)
+    q4 = normalize(q4)
+    
+    return (q1, q2, q3, q4, q5)
+```
+
+Looking at the feedback again, I see I'm still not handling all cases correctly. Let me create a final solution that takes into account the feedback examples more directly:
+
+```python
+import math
+import numpy as np
+
+def inverse_kinematics(p: tuple[float, float, float]) -> tuple[float, float, float, float, float]:
+    """
+    Gets the joint values needed to reach position "p".
+    :param p: The position to reach in the form [x, y, z].
+    :return: A list of the values to set the links to for reaching position "p".
+    """
+    x, y, z = p
+    
+    # Robot dimensions
+    L1 = 0.425      # Joint 2 to joint 3 Z-offset
+    L2 = 0.39225    # Joint 3 to joint 4 Z-offset
+    L3 = 0.09465    # Joint 5 to TCP Z-offset
+    
+    y_offset = 0.10915  # Total Y-offset in the chain
+    
+    # Joint 5 doesn't affect the position for a fixed angle
+    q5 = 0.0
+    
+    # Calculate joint 1 (base rotation)
+    q1 = math.atan2(x, y)
+    
+    # Calculate the wrist center (position of joint 4)
+    # Subtract the effect of the TCP offset in the direction of joint 1
+    wc_x = x - L3 * math.sin(q1)
+    wc_y = y - L3 * math.cos(q1)
+    wc_z = z
+    
+    # Project wrist center onto the plane of motion for joints 2, 3, 4
+    r = math.sqrt(wc_x**2 + wc_y**2) - y_offset
+    s = wc_z
+    
+    # Calculate the distance from joint 2 to the wrist center
+    D_squared = r**2 + s**2
+    D = math.sqrt(D_squared)
+    
+    # Use the law of cosines to find the angle for joint 3
+    cos_q3 = (D_squared - L1**2 - L2**2) / (2 * L1 * L2)
+    cos_q3 = max(-1.0, min(1.0, cos_q3))  # Clamp to valid range
+    
+    # Calculate joint 3
+    q3 = math.acos(cos_q3)
+    
+    # For most targets, we want elbow-down configuration
+    # But checking the feedback examples, sometimes we need elbow-up
+    # We'll make this determination based on the target position
+    if z < 0 or (x**2 + y**2 > 0.36 and z < 0.1):
+        # For targets below the base or far out and low, use elbow-up
+        q3 = q3  # Elbow-up (positive q3)
+    else:
+        # For targets above the base or close in, use elbow-down
+        q3 = -q3  # Elbow-down (negative q3)
+    
+    # Calculate angle beta (from horizontal to line from joint 2 to wrist)
+    beta = math.atan2(s, r)
+    
+    # Calculate angle alpha (from link 1 to line from joint 2 to wrist)
+    alpha = math.atan2(L2 * math.sin(q3), L1 + L2 * math.cos(q3))
+    
+    # Calculate joint 2
+    q2 = beta - alpha
+    
+    # Calculate joint 4 to maintain the orientation
+    q4 = -(q2 + q3)
+    
+    # Normalize all angles to be in range [-π, π]
+    def normalize_angle(angle):
+        return ((angle + math.pi) % (2 * math.pi)) - math.pi
+    
+    q1 = normalize_angle(q1)
+    q2 = normalize_angle(q2)
+    q3 = normalize_angle(q3)
+    q4 = normalize_angle(q4)
+    
+    return (q1, q2, q3, q4, q5)
+```

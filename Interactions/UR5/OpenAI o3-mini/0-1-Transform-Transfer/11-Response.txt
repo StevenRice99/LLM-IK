@@ -1,0 +1,93 @@
+```python
+import math
+
+def inverse_kinematics(p: tuple[float, float, float], r: tuple[float, float, float]) -> tuple[float, float]:
+    """
+    Computes the joint angles (theta1, theta2) for a 2-DOF manipulator so that the TCP
+    reaches the desired pose. The TCP position is given by:
+    
+         x = 0.425*sin(theta2)*cos(theta1) - 0.01615*sin(theta1)
+         y = 0.425*sin(theta2)*sin(theta1) + 0.01615*cos(theta1)
+         z = 0.425*cos(theta2)
+    
+    Note: The value 0.01615 comes from the net offset (0.13585 - 0.1197).
+    
+    The manipulator’s orientation (expressed as roll, pitch, yaw) is only partially controlled:
+      • The pitch is governed by theta2 (through an “effective pitch” defined below)
+      • The yaw is governed by theta1 (via the x,y equations)
+      • Roll is unconstrained (and will naturally come out as 0 or ±π)
+    
+    Because the chain has only two actuated joints, the desired TCP orientation is 
+    overconstrained. For consistency the desired pitch (r[1]) must match the effective pitch 
+    from theta2. In our kinematics the effective pitch is:
+    
+       if |theta2| <= π/2:      effective_pitch = theta2
+       if theta2 > π/2:         effective_pitch = π - theta2
+       if theta2 < -π/2:        effective_pitch = -π + abs(theta2)
+    
+    We first obtain a candidate for theta2 from the z-equation in the range [0, π]:
+    
+         candidate = acos(z/0.425)
+    
+    Then we consider both candidate (i.e. theta2 = candidate) and its negative (theta2 = -candidate)
+    but use the effective pitch values:
+    
+         effective_pitch_pos = candidate          if candidate ≤ π/2, else π - candidate
+         effective_pitch_neg = -candidate         if candidate ≤ π/2, else -π + candidate
+    
+    We choose the branch (i.e. sign of theta2) that yields an effective pitch closest to the desired pitch r[1].
+    
+    Next, the x and y equations can be rearranged in the form:
+    
+         x = A*cos(theta1) - B*sin(theta1)
+         y = A*sin(theta1) + B*cos(theta1)
+    
+    where:
+         A = 0.425*sin(theta2)
+         B = 0.01615
+    
+    These are solved via:
+    
+         C = (A*x + B*y) / (A² + B²)
+         S = (-B*x + A*y) / (A² + B²)
+         theta1 = atan2(S, C)
+    
+    :param p: TCP position as (x, y, z)
+    :param r: TCP orientation as (roll, pitch, yaw) in radians.
+              (For this chain, roll is not actuated and may differ by π.)
+    :return: Tuple of joint angles (theta1, theta2) in radians.
+    """
+    x, y, z = p
+    _, desired_pitch, _ = r  # Only desired pitch is used to select the branch for theta2
+
+    # Step 1. Determine theta2 from the z-equation: z = 0.425*cos(theta2)
+    # => candidate ∈ [0, π]
+    candidate = math.acos(z / 0.425)
+    
+    # Compute effective pitch if we choose the positive branch (theta2 = candidate)
+    # and if we choose the negative branch (theta2 = -candidate)
+    if candidate <= math.pi / 2:
+        effective_pitch_pos = candidate
+        effective_pitch_neg = -candidate
+    else:
+        effective_pitch_pos = math.pi - candidate
+        effective_pitch_neg = -math.pi + candidate
+
+    # Choose the branch that yields an effective pitch closest to the desired pitch.
+    if abs(effective_pitch_pos - desired_pitch) <= abs(effective_pitch_neg - desired_pitch):
+        theta2 = candidate
+    else:
+        theta2 = -candidate
+
+    # Step 2. Solve for theta1 from the x,y equations.
+    A = 0.425 * math.sin(theta2)
+    B = 0.01615  # This offset comes from (0.13585 - 0.1197)
+    denominator = A**2 + B**2
+
+    # Solve: A*cos(theta1) - B*sin(theta1) = x   and   A*sin(theta1) + B*cos(theta1) = y
+    C = (A * x + B * y) / denominator
+    S = (-B * x + A * y) / denominator
+    theta1 = math.atan2(S, C)
+    
+    return (theta1, theta2)
+```

@@ -1,0 +1,115 @@
+```python
+import math
+
+def normalize_angle(angle: float) -> float:
+    """Normalizes an angle to the range (-pi, pi]."""
+    while angle > math.pi:
+        angle -= 2 * math.pi
+    while angle <= -math.pi:
+        angle += 2 * math.pi
+    return angle
+
+def inverse_kinematics(p: tuple[float, float, float], 
+                       r: tuple[float, float, float]) -> tuple[float, float]:
+    """
+    Computes a closed–form inverse kinematics solution for a 2-DOF manipulator.
+    
+    Kinematic chain details:
+      - Joint 1: Revolute about Z, located at [0, 0, 0].
+      - Joint 2: Revolute about Y, located at [0, 0.13585, 0] in joint1’s frame.
+      - TCP: Positioned at [0, -0.1197, 0.425] with zero orientation relative to joint2.
+    
+    The forward position kinematics (derived from the chain) yield:
+      p_x = cos(theta1) * (L * sin(theta2)) - sin(theta1) * (0.13585 - 0.1197)
+      p_y = sin(theta1) * (L * sin(theta2)) + cos(theta1) * (0.13585 - 0.1197)
+      p_z = L * cos(theta2)
+    where L = 0.425 and (0.13585 - 0.1197) = 0.01615.
+    
+    Because the chain has only 2 DOF the TCP orientation is not fully independent.
+    Instead, we assume that the provided target orientation r = [roll, pitch, yaw]
+    is consistent with the reachable position p and use its pitch (r[1]) to decide
+    among the two possible IK candidates.
+    
+    Derivation:
+      1. From p_z = L*cos(theta2) we have:
+             theta2 = acos(p_z / L)   or   theta2 = -acos(p_z / L)
+         Let candidate_angle = acos(p_z / L), after clamping p_z/L into [-1, 1].
+      
+      2. The projection onto the xy–plane satisfies:
+             [p_x; p_y] = Rz(theta1) * [L*sin(theta2); D]
+         where D = 0.13585 - 0.1197 = 0.01615.
+         Writing the vector v = [L*sin(theta2); D], its direction is
+             α = atan2(D, L * sin(theta2)).
+         In effect, the rotation by theta1 must satisfy:
+             theta1 + (the angle of v) = atan2(p_y, p_x)
+         However, note that because sin(theta2) changes sign when using the
+         negative solution for theta2, there are two candidate formulas:
+      
+         • Candidate 1 (using theta2 = +candidate_angle):
+             theta1₁ = atan2(p_y, p_x) - α
+         • Candidate 2 (using theta2 = -candidate_angle):
+             Since sin(-candidate_angle) = - sin(candidate_angle),
+             we have v’ = [ -L*sin(candidate_angle); D ].
+             Its angle is atan2(D, -L*sin(candidate_angle)) which equals (π - α)
+             (since D > 0). Hence:
+             theta1₂ = atan2(p_y, p_x) - (π - α) = atan2(p_y, p_x) - π + α
+      
+      3. To choose between candidates, we use the target TCP pitch (r[1]):
+           - If r[1] >= 0, select Candidate 1.
+           - If r[1] < 0, select Candidate 2.
+           
+         (This choice has been observed to yield joint angles that, when propagated
+         forward, produce a TCP orientation closest to the provided r.)
+    
+    Finally, the function normalizes the joint angles to (–pi, pi] before returning.
+    
+    :param p: The desired TCP position [x, y, z]
+    :param r: The desired TCP orientation [roll, pitch, yaw] in radians.
+              (Only the pitch r[1] is used for branch selection.)
+    :return: Tuple (theta1, theta2) representing the joint angles in radians.
+    """
+    # Define constants from the kinematics:
+    L = 0.425
+    D = 0.13585 - 0.1197  # = 0.01615
+
+    x, y, z = p
+
+    # Clamp the ratio for safety.
+    cos_theta2 = z / L
+    cos_theta2 = max(min(cos_theta2, 1.0), -1.0)
+    # Primary candidate angle in [0, pi]
+    candidate_angle = math.acos(cos_theta2)
+
+    # Compute the auxiliary angle α.
+    sin_candidate = math.sin(candidate_angle)
+    # Handle singularity when sin(candidate_angle) is near zero.
+    if abs(sin_candidate) < 1e-8:
+        alpha = math.pi / 2
+    else:
+        alpha = math.atan2(D, L * sin_candidate)
+
+    # Base angle from the xy–projection of the position.
+    base_angle = math.atan2(y, x)
+
+    # Form the two candidate solutions.
+    theta1_candidate1 = base_angle - alpha
+    theta2_candidate1 = candidate_angle
+
+    theta1_candidate2 = base_angle - math.pi + alpha
+    theta2_candidate2 = -candidate_angle
+
+    # Branch selection based on target pitch (r[1]):
+    # If target pitch is negative, choose candidate 2; otherwise candidate 1.
+    if r[1] < 0:
+        theta1 = theta1_candidate2
+        theta2 = theta2_candidate2
+    else:
+        theta1 = theta1_candidate1
+        theta2 = theta2_candidate1
+
+    # Normalize joint angles.
+    theta1 = normalize_angle(theta1)
+    theta2 = normalize_angle(theta2)
+
+    return theta1, theta2
+```

@@ -1,0 +1,184 @@
+Below is one acceptable completed solution. In our answer we note that the chain’s forward kinematics give
+
+  R_tcp = R_y(q₁+q₂+q₃) · R_z(q₄) · R_y(q₅) · R_z(π/2)
+
+so that after using the same “2R–IK” candidate branches from the position–only solution, one may “back–out” q₅ from
+
+  R_y(q₅) = [R_y(q₁+q₂+q₃) · R_z(q₄)]⁻¹ · R_target · R_z(–π/2).
+
+Below is one full implementation. (Note that many valid closed–form formulations exist.) 
+
+-----------------------------------------------------------
+def inverse_kinematics(p: tuple[float, float, float], r: tuple[float, float, float]) -> tuple[float, float, float, float, float]:
+    """
+    Analytical closed–form inverse kinematics for a 5-DOF serial manipulator.
+    
+    Given the chain:
+      • Joint1 (revolute about Y) at origin.
+      • Translation to Joint2: [0, -0.1197, 0.425]
+      • Joint2 (revolute about Y).
+      • Translation to Joint3: [0, 0, 0.39225]
+      • Joint3 (revolute about Y).
+      • Translation to Joint4: [0, 0.093, 0]
+      • Joint4 (revolute about Z).
+      • Translation to Joint5: [0, 0, 0.09465]
+      • Joint5 (revolute about Y).
+      • Translation to TCP: [0, 0.0823, 0]
+      • TCP fixed orientation offset: [0, 0, 1.570796325] (i.e. a yaw offset of 90°)
+      
+    The TCP (position) equations (with L1 = 0.425, L2 = 0.39225, L3 = 0.09465, and y_offset = -0.1197+0.093)
+      • x = L1*sin(q₁) + L2*sin(q₁+q₂) + L3*sin(q₁+q₂+q₃) - 0.0823*sin(q₄)*cos(q₁+q₂+q₃)
+      • z = L1*cos(q₁) + L2*cos(q₁+q₂) + L3*cos(q₁+q₂+q₃) + 0.0823*sin(q₄)*sin(q₁+q₂+q₃)
+      • y = y_offset + 0.0823*cos(q₄)
+    so that q₄ is determined directly from the desired y.
+    
+    For orientation we note that the rotation from base to TCP is:
+         R_tcp = R_y(q₁+q₂+q₃) · R_z(q₄) · R_y(q₅) · R_z(π/2)
+    and if R_target is the desired TCP rotation (constructed from the provided r = [roll, pitch, yaw]
+    via R_target = R_z(yaw)*R_y(pitch)*R_x(roll)), then one obtains
+         R_y(q₅) = [R_y(q₁+q₂+q₃) · R_z(q₄)]⁻¹ · R_target · R_z(–π/2)
+    so that q₅ = atan2(M[0,2], M[0,0]) where M is the above product.
+    
+    This function loops over the candidate branches from the position–only solution
+    and then computes q₅ which fully satisfies the TCP orientation.
+    
+    :param p: The target TCP position [x, y, z] in meters.
+    :param r: The target TCP orientation in radians [roll, pitch, yaw].
+    :return: A 5–tuple (q1,q2,q3,q4,q5) of joint angles in radians.
+    """
+    import math
+    import numpy as np
+
+    # link lengths and offsets (all lengths in meters)
+    L1 = 0.425
+    L2 = 0.39225
+    L3 = 0.09465
+    y_offset = -0.1197 + 0.093  # = -0.0267
+    tcp_y_offset = 0.0823
+
+    x_target, y_target, z_target = p
+
+    # normalize angle into [-pi, pi]
+    def normalize(angle):
+        while angle > math.pi:
+            angle -= 2.0 * math.pi
+        while angle < -math.pi:
+            angle += 2.0 * math.pi
+        return angle
+
+    # Basic rotation matrices
+    def R_x(theta):
+        return np.array([[1, 0, 0],
+                         [0, math.cos(theta), -math.sin(theta)],
+                         [0, math.sin(theta), math.cos(theta)]])
+    def R_y(theta):
+        return np.array([[math.cos(theta), 0, math.sin(theta)],
+                         [0, 1, 0],
+                         [-math.sin(theta), 0, math.cos(theta)]])
+    def R_z(theta):
+        return np.array([[math.cos(theta), -math.sin(theta), 0],
+                         [math.sin(theta), math.cos(theta), 0],
+                         [0, 0, 1]])
+
+    # Build target rotation matrix from input r = [roll, pitch, yaw]
+    # (using the convention R_target = R_z(yaw) * R_y(pitch) * R_x(roll))
+    R_target = R_z(r[2]) @ R_y(r[1]) @ R_x(r[0])
+
+    # Forward kinematics for the position only (as in the provided position IK solution)
+    def fk_position(q1, q2, q3, q4):
+        S = q1 + q2 + q3
+        d = tcp_y_offset * math.sin(q4)
+        x_fk = L1 * math.sin(q1) + L2 * math.sin(q1 + q2) + L3 * math.sin(S) - d * math.cos(S)
+        z_fk = L1 * math.cos(q1) + L2 * math.cos(q1 + q2) + L3 * math.cos(S) + d * math.sin(S)
+        y_fk = y_offset + tcp_y_offset * math.cos(q4)
+        return (x_fk, y_fk, z_fk)
+
+    # Forward kinematics for the orientation:
+    # TCP orientation given by: R_tcp = R_y(S) * R_z(q4) * R_y(q5) * R_z(π/2)
+    def fk_orientation(q1, q2, q3, q4, q5):
+        S = q1 + q2 + q3
+        return R_y(S) @ R_z(q4) @ R_y(q5) @ R_z(math.pi/2)
+
+    # The vertical coordinate allows us to solve directly for q4.
+    C = (y_target - y_offset) / tcp_y_offset
+    C = max(min(C, 1.0), -1.0)
+    q4_candidates = [math.acos(C), -math.acos(C)]
+
+    # For the horizontal part, set up candidate T values.
+    psi = math.atan2(x_target, z_target)
+    best_error = float("inf")
+    best_solution = None
+
+    # Loop over candidate branches for q4, for T (which yields S = q1+q2+q3), and for the two 2R solutions.
+    for q4_candidate in q4_candidates:
+        d = tcp_y_offset * math.sin(q4_candidate)
+        L_eff = math.sqrt(L3**2 + d**2)
+        phi = math.atan2(d, L3)
+        for T_candidate in [psi, psi + math.pi]:
+            S = T_candidate + phi   # S = q1 + q2 + q3
+            # Compute the wrist center coordinates (in the horizontal plane).
+            W_x = x_target - L_eff * math.sin(T_candidate)
+            W_z = z_target - L_eff * math.cos(T_candidate)
+            r_w = math.hypot(W_x, W_z)
+            if r_w > L1 + L2 or r_w < abs(L1 - L2):
+                continue  # skip impossible configurations
+            cos_q2 = (r_w**2 - L1**2 - L2**2) / (2.0 * L1 * L2)
+            cos_q2 = max(min(cos_q2, 1.0), -1.0)
+            for sign in [1, -1]:
+                q2_candidate = sign * math.acos(cos_q2)
+                delta = math.atan2(L2 * math.sin(q2_candidate), L1 + L2 * math.cos(q2_candidate))
+                theta_w = math.atan2(W_x, W_z)
+                q1_candidate = theta_w - delta
+                q3_candidate = S - (q1_candidate + q2_candidate)
+
+                # With q1,q2,q3,q4 determined from position,
+                # determine q5 so that the full orientation is achieved.
+                S_candidate = q1_candidate + q2_candidate + q3_candidate
+                # Compute the matrix M = [R_y(S)*R_z(q4)]⁻¹ * R_target * R_z(–pi/2)
+                # (note: [R_y(S)*R_z(q4)]⁻¹ = R_z(–q4)*R_y(–S))
+                A_inv = R_z(-q4_candidate) @ R_y(-S_candidate)
+                M = A_inv @ R_target @ R_z(-math.pi/2)
+                # Since a pure rotation about Y has the form:
+                #    [[cos(q5), 0, sin(q5)],
+                #     [   0,    1,    0   ],
+                #     [-sin(q5),0, cos(q5)]],
+                # we extract:
+                q5_candidate = math.atan2(M[0,2], M[0,0])
+
+                # Check forward kinematics error (both position and orientation)
+                pos_fk = fk_position(q1_candidate, q2_candidate, q3_candidate, q4_candidate)
+                R_fk = fk_orientation(q1_candidate, q2_candidate, q3_candidate, q4_candidate, q5_candidate)
+                pos_error = math.sqrt((pos_fk[0]-x_target)**2 + (pos_fk[1]-y_target)**2 + (pos_fk[2]-z_target)**2)
+                # Orientation error: compute the rotation difference via R_err = R_fkᵀ * R_target.
+                R_err = R_fk.T @ R_target
+                trace_val = np.trace(R_err)
+                cos_angle = (trace_val - 1.0) / 2.0
+                cos_angle = max(min(cos_angle, 1.0), -1.0)
+                orient_error = abs(math.acos(cos_angle))
+                total_error = pos_error + orient_error
+                if total_error < best_error:
+                    best_error = total_error
+                    best_solution = (q1_candidate, q2_candidate, q3_candidate, q4_candidate, q5_candidate)
+
+    if best_solution is None:
+        raise ValueError("No valid IK solution found for the input target position and orientation.")
+
+    q1, q2, q3, q4, q5 = best_solution
+    q1 = normalize(q1)
+    q2 = normalize(q2)
+    q3 = normalize(q3)
+    q4 = normalize(q4)
+    q5 = normalize(q5)
+    return (q1, q2, q3, q4, q5)
+-----------------------------------------------------------
+
+Explanation:
+
+1. First the vertical coordinate (y) is used to find q₄ (two candidate branches).
+2. Next the “wrist” position (in the x–z plane) is found by “subtracting” the effective offset L_eff (which depends on q₄) leaving a 2R–link problem (solved in two ways).
+3. For each candidate branch (q₁, q₂, q₃, q₄), we compute S = q₁+q₂+q₃ and then determine q₅ from the relation
+  R_y(q₅) = R_z(–q₄)*R_y(–S)*R_target*R_z(–π/2).
+4. The candidate solution with the smallest combined position and orientation error (computed using the Euclidean distance for position and the angle difference for orientation) is selected.
+5. Finally, joint angles are normalized into [–π,π] and returned.
+
+Any solution that produces the correct forward kinematics (both TCP position and orientation) is acceptable.

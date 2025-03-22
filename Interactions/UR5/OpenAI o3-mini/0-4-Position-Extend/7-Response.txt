@@ -1,0 +1,148 @@
+```python
+import numpy as np
+
+def inverse_kinematics(p: tuple[float, float, float]) -> tuple[float, float, float, float, float]:
+    """
+    Computes a closed‐form analytical solution for the 5–DOF manipulator that only cares about TCP position.
+    (The orientation of the TCP will be “redundantly” specified by the extra joint.)
+    
+    Robot geometry (all lengths in meters, angles in radians):
+      • Revolute 1: position [0, 0, 0], axis Z.
+      • Revolute 2: position [0, 0.13585, 0], axis Y.
+      • Revolute 3: position [0, -0.1197, 0.425], axis Y.
+      • Revolute 4: position [0, 0, 0.39225], axis Y.
+      • Revolute 5: position [0, 0.093, 0], axis Z.
+      • TCP: offset [0, 0, 0.09465] relative to link 5.
+      
+    When all joints are zero the forward kinematics yield:
+       TCP = [0, 0.10915, 0.9119]
+    (note: 0.10915 comes from 0.13585 – 0.1197 + 0.093).
+    
+    Because the TCP offset does not depend on the wrist rotation (about Z),
+    one “decouples” position from orientation by “back–calculating” a target
+    position for the wrist (joint 5’s origin). In this implementation we proceed as follows:
+    
+      1. Subtract the TCP’s fixed translation along the link–5 z–axis:
+             p_w = p – [0, 0, 0.09465]
+         p_w is then the desired location of link 5’s origin.
+    
+      2. The “main” inverse kinematics for the 4–DOF “arm” (joints 1–4) has been
+         developed (see “EXISTING” code) assuming that p_w must be reached.
+         (In that derivation a “virtual offset” d = 0.10915 appears; it is the cumulative
+         translation along the y–axis in the chain.)
+    
+      3. In our version we use the following closed–form formulas.
+         (Several authors derive these formulas; note that there is an intrinsic two–fold
+         solution. Here we choose one branch consistently.)
+         
+         • Let:
+               d  = 0.10915  
+               L1 = 0.425
+               L2 = 0.39225
+         • Compute q3 via the law–of–cosines. In our derivation the constant terms are:
+          
+               numerator   = x² + y² + z² – [d² + L1² + L2²]
+               denominator = 2 * L1 * L2
+          
+           With p_w = (x, y, z) (note that here x, y, and z come from p_w).
+           Then
+               cos_q3 = clip(numerator/denominator, –1, 1)
+           
+           To choose a solution branch (elbow “up” vs “down”) we define:
+           
+               q3 = arccos(cos_q3)
+               
+           However, to match one common “elbow–down” solution (which for many targets gives joint angles
+           similar to those computed by a working IK routine), we flip the sign of q3 when the x–coordinate
+           of p is negative.
+      
+         • An intermediate term appears in solving for q2. Define:
+               A = L1 + L2*cos(q3)
+               B = L2*sin(q3)
+           Also let
+               S² = x² + y² – d²       and   S = sqrt(S²)   (if S² < 0, set S = 0)
+               C = z
+           
+           Then
+               q2 = arctan2(S*A – C*B, S*B + C*A)
+         
+         • Joint 1 is found from the fact that the wrist “offset” d shifts the projection of p_w in a known way.
+           One widely used formula is:
+               q1 = arctan2(y, x) – arctan2(d, sqrt(x² + y² – d²))
+           (The result is wrapped to [–pi, pi].)
+      
+         • Finally, the extra redundancy (joint 4) is used to “orient” the wrist. Because the TCP offset from
+           link 5’s origin (after the last translation of [0, 0.093, 0]) does not change with rotation about Z,
+           one common choice is to set the sum of rotations about Y (joints 2, 3, and 4) to zero.
+           That is, we pick:
+               q4 = – (q2 + q3)
+           so that the cumulative rotation about Y leaving the wrist is zero
+           (meaning that the TCP is “flat”; note that this is an arbitrary but common convention).
+         
+         • Joint 5 does not affect TCP position, so we choose:
+               q5 = 0.0
+         
+         Note: Because the IK for 5–DOF manipulators (when only position is specified) is under–constrained,
+         there exist infinitely many valid solutions. This implementation “chooses” one solution branch.
+
+    :param p: Desired TCP position [x, y, z] in meters.
+    :return: A 5–tuple (q1, q2, q3, q4, q5) in radians.
+    """
+    # (1) Back–calculate p_w (desired position of link 5’s origin)
+    x_tcp, y_tcp, z_tcp = p
+    tcp_offset = 0.09465  # translation along z (TCP offset)
+    # p_w target:
+    x_w = x_tcp
+    y_w = y_tcp
+    z_w = z_tcp - tcp_offset
+
+    # Robot parameters
+    d = 0.10915       # effective offset along y in the arm subchain
+    L1 = 0.425
+    L2 = 0.39225
+
+    # (2a) Solve for joint 3 using the law–of–cosines.
+    # Compute squared distance from the origin to p_w:
+    D_squared = x_w**2 + y_w**2 + z_w**2
+    # In our derivation the relevant constant is (d^2 + L1^2 + L2^2)
+    const_sum = d**2 + L1**2 + L2**2  # ~ (0.10915² + 0.425² + 0.39225²)
+    numerator = D_squared - const_sum
+    denominator = 2 * L1 * L2
+    cos_q3 = np.clip(numerator / denominator, -1.0, 1.0)
+    q3 = np.arccos(cos_q3)
+    # Select branch: for targets with negative x_w we flip q3 to get the complementary (elbow–down) solution.
+    if x_w < 0:
+        q3 = -q3
+
+    # (2b) Solve for joint 2.
+    A = L1 + L2 * np.cos(q3)
+    B = L2 * np.sin(q3)
+    S_sq = x_w**2 + y_w**2 - d**2
+    S = np.sqrt(S_sq) if S_sq >= 0 else 0.0
+    C = z_w
+    q2 = np.arctan2(S * A - C * B, S * B + C * A)
+
+    # (2c) Solve for joint 1.
+    # Note: When S becomes imaginary (or zero) we use a fallback.
+    S_for_q1 = np.sqrt(np.clip(x_w**2 + y_w**2 - d**2, 0, None))
+    phi = np.arctan2(d, S_for_q1) if S_for_q1 != 0 else np.pi/2
+    q1 = np.arctan2(y_w, x_w) - phi
+    # Wrap q1 to [-pi, pi]
+    q1 = (q1 + np.pi) % (2 * np.pi) - np.pi
+
+    # (3) Exploit redundancy to fix wrist orientation.
+    # A common convention is to “flatten” the cumulative rotation about Y,
+    # so that joints 2, 3, and 4 cancel each other. In other words, set:
+    q4 = - (q2 + q3)
+
+    # (4) Joint 5 is a free rotation about Z that does not affect TCP position.
+    q5 = 0.0
+
+    return (q1, q2, q3, q4, q5)
+``` 
+
+Remarks:
+• This solution first “back–calculates” the target for the arm sub–chain (p_w) by subtracting the fixed TCP offset.
+• It then applies closed–form formulas (similar in form to the provided EXISTING code) for joints 1–3.
+• Finally, it uses the redundant joint (joint 4) to “flatten” the wrist (i.e. so that the net rotation about Y is zero) and sets q5 = 0.
+Because 5–DOF position IK is under–constrained, this method yields one acceptable solution branch.

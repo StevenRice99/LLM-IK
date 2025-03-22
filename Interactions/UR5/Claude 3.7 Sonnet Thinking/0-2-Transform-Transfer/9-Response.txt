@@ -1,0 +1,161 @@
+Based on the forward kinematics tests and the previous feedback, I see where my solution was failing. Let me create a more robust inverse kinematics function that correctly handles both position and orientation:
+
+```python
+import math
+
+def inverse_kinematics(p: tuple[float, float, float], r: tuple[float, float, float]) -> tuple[float, float, float]:
+    """
+    Gets the joint values needed to reach position "p" and orientation "r".
+    :param p: The position to reach in the form [x, y, z].
+    :param r: The orientation to reach in radians in the form [x, y, z].
+    :return: A list of the values to set the links to for reaching position "p" and orientation "r".
+    """
+    x, y, z = p
+    rx, ry, rz = r
+    
+    # Joint 1 can be directly determined from rz (orientation around z-axis)
+    θ1 = rz
+    
+    # Calculate position in the local frame after θ1 rotation
+    c1, s1 = math.cos(θ1), math.sin(θ1)
+    x_local = c1 * x + s1 * y
+    y_local = -s1 * x + c1 * y
+    z_local = z
+    
+    # Constants from robot dimensions
+    l2 = 0.425      # Length of link 2
+    l3 = 0.39225    # Length of link 3
+    d2 = 0.13585    # Offset from joint 1 to joint 2
+    d3 = -0.1197    # Y offset from joint 2 to joint 3
+    
+    # Adjust position by the y-offset from joint 1 to joint 2
+    y_local -= d2
+    
+    # Calculate the distance from joint 2 to the endpoint in the YZ plane
+    r_yz = math.sqrt(y_local**2 + z_local**2)
+    
+    # Account for offset from joint 2 to joint 3
+    r_yz_adjusted = math.sqrt((r_yz - d3)**2 + x_local**2)
+    
+    # Calculate θ3 using the law of cosines
+    cos_θ3 = (r_yz_adjusted**2 - l2**2 - l3**2) / (2 * l2 * l3)
+    cos_θ3 = max(min(cos_θ3, 1.0), -1.0)  # Clamp to handle numerical errors
+    
+    # Two possible solutions for θ3 (elbow up/down)
+    θ3_pos = math.acos(cos_θ3)
+    θ3_neg = -θ3_pos
+    
+    # Calculate θ2 for each θ3 solution
+    def calculate_θ2(θ3):
+        # Angle from joint 2 to end-effector in YZ plane
+        β = math.atan2(z_local, y_local)
+        
+        # Angle from joint 2 to joint 3 axis in the YZ plane
+        α_yz = math.atan2(l3 * math.sin(θ3), l2 + l3 * math.cos(θ3))
+        
+        # Adjustment for x-component
+        γ = math.atan2(x_local, r_yz - d3)
+        
+        # Combined angle
+        return β - α_yz + γ
+    
+    θ2_pos = calculate_θ2(θ3_pos)
+    θ2_neg = calculate_θ2(θ3_neg)
+    
+    # Choose solution based on the constraint that θ2 + θ3 = ry (from orientation)
+    # Calculate errors for both solutions
+    error_pos = abs((θ2_pos + θ3_pos) - ry)
+    error_neg = abs((θ2_neg + θ3_neg) - ry)
+    
+    # Choose the solution with the smallest error
+    if error_pos <= error_neg:
+        return (θ1, θ2_pos, θ3_pos)
+    else:
+        return (θ1, θ2_neg, θ3_neg)
+```
+
+Wait, there are still issues with this implementation based on the feedback. Let me improve it:
+
+```python
+import math
+
+def inverse_kinematics(p: tuple[float, float, float], r: tuple[float, float, float]) -> tuple[float, float, float]:
+    """
+    Gets the joint values needed to reach position "p" and orientation "r".
+    :param p: The position to reach in the form [x, y, z].
+    :param r: The orientation to reach in radians in the form [x, y, z].
+    :return: A list of the values to set the links to for reaching position "p" and orientation "r".
+    """
+    x, y, z = p
+    rx, ry, rz = r
+    
+    # Joint 1 is directly determined by rz
+    θ1 = rz
+    
+    # Transform target position to frame after θ1 rotation
+    c1, s1 = math.cos(θ1), math.sin(θ1)
+    x_1 = c1 * x + s1 * y
+    y_1 = -s1 * x + c1 * y
+    z_1 = z
+    
+    # Robot dimensions
+    d2 = 0.13585  # Z offset from joint 1 to joint 2
+    d3 = -0.1197  # Y offset from joint 2 to joint 3 along Y axis
+    a2 = 0.425    # Length of link 2
+    a3 = 0.39225  # Length of link 3
+    
+    # Adjust the target to account for the wrist position
+    y_1 = y_1 - d2
+    
+    # Calculate the position of the wrist center
+    # For this 3-DOF robot, the orientation constraint comes from θ2 + θ3 = ry
+    
+    # Using law of cosines for θ3
+    r_sq = x_1**2 + y_1**2 + z_1**2
+    cos_θ3 = (r_sq - a2**2 - a3**2 - d3**2) / (2 * a2 * math.sqrt(a3**2 + d3**2))
+    
+    # Clamp to handle numerical issues
+    cos_θ3 = max(min(cos_θ3, 1.0), -1.0)
+    
+    # Two possible solutions for θ3
+    θ3_1 = math.acos(cos_θ3) - math.atan2(d3, a3)
+    θ3_2 = -math.acos(cos_θ3) - math.atan2(d3, a3)
+    
+    # Calculate θ2 for each θ3 solution
+    def calculate_θ2(θ3):
+        # Calculate position of joint 3 relative to joint 2
+        x3 = a2 + math.cos(θ3) * a3 - math.sin(θ3) * d3
+        y3 = math.sin(θ3) * a3 + math.cos(θ3) * d3
+        
+        # Calculate θ2 using atan2
+        denominator = math.sqrt(x3**2 + y3**2)
+        if denominator < 1e-6:
+            return 0.0  # Avoid division by zero
+        
+        sin_θ2 = (x3 * z_1 - y3 * math.sqrt(x_1**2 + y_1**2)) / denominator
+        cos_θ2 = (x3 * math.sqrt(x_1**2 + y_1**2) + y3 * z_1) / denominator
+        
+        return math.atan2(sin_θ2, cos_θ2)
+    
+    θ2_1 = calculate_θ2(θ3_1)
+    θ2_2 = calculate_θ2(θ3_2)
+    
+    # Select the solution that best satisfies θ2 + θ3 = ry
+    # Check both solutions and potentially their negatives
+    solutions = [
+        (θ1, θ2_1, θ3_1),
+        (θ1, θ2_2, θ3_2)
+    ]
+    
+    best_solution = None
+    min_error = float('inf')
+    
+    for sol in solutions:
+        _, θ2, θ3 = sol
+        error = abs((θ2 + θ3) - ry)
+        if error < min_error:
+            min_error = error
+            best_solution = sol
+    
+    return best_solution
+```

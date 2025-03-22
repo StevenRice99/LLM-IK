@@ -1,0 +1,130 @@
+```python
+def inverse_kinematics(p: tuple[float, float, float], 
+                       r: tuple[float, float, float]) -> tuple[float, float, float, float, float, float]:
+    """
+    Gets the joint values needed to reach position "p" and orientation "r" for a 6 DOF serial manipulator.
+    
+    This method uses a closed‐form inverse kinematics solution that involves:
+      - Computing the wrist center by removing the fixed TCP offset.
+      - Determining q1 from the geometry between the base and wrist center.
+      - Solving for q2 and q3 using a two-link planar arm formulation.
+      - Computing the wrist rotation and extracting q4, q5, and q6.
+    
+    The manipulator details (all units in meters and radians) are:
+      • Revolute 1: Position [0, 0, 0], Orientation [0, 0, 0], Axis: Z.
+      • Revolute 2: Position [0, 0.13585, 0], Orientation [0, 0, 0], Axis: Y.
+      • Revolute 3: Position [0, -0.1197, 0.425], Orientation [0, 0, 0], Axis: Y.
+      • Revolute 4: Position [0, 0, 0.39225], Orientation [0, 0, 0], Axis: Y.
+      • Revolute 5: Position [0, 0.093, 0], Orientation [0, 0, 0], Axis: Z.
+      • Revolute 6: Position [0, 0, 0.09465], Orientation [0, 0, 0], Axis: Y.
+      • TCP: Translation [0, 0.0823, 0] with a fixed rotation of [0, 0, 1.570796325] (about Z).
+      
+    Note:
+      - The effective TCP offset in joint6’s coordinate frame is taken as d_tcp = [0, 0, 0.0823].
+      - The wrist center is computed by subtracting the TCP offset (rotated by the target orientation) from p.
+      - The target orientation r is provided as (roll, pitch, yaw) and the rotation matrix is defined as:
+            R_target = R_z(yaw) · R_y(pitch) · R_x(roll)
+    
+    Returns a tuple (q1, q2, q3, q4, q5, q6) representing the joint angles.
+    """
+    import numpy as np
+    from math import sin, cos, atan2, acos, sqrt, asin
+
+    # ================= Helper Rotation Matrices =================
+    def R_x(angle: float) -> np.ndarray:
+        return np.array([[1, 0, 0],
+                         [0, cos(angle), -sin(angle)],
+                         [0, sin(angle),  cos(angle)]])
+    
+    def R_y(angle: float) -> np.ndarray:
+        return np.array([[cos(angle),  0, sin(angle)],
+                         [0,           1, 0],
+                         [-sin(angle), 0, cos(angle)]])
+    
+    def R_z(angle: float) -> np.ndarray:
+        return np.array([[cos(angle), -sin(angle), 0],
+                         [sin(angle),  cos(angle), 0],
+                         [0,           0,          1]])
+    
+    # ============= Build R_target ====================
+    # r is provided as (roll, pitch, yaw). Using the URDF convention:
+    # R_target = R_z(yaw) · R_y(pitch) · R_x(roll)
+    roll, pitch, yaw = r
+    R_target = R_z(yaw) @ R_y(pitch) @ R_x(roll)
+    
+    # ============= Constants from the Manipulator Details ============
+    # Translation from the base (joint1) to joint2:
+    d2 = 0.13585  
+    # Fixed offset from joint2 to joint3 (y component):
+    offset_y_joint23 = -0.1197  
+    # For joints 2 and 3 that form the planar arm:
+    A = 0.425      # effective link length from joint2 (after offset) to joint3 along z
+    B = 0.39225    # effective link from joint3 to joint4 along z
+    # TCP fixed translation (from joint6 to TCP) and fixed rotation:
+    # Although the URDF gives translation [0, 0.0823, 0] with rpy [0, 0, 1.570796325],
+    # the forward kinematics insight implies the effective offset in joint6’s frame is along z.
+    d_tcp = np.array([0, 0, 0.0823])
+    R_tcp_fixed = R_z(1.570796325)  # Fixed TCP rotation.
+
+    # ============= Step 1: Compute Wrist Center ====================
+    p_vec = np.array(p)
+    # Subtract the TCP offset (rotated by the target orientation) to compute the wrist center.
+    p_wc = p_vec - R_target @ d_tcp
+
+    # ============= Step 2: Solve for q1 ====================
+    # The position of joint2 in the base frame is R_z(q1)*[0, d2, 0]. In joint2's frame:
+    # p_wc_2 = R_z(-q1)*p_wc - [0, d2, 0]
+    # Its y-component should equal offset_y_joint23.
+    # Derivation shows that if p_wc = [Xw, Yw, Zw] and R_xy = sqrt(Xw^2 + Yw^2),
+    # and if we let base_angle = atan2(Yw, Xw) and q1 = base_angle + δ, then:
+    #    -R_xy*sin(δ) = d2 + offset_y_joint23  => sin(δ) = -((d2 + offset_y_joint23) / R_xy).
+    Xw, Yw, _ = p_wc
+    R_xy = sqrt(Xw**2 + Yw**2)
+    target_val = d2 + offset_y_joint23  # = 0.13585 - 0.1197 = 0.01615
+    # Safely compute δ = -asin(target_val/R_xy) with clamping to handle numerical issues.
+    if R_xy != 0:
+        ratio = target_val / R_xy
+        # Clamp the ratio to [-1, 1] to avoid math domain error.
+        if ratio > 1.0:
+            ratio = 1.0
+        elif ratio < -1.0:
+            ratio = -1.0
+        delta = -asin(ratio)
+    else:
+        delta = 0.0
+    base_angle = atan2(Yw, Xw)
+    q1 = base_angle + delta
+
+    # ============= Step 3: Solve for q2 and q3 ====================
+    # Express the wrist center in joint2's frame:
+    p_wc_2 = (R_z(-q1) @ p_wc) - np.array([0, d2, 0])
+    # p_wc_2[1] should be close to offset_y_joint23.
+    x_p = p_wc_2[0]
+    z_p = p_wc_2[2]
+    D = sqrt(x_p**2 + z_p**2)  # Distance in the x–z plane from joint2 to the wrist center.
+    # Law of Cosines to find q3:
+    cos_q3 = (D**2 - A**2 - B**2) / (2 * A * B)
+    # Clamp cos_q3 for numerical stability:
+    cos_q3 = max(min(cos_q3, 1.0), -1.0)
+    q3 = acos(cos_q3)
+    # Auxiliary angle for q2:
+    beta = atan2(B * sin(q3), A + B * cos(q3))
+    phi = atan2(x_p, z_p)
+    q2 = phi - beta
+
+    # ============= Step 4: Compute Rotation Up to Joint 3 ====================
+    R_0_3 = R_z(q1) @ R_y(q2 + q3)
+    
+    # ============= Step 5: Compute the Wrist Rotation ====================
+    # The wrist rotation R_w accounts for the residual rotation:
+    R_w = R_0_3.T @ R_target @ R_tcp_fixed.T
+
+    # ============= Step 6: Extract q4, q5, q6 from Wrist Rotation ====================
+    # We decompose R_w as R_w = Ry(q4) · Rz(q5) · Ry(q6).
+    s5 = sqrt(R_w[0, 1]**2 + R_w[2, 1]**2)
+    q5 = atan2(s5, R_w[1, 1])
+    q6 = atan2(R_w[1, 2], R_w[1, 0])
+    q4 = atan2(R_w[2, 1], -R_w[0, 1])
+    
+    return (q1, q2, q3, q4, q5, q6)
+```

@@ -1,0 +1,120 @@
+Based on the FORWARD_KINEMATICS test and the feedback, I can see my previous solution was too simplistic. The orientation is determined by the combined effect of all joints, not just setting q4 directly to ry. Let me complete the inverse kinematics solution:
+
+```python
+import numpy as np
+
+def inverse_kinematics(p: tuple[float, float, float], r: tuple[float, float, float]) -> tuple[float, float, float, float]:
+    """
+    Gets the joint values needed to reach position "p" and orientation "r".
+    :param p: The position to reach in the form [x, y, z].
+    :param r: The orientation to reach in radians in the form [x, y, z].
+    :return: A list of the values to set the links to for reaching position "p" and orientation "r".
+    """
+    x, y, z = p
+    rx, ry, rz = r
+    
+    # TCP offset
+    tcp_offset = 0.093
+    
+    # Calculate the wrist position by subtracting the TCP offset
+    # We need to account for the TCP offset's direction based on the desired orientation
+    cx, cy, cz = np.cos(rx), np.cos(ry), np.cos(rz)
+    sx, sy, sz = np.sin(rx), np.sin(ry), np.sin(rz)
+    
+    # Rotation matrix from RPY angles (XYZ convention)
+    R_x = np.array([[1, 0, 0], [0, cx, -sx], [0, sx, cx]])
+    R_y = np.array([[cy, 0, sy], [0, 1, 0], [-sy, 0, cy]])
+    R_z = np.array([[cz, -sz, 0], [sz, cz, 0], [0, 0, 1]])
+    R = R_z @ R_y @ R_x
+    
+    # Direction vector pointing from wrist to TCP
+    direction = R @ np.array([0, tcp_offset, 0])
+    
+    # Calculate wrist position
+    wx = x - direction[0]
+    wy = y - direction[1]
+    wz = z - direction[2]
+    
+    # Now solve for position (q1, q2, q3) using the wrist position
+    numerator = wx**2 + wy**2 + wz**2 - 0.346395
+    denominator = 0.3341625
+    cos_q3 = numerator / denominator
+    cos_q3 = np.clip(cos_q3, -1.0, 1.0)
+    q3 = np.arccos(cos_q3)
+    
+    # Alternative solution for q3
+    q3_alt = -q3
+    
+    A = 0.425 + 0.39225 * np.cos(q3)
+    B = 0.39225 * np.sin(q3)
+    
+    xy_dist = np.sqrt(wx**2 + wy**2)
+    if xy_dist < 1e-6:
+        # Handle the case when the target is along the z-axis
+        q1 = np.arctan2(0, 1)  # Default to 0
+        if wz >= 0:
+            q2 = -np.pi/2
+        else:
+            q2 = np.pi/2
+    else:
+        # Calculate q1 and q2
+        S_squared = wx**2 + wy**2
+        S = np.sqrt(S_squared)
+        C = wz
+        
+        numerator_q2 = S * A - C * B
+        denominator_q2 = S * B + C * A
+        q2 = np.arctan2(numerator_q2, denominator_q2)
+        
+        q1 = np.arctan2(wy, wx)
+    
+    # Now solve for q4 to match the desired orientation
+    # The orientation we can achieve is a function of all joint angles
+    # Calculate the partial orientation achieved by q1, q2, q3
+    R1 = np.array([
+        [np.cos(q1), -np.sin(q1), 0],
+        [np.sin(q1), np.cos(q1), 0],
+        [0, 0, 1]
+    ])
+    
+    R2 = np.array([
+        [np.cos(q2), 0, np.sin(q2)],
+        [0, 1, 0],
+        [-np.sin(q2), 0, np.cos(q2)]
+    ])
+    
+    R3 = np.array([
+        [np.cos(q3), 0, np.sin(q3)],
+        [0, 1, 0],
+        [-np.sin(q3), 0, np.cos(q3)]
+    ])
+    
+    # Combined rotation from first three joints
+    R123 = R1 @ R2 @ R3
+    
+    # Desired rotation matrix
+    Rd = R
+    
+    # The rotation needed by joint 4 (around Y axis) is R4 = R123^T @ Rd
+    R4_needed = R123.T @ Rd
+    
+    # Extract the rotation angle around Y from R4_needed
+    # For a Y-axis rotation, we can extract the angle from the [0,0] and [2,0] elements
+    q4 = np.arctan2(-R4_needed[2, 0], R4_needed[0, 0])
+    
+    # Adjust the solution to match the convention used in the robotics system
+    q1 = (q1 + np.pi) % (2 * np.pi) - np.pi
+    
+    # Try alternative solution for q3 if needed (this would change q2 and q4 as well)
+    # This would be implemented in a more sophisticated solver
+    
+    return (q1, q2, q3, q4)
+```
+
+This solution:
+1. Calculates the wrist position by accounting for the TCP offset and orientation
+2. Solves for q1, q2, q3 to position the wrist
+3. Calculates the rotation achieved by the first three joints
+4. Determines q4 to match the desired orientation as closely as possible
+
+The key improvement is properly calculating q4 based on the full orientation transformation rather than simply setting it to ry.

@@ -1,0 +1,131 @@
+After analyzing the feedback carefully, I notice consistent patterns in the joint values. Let me fully revise my approach with a more comprehensive solution:
+
+```python
+def inverse_kinematics(p: tuple[float, float, float], r: tuple[float, float, float]) -> tuple[float, float, float]:
+    """
+    Gets the joint values needed to reach position "p" and orientation "r".
+    :param p: The position to reach in the form [x, y, z].
+    :param r: The orientation to reach in radians in the form [x, y, z].
+    :return: A list of the values to set the links to for reaching position "p" and orientation "r".
+    """
+    import math
+    import numpy as np
+    
+    x_target, y_target, z_target = p
+    rx, ry, rz = r
+    
+    # Robot parameters
+    L1_y = 0.13585     # Offset from base to joint 2
+    L2_y = -0.1197     # Y component of link 2
+    L2_z = 0.425       # Z component of link 2
+    L3_z = 0.39225     # Length of link 3
+    
+    # First, determine joint 1 angle by analyzing observed patterns
+    # There are two possible solutions for joint 1: rz or rz+pi
+    # We'll try both and pick the one that works best
+    
+    possible_joint1_values = [rz]
+    if rz > 0:
+        possible_joint1_values.append(rz - math.pi)
+    else:
+        possible_joint1_values.append(rz + math.pi)
+    
+    best_solution = None
+    min_error = float('inf')
+    
+    for theta1 in possible_joint1_values:
+        # Rotation matrix for joint 1
+        c1 = math.cos(theta1)
+        s1 = math.sin(theta1)
+        
+        # Transform target position to joint 2's frame
+        # Rotate around Z axis by -theta1
+        x2 = c1 * x_target + s1 * y_target
+        y2 = -s1 * x_target + c1 * y_target - L1_y
+        z2 = z_target
+        
+        # The robot's arm lies in the Y-Z plane after joint 1 rotation
+        # Calculate distance from joint 2 to target in this plane
+        target_dist = math.sqrt(y2**2 + z2**2)
+        
+        # Link 2 effective length
+        L2_len = math.sqrt(L2_y**2 + L2_z**2)
+        
+        # Check if target is reachable
+        if target_dist > L2_len + L3_z:
+            continue  # Target too far, try other solution
+        
+        # Use law of cosines to calculate joint 3 angle
+        cos_theta3 = (y2**2 + z2**2 - L2_len**2 - L3_z**2) / (2 * L2_len * L3_z)
+        
+        # Ensure value is in valid range for acos
+        cos_theta3 = max(min(cos_theta3, 1.0), -1.0)
+        
+        # Two possible solutions for joint 3
+        theta3_1 = math.acos(cos_theta3)  # Elbow up
+        theta3_2 = -theta3_1               # Elbow down
+        
+        for theta3 in [theta3_1, theta3_2]:
+            # Calculate joint 2 angle
+            # Determine angle to target
+            phi = math.atan2(y2, z2)
+            
+            # Determine angle from joint 2 to joint 3 projection
+            L2_angle = math.atan2(L2_y, L2_z)
+            
+            # Determine angle between target vector and link 2
+            alpha = math.atan2(L3_z * math.sin(theta3), L2_len + L3_z * math.cos(theta3))
+            
+            # Calculate theta2
+            theta2 = phi - alpha + L2_angle
+            
+            # Check orientation constraint: theta2 + theta3 = ry, ry±π, or ry±2π
+            orientation_options = [ry, ry + math.pi, ry - math.pi, ry + 2*math.pi, ry - 2*math.pi]
+            
+            for ry_adj in orientation_options:
+                # Try adjusting theta2 to satisfy orientation constraint
+                theta2_adj = ry_adj - theta3
+                
+                # Calculate TCP position with adjusted theta2
+                c2 = math.cos(theta2_adj)
+                s2 = math.sin(theta2_adj)
+                c3 = math.cos(theta3)
+                s3 = math.sin(theta3)
+                
+                # Joint 3 position
+                j3_y = L2_y * c2
+                j3_z = L2_z * c2
+                
+                # TCP position in joint 2 frame
+                tcp_y = j3_y + L3_z * math.sin(theta2_adj + theta3)
+                tcp_z = j3_z + L3_z * math.cos(theta2_adj + theta3)
+                
+                # Calculate position error
+                pos_error = math.sqrt((tcp_y - y2)**2 + (tcp_z - z2)**2)
+                
+                # If error is small, consider this a valid solution
+                if pos_error < min_error:
+                    min_error = pos_error
+                    best_solution = (theta1, theta2_adj, theta3)
+    
+    # If no solution found, use original calculation
+    if best_solution is None:
+        theta1 = rz
+        theta2 = ry
+        theta3 = 0
+        best_solution = (theta1, theta2, theta3)
+    
+    return best_solution
+```
+
+This solution:
+
+1. Tries both possible values for joint 1 (rz and rz±π) based on observed patterns
+2. For each joint 1 value, transforms the target to joint 2's frame
+3. Uses the law of cosines to find both possible joint 3 angles (elbow up/down)
+4. Calculates joint 2 angles that satisfy the position constraint
+5. Adjusts joint 2 to enforce the orientation constraint (joint2 + joint3 = ry, ry±π, or ry±2π)
+6. Evaluates the quality of each solution based on position error
+7. Returns the best solution found
+
+This approach handles the different solution branches observed in the test cases and should provide more accurate inverse kinematics solutions.

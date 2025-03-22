@@ -1,0 +1,85 @@
+Based on the forward kinematics results, I can now complete the inverse kinematics solution. I'll combine the approaches from the existing code samples to develop a comprehensive solution for all three joints.
+
+```python
+def inverse_kinematics(p: tuple[float, float, float], r: tuple[float, float, float]) -> tuple[float, float, float]:
+    """
+    Gets the joint values needed to reach position "p" and orientation "r".
+    :param p: The position to reach in the form [x, y, z].
+    :param r: The orientation to reach in radians in the form [x, y, z].
+    :return: A list of the values to set the links to for reaching position "p" and orientation "r".
+    """
+    import math
+    import numpy as np
+    
+    x_target, y_target, z_target = p
+    rx, ry, rz = r
+    
+    # Calculate joint 1 (rotation around Z-axis)
+    theta1 = math.atan2(-x_target, y_target)
+    
+    # Transform target position to the frame after joint 1 rotation
+    c1 = math.cos(theta1)
+    s1 = math.sin(theta1)
+    
+    # Rotation matrix for joint 1
+    R1 = np.array([
+        [c1, -s1, 0],
+        [s1, c1, 0],
+        [0, 0, 1]
+    ])
+    
+    # Apply inverse rotation to target position
+    p_local = R1.T @ np.array([x_target, y_target, z_target])
+    x_local, y_local, z_local = p_local
+    
+    # Set up parameters for joints 2 and 3
+    L2 = 0.425       # Length of link 2
+    L3 = 0.39225     # Length of link 3
+    offset_y = 0.13585  # Y offset of joint 2 from joint 1
+    
+    # Adjust z and y to account for the offset
+    z_adj = z_local
+    y_adj = y_local - offset_y
+    
+    # Calculate the distance from joint 2 to target point
+    d_sq = y_adj**2 + z_adj**2
+    d = math.sqrt(d_sq)
+    
+    # Calculate joint 3 using law of cosines
+    cos_theta3 = (d_sq - L2**2 - L3**2) / (2 * L2 * L3)
+    cos_theta3 = max(min(cos_theta3, 1.0), -1.0)  # Ensure within valid range
+    
+    # Two possible solutions for joint 3
+    theta3 = math.acos(cos_theta3)
+    
+    # Calculate joint 2 based on joint 3
+    beta = math.atan2(y_adj, z_adj)
+    alpha = math.atan2(L3 * math.sin(theta3), L2 + L3 * math.cos(theta3))
+    theta2 = beta - alpha
+    
+    # Check if our solution is valid, if not try the other solution for joint 3
+    if not (math.isclose(y_adj, -L2 * math.sin(theta2) - L3 * math.sin(theta2 + theta3), abs_tol=1e-5) and 
+            math.isclose(z_adj, L2 * math.cos(theta2) + L3 * math.cos(theta2 + theta3), abs_tol=1e-5)):
+        theta3 = -theta3
+        alpha = math.atan2(L3 * math.sin(theta3), L2 + L3 * math.cos(theta3))
+        theta2 = beta - alpha
+    
+    # Account for the orientation
+    # For this robot, the end effector orientation is determined by the sum of theta2 and theta3
+    if not math.isclose(ry, theta2 + theta3, abs_tol=1e-5):
+        # If orientation doesn't match, adjust the solution
+        theta2_orient = ry - theta3
+        # Check if this orientation-based solution is feasible
+        if (math.isclose(y_adj, -L2 * math.sin(theta2_orient) - L3 * math.sin(theta2_orient + theta3), abs_tol=1e-5) and 
+            math.isclose(z_adj, L2 * math.cos(theta2_orient) + L3 * math.cos(theta2_orient + theta3), abs_tol=1e-5)):
+            theta2 = theta2_orient
+    
+    return (theta1, theta2, theta3)
+```
+
+This solution:
+1. Calculates joint 1 using the atan2 function based on target x and y coordinates
+2. Transforms the target position to the local frame after joint 1 rotation
+3. Solves for joints 2 and 3 using the law of cosines and geometric relationships
+4. Validates the solution and tries alternative solutions if needed
+5. Considers the target orientation for final adjustments

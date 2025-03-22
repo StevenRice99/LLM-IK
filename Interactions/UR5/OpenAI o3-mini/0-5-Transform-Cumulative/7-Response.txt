@@ -1,0 +1,189 @@
+```python
+import math
+import numpy as np
+
+def inverse_kinematics(p: tuple[float, float, float],
+                       r: tuple[float, float, float]) -> tuple[float, float, float, float, float, float]:
+    """
+    Computes a closed–form analytical solution for the inverse kinematics of the 6-DOF manipulator.
+    
+    Robot details:
+      - Revolute 1: origin [0,0,0], rotation about Z.
+      - Revolute 2: translation [0, 0.13585, 0] then rotation about Y.
+      - Revolute 3: translation [0, -0.1197, 0.425] then rotation about Y.
+      - Revolute 4: translation [0, 0, 0.39225] then rotation about Y.
+      - Revolute 5: translation [0, 0.093, 0] then rotation about Z.
+      - Revolute 6: translation [0, 0, 0.09465] then rotation about Y.
+      - TCP: translation [0, 0.0823, 0] then fixed rotation Rz(1.570796325).
+      
+    Some constant offsets arise from the fixed translations: 
+      y_const = 0.13585 - 0.1197 + 0.093 = 0.10915.
+    The chain decouples into a “5-DOF” position/orientation subproblem (joints 1–5) and a wrist (joint 6).
+    
+    This implementation searches over the two candidate branches for q1 and for the planar 2R solution (q3),
+    then uses a forward kinematics evaluation to choose the candidate that best reproduces the target.
+    
+    The desired TCP orientation is assumed to be given in roll–pitch–yaw (URDF convention):
+         R_des = Rz(yaw) · Ry(pitch) · Rx(roll)
+    """
+    
+    # --- Helper functions for rotations and homogeneous transforms ---
+    def norm_angle(theta):
+        # Normalize angle to (-pi, pi]
+        return (theta + math.pi) % (2 * math.pi) - math.pi
+
+    def rot_x(angle):
+        ca, sa = math.cos(angle), math.sin(angle)
+        return np.array([[1,     0,    0],
+                         [0,    ca, -sa],
+                         [0,    sa,  ca]])
+    
+    def rot_y(angle):
+        ca, sa = math.cos(angle), math.sin(angle)
+        return np.array([[ ca, 0, sa],
+                         [  0, 1,  0],
+                         [-sa, 0, ca]])
+    
+    def rot_z(angle):
+        ca, sa = math.cos(angle), math.sin(angle)
+        return np.array([[ca, -sa, 0],
+                         [sa,  ca, 0],
+                         [0,    0, 1]])
+    
+    def T_trans(x, y, z):
+        T = np.eye(4)
+        T[0:3, 3] = [x, y, z]
+        return T
+    
+    def T_from_R(R):
+        T = np.eye(4)
+        T[0:3, 0:3] = R
+        return T
+
+    def T_rot_x(angle):
+        return T_from_R(rot_x(angle))
+    
+    def T_rot_y(angle):
+        return T_from_R(rot_y(angle))
+    
+    def T_rot_z(angle):
+        return T_from_R(rot_z(angle))
+    
+    # --- Forward kinematics for the complete chain ---
+    def fk(joints):
+        q1, q2, q3, q4, q5, q6 = joints
+        # Build the homogeneous transforms for each link.
+        # Note: Each link transform is computed as: T = Translation(origin) @ Rotation(origin_rpy)
+        T1 = T_rot_z(q1)  # Revolute 1: no translation
+        
+        T2 = T_trans(0, 0.13585, 0) @ T_rot_y(q2)  # Revolute 2
+        T3 = T_trans(0, -0.1197, 0.425) @ T_rot_y(q3)  # Revolute 3
+        T4 = T_trans(0, 0, 0.39225) @ T_rot_y(q4)  # Revolute 4
+        T5 = T_trans(0, 0.093, 0) @ T_rot_z(q5)  # Revolute 5
+        T6 = T_trans(0, 0, 0.09465) @ T_rot_y(q6)  # Revolute 6
+        # TCP fixed offset:
+        TCP_offset = T_trans(0, 0.0823, 0) @ T_rot_z(1.570796325)
+        
+        # Compose the complete transform:
+        T_total = T1 @ T2 @ T3 @ T4 @ T5 @ T6 @ TCP_offset
+        return T_total
+
+    # --- End of FK helper ---
+
+    # --- Compute desired orientation matrix from given rpy (URDF: R_des = Rz(yaw)*Ry(pitch)*Rx(roll)) ---
+    roll, pitch, yaw = r
+    R_x = rot_x(roll)
+    R_y = rot_y(pitch)
+    R_z = rot_z(yaw)
+    R_des = R_z @ R_y @ R_x
+
+    px, py, pz = p
+    p_vec = np.array([px, py, pz])
+    
+    # Robot geometric constants from the details.
+    L1 = 0.425         # effective link length from joint 3 translation
+    L2 = 0.39225       # effective link length from joint 4 translation
+    L_tcp = 0.09465    # translation from joint 6 (Revolute 6 translation along Z)
+    y_const = 0.13585 - 0.1197 + 0.093  # 0.10915
+    psi = 1.570796325  # fixed TCP yaw offset
+
+    # --- Step 1: Compute candidate q1 values using the decoupling condition ---
+    r_xy = math.sqrt(px**2 + py**2)
+    if r_xy < 1e-8:
+        theta = 0.0
+    else:
+        theta = math.atan2(py, px)
+    ratio = y_const / r_xy if r_xy != 0 else 0.0
+    ratio = max(-1.0, min(1.0, ratio))
+    a = math.asin(ratio)
+    q1_candidate1 = theta - a
+    q1_candidate2 = theta - (math.pi - a)
+    # Normalize candidates to (-pi, pi]
+    q1_candidate1 = norm_angle(q1_candidate1)
+    q1_candidate2 = norm_angle(q1_candidate2)
+    
+    # We'll search over both q1 and over the two q3 branches.
+    best_error = float('inf')
+    best_solution = None
+    # Loop over q1 candidates
+    for q1 in [q1_candidate1, q1_candidate2]:
+        # Compute decoupled target in the frame with q1 removed.
+        Rz_neg_q1 = rot_z(-q1)
+        p_bar = Rz_neg_q1 @ p_vec  # rotated target position
+        
+        # Compute decoupled desired orientation:
+        M = Rz_neg_q1 @ R_des
+        # Extract φ = q2+q3+q4 from M using elements (0,2) and (2,2)
+        phi = math.atan2(M[0, 2], M[2, 2])
+        # Joint 5 is set by the residual rotation about Z:
+        q5 = math.atan2(M[1, 0], M[1, 1])
+        
+        # Effective planar coordinates: remove offset from joint 6 (assumed along the φ direction)
+        P_x = p_bar[0] - L_tcp * math.sin(phi)
+        P_z = p_bar[2] - L_tcp * math.cos(phi)
+        r2 = math.sqrt(P_x**2 + P_z**2)
+        
+        # Law-of-cosines for joint 3:
+        cos_q3 = (r2**2 - L1**2 - L2**2) / (2 * L1 * L2)
+        cos_q3 = max(-1.0, min(1.0, cos_q3))
+        # Two candidate solutions for q3:
+        for q3 in [math.acos(cos_q3), -math.acos(cos_q3)]:
+            # Solve for q2:
+            q2 = math.atan2(P_x, P_z) - math.atan2(L2 * math.sin(q3), L1 + L2 * math.cos(q3))
+            # Then q4 is:
+            q4 = phi - (q2 + q3)
+            
+            # --- Step 2: Compute wrist joint q6 from the orientation residual ---
+            # The subchain through joint 5 yields an intermediate rotation:
+            # R_mid = Rz(q1) · Ry(q2+q3+q4) · Rz(q5)
+            R_mid = rot_z(q1) @ rot_y(q2 + q3 + q4) @ rot_z(q5)
+            # Then the remaining rotation must satisfy:
+            #   R_des = R_mid · [Ry(q6) · Rz(psi)]
+            # Compute the residual:
+            R_rem = R_mid.T @ R_des
+            # Remove the fixed TCP yaw offset:
+            Rz_minus_psi = rot_z(-psi)
+            A = R_rem @ Rz_minus_psi
+            # Ideally, A should equal Ry(q6); for a pure Ry rotation,
+            # its first row is [cos(q6), 0, sin(q6)]
+            q6 = math.atan2(A[0, 2], A[0, 0])
+            
+            candidate = (q1, q2, q3, q4, q5, q6)
+            T_fk = fk(candidate)
+            # Extract computed TCP position and orientation.
+            pos_fk = T_fk[0:3, 3]
+            R_fk = T_fk[0:3, 0:3]
+            # Compute errors: position error and orientation error (Frobenius norm)
+            pos_error = np.linalg.norm(pos_fk - p_vec)
+            orient_error = np.linalg.norm(R_fk - R_des, ord='fro')
+            total_error = pos_error + orient_error
+            if total_error < best_error:
+                best_error = total_error
+                best_solution = candidate
+
+    # If no candidate was found (should not happen), return zeros.
+    if best_solution is None:
+        return (0.0, 0.0, 0.0, 0.0, 0.0, 0.0)
+    else:
+        return best_solution
+```

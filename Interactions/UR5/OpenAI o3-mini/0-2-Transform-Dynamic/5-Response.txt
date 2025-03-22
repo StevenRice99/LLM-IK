@@ -1,0 +1,111 @@
+```python
+import math
+
+def inverse_kinematics(p: tuple[float, float, float],
+                       r: tuple[float, float, float]) -> tuple[float, float, float]:
+    """
+    Computes the joint angles (joint1, joint2, joint3) for a 3DOF serial manipulator to reach
+    a desired TCP position and orientation.
+    
+    Robot definition (all units in meters and radians):
+      • Revolute 1 (Base): Located at [0, 0, 0], no offset; rotates about Z.
+      • Revolute 2: Located at [0, 0.13585, 0] in Joint1’s frame; rotates about Y.
+      • Revolute 3: Located at [0, -0.1197, 0.425] in Joint2’s frame; rotates about Y.
+      • TCP: Offset [0, 0, 0.39225] from Joint3.
+    
+    Decoupling approach:
+      1. Solve for joint1 by using the projection of the TCP (in base coordinates) onto the XY–plane.
+         (Using the known offset of Joint2 in the base frame.)
+      2. Compute the world coordinates of Joint2 by rotating its known offset by joint1.
+      3. Express the TCP position relative to Joint2. Then, rotate this vector by –joint1 so that
+         the resulting coordinates lie in the plane of motion for joints 2 and 3 (the x–z plane).
+      4. Extract the desired end‐effector (wrist) angle from the TCP orientation using the rpy
+         angles. Here we set:
+               R00 = cos(ry)*cos(rz),   R02 = sin(ry)
+           and define theta_sum = atan2(R02, R00),
+           which is the sum of the angles of joints 2 and 3.
+      5. With an effective 2R (planar) chain, use the cosine law. Let:
+             L1 = 0.425  (distance from Joint2 to Joint3 along z)
+             L2 = 0.39225 (TCP offset from Joint3)
+         Compute the squared distance (in the plane) from Joint2 to the TCP target.
+      6. Solve for joint3 using:
+             cos(joint3) = (d_sq - L1^2 - L2^2) / (2*L1*L2)
+         and then set joint2 = theta_sum - joint3.
+         
+    It is assumed that the given target (p, r) is reachable.
+    
+    :param p: Desired TCP position in base coordinates as (x, y, z).
+    :param r: Desired TCP orientation in rpy (radians) as (roll, pitch, yaw).
+    :return: A tuple (joint1, joint2, joint3) with joint angles in radians.
+    """
+    # Unpack target position and orientation.
+    x, y, z = p
+    rx, ry, rz = r
+
+    # =======================
+    # Step 1: Compute joint1.
+    #
+    # The axis of Revolute 1 is along Z.
+    # A natural decoupling is to align the manipulator's operating plane
+    # with the projection of the TCP on the XY–plane.
+    #
+    # (Note: Existing code solved joint1 as theta = atan2(-x, y), but with our
+    # current decoupling we compute joint1 = atan2(y, x), which, combined with the
+    # fixed offset from Joint2, yields the correct configuration.)
+    joint1 = math.atan2(y, x)
+
+    # =======================
+    # Step 2: Find the world position of Joint2.
+    #
+    # In Joint1’s local frame, Joint2 sits at [0, 0.13585, 0]. To express this in
+    # base (world) coordinates we use the rotation matrix for a rotation about Z.
+    d12 = 0.13585
+    p_joint2_world = (
+        -math.sin(joint1) * d12,
+         math.cos(joint1) * d12,
+         0
+    )
+
+    # =======================
+    # Step 3: Compute the TCP position relative to Joint2 and rotate into the 2R plane.
+    #
+    # Subtract the Joint2 position from the TCP target; then 'undo' the base rotation.
+    p_rel = (x - p_joint2_world[0],
+             y - p_joint2_world[1],
+             z)  # Joint2 and base share the same z coordinate
+    
+    # Rotate p_rel by -joint1 (i.e. apply the inverse rotation about Z):
+    cos1 = math.cos(joint1)
+    sin1 = math.sin(joint1)
+    # In the rotated frame, the "x" axis will lie in the plane of motion for joints 2 and 3.
+    x_plane = p_rel[0] * cos1 + p_rel[1] * sin1
+    z_plane = p_rel[2]  # z remains unchanged
+
+    # =======================
+    # Step 4: Extract the overall wrist angle from the tcp orientation.
+    #
+    # Based on the provided orientation (rpy) for the TCP, we define:
+    #       R00 = cos(ry)*cos(rz)    and   R02 = sin(ry)
+    # so that the sum of joints 2 and 3 is:
+    theta_sum = math.atan2(math.sin(ry), math.cos(ry) * math.cos(rz))
+
+    # =======================
+    # Step 5: Solve the planar 2R (joints 2 & 3) inverse kinematics.
+    #
+    # Effective link lengths:
+    L1 = 0.425    # distance from Joint2 to Joint3 (the z–offset in Revolute 3)
+    L2 = 0.39225  # TCP offset from Joint3 along its z–axis
+    d_sq = x_plane**2 + z_plane**2
+
+    # Compute joint3 using the cosine law.
+    cos_joint3 = (d_sq - L1**2 - L2**2) / (2 * L1 * L2)
+    # Clamp the value in case of minor numerical errors.
+    cos_joint3 = max(min(cos_joint3, 1.0), -1.0)
+    joint3 = math.acos(cos_joint3)
+
+    # =======================
+    # Step 6: Compute joint2 so that joint2 + joint3 = theta_sum.
+    joint2 = theta_sum - joint3
+
+    return (joint1, joint2, joint3)
+```

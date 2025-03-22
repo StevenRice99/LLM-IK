@@ -1,0 +1,167 @@
+Based on the feedback, my inverse kinematics solution has significant issues. Let me develop a more accurate solution that correctly handles this 5-DOF robot's kinematics.
+
+```python
+def inverse_kinematics(p: tuple[float, float, float], r: tuple[float, float, float]) -> tuple[float, float, float, float, float]:
+    """
+    Gets the joint values needed to reach position "p" and orientation "r".
+    :param p: The position to reach in the form [x, y, z].
+    :param r: The orientation to reach in radians in the form [x, y, z].
+    :return: A list of the values to set the links to for reaching position "p" and orientation "r".
+    """
+    import numpy as np
+    from math import atan2, sin, cos, sqrt, acos, pi
+    
+    # Robot dimensions
+    l1_z = 0.425      # Z distance from joint 1 to joint 2
+    l1_y = -0.1197    # Y distance from joint 1 to joint 2
+    l2_z = 0.39225    # Z distance from joint 2 to joint 3
+    l3_y = 0.093      # Y distance from joint 3 to joint 4
+    l4_z = 0.09465    # Z distance from joint 4 to joint 5
+    l5_y = 0.0823     # Y distance from joint 5 to TCP
+    
+    # Target position and orientation
+    px, py, pz = p
+    rx, ry, rz = r
+    
+    # Create rotation matrix from Euler angles
+    def euler_to_rotmat(rx, ry, rz):
+        Rx = np.array([
+            [1, 0, 0],
+            [0, cos(rx), -sin(rx)],
+            [0, sin(rx), cos(rx)]
+        ])
+        
+        Ry = np.array([
+            [cos(ry), 0, sin(ry)],
+            [0, 1, 0],
+            [-sin(ry), 0, cos(ry)]
+        ])
+        
+        Rz = np.array([
+            [cos(rz), -sin(rz), 0],
+            [sin(rz), cos(rz), 0],
+            [0, 0, 1]
+        ])
+        
+        # The final rotation matrix (ZYX convention)
+        return Rz @ Ry @ Rx
+    
+    # Get target rotation matrix
+    R_target = euler_to_rotmat(rx, ry, rz)
+    
+    # We need to adjust for the TCP's rotational offset
+    R_tcp_offset = euler_to_rotmat(0, 0, 1.570796325)
+    R_wrist = R_target @ np.linalg.inv(R_tcp_offset)
+    
+    # Calculate wrist center position by moving back from the TCP
+    # First create the TCP offset vector and rotate it to the world frame
+    tcp_offset = np.array([0, l5_y, 0])
+    wrist_center = np.array([px, py, pz]) - R_target @ tcp_offset
+    
+    wcx, wcy, wcz = wrist_center
+    
+    # Solve for joint 1 (base rotation around Y-axis)
+    theta1 = atan2(wcx, wcz)
+    
+    # Rotate the wrist center into the first joint's frame
+    c1, s1 = cos(theta1), sin(theta1)
+    xc = c1 * wcx + s1 * wcz
+    yc = wcy
+    zc = -s1 * wcx + c1 * wcz
+    
+    # Calculate the distance from joint 2 to wrist center
+    x_from_j2 = xc
+    y_from_j2 = yc - l1_y
+    z_from_j2 = zc - l1_z
+    
+    # Distance from joint 2 to wrist center
+    d = sqrt(x_from_j2**2 + y_from_j2**2 + z_from_j2**2)
+    
+    # Calculate the effective length of the third link (including joint 4->5 vertical offset)
+    l3_effective = sqrt(l3_y**2 + l4_z**2)
+    gamma = atan2(l3_y, l4_z)  # Angle of the effective link
+    
+    # Calculate joint angles 2 and 3 using law of cosines
+    cos_alpha = (l2_z**2 + d**2 - l3_effective**2) / (2 * l2_z * d)
+    cos_alpha = min(1, max(-1, cos_alpha))  # Numerical stability
+    alpha = acos(cos_alpha)
+    
+    # Calculate angle from horizontal to wrist center
+    beta = atan2(sqrt(x_from_j2**2 + z_from_j2**2), y_from_j2)
+    
+    # Determine joint 2 angle
+    if z_from_j2 < 0:
+        theta2 = -(pi/2 - (beta - alpha))
+    else:
+        theta2 = pi/2 - (beta + alpha)
+    
+    # Calculate joint 3 angle using law of cosines
+    cos_phi = (l2_z**2 + l3_effective**2 - d**2) / (2 * l2_z * l3_effective)
+    cos_phi = min(1, max(-1, cos_phi))  # Numerical stability
+    phi = acos(cos_phi)
+    
+    # Adjust for the angle of the effective third link
+    theta3 = pi - phi - gamma
+    
+    # Now compute the rotation matrix up to joint 3
+    def rot_y(angle):
+        return np.array([
+            [cos(angle), 0, sin(angle)],
+            [0, 1, 0],
+            [-sin(angle), 0, cos(angle)]
+        ])
+    
+    def rot_z(angle):
+        return np.array([
+            [cos(angle), -sin(angle), 0],
+            [sin(angle), cos(angle), 0],
+            [0, 0, 1]
+        ])
+    
+    # Rotation from base to joint 3
+    R0_3 = rot_y(theta1) @ rot_y(theta2) @ rot_y(theta3)
+    
+    # The remaining rotation needed to achieve the target orientation
+    R3_5 = R0_3.T @ R_wrist
+    
+    # Extract joint 4 and 5 angles
+    # Joint 4 rotates around Z-axis
+    # Joint 5 rotates around Y-axis
+    
+    # For joint 4, we take the atan2 of the first two elements of the first row/column
+    theta4 = atan2(R3_5[1, 0], R3_5[0, 0])
+    
+    # For joint 5, we can determine it from the resulting elements after joint 4 rotation
+    R3_4 = rot_z(theta4)
+    R4_5 = R3_4.T @ R3_5
+    
+    # Now extract theta5 from the resulting matrix
+    theta5 = atan2(-R4_5[2, 0], R4_5[2, 2])
+    
+    # Normalize angles to range [-pi, pi]
+    def normalize_angle(angle):
+        while angle > pi:
+            angle -= 2 * pi
+        while angle < -pi:
+            angle += 2 * pi
+        return angle
+    
+    theta1 = normalize_angle(theta1)
+    theta2 = normalize_angle(theta2)
+    theta3 = normalize_angle(theta3)
+    theta4 = normalize_angle(theta4)
+    theta5 = normalize_angle(theta5)
+    
+    return (theta1, theta2, theta3, theta4, theta5)
+```
+
+This solution addresses several key issues from my previous attempt:
+
+1. Correctly accounts for the TCP's orientation offset ([0, 0, 1.570796325])
+2. More carefully handles the geometry when calculating the wrist center position
+3. Correctly models the offsets between joints in both Y and Z directions
+4. Better handles the law of cosines calculations with numerical stability checks
+5. Properly extracts joint angles 4 and 5 based on the remaining rotation after joints 1-3
+6. Normalizes angles to maintain consistency
+
+The approach decomposes the problem into position (joints 1-3) and orientation (joints 4-5) components, using the geometric relationships between links and the properties of rotation matrices.

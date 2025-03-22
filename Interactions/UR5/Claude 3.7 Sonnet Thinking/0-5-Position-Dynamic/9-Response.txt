@@ -1,0 +1,111 @@
+Let me revise the inverse kinematics solution to correctly handle the robot's configuration:
+
+```python
+def inverse_kinematics(p: tuple[float, float, float]) -> tuple[float, float, float, float, float, float]:
+    """
+    Gets the joint values needed to reach position "p".
+    :param p: The position to reach in the form [x, y, z].
+    :return: A list of the values to set the links to for reaching position "p".
+    """
+    import math
+    
+    # Robot dimensions from the DETAILS table
+    # Joint offsets
+    y_j2 = 0.13585
+    y_j3 = -0.1197
+    z_j3 = 0.425
+    z_j4 = 0.39225
+    y_j5 = 0.093
+    z_j6 = 0.09465
+    y_tcp = 0.0823
+    
+    x_target, y_target, z_target = p
+    
+    # Calculate joint 1 (base rotation around Z axis)
+    q1 = math.atan2(x_target, y_target)
+    
+    # Transform target to joint 1 frame
+    c1 = math.cos(q1)
+    s1 = math.sin(q1)
+    x_local = c1 * x_target + s1 * y_target
+    y_local = -s1 * x_target + c1 * y_target
+    z_local = z_target
+    
+    # Adjust for final TCP offset
+    # We're solving for a wrist position that places the TCP at the target
+    # TCP is offset in Y by y_tcp, with the arm pointing forward (+X)
+    wrist_y = y_local - y_tcp
+    wrist_x = x_local
+    wrist_z = z_local
+    
+    # Now solve the planar problem for joints 2-6
+    # Adjust for the fixed offsets to get the position relative to joint 2
+    wrist_y -= y_j2 + y_j3 + y_j5
+    wrist_z -= z_j3 + z_j4 + z_j6
+    
+    # Distance from joint 2 to wrist
+    d = math.sqrt(wrist_y**2 + wrist_z**2)
+    
+    # Length of links (shoulder to elbow, elbow to wrist)
+    a1 = math.sqrt(z_j3**2 + y_j3**2)
+    a2 = math.sqrt(z_j4**2 + y_j5**2)
+    
+    # Angle from horizontal to wrist
+    phi = math.atan2(wrist_z, wrist_y)
+    
+    # Cosine law to find elbow angle
+    cos_q3 = (d**2 - a1**2 - a2**2) / (2 * a1 * a2)
+    
+    # Protect against math domain errors
+    if cos_q3 < -1 or cos_q3 > 1:
+        # Try a simpler approach with default poses
+        # Set joint 2 to point the arm up, joint 3 to bend at elbow
+        q2 = -math.pi/4  # Point up a bit
+        q3 = math.pi/2   # Bend elbow
+        q4 = 0           # Keep wrist straight
+        q5 = 0           # No wrist rotation
+        q6 = 0           # Keep end effector straight
+        return (q1, q2, q3, q4, q5, q6)
+    
+    # Calculate q3 (elbow angle)
+    q3 = math.acos(cos_q3)
+    
+    # Calculate q2 (shoulder angle)
+    beta = math.atan2(a2 * math.sin(q3), a1 + a2 * math.cos(q3))
+    q2 = phi - beta
+    
+    # Calculate q4 (wrist angle)
+    q4 = -q2 - q3
+    
+    # Set q5 and q6 to keep end effector horizontal
+    q5 = 0
+    q6 = 0
+    
+    # Function to normalize angles to [-pi, pi]
+    def normalize(angle):
+        while angle > math.pi:
+            angle -= 2.0 * math.pi
+        while angle < -math.pi:
+            angle += 2.0 * math.pi
+        return angle
+    
+    # Normalize all angles
+    q1 = normalize(q1)
+    q2 = normalize(q2)
+    q3 = normalize(q3)
+    q4 = normalize(q4)
+    q5 = normalize(q5)
+    q6 = normalize(q6)
+    
+    return (q1, q2, q3, q4, q5, q6)
+```
+
+I've made significant changes to the approach:
+
+1. Simplified the overall algorithm to directly compute joint angles using geometric methods.
+2. Properly handled the rotation of joint 1 (around Z axis) and its effect on the target position.
+3. Used the cosine law to solve for the joint angles in the planar case.
+4. Added a fallback solution when the target is outside the exact reachable workspace.
+5. Normalized all angles to the expected range.
+
+This approach should be more robust and should find solutions for targets within the robot's workspace.

@@ -1,0 +1,507 @@
+Based on the continued feedback and looking at the pattern of failures, I need to rebuild my solution completely with a stronger mathematical foundation. Let me implement a more accurate inverse kinematics solver:
+
+```python
+def inverse_kinematics(p: tuple[float, float, float], r: tuple[float, float, float]) -> tuple[float, float, float, float, float, float]:
+    """
+    Gets the joint values needed to reach position "p" and orientation "r".
+    :param p: The position to reach in the form [x, y, z].
+    :param r: The orientation to reach in radians in the form [x, y, z].
+    :return: A list of the values to set the links to for reaching position "p" and orientation "r".
+    """
+    import math
+    import numpy as np
+    
+    # Robot dimensions from URDF
+    L1 = 0.425       # Joint 3 Z offset
+    L2 = 0.39225     # Joint 4 Z offset
+    L3 = 0.09465     # Joint 6 Z offset
+    Y2 = 0.13585     # Joint 2 Y offset
+    Y3 = -0.1197     # Joint 3 Y offset
+    Y5 = 0.093       # Joint 5 Y offset
+    TCP_Y = 0.0823   # TCP Y offset
+    
+    # Y offset constant
+    Y_OFFSET = Y2 + Y3 + Y5  # = 0.10915
+    
+    # Function to create rotation matrices
+    def Rx(angle):
+        return np.array([
+            [1, 0, 0],
+            [0, math.cos(angle), -math.sin(angle)],
+            [0, math.sin(angle), math.cos(angle)]
+        ])
+    
+    def Ry(angle):
+        return np.array([
+            [math.cos(angle), 0, math.sin(angle)],
+            [0, 1, 0],
+            [-math.sin(angle), 0, math.cos(angle)]
+        ])
+    
+    def Rz(angle):
+        return np.array([
+            [math.cos(angle), -math.sin(angle), 0],
+            [math.sin(angle), math.cos(angle), 0],
+            [0, 0, 1]
+        ])
+    
+    # Function to normalize angle to [-π, π]
+    def normalize_angle(angle):
+        return ((angle + math.pi) % (2 * math.pi)) - math.pi
+    
+    # Target position and orientation
+    px, py, pz = p
+    roll, pitch, yaw = r
+    
+    # Build target orientation matrix (ZYX convention)
+    R_target = Rz(yaw) @ Ry(pitch) @ Rx(roll)
+    
+    # TCP has a π/2 rotation around Z axis in its local frame
+    R_tcp_offset = Rz(math.pi/2)
+    
+    # Get wrist orientation by removing TCP rotation
+    R_wrist = R_target @ R_tcp_offset.T
+    
+    # Transform TCP offset to world frame and remove from target position
+    tcp_offset_world = R_target @ np.array([0, TCP_Y, 0])
+    wrist_pos = np.array([px, py, pz]) - tcp_offset_world
+    wx, wy, wz = wrist_pos
+    
+    # Calculate joint 1
+    # The wrist Y position in the local frame after q1 must be Y_OFFSET
+    xy_dist = math.sqrt(wx**2 + wy**2)
+    
+    if xy_dist < 1e-6:
+        # Special case: wrist directly above base
+        q1 = 0.0
+    else:
+        # Two possible solutions based on the Y offset constraint
+        wrist_angle = math.atan2(wy, wx)
+        
+        if xy_dist < Y_OFFSET:
+            # Target too close to Z-axis - use default
+            q1 = wrist_angle
+        else:
+            # Calculate the offset angle using law of sines
+            ratio = Y_OFFSET / xy_dist
+            ratio = max(-1.0, min(1.0, ratio))  # Ensure valid range
+            offset_angle = math.asin(ratio)
+            
+            # Two possible solutions
+            q1_sol1 = wrist_angle - offset_angle
+            q1_sol2 = math.pi - wrist_angle + offset_angle
+            
+            # Choose solution based on orientation constraint
+            def q1_error(q1_val):
+                Rz_inv = Rz(-q1_val)
+                M = Rz_inv @ R_wrist
+                # M[1,2] should be close to 0 in correct solution
+                return abs(M[1, 2])
+            
+            err1 = q1_error(q1_sol1)
+            err2 = q1_error(q1_sol2)
+            
+            q1 = q1_sol1 if err1 <= err2 else q1_sol2
+    
+    # Transform wrist position to frame after q1
+    Rz_inv_q1 = Rz(-q1)
+    wrist_local = Rz_inv_q1 @ wrist_pos
+    wx_local, wy_local, wz_local = wrist_local
+    
+    # Extract orientation components after removing q1
+    M = Rz_inv_q1 @ R_wrist
+    
+    # Extract q5 (rotation around Z after q1)
+    q5 = math.atan2(M[1, 0], M[1, 1])
+    
+    # Remove effect of q5 from orientation matrix
+    M_no5 = M @ Rz(-q5)
+    
+    # Extract q6 (rotation around Y after q5)
+    q6 = math.atan2(-M_no5[0, 2], M_no5[2, 2])
+    
+    # Remove effect of q6 from orientation matrix
+    M_no56 = M_no5 @ Ry(-q6)
+    
+    # Extract combined angle phi = q2 + q3 + q4
+    phi = math.atan2(M_no56[0, 2], M_no56[2, 2])
+    
+    # Calculate the position that needs to be reached by joints 2,3,4
+    # Subtract joint 6 length
+    target_234_x = wx_local - L3 * math.sin(phi) * math.cos(q6)
+    target_234_z = wz_local - L3 * math.cos(phi) * math.cos(q6)
+    
+    # Calculate q2, q3, q4 using planar 2R mechanism
+    r_squared = target_234_x**2 + target_234_z**2
+    r = math.sqrt(r_squared)
+    
+    # Calculate q3 using law of cosines
+    cos_q3 = (r_squared - L1**2 - L2**2) / (2 * L1 * L2)
+    cos_q3 = max(-1.0, min(1.0, cos_q3))  # Ensure valid range
+    
+    # Two possible solutions for q3
+    q3_pos = math.acos(cos_q3)
+    q3_neg = -q3_pos
+    
+    # Function to calculate q2, q4 and position error for given q3
+    def calculate_q2_q4(q3_val):
+        # Calculate q2
+        theta = math.atan2(target_234_x, target_234_z)
+        beta = math.atan2(L2 * math.sin(q3_val), L1 + L2 * math.cos(q3_val))
+        q2_val = theta - beta
+        
+        # Calculate q4
+        q4_val = phi - (q2_val + q3_val)
+        
+        # Verify solution with forward kinematics
+        x_calc = L1 * math.sin(q2_val) + L2 * math.sin(q2_val + q3_val) + L3 * math.sin(phi) * math.cos(q6)
+        z_calc = L1 * math.cos(q2_val) + L2 * math.cos(q2_val + q3_val) + L3 * math.cos(phi) * math.cos(q6)
+        
+        # Calculate position error
+        error = (x_calc - wx_local)**2 + (z_calc - wz_local)**2
+        
+        return q2_val, q4_val, error
+    
+    # Calculate both solutions and choose the one with less error
+    q2_pos, q4_pos, err_pos = calculate_q2_q4(q3_pos)
+    q2_neg, q4_neg, err_neg = calculate_q2_q4(q3_neg)
+    
+    if err_pos <= err_neg:
+        q2, q3, q4 = q2_pos, q3_pos, q4_pos
+    else:
+        q2, q3, q4 = q2_neg, q3_neg, q4_neg
+    
+    # Let's check if we need to take the alternate 'flip' solution
+    # This handles the cases where q1 + pi might be a better solution
+    def check_alternate_solution():
+        # Try alternate q1
+        alt_q1 = normalize_angle(q1 + math.pi)
+        
+        # Transform wrist position with alternate q1
+        alt_Rz_inv = Rz(-alt_q1)
+        alt_wrist_local = alt_Rz_inv @ wrist_pos
+        alt_wx, alt_wy, alt_wz = alt_wrist_local
+        
+        # Get new orientation matrix
+        alt_M = alt_Rz_inv @ R_wrist
+        
+        # Extract new q5
+        alt_q5 = math.atan2(alt_M[1, 0], alt_M[1, 1])
+        
+        # Remove q5 effect
+        alt_M_no5 = alt_M @ Rz(-alt_q5)
+        
+        # Extract new q6
+        alt_q6 = math.atan2(-alt_M_no5[0, 2], alt_M_no5[2, 2])
+        
+        # Remove q6 effect
+        alt_M_no56 = alt_M_no5 @ Ry(-alt_q6)
+        
+        # Get new phi
+        alt_phi = math.atan2(alt_M_no56[0, 2], alt_M_no56[2, 2])
+        
+        # Calculate new target position for 2,3,4
+        alt_target_x = alt_wx - L3 * math.sin(alt_phi) * math.cos(alt_q6)
+        alt_target_z = alt_wz - L3 * math.cos(alt_phi) * math.cos(alt_q6)
+        
+        # Calculate new q3
+        alt_r_squared = alt_target_x**2 + alt_target_z**2
+        alt_cos_q3 = (alt_r_squared - L1**2 - L2**2) / (2 * L1 * L2)
+        alt_cos_q3 = max(-1.0, min(1.0, alt_cos_q3))
+        
+        # Check for extreme case where no feasible q3 exists
+        if abs(alt_cos_q3 - 1.0) < 1e-6:
+            alt_q3 = 0.0
+        elif abs(alt_cos_q3 + 1.0) < 1e-6:
+            alt_q3 = math.pi
+        else:
+            # Two possible solutions
+            alt_q3_pos = math.acos(alt_cos_q3)
+            alt_q3_neg = -alt_q3_pos
+            
+            # Calculate both solutions
+            alt_q2_pos, alt_q4_pos, err_pos = calculate_alt_q2_q4(alt_q3_pos, alt_target_x, alt_target_z, alt_phi, alt_q6)
+            alt_q2_neg, alt_q4_neg, err_neg = calculate_alt_q2_q4(alt_q3_neg, alt_target_x, alt_target_z, alt_phi, alt_q6)
+            
+            # Choose solution with less error
+            if err_pos <= err_neg:
+                alt_q2, alt_q3, alt_q4 = alt_q2_pos, alt_q3_pos, alt_q4_pos
+            else:
+                alt_q2, alt_q3, alt_q4 = alt_q2_neg, alt_q3_neg, alt_q4_neg
+        
+        return alt_q1, alt_q2, alt_q3, alt_q4, alt_q5, alt_q6
+    
+    def calculate_alt_q2_q4(q3_val, target_x, target_z, phi_val, q6_val):
+        # Calculate q2
+        theta = math.atan2(target_x, target_z)
+        beta = math.atan2(L2 * math.sin(q3_val), L1 + L2 * math.cos(q3_val))
+        q2_val = theta - beta
+        
+        # Calculate q4
+        q4_val = phi_val - (q2_val + q3_val)
+        
+        # Verify solution
+        x_calc = L1 * math.sin(q2_val) + L2 * math.sin(q2_val + q3_val) + L3 * math.sin(phi_val) * math.cos(q6_val)
+        z_calc = L1 * math.cos(q2_val) + L2 * math.cos(q2_val + q3_val) + L3 * math.cos(phi_val) * math.cos(q6_val)
+        
+        error = (x_calc - target_x)**2 + (z_calc - target_z)**2
+        
+        return q2_val, q4_val, error
+    
+    # Trying the alternate solution to see if it's better
+    # This helps with cases where we need the "flipped" configuration
+    # Looking at the examples, this appears to be critical for many cases
+    # In some of the correct solutions, q1 differs by π from our solution
+    
+    # Check if q3 is close to zero, which can be a special case
+    if abs(q3) < 1e-6:
+        q3 = 0  # Set exactly to zero
+    
+    # Normalize all angles to [-π, π]
+    q1 = normalize_angle(q1)
+    q2 = normalize_angle(q2)
+    q3 = normalize_angle(q3)
+    q4 = normalize_angle(q4)
+    q5 = normalize_angle(q5)
+    q6 = normalize_angle(q6)
+    
+    # Test the solution by reconstructing the transformation matrix
+    # and comparing with the desired orientation
+    def test_solution(q1, q2, q3, q4, q5, q6):
+        # Build forward kinematics transformation
+        T_01 = np.eye(4)
+        T_01[:3, :3] = Rz(q1)
+        
+        T_12 = np.eye(4)
+        T_12[1, 3] = Y2
+        T_12[:3, :3] = Ry(q2)
+        
+        T_23 = np.eye(4)
+        T_23[1, 3] = Y3
+        T_23[2, 3] = L1
+        T_23[:3, :3] = Ry(q3)
+        
+        T_34 = np.eye(4)
+        T_34[2, 3] = L2
+        T_34[:3, :3] = Ry(q4)
+        
+        T_45 = np.eye(4)
+        T_45[1, 3] = Y5
+        T_45[:3, :3] = Rz(q5)
+        
+        T_56 = np.eye(4)
+        T_56[2, 3] = L3
+        T_56[:3, :3] = Ry(q6)
+        
+        T_6T = np.eye(4)
+        T_6T[1, 3] = TCP_Y
+        T_6T[:3, :3] = Rz(math.pi/2)
+        
+        # Calculate full transformation
+        T_0T = T_01 @ T_12 @ T_23 @ T_34 @ T_45 @ T_56 @ T_6T
+        
+        # Extract position and orientation
+        calc_pos = T_0T[:3, 3]
+        calc_R = T_0T[:3, :3]
+        
+        # Calculate error
+        pos_error = np.linalg.norm(calc_pos - np.array([px, py, pz]))
+        R_error = np.linalg.norm(calc_R - R_target, 'fro')
+        
+        return pos_error + R_error
+    
+    # If q3 is zero or close to zero, try a range of special cases
+    if abs(q3) < 1e-2:
+        # Try q3 = 0 explicitly
+        q3_alt = 0
+        q2_alt = normalize_angle(theta)  # Use direct angle to target
+        q4_alt = normalize_angle(phi - q2_alt)  # Adjust q4 to maintain phi
+        
+        # Test this solution
+        err_alt = test_solution(q1, q2_alt, q3_alt, q4_alt, q5, q6)
+        err_orig = test_solution(q1, q2, q3, q4, q5, q6)
+        
+        if err_alt < err_orig:
+            q2, q3, q4 = q2_alt, q3_alt, q4_alt
+    
+    # Final angle normalization
+    q1 = normalize_angle(q1)
+    q2 = normalize_angle(q2)
+    q3 = normalize_angle(q3)
+    q4 = normalize_angle(q4)
+    q5 = normalize_angle(q5)
+    q6 = normalize_angle(q6)
+    
+    return (q1, q2, q3, q4, q5, q6)
+```
+
+Let me revise this solution one more time, focusing on the essential mathematical approach:
+
+```python
+def inverse_kinematics(p: tuple[float, float, float], r: tuple[float, float, float]) -> tuple[float, float, float, float, float, float]:
+    """
+    Gets the joint values needed to reach position "p" and orientation "r".
+    :param p: The position to reach in the form [x, y, z].
+    :param r: The orientation to reach in radians in the form [x, y, z].
+    :return: A list of the values to set the links to for reaching position "p" and orientation "r".
+    """
+    import math
+    import numpy as np
+    
+    # Robot dimensions
+    L1 = 0.425       # Link 3 Z offset
+    L2 = 0.39225     # Link 4 Z offset
+    L3 = 0.09465     # Link 6 Z offset
+    Y2 = 0.13585     # Joint 2 Y offset
+    Y3 = -0.1197     # Joint 3 Y offset 
+    Y5 = 0.093       # Joint 5 Y offset
+    TCP_Y = 0.0823   # TCP Y offset
+    Y_OFFSET = Y2 + Y3 + Y5  # = 0.10915
+    
+    # Target position and orientation
+    px, py, pz = p
+    roll, pitch, yaw = r
+    
+    # Rotation matrix functions
+    def Rx(a): return np.array([[1, 0, 0], [0, math.cos(a), -math.sin(a)], [0, math.sin(a), math.cos(a)]])
+    def Ry(a): return np.array([[math.cos(a), 0, math.sin(a)], [0, 1, 0], [-math.sin(a), 0, math.cos(a)]])
+    def Rz(a): return np.array([[math.cos(a), -math.sin(a), 0], [math.sin(a), math.cos(a), 0], [0, 0, 1]])
+    
+    # Normalize angle to [-π, π]
+    def normalize(a): return ((a + math.pi) % (2 * math.pi)) - math.pi
+    
+    # Build target orientation matrix
+    R_target = Rz(yaw) @ Ry(pitch) @ Rx(roll)
+    
+    # Account for TCP orientation (π/2 around Z)
+    R_tcp = Rz(math.pi/2)
+    R_wrist = R_target @ R_tcp.T
+    
+    # Remove TCP offset from target position to get wrist position
+    tcp_offset = R_target @ np.array([0, TCP_Y, 0])
+    wrist_pos = np.array([px, py, pz]) - tcp_offset
+    wx, wy, wz = wrist_pos
+    
+    # Step 1: Solve for q1 (base rotation)
+    xy_dist = math.sqrt(wx**2 + wy**2)
+    theta = math.atan2(wy, wx)
+    
+    # There are two possible solutions for q1 (based on Law of Sines)
+    if xy_dist < 1e-6:
+        # Special case: wrist directly above base
+        q1 = 0.0
+    else:
+        # Calculate the offset angle
+        if xy_dist < Y_OFFSET:
+            q1 = theta  # Default if target is unreachable with Y offset
+        else:
+            ratio = Y_OFFSET / xy_dist
+            ratio = max(-1.0, min(1.0, ratio))
+            offset = math.asin(ratio)
+            
+            q1_sol1 = theta - offset
+            q1_sol2 = math.pi - theta + offset
+            
+            # Test which solution works better with the orientation
+            def test_q1(q1_val):
+                Rz_inv = Rz(-q1_val)
+                M = Rz_inv @ R_wrist
+                return abs(M[1, 2])  # Should be close to 0
+            
+            err1 = test_q1(q1_sol1)
+            err2 = test_q1(q1_sol2)
+            
+            if err1 <= err2:
+                q1 = q1_sol1
+            else:
+                q1 = q1_sol2
+    
+    # Transform wrist position to frame after q1
+    Rz_inv = Rz(-q1)
+    wrist_local = Rz_inv @ wrist_pos
+    wx_local, wy_local, wz_local = wrist_local
+    
+    # Get orientation matrix after q1
+    M = Rz_inv @ R_wrist
+    
+    # Step 2: Extract q5 from orientation
+    q5 = math.atan2(M[1, 0], M[1, 1])
+    
+    # Remove q5 effect from orientation
+    M_no5 = M @ Rz(-q5)
+    
+    # Step 3: Extract q6 from orientation
+    q6 = math.atan2(-M_no5[0, 2], M_no5[2, 2])
+    
+    # Remove q6 effect from orientation
+    M_no56 = M_no5 @ Ry(-q6)
+    
+    # Step 4: Extract phi (q2+q3+q4) from orientation
+    phi = math.atan2(M_no56[0, 2], M_no56[2, 2])
+    
+    # Step 5: Calculate the position joints 2,3,4 need to reach
+    target_x = wx_local - L3 * math.sin(phi) * math.cos(q6)
+    target_z = wz_local - L3 * math.cos(phi) * math.cos(q6)
+    
+    # Step 6: Solve for q2, q3, q4 using planar kinematics
+    r2 = target_x**2 + target_z**2
+    
+    # Calculate q3 using law of cosines
+    cos_q3 = (r2 - L1**2 - L2**2) / (2 * L1 * L2)
+    cos_q3 = max(-1.0, min(1.0, cos_q3))
+    
+    if abs(cos_q3 - 1.0) < 1e-6:
+        q3 = 0.0
+    elif abs(cos_q3 + 1.0) < 1e-6:
+        q3 = math.pi
+    else:
+        q3_pos = math.acos(cos_q3)
+        q3_neg = -q3_pos
+        
+        # Calculate q2, q4 for both q3 solutions
+        def calc_q2q4(q3_val):
+            # Calculate q2
+            alpha = math.atan2(target_x, target_z)
+            beta = math.atan2(L2 * math.sin(q3_val), L1 + L2 * math.cos(q3_val))
+            q2_val = alpha - beta
+            
+            # Calculate q4
+            q4_val = phi - (q2_val + q3_val)
+            
+            # Verify with forward kinematics
+            x_calc = L1 * math.sin(q2_val) + L2 * math.sin(q2_val + q3_val) + L3 * math.sin(phi) * math.cos(q6)
+            z_calc = L1 * math.cos(q2_val) + L2 * math.cos(q2_val + q3_val) + L3 * math.cos(phi) * math.cos(q6)
+            
+            error = (x_calc - wx_local)**2 + (z_calc - wz_local)**2
+            return q2_val, q4_val, error
+        
+        # Calculate both solutions and select the one with less error
+        q2_pos, q4_pos, err_pos = calc_q2q4(q3_pos)
+        q2_neg, q4_neg, err_neg = calc_q2q4(q3_neg)
+        
+        if err_pos <= err_neg:
+            q2, q3, q4 = q2_pos, q3_pos, q4_pos
+        else:
+            q2, q3, q4 = q2_neg, q3_neg, q4_neg
+    
+    # Normalize all angles to [-π, π]
+    q1 = normalize(q1)
+    q2 = normalize(q2)
+    q3 = normalize(q3)
+    q4 = normalize(q4)
+    q5 = normalize(q5)
+    q6 = normalize(q6)
+    
+    return (q1, q2, q3, q4, q5, q6)
+```
+
+This solution focuses on the core mathematical approach with careful handling of special cases:
+
+1. Proper handling of the TCP offset and orientation
+2. Correct calculation of the wrist position from the target
+3. Accurate extraction of joint angles from the orientation matrix
+4. Proper handling of the planar mechanism formed by joints 2, 3, and 4
+5. Selection of the correct branch from multiple solutions
+6. Normalization of joint angles to ensure they're in the expected range
+
+The solution follows the same approach as the existing 5-DOF solution but properly extends it to account for joint 6 and the TCP transformation.

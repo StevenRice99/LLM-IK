@@ -1,0 +1,141 @@
+```python
+import math
+import numpy as np
+
+def inverse_kinematics(p: tuple[float, float, float], r: tuple[float, float, float]) -> tuple[float, float, float, float, float]:
+    """
+    Closed-form inverse kinematics for a 5-DOF manipulator with the following structure:
+      - Base (Revolute 1): at [0,0,0], rotation about Y.
+      - Revolute 2: translation from base: [0, -0.1197, 0.425] (in joint1 frame), rotation about Y.
+      - Revolute 3: translation: [0, 0, 0.39225] (from joint2 to joint3), rotation about Y.
+      - Revolute 4: translation: [0, 0.093, 0] (from joint3 to joint4), rotation about Z.
+      - Revolute 5: translation: [0, 0, 0.09465] (from joint4 to joint5), rotation about Y.
+      - TCP: translation [0, 0.0823, 0] and fixed orientation offset about Z by psi = 1.570796325.
+    
+    The method decouples the IK problem by first determining the wrist center (joint5 origin)
+    then solving for the position limbs (joints 1–3) and finally the wrist orientation (joints 4 and 5).
+    
+    Note: This implementation generates candidate solutions (due to the ± ambiguity in joint 3)
+    and chooses the candidate whose forward computed end‐effector orientation best matches R_target.
+    
+    :param p: Desired TCP position [x, y, z] (global coordinates).
+    :param r: Desired TCP orientation given as roll, pitch, yaw (in radians) following URDF convention:
+              R_target = Rz(yaw) @ Ry(pitch) @ Rx(roll).
+    :return: Tuple (q1, q2, q3, q4, q5) of joint angles in radians.
+    """
+    
+    # ----- Helper rotation matrices -----
+    def rot_x(a):
+        ca, sa = math.cos(a), math.sin(a)
+        return np.array([[1, 0, 0],
+                         [0, ca, -sa],
+                         [0, sa,  ca]])
+    
+    def rot_y(a):
+        ca, sa = math.cos(a), math.sin(a)
+        return np.array([[ ca, 0, sa],
+                         [  0, 1,  0],
+                         [-sa, 0, ca]])
+    
+    def rot_z(a):
+        ca, sa = math.cos(a), math.sin(a)
+        return np.array([[ca, -sa, 0],
+                         [sa,  ca, 0],
+                         [ 0,   0, 1]])
+    
+    # ----- Fixed geometric parameters -----
+    # Offset from base (joint1) to joint2 (given in joint1 frame)
+    off_12 = np.array([0.0, -0.1197, 0.425])
+    # Translations along the chain (expressed in each link's local coordinates):
+    # From joint2 to joint3 (after Revolute2): along local z
+    L1 = 0.39225  
+    # From joint3 to joint4 (fixed translation): along local y
+    d_34 = 0.093  
+    # From joint4 to joint5 (wrist center): along local z
+    L2 = 0.09465  
+    # TCP offset (from joint5 to TCP): translation along joint5 local y (URDF convention)
+    d_tcp = 0.0823  
+    # Fixed TCP rotation about Z (radians)
+    psi = 1.570796325
+
+    # ----- Step 1: Compute target end-effector rotation R_target from rpy -----
+    roll, pitch, yaw = r
+    R_target = rot_z(yaw) @ rot_y(pitch) @ rot_x(roll)
+    
+    # ----- Step 2: Compute wrist center (joint5 origin) position -----
+    # The TCP pose is given by: translation d_tcp (in joint5 frame) then fixed rotation R_z(psi).
+    # To compute the wrist center, subtract the TCP translation expressed in the global frame.
+    # Here we assume the translation is applied in the TCP frame, so:
+    p_global = np.array(p)
+    # Transform the TCP offset by the desired end-effector orientation:
+    offset_tcp_global = R_target @ np.array([0, d_tcp, 0])
+    p_wrist = p_global - offset_tcp_global
+
+    # ----- Step 3: Solve for base joint (q1) -----
+    # Joint1 rotates about Y (vertical); its effect is to orient the arm in the X-Z plane.
+    # Compute q1 from the wrist center's projection on the X-Z plane.
+    q1 = math.atan2(p_wrist[0], p_wrist[2])
+    
+    # ----- Step 4: Transform wrist center into joint2 frame -----
+    # The origin of joint2 in the global frame is: p_joint2 = R_y(q1) @ off_12.
+    p_joint2 = rot_y(q1) @ off_12
+    # Express wrist center relative to joint2 and rotate by -q1 to get coordinates in joint2 frame.
+    p_sub = np.dot(rot_y(-q1), (p_wrist - p_joint2))
+    # p_sub = [p_sub_x, p_sub_y, p_sub_z] in joint2 frame.
+    # Ideally, due to the fixed translation from joint3 to joint4 (d_34 along y), the y-component should equal d_34.
+    # (Minor differences may occur due to numerical error.)
+    p_sub_x, p_sub_y, p_sub_z = p_sub.copy()
+    
+    # ----- Step 5: Solve for joints q2 and q3 from the position sub-problem -----
+    # The wrist center (joint5) position relative to joint2 is given by the forward kinematics of joints 2–4:
+    #   p_sub = R_y(q2) * { [0, 0, L1] + R_y(q3) * ( [0, d_34, 0] + [0, 0, L2] ) }
+    # Notice that the translation [0, d_34, 0] (from joint3 to joint4) is along y and is invariant to R_y(q3).
+    # Thus the effective position (ignoring the constant y offset) in the x-z plane is:
+    #   [p_x; p_z] = R_y(q2) * [ L1 + L2*cos(q3); L2*sin(q3) ]
+    # Let theta = atan2(p_sub_x, p_sub_z). And let R_planar = sqrt(p_sub_x^2+p_sub_z^2).
+    # Then:
+    #     R_planar = sqrt( (L1 + L2*cos(q3))^2 + (L2*sin(q3))^2 )
+    #              = sqrt( L1^2 + 2*L1*L2*cos(q3) + L2^2 )
+    # Solve for cos(q3):
+    #     cos(q3) = (R_planar^2 - (L1**2 + L2**2)) / (2*L1*L2)
+    R_planar = math.sqrt(p_sub_x**2 + p_sub_z**2)
+    # Clamp the cosine value within [-1, 1] to avoid numerical issues.
+    cos_q3_val = (R_planar**2 - (L1**2 + L2**2)) / (2 * L1 * L2)
+    cos_q3_val = max(min(cos_q3_val, 1.0), -1.0)
+    
+    # Two possible solutions for q3 (elbow up and elbow down)
+    q3_candidate1 = math.acos(cos_q3_val)
+    q3_candidate2 = -q3_candidate1
+
+    # For each candidate q3, compute corresponding q2.
+    # Let gamma = atan2(L2*sin(q3), L1 + L2*cos(q3)).
+    candidates = []
+    theta = math.atan2(p_sub_x, p_sub_z)
+    for q3_candidate in [q3_candidate1, q3_candidate2]:
+        gamma = math.atan2(L2 * math.sin(q3_candidate), L1 + L2 * math.cos(q3_candidate))
+        q2_candidate = theta - gamma
+        # ----- Step 6: Solve for wrist orientation joints (q4 and q5) -----
+        # The overall orientation is:
+        #   R_target = R_y(q1) * R_y(q2) * R_y(q3) * R_z(q4) * R_y(q5) * R_z(psi)
+        # Multiply both sides on the left by R_y(-(q1+q2+q3)) and on the right by R_z(-psi):
+        #   R_bar2 = R_y(-(q1+q2+q3)) * R_target * R_z(-psi) = R_z(q4) * R_y(q5)
+        R_bar2 = rot_y(-(q1 + q2_candidate + q3_candidate)) @ R_target @ rot_z(-psi)
+        # From the structure of R_z(q4)*R_y(q5), we can extract:
+        #   [R_bar2]_{2,0} = -sin(q5)   ->  q5 = -asin(R_bar2[2,0])
+        #   and q4 = atan2(R_bar2[1,0], R_bar2[0,0])
+        r20 = np.clip(R_bar2[2, 0], -1.0, 1.0)
+        q5_candidate = -math.asin(r20)
+        q4_candidate = math.atan2(R_bar2[1, 0], R_bar2[0, 0])
+        
+        # Reconstruct overall rotation from candidate joint angles:
+        R_candidate = ( rot_y(q1) @ rot_y(q2_candidate) @ rot_y(q3_candidate) @
+                        rot_z(q4_candidate) @ rot_y(q5_candidate) @ rot_z(psi) )
+        # Compute error with target rotation (Frobenius norm)
+        error = np.linalg.norm(R_candidate - R_target, ord='fro')
+        candidate = (error, (q1, q2_candidate, q3_candidate, q4_candidate, q5_candidate))
+        candidates.append(candidate)
+    
+    # Choose the candidate with the smallest orientation error.
+    best_candidate = min(candidates, key=lambda c: c[0])[1]
+    return best_candidate
+```

@@ -1,0 +1,359 @@
+Based on the forward kinematics results and the feedback, I need to completely revise my inverse kinematics solution. I see that my previous approach didn't correctly handle the joint configurations and transformations.
+
+Here's my updated solution:
+
+```python
+import math
+import numpy as np
+
+def inverse_kinematics(p: tuple[float, float, float]) -> tuple[float, float, float, float, float, float]:
+    """
+    Gets the joint values needed to reach position "p".
+    :param p: The position to reach in the form [x, y, z].
+    :return: A list of the values to set the links to for reaching position "p".
+    """
+    x, y, z = p
+    
+    # Robot dimensions
+    j1_to_j2_y = 0.13585
+    j2_to_j3_y = -0.1197
+    j2_to_j3_z = 0.425
+    j3_to_j4_z = 0.39225
+    j4_to_j5_y = 0.093
+    j5_to_j6_z = 0.09465
+    j6_to_tcp_y = 0.0823
+    
+    # Calculate the wrist center position by backtracking from TCP
+    # We need to consider TCP offsets and account for joint 5 rotation
+    
+    # First determine joint 1 (rotation around Z)
+    theta1 = math.atan2(x, y)
+    
+    # To handle the full range of possibilities, we'll try multiple starting configurations
+    # and choose the best result
+    
+    best_solution = None
+    best_error = float('inf')
+    
+    # Try different configurations for joint 3
+    for theta3_sign in [-1, 1]:
+        # Compute the wrist center by backtracking from TCP
+        # Since we don't know the orientation yet, we'll use an approximation
+        # and refine later
+        wc_x = x - j6_to_tcp_y * math.sin(theta1)
+        wc_y = y - j6_to_tcp_y * math.cos(theta1)
+        wc_z = z - j5_to_j6_z
+        
+        # Distance from joint 2 to wrist center
+        j2_to_wc_x = wc_x - 0  # joint 2 is at origin (x)
+        j2_to_wc_y = wc_y - j1_to_j2_y * math.cos(theta1)
+        j2_to_wc_z = wc_z - 0  # Assuming joint 2 is at origin (z)
+        
+        # Project the wrist center onto the plane defined by joint 1
+        distance_xy = math.sqrt(j2_to_wc_x**2 + j2_to_wc_y**2)
+        distance_proj = math.sqrt(distance_xy**2 + j2_to_wc_z**2)
+        
+        # Apply the law of cosines to find the angle of joint 3
+        # We have a triangle with sides: j2_to_j3, j3_to_wc, and j2_to_wc
+        j2_to_j3 = math.sqrt(j2_to_j3_y**2 + j2_to_j3_z**2)
+        j3_to_wc = math.sqrt(j3_to_j4_z**2 + j4_to_j5_y**2)
+        
+        # Law of cosines: cos(C) = (a² + b² - c²) / (2*a*b)
+        cos_theta3 = (j2_to_j3**2 + j3_to_wc**2 - distance_proj**2) / (2 * j2_to_j3 * j3_to_wc)
+        
+        # Ensure the value is within valid range for acos
+        cos_theta3 = max(min(cos_theta3, 1.0), -1.0)
+        
+        # Calculate theta3 (we try both positive and negative solutions)
+        theta3 = theta3_sign * math.acos(cos_theta3)
+        
+        # Given theta3, calculate theta2
+        # We need to find the angle between the vertical and the line from joint 2 to joint 3
+        # Then we add the angle between that line and the line from joint 2 to wrist center
+        
+        # First angle (vertical to j2-j3 line)
+        phi1 = math.atan2(j2_to_j3_z, j2_to_j3_y)
+        
+        # Second angle (using the law of sines)
+        sin_phi2 = j3_to_wc * math.sin(theta3) / distance_proj
+        sin_phi2 = max(min(sin_phi2, 1.0), -1.0)
+        phi2 = math.asin(sin_phi2)
+        
+        # Calculate the projection angle in the xy-plane
+        phi_xy = math.atan2(j2_to_wc_x, j2_to_wc_y)
+        
+        # Final theta2 computation
+        theta2 = phi_xy - phi1 - phi2
+        
+        # Now compute theta4 to make the end effector reach the target
+        # We know joints 1, 2, and 3, so we can compute the position after joint 3
+        # Then, we use theta4 to align with the wrist center
+        theta4 = 0
+        
+        # Try different configurations for joint 5
+        for theta5 in [0, math.pi/2, -math.pi/2, math.pi, -math.pi]:
+            # For simplicity, we'll set theta6 to 0
+            theta6 = 0
+            
+            # Now we need to verify our solution by computing the forward kinematics
+            # This is a simplified version just to estimate the TCP position
+            
+            # Transform through joint 1 (Z rotation)
+            c1, s1 = math.cos(theta1), math.sin(theta1)
+            R1 = np.array([
+                [c1, -s1, 0],
+                [s1, c1, 0],
+                [0, 0, 1]
+            ])
+            
+            # Transform through joint 2 (Y rotation)
+            c2, s2 = math.cos(theta2), math.sin(theta2)
+            R2 = np.array([
+                [c2, 0, s2],
+                [0, 1, 0],
+                [-s2, 0, c2]
+            ])
+            
+            # Transform through joint 3 (Y rotation)
+            c3, s3 = math.cos(theta3), math.sin(theta3)
+            R3 = np.array([
+                [c3, 0, s3],
+                [0, 1, 0],
+                [-s3, 0, c3]
+            ])
+            
+            # Transform through joint 4 (Y rotation)
+            c4, s4 = math.cos(theta4), math.sin(theta4)
+            R4 = np.array([
+                [c4, 0, s4],
+                [0, 1, 0],
+                [-s4, 0, c4]
+            ])
+            
+            # Transform through joint 5 (Z rotation)
+            c5, s5 = math.cos(theta5), math.sin(theta5)
+            R5 = np.array([
+                [c5, -s5, 0],
+                [s5, c5, 0],
+                [0, 0, 1]
+            ])
+            
+            # Transform through joint 6 (Y rotation)
+            c6, s6 = math.cos(theta6), math.sin(theta6)
+            R6 = np.array([
+                [c6, 0, s6],
+                [0, 1, 0],
+                [-s6, 0, c6]
+            ])
+            
+            # Composite rotation
+            R = R1.dot(R2).dot(R3).dot(R4).dot(R5).dot(R6)
+            
+            # Position after each joint
+            p1 = np.array([0, 0, 0])
+            p2 = p1 + R1.dot(np.array([0, j1_to_j2_y, 0]))
+            p3 = p2 + R1.dot(R2).dot(np.array([0, j2_to_j3_y, j2_to_j3_z]))
+            p4 = p3 + R1.dot(R2).dot(R3).dot(np.array([0, 0, j3_to_j4_z]))
+            p5 = p4 + R1.dot(R2).dot(R3).dot(R4).dot(np.array([0, j4_to_j5_y, 0]))
+            p6 = p5 + R1.dot(R2).dot(R3).dot(R4).dot(R5).dot(np.array([0, 0, j5_to_j6_z]))
+            tcp = p6 + R.dot(np.array([0, j6_to_tcp_y, 0]))
+            
+            # Compute error between our computed TCP and target
+            error = math.sqrt((tcp[0] - x)**2 + (tcp[1] - y)**2 + (tcp[2] - z)**2)
+            
+            # Update best solution if this one is better
+            if error < best_error:
+                best_error = error
+                best_solution = (theta1, theta2, theta3, theta4, theta5, theta6)
+    
+    # If no solution was found, provide a reasonable default
+    if best_solution is None:
+        return (0, 0, 0, 0, 0, 0)
+    
+    return best_solution
+```
+
+However, I realize this approach might still not be optimal. Let me try a more methodical approach based on the existing code examples:
+
+```python
+import math
+import numpy as np
+
+def inverse_kinematics(p: tuple[float, float, float]) -> tuple[float, float, float, float, float, float]:
+    """
+    Gets the joint values needed to reach position "p".
+    :param p: The position to reach in the form [x, y, z].
+    :return: A tuple of the 6 joint values needed to reach the position.
+    """
+    x, y, z = p
+    
+    # Robot dimensions from the URDF
+    L1_y = 0.13585    # Joint 1 to Joint 2 (y)
+    L2_y = -0.1197    # Joint 2 to Joint 3 (y)
+    L2_z = 0.425      # Joint 2 to Joint 3 (z)
+    L3_z = 0.39225    # Joint 3 to Joint 4 (z)
+    L4_y = 0.093      # Joint 4 to Joint 5 (y)
+    L5_z = 0.09465    # Joint 5 to Joint 6 (z)
+    L6_y = 0.0823     # Joint 6 to TCP (y)
+    
+    # We'll use a numerical approach by trying multiple possible solutions
+    best_solution = None
+    min_error = float('inf')
+    
+    # Try multiple initial configurations
+    for theta1_init in np.linspace(-math.pi, math.pi, 8):
+        for theta3_sign in [-1, 1]:
+            # Calculate an approximated wrist center position (ignoring joint 5 rotation for now)
+            c1 = math.cos(theta1_init)
+            s1 = math.sin(theta1_init)
+            
+            # Estimate wrist center by subtracting final offsets
+            wc_x = x - L6_y * s1
+            wc_y = y - L6_y * c1
+            wc_z = z - L5_z
+            
+            # Convert to plane coordinates (rotate by -theta1 around Z)
+            wc_x_plane = c1 * wc_x + s1 * wc_y
+            wc_y_plane = -s1 * wc_x + c1 * wc_y
+            wc_z_plane = wc_z
+            
+            # Adjust to joint 2 coordinate system
+            rel_y = wc_y_plane - L1_y
+            rel_z = wc_z_plane
+            
+            # Distance from joint 2 to wrist center
+            D = math.sqrt(rel_y**2 + rel_z**2)
+            
+            # Calculate joint angles using the law of cosines
+            L_arm = math.sqrt(L2_y**2 + L2_z**2)
+            L_forearm = math.sqrt(L3_z**2 + L4_y**2)
+            
+            # Joint 3 angle using law of cosines
+            cos_theta3 = (D**2 - L_arm**2 - L_forearm**2) / (2 * L_arm * L_forearm)
+            
+            # Check if position is reachable
+            if abs(cos_theta3) > 1.0:
+                continue
+            
+            theta3 = theta3_sign * math.acos(max(min(cos_theta3, 1.0), -1.0))
+            
+            # Angle of the arm in the Y-Z plane
+            alpha = math.atan2(rel_z, rel_y)
+            
+            # Angle between the line from joint 2 to joint 3 and the horizontal
+            beta = math.atan2(L2_z, -L2_y)
+            
+            # Angle between the line from joint 2 to wrist center and the arm
+            cos_gamma = (L_arm**2 + D**2 - L_forearm**2) / (2 * L_arm * D)
+            cos_gamma = max(min(cos_gamma, 1.0), -1.0)
+            gamma = math.acos(cos_gamma)
+            
+            # Joint 2 angle
+            theta2 = alpha - gamma - beta
+            
+            # For joint 4, we'll try multiple values
+            for theta4 in np.linspace(-math.pi, math.pi, 8):
+                # For joint 5, we'll try multiple values
+                for theta5 in np.linspace(-math.pi, math.pi, 8):
+                    # For simplicity, set joint 6 to 0
+                    theta6 = 0
+                    
+                    # Compute forward kinematics to check the result
+                    # Joint 1 rotation (around Z)
+                    c1, s1 = math.cos(theta1_init), math.sin(theta1_init)
+                    R1 = np.array([
+                        [c1, -s1, 0],
+                        [s1, c1, 0],
+                        [0, 0, 1]
+                    ])
+                    
+                    # Joint 2 rotation (around Y)
+                    c2, s2 = math.cos(theta2), math.sin(theta2)
+                    R2 = np.array([
+                        [c2, 0, s2],
+                        [0, 1, 0],
+                        [-s2, 0, c2]
+                    ])
+                    
+                    # Joint 3 rotation (around Y)
+                    c3, s3 = math.cos(theta3), math.sin(theta3)
+                    R3 = np.array([
+                        [c3, 0, s3],
+                        [0, 1, 0],
+                        [-s3, 0, c3]
+                    ])
+                    
+                    # Joint 4 rotation (around Y)
+                    c4, s4 = math.cos(theta4), math.sin(theta4)
+                    R4 = np.array([
+                        [c4, 0, s4],
+                        [0, 1, 0],
+                        [-s4, 0, c4]
+                    ])
+                    
+                    # Joint 5 rotation (around Z)
+                    c5, s5 = math.cos(theta5), math.sin(theta5)
+                    R5 = np.array([
+                        [c5, -s5, 0],
+                        [s5, c5, 0],
+                        [0, 0, 1]
+                    ])
+                    
+                    # Joint 6 rotation (around Y)
+                    c6, s6 = math.cos(theta6), math.sin(theta6)
+                    R6 = np.array([
+                        [c6, 0, s6],
+                        [0, 1, 0],
+                        [-s6, 0, c6]
+                    ])
+                    
+                    # Transform matrices
+                    T1 = np.eye(4)
+                    T1[:3, :3] = R1
+                    
+                    T2 = np.eye(4)
+                    T2[:3, :3] = R2
+                    T2[1, 3] = L1_y
+                    
+                    T3 = np.eye(4)
+                    T3[:3, :3] = R3
+                    T3[1, 3] = L2_y
+                    T3[2, 3] = L2_z
+                    
+                    T4 = np.eye(4)
+                    T4[:3, :3] = R4
+                    T4[2, 3] = L3_z
+                    
+                    T5 = np.eye(4)
+                    T5[:3, :3] = R5
+                    T5[1, 3] = L4_y
+                    
+                    T6 = np.eye(4)
+                    T6[:3, :3] = R6
+                    T6[2, 3] = L5_z
+                    
+                    T_tcp = np.eye(4)
+                    T_tcp[1, 3] = L6_y
+                    
+                    # Total transformation
+                    T = T1.dot(T2).dot(T3).dot(T4).dot(T5).dot(T6).dot(T_tcp)
+                    
+                    # Get TCP position
+                    tcp_pos = T[:3, 3]
+                    
+                    # Calculate error
+                    error = math.sqrt((tcp_pos[0] - x)**2 + (tcp_pos[1] - y)**2 + (tcp_pos[2] - z)**2)
+                    
+                    # Update best solution if better
+                    if error < min_error:
+                        min_error = error
+                        best_solution = (theta1_init, theta2, theta3, theta4, theta5, theta6)
+    
+    # If no solution found, return a default
+    if best_solution is None:
+        return (0, 0, 0, 0, 0, 0)
+    
+    return best_solution
+```
+
+But I'm concerned that this brute-force approach might be too slow. Let me analyze the failed test cases more carefully to develop a more precise analytical solution.

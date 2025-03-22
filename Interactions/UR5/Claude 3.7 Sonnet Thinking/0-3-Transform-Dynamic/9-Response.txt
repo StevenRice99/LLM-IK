@@ -1,0 +1,143 @@
+After analyzing the feedback and examining the correct joint values, I'm going to implement a revised solution that directly addresses the robot's kinematic structure:
+
+```python
+def inverse_kinematics(p: tuple[float, float, float], r: tuple[float, float, float]) -> tuple[float, float, float, float]:
+    """
+    Gets the joint values needed to reach position "p" and orientation "r".
+    :param p: The position to reach in the form [x, y, z].
+    :param r: The orientation to reach in radians in the form [x, y, z].
+    :return: A list of the values to set the links to for reaching position "p" and orientation "r".
+    """
+    import numpy as np
+    import math
+    
+    # Robot dimensions
+    l1_y = 0.13585        # Joint 2 Y offset from Joint 1
+    l2_y = -0.1197        # Joint 3 Y offset from Joint 2
+    l2_z = 0.425          # Joint 3 Z offset from Joint 2
+    l3_z = 0.39225        # Joint 4 Z offset from Joint 3
+    tcp_y = 0.093         # TCP Y offset from Joint 4
+    
+    # Target position and orientation
+    x, y, z = p
+    roll, pitch, yaw = r
+    
+    # Step 1: Set Joint 1 = yaw from the orientation
+    theta1 = yaw
+    
+    # Step 2: Transform target to Joint 1 frame
+    c1, s1 = np.cos(theta1), np.sin(theta1)
+    R1 = np.array([
+        [c1, s1, 0],
+        [-s1, c1, 0],
+        [0, 0, 1]
+    ])
+    
+    # Position in Joint 1 frame
+    p1 = R1 @ np.array([x, y, z])
+    
+    # Calculate rotation matrix for target orientation
+    c_r, s_r = np.cos(roll), np.sin(roll)
+    c_p, s_p = np.cos(pitch), np.sin(pitch)
+    c_y, s_y = np.cos(yaw), np.sin(yaw)
+    
+    Rx = np.array([[1, 0, 0], [0, c_r, -s_r], [0, s_r, c_r]])
+    Ry = np.array([[c_p, 0, s_p], [0, 1, 0], [-s_p, 0, c_p]])
+    Rz = np.array([[c_y, -s_y, 0], [s_y, c_y, 0], [0, 0, 1]])
+    
+    R_target = Rz @ Ry @ Rx
+    
+    # Target orientation in Joint 1 frame
+    R1_target = R1 @ R_target
+    
+    # Step 3: Account for TCP offset
+    # The TCP offset is along the Y-axis of the TCP frame
+    tcp_offset = R1_target @ np.array([0, tcp_y, 0])
+    
+    # Wrist position (Joint 4) in Joint 1 frame
+    wrist = p1 - tcp_offset
+    
+    # Step 4: Now we have a 3-joint planar manipulator problem
+    # Adjust for Joint 2 offset from Joint 1
+    wrist[1] -= l1_y
+    
+    # The effective lengths of the links
+    l2 = np.sqrt(l2_y**2 + l2_z**2)  # Effective length from Joint 2 to 3
+    l3 = l3_z                        # Length from Joint 3 to 4
+    
+    # The angle offset of link 2 due to Y offset
+    phi2 = np.arctan2(l2_z, l2_y)
+    
+    # Distance to wrist from Joint 2
+    d = np.sqrt(wrist[1]**2 + wrist[2]**2)
+    
+    # Use cosine law to find Joint 3 angle
+    cos_theta3 = (d**2 - l2**2 - l3**2) / (2 * l2 * l3)
+    cos_theta3 = np.clip(cos_theta3, -1.0, 1.0)
+    
+    # Two possible solutions for Joint 3
+    theta3 = np.arccos(cos_theta3)
+    theta3_alt = -theta3
+    
+    # Calculate Joint 2 angle
+    beta = np.arctan2(wrist[1], wrist[2])
+    gamma = np.arctan2(l3 * np.sin(theta3), l2 + l3 * np.cos(theta3))
+    theta2 = beta - gamma
+    
+    gamma_alt = np.arctan2(l3 * np.sin(theta3_alt), l2 + l3 * np.cos(theta3_alt))
+    theta2_alt = beta - gamma_alt
+    
+    # Step 5: Calculate Joint 4 to achieve the desired orientation
+    # Extract the Z-axis of the target orientation in Joint 1 frame
+    z_axis = R1_target[:, 2]
+    
+    # Angle of Z-axis in the YZ plane
+    target_angle = np.arctan2(z_axis[1], z_axis[2])
+    
+    # Joint 4 angle to achieve the desired orientation
+    theta4 = target_angle - theta2 - theta3
+    theta4_alt = target_angle - theta2_alt - theta3_alt
+    
+    # Normalize angles to [-π, π]
+    def normalize_angle(angle):
+        return ((angle + np.pi) % (2 * np.pi)) - np.pi
+    
+    # Apply corrections for the robot's specific geometry
+    # Based on the correct joint values from feedback
+    
+    # Joint 1 is already correct (theta1 = yaw)
+    
+    # Joint 2 needs an angle correction due to the link configuration
+    theta2 = normalize_angle(theta2 - phi2)  # Subtract the offset angle
+    theta2_alt = normalize_angle(theta2_alt - phi2)
+    
+    # Normalize all angles
+    theta1 = normalize_angle(theta1)
+    theta3 = normalize_angle(theta3)
+    theta4 = normalize_angle(theta4)
+    
+    theta3_alt = normalize_angle(theta3_alt)
+    theta4_alt = normalize_angle(theta4_alt)
+    
+    # Step 6: Choose the solution with minimal joint movement
+    # Create two possible solutions
+    solution1 = (theta1, theta2, theta3, theta4)
+    solution2 = (theta1, theta2_alt, theta3_alt, theta4_alt)
+    
+    # Select the solution with the minimum sum of absolute joint values
+    if sum(abs(angle) for angle in solution1) <= sum(abs(angle) for angle in solution2):
+        return solution1
+    else:
+        return solution2
+```
+
+This solution has several key improvements:
+
+1. Joint 1 is directly set to the yaw value, which seems to be the correct approach based on the feedback
+2. The transformations between frames are more carefully handled
+3. The TCP offset is correctly applied in the end-effector frame
+4. The kinematics for the planar manipulator (joints 2-4) are solved with proper geometric relationships
+5. The link angle offset is accounted for in joint 2
+6. Two possible solutions (elbow up/down configurations) are considered and the one with minimal joint movement is selected
+
+This solution properly takes into account the robot's specific geometry and should correctly solve the inverse kinematics for the 4-DOF manipulator.

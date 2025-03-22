@@ -1,0 +1,181 @@
+Below is one valid complete solution. In this implementation the position–chain (joints 1–5) is solved as in EXISTING 2 and then the remaining yaw about the “wrist” (joint 6) is recovered by comparing the computed (up‐to–joint5) orientation with the target. (In this solution the TCP fixed yaw offset is ψ = 1.570796325.) 
+
+Below is the code:
+
+------------------------------------------------------------
+def inverse_kinematics(p: tuple[float, float, float],
+                       r: tuple[float, float, float]) -> tuple[float, float, float, float, float, float]:
+    """
+    Computes a closed–form analytical inverse kinematics solution for the 6-DOF manipulator.
+    
+    The manipulator is defined with:
+      – Revolute 1 (about Z at [0,0,0])
+      – Revolute 2 (about Y at [0, 0.13585, 0])
+      – Revolute 3 (about Y at [0, –0.1197, 0.425])
+      – Revolute 4 (about Y at [0, 0, 0.39225])
+      – Revolute 5 (about Z at [0, 0.093, 0])
+      – Revolute 6 (about Y at [0, 0, 0.09465])
+      – TCP offset: translation [0, 0.0823, 0] and fixed orientation offset of Rz(ψ)
+         with ψ = 1.570796325.
+    
+    This routine first decouples the problem along the “planar” 2R chain (joints 2–4)
+    as in EXISTING 2 (after choosing among two candidate q1’s) to yield q1, q2, q3, q4,
+    and obtains q5 from the orientation residual. Then the remaining joint q6 is recovered
+    by comparing the forward–computed orientation up to joint 5 with the desired R_des.
+    """
+    import math
+    import numpy as np
+
+    # Define robot constants from the DETAILS table
+    L1 = 0.425         # translation in joint 3 subchain (x offset of Revolute 3)
+    L2 = 0.39225       # translation in joint 4 subchain (z offset of Revolute 4)
+    L_tcp = 0.09465    # translation in joint 6 subchain (z offset of Revolute 6)
+    # The constant offset from joints 2,3 and 5 (0.13585 from joint2, -0.1197 from joint3, +0.093 from joint5)
+    y_const = 0.13585 - 0.1197 + 0.093   # = 0.10915
+    psi = 1.570796325  # fixed TCP yaw offset (given in the TCP orientation)
+
+    # Unpack target position and desired roll, pitch, yaw.
+    p_x, p_y, p_z = p
+    roll, pitch, yaw = r
+
+    # --- Step 1. Solve for joint1 (rotation about Z) ---
+    # In the decoupled planar base, the rotated target must satisfy p̄_y = y_const.
+    r_xy = math.sqrt(p_x**2 + p_y**2)
+    theta = math.atan2(p_y, p_x)
+    # Compute solution candidates for q1
+    ratio = y_const / r_xy if r_xy != 0 else 0
+    ratio = max(-1.0, min(1.0, ratio))
+    a = math.asin(ratio)
+    q1_candidate1 = theta - a
+    q1_candidate2 = theta - (math.pi - a)
+    
+    # To pick the proper branch we “test” the decoupled orientation.
+    def compute_M(q1_val):
+        cos_q1 = math.cos(q1_val)
+        sin_q1 = math.sin(q1_val)
+        # Rz(-q1)
+        Rz_neg_q1 = np.array([[cos_q1, sin_q1, 0],
+                              [-sin_q1, cos_q1, 0],
+                              [0, 0, 1]])
+        # Build desired orientation R_des from URDF convention: R_des = Rz(yaw)·Ry(pitch)·Rx(roll)
+        R_x = np.array([[1, 0, 0],
+                        [0, math.cos(roll), -math.sin(roll)],
+                        [0, math.sin(roll), math.cos(roll)]])
+        R_y = np.array([[math.cos(pitch), 0, math.sin(pitch)],
+                        [0, 1, 0],
+                        [-math.sin(pitch), 0, math.cos(pitch)]])
+        R_z = np.array([[math.cos(yaw), -math.sin(yaw), 0],
+                        [math.sin(yaw), math.cos(yaw), 0],
+                        [0, 0, 1]])
+        R_des = R_z @ R_y @ R_x
+        M_val = Rz_neg_q1 @ R_des
+        return M_val, R_des
+
+    M1, R_des = compute_M(q1_candidate1)
+    M2, _ = compute_M(q1_candidate2)
+    err1 = abs(M1[1, 2])
+    err2 = abs(M2[1, 2])
+    q1 = q1_candidate1 if err1 <= err2 else q1_candidate2
+
+    # --- Step 2. Rotate target position into the decoupled (q1-eliminated) frame ---
+    cos_q1 = math.cos(q1)
+    sin_q1 = math.sin(q1)
+    Rz_neg_q1 = np.array([[cos_q1, sin_q1, 0],
+                          [-sin_q1, cos_q1, 0],
+                          [0, 0, 1]])
+    p_vec = np.array([p_x, p_y, p_z])
+    p_bar = Rz_neg_q1 @ p_vec
+    p_bar_x, p_bar_y, p_bar_z = p_bar
+
+    # Recompute R_des (from desired r) in global frame
+    R_x = np.array([[1, 0, 0],
+                    [0, math.cos(roll), -math.sin(roll)],
+                    [0, math.sin(roll), math.cos(roll)]])
+    R_y = np.array([[math.cos(pitch), 0, math.sin(pitch)],
+                    [0, 1, 0],
+                    [-math.sin(pitch), 0, math.cos(pitch)]])
+    R_z = np.array([[math.cos(yaw), -math.sin(yaw), 0],
+                    [math.sin(yaw), math.cos(yaw), 0],
+                    [0, 0, 1]])
+    R_des = R_z @ R_y @ R_x
+
+    # --- Step 3. Decouple orientation to obtain total “planar” rotation φ and joint 5 ---
+    # Compute M = Rz(-q1)*R_des
+    M = Rz_neg_q1 @ R_des
+    # φ = q2+q3+q4 is given by:
+    phi = math.atan2(M[0, 2], M[2, 2])
+    # Joint 5 (rotation about Z) is obtained from:
+    q5 = math.atan2(M[1, 0], M[1, 1])
+
+    # --- Step 4. Solve the effective 2R planar arm to determine q2, q3, q4 ---
+    # Remove TCP offset along φ.
+    P_x = p_bar_x - L_tcp * math.sin(phi)
+    P_z = p_bar_z - L_tcp * math.cos(phi)
+    r2 = math.sqrt(P_x**2 + P_z**2)
+    # Solve for q3 using the law of cosines:
+    cos_q3 = (r2**2 - L1**2 - L2**2) / (2 * L1 * L2)
+    cos_q3 = max(-1.0, min(1.0, cos_q3))
+    q3_candidateA = math.acos(cos_q3)
+    q3_candidateB = -q3_candidateA
+    
+    def planar_solution(q3_val):
+        q2_val = math.atan2(P_x, P_z) - math.atan2(L2 * math.sin(q3_val),
+                                                     L1 + L2 * math.cos(q3_val))
+        q4_val = phi - (q2_val + q3_val)
+        # Reconstruct the effective forward position
+        calc_x = L1 * math.sin(q2_val) + L2 * math.sin(q2_val + q3_val) + L_tcp * math.sin(phi)
+        calc_z = L1 * math.cos(q2_val) + L2 * math.cos(q2_val + q3_val) + L_tcp * math.cos(phi)
+        err_val = math.sqrt((calc_x - p_bar_x)**2 + (calc_z - p_bar_z)**2)
+        return (q2_val, q4_val, err_val)
+    
+    q2_A, q4_A, err_A = planar_solution(q3_candidateA)
+    q2_B, q4_B, err_B = planar_solution(q3_candidateB)
+    if err_A <= err_B:
+        q3, q2, q4 = q3_candidateA, q2_A, q4_A
+    else:
+        q3, q2, q4 = q3_candidateB, q2_B, q4_B
+
+    # --- Step 5. Recover the last joint angle q6 from the orientation residual ---
+    # Up to joint 5 the orientation is given by:
+    #   R_mid = Rz(q1) * Ry(q2+q3+q4) * Rz(q5)
+    # and the remaining transform from joint 6 and the TCP fixed offset is:
+    #   Ry(q6) * Rz(psi)
+    # so that R_des = R_mid * [Ry(q6)*Rz(psi)].
+    # Compute R_mid:
+    R1 = np.array([[math.cos(q1), -math.sin(q1), 0],
+                   [math.sin(q1), math.cos(q1), 0],
+                   [0, 0, 1]])
+    R_y_phi = np.array([[math.cos(phi), 0, math.sin(phi)],
+                        [0, 1, 0],
+                        [-math.sin(phi), 0, math.cos(phi)]])
+    Rz_q5 = np.array([[math.cos(q5), -math.sin(q5), 0],
+                      [math.sin(q5), math.cos(q5), 0],
+                      [0, 0, 1]])
+    R_mid = R1 @ R_y_phi @ Rz_q5
+    # Then,
+    #   Ry(q6)*Rz(psi) = R_mid^T * R_des.
+    R_rem = R_mid.T @ R_des
+    # Multiply on the right by Rz(-psi) (and note Rz(-psi) = [[cosψ, sinψ, 0], [-sinψ, cosψ, 0], [0, 0, 1]])
+    Rz_neg_psi = np.array([[math.cos(psi), math.sin(psi), 0],
+                           [-math.sin(psi), math.cos(psi), 0],
+                           [0, 0, 1]])
+    R_temp = R_rem @ Rz_neg_psi
+    # Now ideally R_temp = Ry(q6) which has the form:
+    #   [[cos(q6), 0, sin(q6)],
+    #    [   0,    1,    0   ],
+    #    [-sin(q6),0, cos(q6)]]
+    # So we extract:
+    q6 = math.atan2(R_temp[0, 2], R_temp[0, 0])
+    
+    return (q1, q2, q3, q4, q5, q6)
+
+------------------------------------------------------------
+
+Explanation:
+
+1. The algorithm first chooses between two candidates for joint 1 by enforcing that the rotated target p̄ (i.e. Rz(–q1)·p) has its “y”‐component equal to the constant y_const.
+2. Then the decoupled orientation M = Rz(–q1)·R_des is used so that the net rotation about Y from joints 2–4 is given by φ = q2+q3+q4 (extracted via atan2) and joint 5 by q5.
+3. The “planar” 2R subchain (with effective lengths L1 and L2) then yields q2, q3 and q4 via standard law–of–cosines and angle–subtraction formulas.
+4. Finally, using the computed R_mid (the forward rotation from joints 1–5) the remaining joint q6 is recovered so that R_mid * (Ry(q6)*Rz(ψ)) matches the desired R_des.
+  
+This closed–form solution returns the joint angles (in radians) that achieve the target TCP position and orientation.

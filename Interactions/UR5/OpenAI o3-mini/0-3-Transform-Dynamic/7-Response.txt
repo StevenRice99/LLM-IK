@@ -1,0 +1,189 @@
+```python
+import math
+import numpy as np
+
+def inverse_kinematics(p: tuple[float, float, float],
+                       r: tuple[float, float, float]) -> tuple[float, float, float, float]:
+    """
+    Computes an analytical inverse kinematics solution for a 4-DOF serial manipulator.
+    
+    The robot’s kinematics are defined by:
+      - Joint 1: rotates about Z at the base at [0,0,0].
+      - Joint 2: is located at [0, 0.13585, 0] (in base) and rotates about Y.
+      - Joint 3: is offset from joint2 by [0, -0.1197, 0.425] and rotates about Y.
+      - Joint 4: is offset from joint3 by [0, 0, 0.39225] and rotates about Y.
+      - The TCP is then offset by [0, 0.093, 0] from joint4.
+      
+    Because joints 2,3,4 all rotate about Y the “arm‐plane” (which affects x and z)
+    decouples from the vertical (y) translation. In our solution we first choose the base angle
+    (joint1) so that when the target TCP is expressed in the shoulder (joint2) frame the wrist center
+    (i.e. the origin of joint4) lies in the shoulder’s x–z plane.
+    
+    To that end we note:
+      • The shoulder (joint2) is at T2 = [0, 0.13585, 0] in base.
+      • The TCP offset from the wrist (joint4) is [0, 0.093, 0].
+      • Thus the wrist center (joint4 origin) expressed in base coordinates
+        is p_wc = p - Rz(theta1)*[0, 0.093, 0].
+      • Expressed in the shoulder frame (i.e. after “undoing” the base rotation and subtracting T2),
+        the wrist center is:
+            p_wc_shoulder = Rz(-theta1)*p - [0, 0.13585 + 0.093, 0]
+                         = Rz(-theta1)*p - [0, 0.22885, 0].
+      • For a decoupled (planar) IK the wrist center (which is produced by joints 3 and 4)
+        should lie in the shoulder’s x–z plane. In a typical configuration the relative translation
+        from joint2 to joint4 is [0, -0.1197, (0.425+0.39225)], so the desired y‐coordinate in
+        the shoulder frame is –0.1197.
+        
+    Hence, we choose theta1 that forces:
+          (Rz(-theta1)*p)_y = 0.22885 - 0.1197 = 0.10915.
+    In other words, if we let
+          p_rot = Rz(-theta1)*p,
+    then the condition is:
+          p_rot[1] = 0.10915.
+    
+    After theta1 is set, we carry out the planar inverse kinematics in the shoulder frame.
+    In that frame we define:
+          p_eff = Rz(-theta1) * (p - [0, 0.13585, 0]),
+    so that the 2D target (for the x–z planar chain) is
+          (x_target, z_target) = (p_eff[0], p_eff[2]).
+    The two planar “links” have lengths:
+          L1 = 0.425   (from joint2 to joint3, using the z-offset of [0, -0.1197, 0.425])
+          L2 = 0.39225 (from joint3 to joint4, using [0, 0, 0.39225])
+    
+    Finally, the overall rotation of the arm about Y (i.e. the sum θ₂ + θ₃ + θ₄) is determined from
+    the desired TCP orientation. In our convention the TCP orientation R_desired is computed from the
+    given roll–pitch–yaw angles “r”. Removing the effect of theta1 yields R_planar = Rz(–theta1) * R_desired,
+    and we extract:
+              target_sum = atan2( R_planar[0,2], R_planar[0,0] ).
+    Then we set:
+              theta4 = target_sum – (theta2 + theta3).
+    
+    Note: Two IK solutions (elbow-up and elbow–down) exist; here the one with better consistency
+    (minimizing a simple error metric on the planar position and orientation) is chosen.
+    
+    :param p: Desired TCP global position [x, y, z].
+    :param r: Desired TCP orientation as roll, pitch, yaw (in radians).
+    :return: Tuple (theta1, theta2, theta3, theta4) in radians.
+    """
+    
+    # Helper: rotation about Z
+    def rotz(angle):
+        c = math.cos(angle)
+        s = math.sin(angle)
+        return np.array([[c, s, 0],
+                         [-s, c, 0],
+                         [0, 0, 1]])
+    
+    # ---------- Step 1. Determine base joint (theta1) ------------
+    # We want to choose theta1 so that when the TCP is expressed in the shoulder frame,
+    # the wrist center, defined as:
+    #    p_wc_shoulder = Rz(-theta1)*p - [0, (0.13585+0.093), 0] = Rz(-theta1)*p - [0, 0.22885, 0]
+    # has a y-coordinate equal to the desired value (-0.1197 from joint2->joint4 translation).
+    # That is, we require:
+    #      (Rz(-theta1)*p)[1] = 0.22885 + (-0.1197) = 0.10915.
+    # Write p = (p_x, p_y, p_z)
+    p_x, p_y, p_z = p
+    # Define the desired rotated y value:
+    desired_rot_y = 0.10915  # = 0.22885 - 0.1197
+    # For a given theta1, the rotated y is: -p_x*sin(theta1) + p_y*cos(theta1)
+    # We want to solve for theta1 in: -p_x*sin(theta1) + p_y*cos(theta1) = desired_rot_y.
+    # This equation has two solutions. We recast it in the form:
+    #        R_xy * cos(theta1 + alpha) = desired_rot_y,
+    # where R_xy = sqrt(p_x^2 + p_y^2) and alpha = atan2(p_x, p_y)
+    R_xy = math.hypot(p_x, p_y)
+    # To avoid divide-by-zero, if R_xy is almost zero, default theta1 = 0.
+    if R_xy < 1e-8:
+        theta1_candidate = 0.0
+    else:
+        alpha = math.atan2(p_x, p_y)
+        # Clamp the ratio inside acos to [-1,1]. If R_xy is too small, use 0.
+        ratio = desired_rot_y / R_xy
+        ratio = max(min(ratio, 1.0), -1.0)
+        delta = math.acos(ratio)
+        # Two candidate solutions:
+        cand1 = -alpha - delta
+        cand2 = -alpha + delta
+        # We choose the candidate that makes the wrist center (in the shoulder frame)
+        # have a y-coordinate close to -0.1197.
+        def wrist_y(th):
+            # In shoulder frame, the wrist center is p_wc_shoulder = Rz(-th)*p - [0, 0.22885, 0]
+            p_rot = rotz(-th).dot(np.array(p))
+            return p_rot[1] - 0.22885
+        # Desired wrist y in shoulder frame (from shoulder to joint4) is -0.1197.
+        target_wrist_y = -0.1197
+        err1 = abs(wrist_y(cand1) - target_wrist_y)
+        err2 = abs(wrist_y(cand2) - target_wrist_y)
+        theta1_candidate = cand1 if err1 < err2 else cand2
+
+    theta1 = theta1_candidate
+    # ---------- Step 2. Compute effective target for planar IK in shoulder frame ----------
+    # In the shoulder frame, the origin is at joint2 which is at T2 = [0, 0.13585, 0] in base.
+    # Express the TCP position relative to joint2 and rotate by -theta1:
+    T2 = np.array([0, 0.13585, 0])
+    p_shoulder = np.array(p) - T2
+    p_eff = rotz(-theta1).dot(p_shoulder)
+    # For the planar (x-z) IK we use:
+    x_target = p_eff[0]
+    z_target = p_eff[2]
+    d = math.hypot(x_target, z_target)
+    
+    # Link lengths for the two-link planar chain (joints 3 and 4)
+    L1 = 0.425    # from shoulder to elbow (using translation [0, -0.1197, 0.425]) – only the z part matters for planar reach
+    L2 = 0.39225  # from elbow to wrist (translation [0, 0, 0.39225])
+    
+    # ---------- Step 3. Solve the planar (2R) IK for joints 2 and 3 ----------
+    # Using the cosine law:
+    cos_theta3 = (d**2 - L1**2 - L2**2) / (2 * L1 * L2)
+    # Clamp due to numerical errors:
+    cos_theta3 = max(min(cos_theta3, 1.0), -1.0)
+    theta3_sol1 = math.acos(cos_theta3)
+    theta3_sol2 = -theta3_sol1  # alternate configuration
+    solutions = []
+    for theta3 in [theta3_sol1, theta3_sol2]:
+        # For a given theta3, solve for theta2:
+        # The forward equations:
+        #    x_target = L1*sin(theta2) + L2*sin(theta2+theta3)
+        #    z_target = L1*cos(theta2) + L2*cos(theta2+theta3)
+        # A known solution is:
+        theta2 = math.atan2(x_target, z_target) - math.atan2(L2 * math.sin(theta3), L1 + L2 * math.cos(theta3))
+        solutions.append((theta2, theta3))
+    
+    # ---------- Step 4. Determine joint 4 from orientation ----------
+    # Compute the desired TCP orientation’s rotation matrix.
+    roll, pitch, yaw = r
+    cr, sr = math.cos(roll), math.sin(roll)
+    cp, sp = math.cos(pitch), math.sin(pitch)
+    cy, sy = math.cos(yaw), math.sin(yaw)
+    R_desired = np.array([
+        [cy * cp,            cy * sp * sr - sy * cr,    cy * sp * cr + sy * sr],
+        [sy * cp,            sy * sp * sr + cy * cr,    sy * sp * cr - cy * sr],
+        [-sp,                cp * sr,                  cp * cr]
+    ])
+    # Remove base rotation: in the shoulder frame, the arm’s rotation about Y is given by:
+    R_planar = rotz(-theta1).dot(R_desired)
+    # For a pure rotation about Y, the (0,0) and (0,2) elements yield the sum angle ψ = (theta2+theta3+theta4):
+    target_sum = math.atan2(R_planar[0, 2], R_planar[0, 0])
+    
+    # For each candidate (theta2, theta3) from the planar IK, define theta4 to match the desired total:
+    best_error = float('inf')
+    best_solution = None
+    for (theta2, theta3) in solutions:
+        psi = theta2 + theta3   # planar sum from joints 2 and 3
+        theta4 = target_sum - psi
+        # Evaluate error by forward computing the planar position:
+        x_calc = L1 * math.sin(theta2) + L2 * math.sin(theta2 + theta3)
+        z_calc = L1 * math.cos(theta2) + L2 * math.cos(theta2 + theta3)
+        pos_error = math.hypot(x_calc - x_target, z_calc - z_target)
+        orient_error = abs((((theta2 + theta3 + theta4) - target_sum + math.pi) % (2*math.pi)) - math.pi)
+        total_error = pos_error + orient_error
+        if total_error < best_error:
+            best_error = total_error
+            best_solution = (theta2, theta3, theta4)
+    
+    if best_solution is None:
+        # Should not occur for reachable targets.
+        theta2 = theta3 = theta4 = 0.0
+    else:
+        theta2, theta3, theta4 = best_solution
+    
+    return (theta1, theta2, theta3, theta4)
+```

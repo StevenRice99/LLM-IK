@@ -1,0 +1,109 @@
+```python
+import math
+import numpy as np
+
+def inverse_kinematics(p: tuple[float, float, float], r: tuple[float, float, float]) -> tuple[float, float, float, float, float]:
+    """
+    Computes the 5-DOF closed-form inverse kinematics solution for the serial manipulator.
+    The joints correspond to:
+      - Revolute 1 (axis Y)
+      - Revolute 2 (axis Y)
+      - Revolute 3 (axis Y)
+      - Revolute 4 (axis Z)
+      - Revolute 5 (axis Y)
+    The robot has a fixed tool offset with translation [0, 0.0823, 0] and an extra rotation of R_z(1.570796325)
+    (so that when all joint angles are 0, the TCP pose is 
+     Position: [0, 0.0556, 0.9119] with Orientation: [0, 0, 1.570796325]).
+    
+    :param p: The desired TCP position as (x, y, z)
+    :param r: The desired TCP orientation in roll, pitch, yaw (in radians)
+    :return: A tuple (θ₁, θ₂, θ₃, θ₄, θ₅) representing the joint angles in radians.
+    """
+    # Unpack target position and rpy values.
+    x_target, y_target, z_target = p
+    roll, pitch, yaw = r
+
+    # Build the target rotation matrix from roll-pitch-yaw using the convention R_z * R_y * R_x.
+    cr, sr = math.cos(roll), math.sin(roll)
+    cp, sp = math.cos(pitch), math.sin(pitch)
+    cy, sy = math.cos(yaw), math.sin(yaw)
+    
+    R_x = np.array([[1, 0, 0],
+                    [0, cr, -sr],
+                    [0, sr,  cr]])
+    
+    R_y = np.array([[cp, 0, sp],
+                    [0,  1, 0],
+                    [-sp, 0, cp]])
+    
+    R_z = np.array([[cy, -sy, 0],
+                    [sy,  cy, 0],
+                    [0,    0, 1]])
+    
+    R_target = R_z @ R_y @ R_x
+
+    # The fixed tool (TCP) rotation offset is a R_z rotation of 1.570796325 radians.
+    yaw_tcp = 1.570796325
+    R_tcp_fixed = np.array([[math.cos(yaw_tcp), -math.sin(yaw_tcp), 0],
+                            [math.sin(yaw_tcp),  math.cos(yaw_tcp), 0],
+                            [0,                0,                1]])
+
+    # The TCP’s constant translation offset is [0, 0.0823, 0].
+    p_tcp = np.array([x_target, y_target, z_target])
+    # Wrist position (joint-5 origin) is obtained by removing this translation.
+    p_wrist = p_tcp - np.array([0, 0.0823, 0])
+
+    # Joints 1-3 all rotate about Y. They produce an effective rotation R_y(θ₁+θ₂+θ₃).
+    # We extract the sum theta_sum from the target rotation matrix:
+    theta_sum = math.atan2(R_target[0, 2], R_target[2, 2])
+    
+    # There is a fixed translation along the chain from joint 5 to joint 4.
+    # This constant length is given by the translation of Revolute 5: C_tcp = 0.09465.
+    C_tcp = 0.09465
+
+    # Compute effective (x, z) for the arm's planar 2-link chain.
+    x_wrist = p_wrist[0]
+    z_wrist = p_wrist[2]
+    x_eff = x_wrist - C_tcp * math.sin(theta_sum)
+    z_eff = z_wrist - C_tcp * math.cos(theta_sum)
+    
+    # Define link lengths from the URDF.
+    a = 0.425    # length from joint 2 to joint 3
+    b = 0.39225  # length from joint 3 to joint 5 (wrist) along the x-z plane
+    
+    # Solve for the two-link planar geometry using the law of cosines.
+    d_sq = x_eff**2 + z_eff**2
+    cos_theta2 = (d_sq - a**2 - b**2) / (2 * a * b)
+    # Clamp to account for numerical errors:
+    cos_theta2 = max(min(cos_theta2, 1.0), -1.0)
+    theta2 = math.acos(cos_theta2)  # selecting the “elbow-down” solution.
+    
+    # Compute θ₁ using the law of sines:
+    theta1 = math.atan2(x_eff, z_eff) - math.atan2(b * math.sin(theta2), a + b * math.cos(theta2))
+    
+    # Since θ₁ + θ₂ + θ₃ = theta_sum, solve for θ₃.
+    theta3 = theta_sum - theta1 - theta2
+
+    # Now solve for the wrist orientation (joints 4 and 5).
+    # The complete chain’s orientation is given by:
+    #   R_target = R_y(θ₁+θ₂+θ₃) · R_z(θ₄) · R_y(θ₅) · R_tcp_fixed.
+    # Remove the fixed TCP rotation by multiplying with the inverse of R_tcp_fixed:
+    M = R_target @ np.linalg.inv(R_tcp_fixed)  # equivalent to R_target @ R_z(-yaw_tcp)
+    
+    # Remove the arm rotation R_y(theta_sum):
+    R_y_sum = np.array([[math.cos(theta_sum), 0, math.sin(theta_sum)],
+                        [0, 1, 0],
+                        [-math.sin(theta_sum), 0, math.cos(theta_sum)]])
+    # Compute the residual rotation produced by joints 4 and 5.
+    R_bar = R_y_sum.T @ M
+
+    # The product R_z(θ₄) · R_y(θ₅) has the structure:
+    # [[cosθ₄*cosθ₅, -sinθ₄, cosθ₄*sinθ₅],
+    #  [sinθ₄*cosθ₅,  cosθ₄, sinθ₄*sinθ₅],
+    #  [-sinθ₅,           0,      cosθ₅]]
+    # Thus, we can extract:
+    theta5 = -math.asin(R_bar[2, 0])  # since R_bar[2,0] = -sin(θ₅)
+    theta4 = math.atan2(R_bar[1, 0], R_bar[0, 0])
+
+    return (theta1, theta2, theta3, theta4, theta5)
+```

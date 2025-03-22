@@ -1,0 +1,98 @@
+```python
+import math
+
+def inverse_kinematics(p: tuple[float, float, float], r: tuple[float, float, float]) -> tuple[float, float]:
+    """
+    Compute the joint angles (theta1, theta2) for a 2-DOF manipulator with:
+      • Joint 1: Revolute about Z at the base.
+      • Joint 2: Revolute about Y after a translation.
+      • TCP: Positioned (in joint2’s frame) at [0, -0.1197, 0.425],
+             with an intervening translation from joint1 of [0, 0.13585, 0].
+
+    The forward kinematics for position are:
+        p = Rz(theta1) * { [0, 0.13585, 0] + R_y(theta2) * [0, -0.1197, 0.425] }
+          = Rz(theta1) * ([0.425*sin(theta2),
+                           0.13585 - 0.1197,
+                           0.425*cos(theta2)])
+          = Rz(theta1) * ([0.425*sin(theta2), 0.01615, 0.425*cos(theta2)])
+    
+    Meanwhile, when the rotation part (Rz(theta1)*Ry(theta2)) is expressed in ZYX Euler angles,
+    one common outcome is:
+         [roll, pitch, yaw] = [0, theta2, theta1]
+    However, due to singularities and angle wrapping the same rotation may also be represented as:
+         [roll, pitch, yaw] = [pi, -theta2, theta1 - pi]   (or with roll = -pi and adjusted signs)
+    
+    We assume the provided orientation r = (roll, pitch, yaw) is consistent with one of these
+    representations. Thus, we recover the joint angles as follows:
+    
+      • If roll ≈ 0, then we set:
+              theta1 = yaw 
+              theta2 = pitch
+      • If |roll| ≈ pi, then a “flip” has occurred. We choose:
+              If roll > 0:
+                  theta1 = yaw - pi
+                  theta2 = pi - pitch
+              If roll < 0:
+                  theta1 = yaw + pi
+                  theta2 = -pi - pitch
+      • Otherwise (fallback), we solve geometrically:
+              From the z-coordinate:  z = 0.425*cos(theta2)  → theta2 = ±acos(z/0.425)
+              (select the sign to match the provided pitch)
+              Then, writing the x-y equations as
+                  [x, y] = Rz(theta1)*[0.425*sin(theta2), 0.01615],
+              we obtain:
+                  theta1 = atan2(y, x) - atan2(0.01615, 0.425*sin(theta2))
+    
+    Finally, we normalize the joint angles to the interval (–pi, pi].
+
+    :param p: The target TCP position (x, y, z).
+    :param r: The target TCP orientation (roll, pitch, yaw) in radians.
+    :return: A tuple (theta1, theta2) representing the joint angles.
+    """
+    x, y, z = p
+    roll, pitch, yaw = r
+    tol = 1e-6
+    L = 0.425
+    offset = 0.13585 - 0.1197  # = 0.01615
+
+    # --- Primary branch: use target orientation r to determine the solution branch ---
+    if abs(roll) < tol:
+        # No flip: the Euler angles come out as [0, theta2, theta1]
+        theta1 = yaw
+        theta2 = pitch
+    elif abs(abs(roll) - math.pi) < tol:
+        # A flip has occurred. Depending on the sign of roll, the Euler representation is:
+        #   If roll ≈ +pi:  [pi, -theta2, theta1 - pi]  →  theta1 = yaw - pi,   theta2 = pi - pitch
+        #   If roll ≈ -pi:  [-pi, -theta2, theta1 + pi]  →  theta1 = yaw + pi,   theta2 = -pi - pitch
+        if roll > 0:
+            theta1 = yaw - math.pi
+            theta2 = math.pi - pitch
+        else:
+            theta1 = yaw + math.pi
+            theta2 = -math.pi - pitch
+    else:
+        # --- Fallback branch: solve geometrically from the TCP position ---
+        # Use the z coordinate to get theta2:
+        ratio = z / L
+        ratio = max(min(ratio, 1.0), -1.0)
+        theta2_candidate = math.acos(ratio)
+        # Choose the sign of theta2 to align with the provided pitch.
+        if pitch < 0:
+            theta2 = -theta2_candidate
+        else:
+            theta2 = theta2_candidate
+        
+        # Now solve for theta1 from x and y.
+        # The position equations are:
+        #    x = 0.425*cos(theta1)*sin(theta2) - offset*sin(theta1)
+        #    y = 0.425*sin(theta1)*sin(theta2) + offset*cos(theta1)
+        # These represent a rotation of the vector [0.425*sin(theta2), offset]. Thus:
+        A = L * math.sin(theta2)
+        theta1 = math.atan2(y, x) - math.atan2(offset, A)
+
+    # Normalize both angles to the interval (–pi, pi]
+    theta1 = math.atan2(math.sin(theta1), math.cos(theta1))
+    theta2 = math.atan2(math.sin(theta2), math.cos(theta2))
+
+    return (theta1, theta2)
+```

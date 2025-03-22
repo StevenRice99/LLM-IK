@@ -1,0 +1,215 @@
+I notice my solution is still not matching the expected joint values, particularly for orientations. With a 5-DOF robot, the key insight is that we need to be very precise about the relationship between the joint angles and the resulting orientation.
+
+Here's a completely revised solution focusing on better orientation handling:
+
+```python
+def inverse_kinematics(p: tuple[float, float, float], r: tuple[float, float, float]) -> tuple[float, float, float, float, float]:
+    """
+    Gets the joint values needed to reach position "p" and orientation "r".
+    :param p: The position to reach in the form [x, y, z].
+    :param r: The orientation to reach in radians in the form [x, y, z].
+    :return: A list of the values to set the links to for reaching position "p" and orientation "r".
+    """
+    import math
+    import numpy as np
+    
+    # Constants from the robot definition
+    L1 = 0.425      # Translation along z in joint2
+    L2 = 0.39225    # Translation along z in joint3
+    L3 = 0.09465    # Translation along z from joint5 to TCP
+    y_offset = -0.1197 + 0.093  # Y offset from joint1 to joint4
+    tcp_y_offset = 0.0823  # Y offset from joint5 to TCP
+    
+    x_target, y_target, z_target = p
+    rx_target, ry_target, rz_target = r
+    
+    def normalize(angle):
+        """Normalize angle to [-π, π]"""
+        while angle > math.pi:
+            angle -= 2.0 * math.pi
+        while angle < -math.pi:
+            angle += 2.0 * math.pi
+        return angle
+    
+    # Function to compute rotation matrix from RPY angles (XYZ order)
+    def rpy_to_rot_matrix(rx, ry, rz):
+        # Rotation around X
+        Rx = np.array([
+            [1, 0, 0],
+            [0, math.cos(rx), -math.sin(rx)],
+            [0, math.sin(rx), math.cos(rx)]
+        ])
+        
+        # Rotation around Y
+        Ry = np.array([
+            [math.cos(ry), 0, math.sin(ry)],
+            [0, 1, 0],
+            [-math.sin(ry), 0, math.cos(ry)]
+        ])
+        
+        # Rotation around Z
+        Rz = np.array([
+            [math.cos(rz), -math.sin(rz), 0],
+            [math.sin(rz), math.cos(rz), 0],
+            [0, 0, 1]
+        ])
+        
+        # Combined rotation matrix (ZYX order)
+        return Rz @ Ry @ Rx
+    
+    # Function to create rotation matrices for each joint
+    def joint_rot_matrices(q1, q2, q3, q4, q5):
+        # Y-axis rotation for joint 1
+        R1 = np.array([
+            [math.cos(q1), 0, math.sin(q1)],
+            [0, 1, 0],
+            [-math.sin(q1), 0, math.cos(q1)]
+        ])
+        
+        # Y-axis rotation for joint 2
+        R2 = np.array([
+            [math.cos(q2), 0, math.sin(q2)],
+            [0, 1, 0],
+            [-math.sin(q2), 0, math.cos(q2)]
+        ])
+        
+        # Y-axis rotation for joint 3
+        R3 = np.array([
+            [math.cos(q3), 0, math.sin(q3)],
+            [0, 1, 0],
+            [-math.sin(q3), 0, math.cos(q3)]
+        ])
+        
+        # Z-axis rotation for joint 4
+        R4 = np.array([
+            [math.cos(q4), -math.sin(q4), 0],
+            [math.sin(q4), math.cos(q4), 0],
+            [0, 0, 1]
+        ])
+        
+        # Y-axis rotation for joint 5
+        R5 = np.array([
+            [math.cos(q5), 0, math.sin(q5)],
+            [0, 1, 0],
+            [-math.sin(q5), 0, math.cos(q5)]
+        ])
+        
+        # TCP rotation offset (π/2 around Z)
+        Rtcp = np.array([
+            [0, -1, 0],
+            [1, 0, 0],
+            [0, 0, 1]
+        ])
+        
+        return R1, R2, R3, R4, R5, Rtcp
+    
+    # Calculate full forward kinematics
+    def forward_kinematics(q1, q2, q3, q4, q5):
+        # Position
+        S = q1 + q2 + q3
+        d = tcp_y_offset * math.sin(q4)
+        x = L1 * math.sin(q1) + L2 * math.sin(q1 + q2) + L3 * math.sin(S) - d * math.cos(S)
+        z = L1 * math.cos(q1) + L2 * math.cos(q1 + q2) + L3 * math.cos(S) + d * math.sin(S)
+        y = y_offset + tcp_y_offset * math.cos(q4)
+        
+        # Orientation
+        R1, R2, R3, R4, R5, Rtcp = joint_rot_matrices(q1, q2, q3, q4, q5)
+        R = R1 @ R2 @ R3 @ R4 @ R5 @ Rtcp
+        
+        # Convert rotation matrix to RPY
+        if abs(R[2, 0]) >= 0.99999:
+            # Gimbal lock case
+            ry = -math.pi/2 if R[2, 0] > 0 else math.pi/2
+            rz = 0
+            rx = math.atan2(-R[0, 1], R[1, 1])
+        else:
+            ry = math.asin(-R[2, 0])
+            rx = math.atan2(R[2, 1], R[2, 2])
+            rz = math.atan2(R[1, 0], R[0, 0])
+        
+        return (x, y, z), (rx, ry, rz), R
+    
+    # Convert target orientation to rotation matrix
+    R_target = rpy_to_rot_matrix(rx_target, ry_target, rz_target)
+    
+    # First solve for q4 based on y-coordinate
+    C = (y_target - y_offset) / tcp_y_offset
+    C = max(min(C, 1.0), -1.0)  # Clamp to ensure valid acos input
+    q4_candidates = [math.acos(C), -math.acos(C)]
+    
+    # Direction to target in xz-plane
+    psi = math.atan2(x_target, z_target)
+    
+    best_error = float('inf')
+    best_solution = None
+    
+    # Try both q4 solutions
+    for q4 in q4_candidates:
+        d = tcp_y_offset * math.sin(q4)
+        L_eff = math.sqrt(L3 ** 2 + d ** 2)
+        phi = math.atan2(d, L3)
+        
+        # Try both possible approach angles to the target
+        for T in [psi, psi + math.pi]:
+            S = T + phi
+            
+            # Calculate wrist center position
+            W_x = x_target - L_eff * math.sin(T)
+            W_z = z_target - L_eff * math.cos(T)
+            
+            r_w = math.hypot(W_x, W_z)
+            if r_w > L1 + L2 or r_w < abs(L1 - L2):
+                continue  # Wrist center not reachable
+            
+            # Find q2 (two possible solutions)
+            cos_q2 = (r_w ** 2 - L1 ** 2 - L2 ** 2) / (2 * L1 * L2)
+            cos_q2 = max(min(cos_q2, 1.0), -1.0)
+            
+            for sign_q2 in [1, -1]:
+                q2 = sign_q2 * math.acos(cos_q2)
+                
+                # Find q1
+                delta = math.atan2(L2 * math.sin(q2), L1 + L2 * math.cos(q2))
+                theta_w = math.atan2(W_x, W_z)
+                q1 = theta_w - delta
+                
+                # Find q3
+                q3 = S - (q1 + q2)
+                
+                # Now we need to find q5 to match the orientation
+                # Let's try multiple q5 values and find the one that gives the closest match
+                for q5_base in [0, math.pi, -math.pi]:
+                    for q5_offset in np.linspace(-math.pi, math.pi, 36):  # 10-degree increments
+                        q5 = q5_base + q5_offset
+                        
+                        # Check this solution
+                        (x_fk, y_fk, z_fk), (rx_fk, ry_fk, rz_fk), R_fk = forward_kinematics(q1, q2, q3, q4, q5)
+                        
+                        # Position error
+                        pos_error = math.sqrt((x_fk - x_target)**2 + (y_fk - y_target)**2 + (z_fk - z_target)**2)
+                        
+                        # Orientation error - use Frobenius norm of difference between rotation matrices
+                        ori_error = np.linalg.norm(R_fk - R_target, 'fro')
+                        
+                        # Combined error with greater weight on orientation
+                        total_error = pos_error + 3.0 * ori_error
+                        
+                        if total_error < best_error:
+                            best_error = total_error
+                            best_solution = (q1, q2, q3, q4, q5)
+    
+    if best_solution is None:
+        raise ValueError('No valid IK solution found for the input target position and orientation.')
+    
+    return best_solution
+```
+
+This solution makes several improvements:
+
+1. Comprehensive forward kinematics that calculates both position and orientation
+2. More thorough exploration of different q5 values to find the one that best matches the target orientation
+3. Searching over wider ranges of q5 (including multiples of π) to find solutions that might be outside the [-π, π] range
+4. Improved error calculation with greater weight on orientation
+5. Cleaner separation of concerns between different parts of the solution
+
+I'm optimizing this solution to better match the joint values in the provided examples.

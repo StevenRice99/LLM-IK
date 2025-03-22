@@ -1,0 +1,126 @@
+I need to take a more precise approach that fully respects the robot's kinematic structure. Let me revise my solution by carefully working through the full inverse kinematics problem:
+
+```python
+import math
+
+def inverse_kinematics(p: tuple[float, float, float]) -> tuple[float, float, float, float, float]:
+    """
+    Gets the joint values needed to reach position "p".
+    :param p: The position to reach in the form [x, y, z].
+    :return: A list of the values to set the links to for reaching position "p".
+    """
+    x, y, z = p
+    
+    # Step 1: Solve for joint 1 (base rotation around Z-axis)
+    # This determines the plane in which the arm operates
+    theta1 = math.atan2(y, x)
+    
+    # Step 2: Transform the target into the plane defined by joint 1
+    # Project the target onto the XZ plane after rotating around Z
+    x_1 = x * math.cos(theta1) + y * math.sin(theta1)
+    
+    # Step 3: Account for the TCP offset to find the wrist center
+    # Link lengths from the problem description
+    l1_y = 0.13585    # Joint 1 to Joint 2 (y-offset)
+    l2_y = -0.1197    # Joint 2 to Joint 3 (y-offset)
+    l2_z = 0.425      # Joint 2 to Joint 3 (z-offset)
+    l3_z = 0.39225    # Joint 3 to Joint 4 (z-offset)
+    l4_y = 0.093      # Joint 4 to Joint 5 (y-offset)
+    l5_z = 0.09465    # Joint 5 to TCP (z-offset)
+    
+    # Calculate effective y-offset in the kinematic chain
+    y_offset = l1_y + l2_y + l4_y  # = 0.10915
+    
+    # Calculate the wrist center by subtracting the TCP offset in the z-direction
+    wc_x = x
+    wc_y = y
+    wc_z = z - l5_z
+    
+    # Project the wrist center onto the plane defined by joint 1
+    wc_x_1 = wc_x * math.cos(theta1) + wc_y * math.sin(theta1)
+    
+    # Step 4: Solve the 3R planar manipulator for joints 2, 3, and 4
+    # We'll use the approach from example code 2
+    
+    # The arm forms a planar 3R chain in the XZ plane after joint 1 rotation
+    L1 = l2_z          # First link length in the planar chain
+    L2 = l3_z          # Second link length in the planar chain
+    L3 = l5_z          # TCP offset (already subtracted from wrist center)
+    
+    # Target position for the planar 3R chain
+    px = x_1 - y_offset * math.sin(theta1)
+    pz = z
+    
+    # Define possible end-effector orientations in the XZ plane
+    psi = math.atan2(px, pz)
+    T_options = [psi, psi + math.pi]
+    
+    candidates = []
+    for T in T_options:
+        # Find wrist center for the planar chain
+        wx = px
+        wz = pz
+        
+        # Calculate the distance to the wrist center
+        d = math.sqrt(wx**2 + wz**2)
+        
+        # Use law of cosines to find the angle between L1 and L2
+        cos_theta3 = (d**2 - L1**2 - L2**2) / (2 * L1 * L2)
+        
+        # Ensure the value is within valid range
+        cos_theta3 = max(-1.0, min(1.0, cos_theta3))
+        
+        # Calculate theta3 (two possible solutions: elbow up/down)
+        for sign in [1, -1]:
+            theta3 = sign * math.acos(cos_theta3)
+            
+            # Calculate theta2
+            beta = math.atan2(wx, wz)
+            gamma = math.atan2(L2 * math.sin(theta3), L1 + L2 * math.cos(theta3))
+            theta2 = beta - gamma
+            
+            # Calculate theta4 to match the desired end-effector orientation
+            theta4 = T - (theta2 + theta3)
+            
+            # Forward kinematics to check accuracy
+            fx = L1 * math.sin(theta2) + L2 * math.sin(theta2 + theta3)
+            fz = L1 * math.cos(theta2) + L2 * math.cos(theta2 + theta3)
+            
+            # Calculate error between forward kinematics and target
+            error = math.sqrt((fx - wx)**2 + (fz - wz)**2)
+            
+            candidates.append((error, theta2, theta3, theta4))
+    
+    # Choose the solution with the smallest error
+    best_solution = min(candidates, key=lambda x: x[0])
+    theta2, theta3, theta4 = best_solution[1], best_solution[2], best_solution[3]
+    
+    # Joint 5 doesn't affect position
+    theta5 = 0.0
+    
+    # Normalize angles to [-π, π]
+    def normalize_angle(angle):
+        while angle > math.pi:
+            angle -= 2 * math.pi
+        while angle < -math.pi:
+            angle += 2 * math.pi
+        return angle
+    
+    theta1 = normalize_angle(theta1)
+    theta2 = normalize_angle(theta2)
+    theta3 = normalize_angle(theta3)
+    theta4 = normalize_angle(theta4)
+    theta5 = normalize_angle(theta5)
+    
+    return (theta1, theta2, theta3, theta4, theta5)
+```
+
+Upon further reflection, I see that I need to align my approach more closely with the successful example code 2. The key insights are:
+
+1. The first joint rotates around Z-axis, changing the plane in which the arm operates
+2. After the first joint rotation, we need to correctly compute the target in the new arm plane
+3. The arm's y-offsets create a fixed offset that needs to be accounted for
+4. Joints 2-4 form a planar 3R manipulator operating in this new plane
+5. Multiple solutions exist (elbow up/down) that need to be evaluated
+
+Let me submit this revised solution that more carefully handles the transformations and matches the approach from the working example.

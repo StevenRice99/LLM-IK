@@ -1,0 +1,188 @@
+```python
+def inverse_kinematics(p: tuple[float, float, float], r: tuple[float, float, float]) -> tuple[float, float, float, float, float, float]:
+    """
+    Computes a closed‐form analytical solution for the inverse kinematics of the 6-DOF serial manipulator.
+    
+    Kinematic structure:
+      • Joint 1: Revolute about Z at [0,0,0].
+      • Joint 2: Translate [0, 0.13585, 0] then rotate about Y.
+      • Joint 3: Translate [0, -0.1197, 0.425] then rotate about Y.
+      • Joint 4: Translate [0, 0, 0.39225] then rotate about Y.
+      • Joint 5: Translate [0, 0.093, 0] then rotate about Z.
+      • Joint 6: Translate [0, 0, 0.09465] then rotate about Y.
+      • TCP: Translate [0, 0.0823, 0] and fixed rotation Rz(1.570796325).
+    
+    This method works in two stages:
+      1. We first “decouple” the position by computing the wrist (joint6) target.
+         The TCP frame has a fixed offset relative to joint6 given by t_tcp = [0, 0.0823, 0].
+         Hence we compute:
+              p_wrist = p - R_des @ [0, 0.0823, 0],
+         where R_des is the desired TCP rotation computed (using URDF convention) as
+              R_des = Rz(yaw) @ Ry(pitch) @ Rx(roll).
+         Then we solve a 5‐DOF inverse kinematics for joints 1–5 so that the 
+         wrist center is correctly reached. This subproblem uses the effective link
+         lengths:
+              L1 = 0.425,
+              L2 = 0.39225,
+              L_tcp = 0.09465,
+         and a constant Y–offset contributed by the fixed translations:
+              y_const = 0.13585 – 0.1197 + 0.093 = 0.10915.
+              
+      2. With joints 1–5 determining a rotation R_arm that positions joint6, we 
+         compute the remaining wrist angle q6 from the residual orientation.
+         Noting that the full chain rotation is factored as:
+              R_des = R_arm · [Ry(q6) · R_tcp]
+         where R_tcp = Rz(1.570796325) is the fixed rotation from joint6 to TCP,
+         we isolate:
+              Ry(q6) = R_armᵀ · R_des · R_tcpᵀ,
+         and then q6 = atan2( X[0,2], X[0,0] ) with X defined below.
+    
+    Parameters:
+      p: Target position [x, y, z] for the TCP.
+      r: Target orientation (roll, pitch, yaw) in radians.
+    
+    Returns:
+      A tuple (q1, q2, q3, q4, q5, q6) with the joint angles in radians.
+    """
+    import math
+    import numpy as np
+
+    # -----------------------------
+    # Geometric constants from the URDF
+    L1 = 0.425         # Translation along Z from joint2->joint3 (effective in the planar subchain)
+    L2 = 0.39225       # Translation along Z from joint3->joint4
+    L_tcp = 0.09465    # Translation from joint5->joint6 (wrist offset)
+    y_const = 0.13585 - 0.1197 + 0.093  # Constant offset in Y (equals 0.10915)
+    tcp_offset = np.array([0, 0.0823, 0])  # TCP translation w.r.t. joint6
+
+    # -----------------------------
+    # Compute desired end-effector rotation R_des using URDF convention:
+    # R_des = Rz(yaw) @ Ry(pitch) @ Rx(roll)
+    roll, pitch, yaw = r
+    R_x = np.array([[1, 0, 0],
+                    [0, math.cos(roll), -math.sin(roll)],
+                    [0, math.sin(roll),  math.cos(roll)]])
+    R_y = np.array([[math.cos(pitch), 0, math.sin(pitch)],
+                    [0, 1, 0],
+                    [-math.sin(pitch), 0, math.cos(pitch)]])
+    R_z = np.array([[math.cos(yaw), -math.sin(yaw), 0],
+                    [math.sin(yaw),  math.cos(yaw), 0],
+                    [0, 0, 1]])
+    R_des = R_z @ R_y @ R_x
+
+    # -----------------------------
+    # Compute the wrist (joint6) target position.
+    # Since the TCP frame is offset by tcp_offset (in TCP coordinates),
+    # its position in base coordinates is p, so the wrist center is:
+    p_vec = np.array(p)
+    p_wrist = p_vec - R_des @ tcp_offset
+
+    # -----------------------------
+    # Solve 5-DOF IK for joints 1–5 using p_wrist as the target.
+    # --- Compute q1 candidates based on the XY-projection of p_wrist. ---
+    p_wrist_x, p_wrist_y, p_wrist_z = p_wrist
+    r_xy = math.sqrt(p_wrist_x**2 + p_wrist_y**2)
+    theta = math.atan2(p_wrist_y, p_wrist_x)
+    ratio = y_const / r_xy
+    ratio = max(-1.0, min(1.0, ratio))  # Clamp the value for safety
+    a = math.asin(ratio)
+    q1_candidate1 = theta - a
+    q1_candidate2 = theta - (math.pi - a)
+
+    # Helper: Compute the decoupled orientation matrix M = Rz(-q1)*R_des.
+    def compute_M(q1_val: float) -> np.ndarray:
+        cos_val = math.cos(q1_val)
+        sin_val = math.sin(q1_val)
+        Rz_neg = np.array([[cos_val, sin_val, 0],
+                           [-sin_val, cos_val, 0],
+                           [0, 0, 1]])
+        return Rz_neg @ R_des
+
+    M1 = compute_M(q1_candidate1)
+    M2 = compute_M(q1_candidate2)
+    # Choose the candidate with the smaller |M[1,2]| as a simple test.
+    if abs(M1[1, 2]) <= abs(M2[1, 2]):
+        q1 = q1_candidate1
+        M = M1
+    else:
+        q1 = q1_candidate2
+        M = M2
+
+    # Transform p_wrist into the decoupled frame (removing q1 rotation).
+    cos_q1 = math.cos(q1)
+    sin_q1 = math.sin(q1)
+    Rz_neg_q1 = np.array([[cos_q1, sin_q1, 0],
+                          [-sin_q1, cos_q1, 0],
+                          [0, 0, 1]])
+    p_bar = Rz_neg_q1 @ p_wrist
+    p_bar_x, p_bar_y, p_bar_z = p_bar
+
+    # From the decoupled orientation M, factor it as M = Ry(phi) * Rz(q5),
+    # and extract the effective angle phi and the joint 5 angle q5.
+    phi = math.atan2(M[0, 2], M[2, 2])
+    q5 = math.atan2(M[1, 0], M[1, 1])
+
+    # --- Solve the effective 2R planar subchain for joints 2, 3, and 4.
+    # Remove the wrist offset (L_tcp) from p_bar in the plane.
+    P_x = p_bar_x - L_tcp * math.sin(phi)
+    P_z = p_bar_z - L_tcp * math.cos(phi)
+    r2 = math.sqrt(P_x**2 + P_z**2)
+
+    # Compute q3 using the cosine law.
+    cos_q3 = (r2**2 - L1**2 - L2**2) / (2 * L1 * L2)
+    cos_q3 = max(-1.0, min(1.0, cos_q3))
+    q3_candidateA = math.acos(cos_q3)
+    q3_candidateB = -q3_candidateA
+
+    # For each candidate for q3, compute q2 and then q4 = phi - (q2 + q3).
+    def planar_solution(q3_val: float) -> tuple[float, float, float]:
+        q2_val = math.atan2(P_x, P_z) - math.atan2(L2 * math.sin(q3_val), L1 + L2 * math.cos(q3_val))
+        q4_val = phi - (q2_val + q3_val)
+        # Recompute the forward-planar position (only using x and z) for error checking.
+        calc_x = L1 * math.sin(q2_val) + L2 * math.sin(q2_val + q3_val) + L_tcp * math.sin(phi)
+        calc_z = L1 * math.cos(q2_val) + L2 * math.cos(q2_val + q3_val) + L_tcp * math.cos(phi)
+        err_val = math.sqrt((calc_x - p_bar_x)**2 + (calc_z - p_bar_z)**2)
+        return (q2_val, q4_val, err_val)
+    
+    q2_A, q4_A, err_A = planar_solution(q3_candidateA)
+    q2_B, q4_B, err_B = planar_solution(q3_candidateB)
+    if err_A <= err_B:
+        q3 = q3_candidateA
+        q2 = q2_A
+        q4 = q4_A
+    else:
+        q3 = q3_candidateB
+        q2 = q2_B
+        q4 = q4_B
+
+    # -----------------------------
+    # Now compute joint 6 (wrist rotation).
+    # First, reconstruct the rotation from base to joint6 (the wrist center)
+    # from the 5-DOF solution.
+    R_z_q1 = np.array([[math.cos(q1), -math.sin(q1), 0],
+                         [math.sin(q1),  math.cos(q1), 0],
+                         [0, 0, 1]])
+    angle_y = q2 + q3 + q4
+    R_y_total = np.array([[math.cos(angle_y), 0, math.sin(angle_y)],
+                          [0, 1, 0],
+                          [-math.sin(angle_y), 0, math.cos(angle_y)]])
+    R_z_q5 = np.array([[math.cos(q5), -math.sin(q5), 0],
+                       [math.sin(q5),  math.cos(q5), 0],
+                       [0, 0, 1]])
+    
+    R_arm = R_z_q1 @ R_y_total @ R_z_q5  # Rotation from base to joint6
+
+    # The fixed rotation from joint6 to TCP is:
+    R_tcp = np.array([[math.cos(1.570796325), -math.sin(1.570796325), 0],
+                      [math.sin(1.570796325),  math.cos(1.570796325), 0],
+                      [0, 0, 1]])
+    
+    # The complete rotation must satisfy:
+    #   R_des = R_arm · (Ry(q6) · R_tcp)
+    # Hence,
+    #   Ry(q6) = R_armᵀ · R_des · R_tcpᵀ
+    X = (R_arm.T @ R_des) @ R_tcp.T
+    q6 = math.atan2(X[0, 2], X[0, 0])
+    
+    return (q1, q2, q3, q4, q5, q6)
+```

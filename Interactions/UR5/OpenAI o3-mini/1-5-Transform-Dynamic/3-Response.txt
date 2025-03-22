@@ -1,0 +1,156 @@
+import math
+import numpy as np
+
+def inverse_kinematics(p: tuple[float, float, float], r: tuple[float, float, float]) -> tuple[float, float, float, float, float]:
+    """
+    Computes the joint angles for a 5-DOF serial manipulator that reaches a specified
+    TCP position and orientation using a closed‐form analytical inverse kinematics solution.
+    
+    The robot structure (all lengths in meters, angles in radians):
+      • Revolute 1: position [0, 0, 0], no fixed offset, rotates about Y.
+      • Revolute 2: position relative to previous link: [0, -0.1197, 0.425], rotates about Y.
+      • Revolute 3: position: [0, 0, 0.39225], rotates about Y.
+      • Revolute 4: position: [0, 0.093, 0], rotates about Z.
+      • Revolute 5: position: [0, 0, 0.09465], rotates about Y.
+      • TCP: fixed offset translation [0, 0.0823, 0] with a constant orientation rotation about Z of +1.570796325.
+      
+    The overall kinematics naturally decouples into two sub-chains. Existing code (see EXISTING 1)
+    shows that the base (Revolute 1) solution is given by:
+         q1 = atan2(TCP_x, TCP_z)
+    Once q1 is determined the target TCP position (and orientation) is transformed into the
+    coordinate frame of Revolute 2 by subtracting the fixed offset from Link1 to Link2.
+    Then, the remainder of the chain (from Revolute 2 to TCP) is solved using a closed‐form
+    solution analogous to EXISTING 2.
+    
+    The parameters for the second chain (joints 2 to 5) are:
+         d2 = 0.39225, d3 = 0.093, d4 = 0.09465, d_tcp = 0.0823, psi = 1.570796325.
+    In this sub-chain we denote:
+         q2  → Revolute 2 angle  (first joint of subchain),
+         q3  → Revolute 3 angle,
+         q4  → Revolute 4 angle (about Z),
+         q5  → Revolute 5 angle.
+    These enter the following (decoupled) forward position equations in the sub-chain:
+         p'_x = d2*sin(q2) + d4*sin(q2+q3) - d_tcp*sin(q4)*cos(q2+q3)
+         p'_y = d3 + d_tcp*cos(q4)
+         p'_z = d2*cos(q2) + d4*cos(q2+q3) + d_tcp*sin(q4)*sin(q2+q3)
+    And the TCP orientation (in the sub-chain frame) is given by:
+         R_total = Ry(q2+q3) · Rz(q4) · Ry(q5) · Rz(psi)
+    where the target orientation (provided as roll,pitch,yaw in the URDF convention) must be
+    transformed into the sub-chain’s (Revolute 2) coordinate frame.
+    
+    This function computes all possible solutions (stemming from the ± choices in q4 and in the
+    positioning sub-problem) and selects the candidate whose forward computed orientation best
+    matches the target.
+    
+    :param p: TCP target position [x, y, z] in global coordinates.
+    :param r: TCP target orientation in rpy (roll, pitch, yaw) in radians.
+    :return: Tuple (q1, q2, q3, q4, q5) representing the joint angles in radians.
+    """
+    # Define basic rotation matrices.
+    def rot_x(a):
+        ca, sa = math.cos(a), math.sin(a)
+        return np.array([[1, 0, 0],
+                         [0, ca, -sa],
+                         [0, sa,  ca]])
+    
+    def rot_y(a):
+        ca, sa = math.cos(a), math.sin(a)
+        return np.array([[ ca, 0, sa],
+                         [  0, 1,  0],
+                         [-sa, 0, ca]])
+    
+    def rot_z(a):
+        ca, sa = math.cos(a), math.sin(a)
+        return np.array([[ca, -sa, 0],
+                         [sa,  ca, 0],
+                         [ 0,   0, 1]])
+    
+    # Convert inputs to arrays.
+    p_global = np.array(p)
+    roll, pitch, yaw = r
+    # Global target orientation from rpy (URDF convention: R_target = Rz(yaw)*Ry(pitch)*Rx(roll))
+    R_target = rot_z(yaw) @ rot_y(pitch) @ rot_x(roll)
+    
+    # ----- Solve for joint 1 (Revolute 1) -----
+    # Existing code 1: joint 1 (about Y) aligns the arm in the horizontal plane.
+    q1 = math.atan2(p_global[0], p_global[2])
+    
+    # ----- Transform the target for the remaining sub-chain (joints 2 to 5) -----
+    # The fixed offset from the base (Revolute 1) to Revolute 2 is given in the URDF as:
+    off_12 = np.array([0.0, -0.1197, 0.425])
+    R_y_q1 = rot_y(q1)
+    p_joint2 = R_y_q1 @ off_12
+    # Express target position relative to joint2 in its own frame.
+    p_sub = np.dot(rot_y(-q1), (p_global - p_joint2))
+    # p_sub is now the TCP position expressed in the frame of Revolute 2.
+    
+    # Parameters for the sub-chain (from Revolute 2 to TCP)
+    d2 = 0.39225   # translation from joint2 to joint3
+    d3 = 0.093     # translation from joint3 to joint4 (vertical offset)
+    d4 = 0.09465   # translation from joint4 to joint5
+    d_tcp = 0.0823 # TCP offset (applied after joint5)
+    psi = 1.570796325  # constant yaw offset at the TCP (rotation about Z)
+    
+    # ----- Solve the position sub-problem (for joints 2 & 3 & 4) -----
+    # Note: The equation for p_sub[1] in the sub-chain is:
+    #       p_sub[1] = d3 + d_tcp*cos(q4)
+    # Thus, we obtain:
+    cos_q4 = (p_sub[1] - d3) / d_tcp
+    # Clamp to valid range:
+    cos_q4 = max(min(cos_q4, 1.0), -1.0)
+    q4_cand1 = math.acos(cos_q4)
+    q4_cand2 = -q4_cand1  # two possible solutions for joint 4
+    
+    candidates = []
+    # The target orientation for the sub-chain (i.e. the orientation to be achieved after joint2)
+    # is obtained by “removing” the effect of joint1:
+    R_target_sub = rot_y(-q1) @ R_target
+    # In the positioning plane (x-z plane of the sub-chain frame):
+    r_planar = math.sqrt(p_sub[0]**2 + p_sub[2]**2)
+    delta = math.atan2(p_sub[0], p_sub[2])
+    
+    # Loop over the two choices for q4 (joint 4)
+    for q4_val in [q4_cand1, q4_cand2]:
+        sin_q4 = math.sin(q4_val)
+        # Effective wrist length influenced by joint 4 and the TCP offset:
+        R_eff = math.sqrt(d4**2 + (d_tcp * sin_q4)**2)
+        # Auxiliary angle from the TCP offset:
+        phi = math.atan2(d_tcp * sin_q4, d4)
+        # Using the law-of-cosines to solve for the first positioning joint (joint 2)
+        # (r_planar)^2 = d2^2 + R_eff^2 - 2*d2*R_eff*cos(theta_offset)
+        # rearranged gives:
+        cos_term = (r_planar**2 + d2**2 - R_eff**2) / (2 * d2 * r_planar)
+        cos_term = max(min(cos_term, 1.0), -1.0)
+        theta_offset = math.acos(cos_term)
+        # Two solutions for joint 2:
+        for sign in [1, -1]:
+            q2_val = delta + sign * theta_offset
+            # Now solve for joint 3.
+            # Compute the residual vector in the plane after subtracting the d2 offset.
+            Vx = p_sub[0] - d2 * math.sin(q2_val)
+            Vz = p_sub[2] - d2 * math.cos(q2_val)
+            # The required angle for the second positioning joint (joint 3) is given by:
+            theta12 = math.atan2(Vx, Vz) + phi
+            q3_val = theta12 - q2_val
+            # ----- Solve the orientation (wrist) sub-problem: joint 5 -----
+            # For the sub-chain, the orientation contribution is:
+            #   R_sub = Ry(q2+q3) · Rz(q4) · Ry(q5) · Rz(psi)
+            # The known target for this sub-chain is R_target_sub.
+            # First, compute the rotation that is already achieved by joints 2-4:
+            R_pre = rot_y(q2_val + q3_val) @ rot_z(q4_val)
+            # Then, the rotation that joint 5 must account for is:
+            #   Ry(q5) = (R_pre)^T · R_target_sub · Rz(-psi)
+            R_wrist = np.linalg.inv(R_pre) @ R_target_sub @ rot_z(-psi)
+            q5_val = math.atan2(R_wrist[0, 2], R_wrist[0, 0])
+            
+            # --- Assemble the full candidate solution ---
+            candidate_solution = (q1, q2_val, q3_val, q4_val, q5_val)
+            # To choose among candidates, compute forward orientation (from joint 1 through TCP)
+            # Note: Translation does not affect orientation, so we compose just the rotations.
+            R_candidate = rot_y(q1) @ rot_y(q2_val + q3_val) @ rot_z(q4_val) @ rot_y(q5_val) @ rot_z(psi)
+            err = np.linalg.norm(R_candidate - R_target, ord='fro')
+            candidates.append((err, candidate_solution))
+    
+    # Select the candidate with the smallest orientation error.
+    best_candidate = min(candidates, key=lambda c: c[0])[1]
+    return best_candidate

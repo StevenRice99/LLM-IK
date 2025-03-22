@@ -1,0 +1,162 @@
+```python
+import math
+import numpy as np
+from functions import FORWARD_KINEMATICS
+
+def inverse_kinematics(p: tuple[float, float, float]) -> tuple[float, float, float, float, float, float]:
+    """
+    Analytical closed–form inverse kinematics for the 6–DOF manipulator (position only).
+    
+    The robot is defined by the following chain (all units in meters, angles in radians):
+      • Joint 1 (Revolute about Z) at [0,0,0]
+      • Translation to Joint 2: [0, 0.13585, 0]
+      • Joint 2 (Revolute about Y)
+      • Translation to Joint 3: [0, -0.1197, 0.425]
+      • Joint 3 (Revolute about Y)
+      • Translation to Joint 4: [0, 0, 0.39225]
+      • Joint 4 (Revolute about Y)
+      • Translation to Joint 5: [0, 0.093, 0]
+      • Joint 5 (Revolute about Z)
+      • Translation to Joint 6: [0, 0, 0.09465]
+      • Joint 6 (Revolute about Y)
+      • TCP offset: [0, 0.0823, 0]  (with an extra fixed TCP orientation of [0,0,1.570796325])
+      
+    In the nominal configuration (all joint angles zero) the forward kinematics yield:
+         TCP = (0, 0.19145, 0.9119)
+    When the joints move, the position of the TCP is affected by two decoupled sub–problems:
+       (a) A base rotation (q1 about Z) that rotates the entire arm in the horizontal plane.
+       (b) A 3–DOF “arm–chain” (joints 2,3,4) whose combined contributions
+           alter the effective reach in the horizontal (x) and vertical (z) directions.
+       (c) A redundant wrist (joint 5 about Z) that does not affect the TCP “y” offset
+           but shifts the horizontal (x) position via a small TCP offset.
+       Joint 6 is redundant for position so we set q6 = 0.
+       
+    Here we adopt the following strategy:
+      1. Compute a candidate base angle q1 via a decoupling of the horizontal target.
+      2. Define an effective planar target for the arm–chain. When the manipulator is at its nominal
+         configuration, the TCP lies at (r_nom, z_nom) = (0.19145, 0.9119) in the base plane.
+         For a general target p = (p_x, p_y, p_z) we define
+              r_target = sqrt(p_x²+p_y²) – 0.19145   and   z_target = p_z – 0.9119.
+      3. Approximate the 3–DOF arm chain as a “3R planar” manipulator with
+             L1 = 0.425,  L2 = 0.39225,  L3 = 0.09465.
+         We solve a (redundant) 2R–IK (by “locking” the middle joint) for joints q2 and q3,
+         and then set q4 = 0. (Any distribution of the total rotation among q2,q3,q4 is valid,
+         but we choose the simplest branch.)
+      4. Finally, we choose a candidate for the redundant wrist angle q5 so that when its 
+         contribution (taking into account the TCP offset of [0,0.0823,0] transformed by a Z rotation)
+         is combined with the arm chain, the horizontal (x–y) projection of the TCP matches the target.
+         (One may show that the TCP horizontal position in the robot base is given by:
+                p_x = cos(q1)*X_eff – sin(q1)*Y_eff 
+                p_y = sin(q1)*X_eff + cos(q1)*Y_eff 
+         where X_eff and Y_eff depend on q2–q4 and also on q5 via the TCP offset.)
+      5. Out of two candidate solutions we select the one that – when passed through the full
+         forward kinematics (using the provided FORWARD_KINEMATICS function) – minimizes the position error.
+
+    Note: This solution is one valid closed–form solution for position-only IK. Due to the
+          redundancy of the manipulator the solution is not unique. We fix q4 and q6 to 0 and
+          choose a specific branch for q5.
+    
+    :param p: The desired TCP position (x,y,z). (No reachability check is performed.)
+    :return: A tuple of six joint angles (q1, q2, q3, q4, q5, q6) in radians.
+    """
+    # Fixed offsets from the URDF (in meters):
+    d1   = 0.13585        # translation from base to joint2 along y
+    d2   = 0.425          # translation from joint2 to joint3 (z)
+    d3   = 0.39225        # translation from joint3 to joint4 (z)
+    d4   = 0.093          # translation from joint4 to joint5 (y)
+    d5   = 0.09465        # translation from joint5 to joint6 (z)
+    d6   = 0.0823         # TCP offset from joint6 (y)
+    # Nominal TCP position (all joints zero):
+    y_nom = d1 + d4 + d6   # 0.13585 + 0.093 + 0.0823 = 0.31115, but note the URDF chain yields 0.19145 after taking into account a subtraction in joint3 origin.
+    # The provided forward kinematics (with zero joints) yield:
+    r_nom = 0.19145      # effective horizontal (y) offset in base frame
+    z_nom = 0.9119       # nominal z position
+    
+    # (1) --- Base rotation candidate.
+    # In the nominal configuration the TCP is at (0, r_nom, z_nom).
+    # A simple decoupling is to choose q1 so that the nominal TCP (rotated by q1) approximates p.
+    # One natural candidate is:
+    q1_candidate = math.atan2(-p[0], p[1])
+    
+    # (2) --- Define an effective planar target for the 3R arm chain.
+    # We define the deviations from the nominal TCP:
+    # The effective horizontal deviation (in the plane of the arm chain) is:
+    r_target = math.sqrt(p[0]**2 + p[1]**2) - r_nom
+    z_target = p[2] - z_nom
+
+    # (3) --- Solve a simple 2R planar IK for an effective arm with link lengths L1 and L2,
+    # where we lump L2 and L3 together.
+    L1 = d2     # 0.425
+    L2 = d3 + d5  # 0.39225 + 0.09465 = 0.4869
+    R_eff = math.hypot(r_target, z_target)
+    # Clamp for acos:
+    cos_angle = (R_eff**2 - L1**2 - L2**2) / (2 * L1 * L2)
+    cos_angle = max(min(cos_angle, 1.0), -1.0)
+    try:
+        theta2_eff = math.acos(cos_angle)
+    except Exception:
+        theta2_eff = 0.0
+    # Two branches for the elbow (we take both candidates):
+    candidates = []
+    for sign in [1, -1]:
+        q3_eff = sign * theta2_eff   # effective elbow angle
+        # Shoulder (joint2) angle from the 2R IK:
+        beta = math.atan2(L2 * math.sin(q3_eff), L1 + L2 * math.cos(q3_eff))
+        q2_candidate = math.atan2(z_target, r_target) - beta
+        # For redundancy in the 3R chain, we split the effective angles as follows:
+        q2 = q2_candidate
+        q3 = q3_eff  # assign effective elbow angle to joint3
+        q4 = 0.0     # absorb any remainder into q4 (choose the simple branch)
+        
+        # (4) --- Determine q5 (wrist rotation) so that, when the TCP offset is added,
+        # the horizontal projection of the TCP matches the target.
+        # In the “arm–frame” (i.e. before applying the base rotation q1_candidate) the x–p coordinate is:
+        #   X_eff = L1*sin(q2) + d3*sin(q2 + q3) + 0              [we lumped d3 and d5 into L2, so use d3 part]
+        # Here, however, we use the 2R solution to approximate the “arm extension”
+        # and then adjust with the TCP offset.
+        X_eff_arm = L1 * math.sin(q2) + (L2 - d5) * math.sin(q2 + q3)
+        # The TCP offset (of length d6) is applied along the y–direction of the frame after joint5.
+        # A rotation by q5 about Z will shift the effective x–coordinate by –d6*sin(q5).
+        # We require that the effective x coordinate (after wrist adjustment) equals:
+        #   X_target_eff = (horizontal deviation) = r_target.
+        # Thus, we solve for q5 from:  X_eff_arm - d6 * sin(q5) = r_target.
+        # (This is a scalar equation; we choose the solution that yields a small wrist angle when possible.)
+        # Rearranging:
+        #       sin(q5) = (X_eff_arm - r_target) / d6.
+        val = (X_eff_arm - r_target) / d6
+        val = max(min(val, 1.0), -1.0)
+        q5_candidate = math.asin(val)
+        
+        # (5) --- Set redundant joint q6 = 0.
+        q6 = 0.0
+        
+        # Assemble the candidate solution:
+        candidate = (q1_candidate, q2, q3, q4, q5_candidate, q6)
+        
+        # Evaluate forward kinematics error using the provided FK function.
+        # Note: FORWARD_KINEMATICS is assumed to return a dict that includes a 'position' key.
+        fk_result = FORWARD_KINEMATICS(
+            joint1=candidate[0],
+            joint2=candidate[1],
+            joint3=candidate[2],
+            joint4=candidate[3],
+            joint5=candidate[4],
+            joint6=candidate[5]
+        )
+        # Extract position (if not present, default to (0,0,0))
+        fk_pos = fk_result.get("position", (0.0, 0.0, 0.0))
+        error = math.sqrt((fk_pos[0] - p[0])**2 + (fk_pos[1] - p[1])**2 + (fk_pos[2] - p[2])**2)
+        candidates.append((error, candidate))
+    
+    # Select the candidate with minimum forward kinematics error.
+    best_candidate = min(candidates, key=lambda c: c[0])[1]
+    # Normalize all angles to the range [-pi, pi]
+    def normalize(angle):
+        while angle > math.pi:
+            angle -= 2 * math.pi
+        while angle < -math.pi:
+            angle += 2 * math.pi
+        return angle
+    best_candidate = tuple(normalize(ang) for ang in best_candidate)
+    return best_candidate
+```

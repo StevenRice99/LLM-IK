@@ -1,0 +1,466 @@
+Thank you for the feedback. I see that my solution had significant issues with coordinate frame transformations and joint angle calculations. Let me revise the solution completely based on the failures provided.
+
+```python
+def inverse_kinematics(p: tuple[float, float, float], r: tuple[float, float, float]) -> tuple[float, float, float, float]:
+    """
+    Gets the joint values needed to reach position "p" and orientation "r".
+    :param p: The position to reach in the form [x, y, z].
+    :param r: The orientation to reach in radians in the form [x, y, z].
+    :return: A list of the values to set the links to for reaching position "p" and orientation "r".
+    """
+    import math
+    import numpy as np
+    
+    x_target, y_target, z_target = p
+    roll, pitch, yaw = r
+    
+    # Constants - link lengths and offsets
+    L1 = 0.13585  # Offset from joint 1 to joint 2
+    L2 = 0.425    # Length of link 2
+    L3 = 0.39225  # Length of link 3
+    TCP_OFFSET = 0.093  # TCP offset in y direction
+    
+    # First, calculate joint 1 (base rotation)
+    theta1 = math.atan2(x_target, y_target)
+    
+    # Calculate rotation matrix for the orientation
+    cr, sr = math.cos(roll), math.sin(roll)
+    cp, sp = math.cos(pitch), math.sin(pitch)
+    cy, sy = math.cos(yaw), math.sin(yaw)
+    
+    R = np.array([
+        [cy*cp, cy*sp*sr - sy*cr, cy*sp*cr + sy*sr],
+        [sy*cp, sy*sp*sr + cy*cr, sy*sp*cr - cy*sr],
+        [-sp, cp*sr, cp*cr]
+    ])
+    
+    # Rotation matrix for joint 1
+    c1, s1 = math.cos(theta1), math.sin(theta1)
+    R1 = np.array([
+        [c1, -s1, 0],
+        [s1, c1, 0],
+        [0, 0, 1]
+    ])
+    
+    # Adjust target position by removing TCP offset
+    # TCP offset is in local y direction after all rotations
+    end_effector_direction = R @ np.array([0, 1, 0])
+    
+    # Remove TCP offset from target position
+    x_wrist = x_target - TCP_OFFSET * end_effector_direction[0]
+    y_wrist = y_target - TCP_OFFSET * end_effector_direction[1]
+    z_wrist = z_target - TCP_OFFSET * end_effector_direction[2]
+    
+    # Transform wrist position to frame after joint 1
+    x_local = c1 * x_wrist + s1 * y_wrist
+    y_local = -s1 * x_wrist + c1 * y_wrist - L1
+    z_local = z_wrist
+    
+    # Compute the local x-z distance to the wrist point
+    r_local = math.sqrt(x_local**2 + z_local**2)
+    
+    # Use law of cosines to compute theta3
+    cos_theta3 = (r_local**2 - L2**2 - L3**2) / (2 * L2 * L3)
+    
+    # Clamp to handle numerical issues
+    if cos_theta3 > 1:
+        cos_theta3 = 1
+    elif cos_theta3 < -1:
+        cos_theta3 = -1
+    
+    theta3 = math.acos(cos_theta3)
+    # Consider both possible angles for theta3
+    theta3_solutions = [theta3, -theta3]
+    
+    # Transform target orientation to local frame
+    R_local = R1.T @ R
+    
+    # Extract x-rotation from R_local which corresponds to joint 4 + joint 3 + joint 2
+    target_orientation_y = math.atan2(R_local[0, 2], R_local[0, 0])
+    
+    # Collect all candidate solutions
+    solutions = []
+    
+    for theta3_candidate in theta3_solutions:
+        # Calculate theta2 using geometric approach
+        alpha = math.atan2(x_local, z_local)
+        beta = math.atan2(L3 * math.sin(theta3_candidate), L2 + L3 * math.cos(theta3_candidate))
+        theta2 = alpha - beta
+        
+        # Calculate theta4 to satisfy the orientation constraint
+        theta4 = target_orientation_y - theta2 - theta3_candidate
+        
+        # Normalize all angles
+        theta1_norm = ((theta1 % (2 * math.pi)) + 2 * math.pi) % (2 * math.pi)
+        if theta1_norm > math.pi:
+            theta1_norm -= 2 * math.pi
+            
+        theta2_norm = ((theta2 % (2 * math.pi)) + 2 * math.pi) % (2 * math.pi)
+        if theta2_norm > math.pi:
+            theta2_norm -= 2 * math.pi
+            
+        theta3_norm = ((theta3_candidate % (2 * math.pi)) + 2 * math.pi) % (2 * math.pi)
+        if theta3_norm > math.pi:
+            theta3_norm -= 2 * math.pi
+            
+        theta4_norm = ((theta4 % (2 * math.pi)) + 2 * math.pi) % (2 * math.pi)
+        if theta4_norm > math.pi:
+            theta4_norm -= 2 * math.pi
+            
+        solutions.append((theta1_norm, theta2_norm, theta3_norm, theta4_norm))
+    
+    # Choose the solution that minimizes the sum of absolute joint angles
+    # This tends to select more reasonable configurations
+    best_solution = min(solutions, key=lambda angles: sum(abs(angle) for angle in angles))
+    
+    return best_solution
+```
+
+Wait, I see some issues with my solution. Let me revise it:
+
+```python
+def inverse_kinematics(p: tuple[float, float, float], r: tuple[float, float, float]) -> tuple[float, float, float, float]:
+    """
+    Gets the joint values needed to reach position "p" and orientation "r".
+    :param p: The position to reach in the form [x, y, z].
+    :param r: The orientation to reach in radians in the form [x, y, z].
+    :return: A list of the values to set the links to for reaching position "p" and orientation "r".
+    """
+    import math
+    import numpy as np
+    
+    x_target, y_target, z_target = p
+    roll, pitch, yaw = r
+    
+    # Constants - link lengths and offsets
+    L1 = 0.13585  # Offset from joint 1 to joint 2
+    L2 = 0.425    # Length of link 2
+    L3 = 0.39225  # Length of link 3
+    TCP_OFFSET = 0.093  # TCP offset in y direction
+    
+    # Create rotation matrix from Euler angles
+    cr, sr = math.cos(roll), math.sin(roll)
+    cp, sp = math.cos(pitch), math.sin(pitch)
+    cy, sy = math.cos(yaw), math.sin(yaw)
+    
+    R = np.array([
+        [cy*cp, cy*sp*sr - sy*cr, cy*sp*cr + sy*sr],
+        [sy*cp, sy*sp*sr + cy*cr, sy*sp*cr - cy*sr],
+        [-sp, cp*sr, cp*cr]
+    ])
+    
+    # The y axis of the target orientation is the direction the TCP offset points
+    y_axis = R @ np.array([0, 1, 0])
+    
+    # Subtract TCP offset
+    wrist_pos = np.array([
+        x_target - TCP_OFFSET * y_axis[0],
+        y_target - TCP_OFFSET * y_axis[1],
+        z_target - TCP_OFFSET * y_axis[2]
+    ])
+    
+    # Compute joint 1 (base rotation)
+    theta1 = math.atan2(wrist_pos[0], wrist_pos[1])
+    
+    # Rotate to frame after joint 1
+    c1, s1 = math.cos(theta1), math.sin(theta1)
+    R1 = np.array([
+        [c1, s1, 0],
+        [-s1, c1, 0],
+        [0, 0, 1]
+    ])
+    
+    # Transform wrist position to local frame
+    local_wrist = R1 @ wrist_pos
+    
+    # Adjust for the offset of joint 2
+    local_wrist[1] -= L1
+    
+    # Project to the x-z plane for the planar manipulator problem
+    r_local = math.sqrt(local_wrist[0]**2 + local_wrist[2]**2)
+    
+    # Use law of cosines for joint 3
+    cos_theta3 = (r_local**2 - L2**2 - L3**2) / (2 * L2 * L3)
+    
+    # Clamp to handle numerical issues
+    if cos_theta3 > 1:
+        cos_theta3 = 1
+    elif cos_theta3 < -1:
+        cos_theta3 = -1
+    
+    theta3 = math.acos(cos_theta3)
+    
+    # Consider both elbow up and elbow down solutions
+    theta3_solutions = [theta3, -theta3]
+    
+    # Transform orientation to local frame
+    R_local = R1.T @ R
+    
+    # Extract target orientation for the planar chain
+    target_y_angle = math.atan2(R_local[0, 2], R_local[0, 0])
+    
+    # Try both configurations
+    solutions = []
+    
+    for theta3_candidate in theta3_solutions:
+        # Calculate theta2 using geometric approach
+        phi = math.atan2(local_wrist[0], local_wrist[2])
+        psi = math.atan2(L3 * math.sin(theta3_candidate), L2 + L3 * math.cos(theta3_candidate))
+        theta2 = phi - psi
+        
+        # Calculate theta4 to meet the orientation constraint
+        theta4 = target_y_angle - theta2 - theta3_candidate
+        
+        # Normalize angles to -π to π range
+        theta1 = ((theta1 + math.pi) % (2 * math.pi)) - math.pi
+        theta2 = ((theta2 + math.pi) % (2 * math.pi)) - math.pi
+        theta3_candidate = ((theta3_candidate + math.pi) % (2 * math.pi)) - math.pi
+        theta4 = ((theta4 + math.pi) % (2 * math.pi)) - math.pi
+        
+        # Check joint limits
+        if (abs(theta1) <= 6.2831853 and 
+            abs(theta2) <= 6.2831853 and 
+            abs(theta3_candidate) <= 6.2831853 and 
+            abs(theta4) <= 6.2831853):
+            solutions.append((theta1, theta2, theta3_candidate, theta4))
+    
+    if not solutions:
+        # If no solution within limits, add the closest ones
+        for theta3_candidate in theta3_solutions:
+            phi = math.atan2(local_wrist[0], local_wrist[2])
+            psi = math.atan2(L3 * math.sin(theta3_candidate), L2 + L3 * math.cos(theta3_candidate))
+            theta2 = phi - psi
+            
+            theta4 = target_y_angle - theta2 - theta3_candidate
+            
+            # Normalize angles
+            theta1 = ((theta1 + math.pi) % (2 * math.pi)) - math.pi
+            theta2 = ((theta2 + math.pi) % (2 * math.pi)) - math.pi
+            theta3_candidate = ((theta3_candidate + math.pi) % (2 * math.pi)) - math.pi
+            theta4 = ((theta4 + math.pi) % (2 * math.pi)) - math.pi
+            
+            solutions.append((theta1, theta2, theta3_candidate, theta4))
+    
+    # Select the solution that minimizes joint movement
+    best_solution = min(solutions, key=lambda angles: sum(abs(angle) for angle in angles))
+    
+    return best_solution
+```
+
+I'm still seeing issues with my coordinate frame transformations. Let me make one final revision:
+
+```python
+def inverse_kinematics(p: tuple[float, float, float], r: tuple[float, float, float]) -> tuple[float, float, float, float]:
+    """
+    Gets the joint values needed to reach position "p" and orientation "r".
+    :param p: The position to reach in the form [x, y, z].
+    :param r: The orientation to reach in radians in the form [x, y, z].
+    :return: A list of the values to set the links to for reaching position "p" and orientation "r".
+    """
+    import math
+    import numpy as np
+    
+    # Extract target position and orientation
+    x_target, y_target, z_target = p
+    roll, pitch, yaw = r
+    
+    # Robot parameters
+    L1 = 0.13585  # Offset from joint 1 to joint 2
+    L2 = 0.425    # Length of link 2
+    L3 = 0.39225  # Length of link 3
+    TCP_OFFSET = 0.093  # TCP offset in y direction
+    
+    # Create rotation matrix from target orientation
+    cr, sr = math.cos(roll), math.sin(roll)
+    cp, sp = math.cos(pitch), math.sin(pitch)
+    cy, sy = math.cos(yaw), math.sin(yaw)
+    
+    R_target = np.array([
+        [cy*cp, cy*sp*sr - sy*cr, cy*sp*cr + sy*sr],
+        [sy*cp, sy*sp*sr + cy*cr, sy*sp*cr - cy*sr],
+        [-sp, cp*sr, cp*cr]
+    ])
+    
+    # TCP offset vector (in end-effector frame)
+    tcp_offset = np.array([0, TCP_OFFSET, 0])
+    
+    # Transform offset to world frame
+    tcp_offset_world = R_target @ tcp_offset
+    
+    # Calculate wrist position by subtracting TCP offset
+    wrist_pos = np.array([
+        x_target - tcp_offset_world[0],
+        y_target - tcp_offset_world[1],
+        z_target - tcp_offset_world[2]
+    ])
+    
+    # Calculate joint 1 angle
+    theta1 = math.atan2(wrist_pos[0], wrist_pos[1])
+    
+    # Rotation matrix for joint 1
+    c1, s1 = math.cos(theta1), math.sin(theta1)
+    R1 = np.array([
+        [c1, s1, 0],
+        [-s1, c1, 0],
+        [0, 0, 1]
+    ])
+    
+    # Transform wrist position to joint 1 frame
+    local_wrist = R1.T @ wrist_pos
+    
+    # Adjust for the height offset of joint 2
+    local_wrist[1] -= L1
+    
+    # Project to xz plane for the planar manipulator problem
+    D = math.sqrt(local_wrist[0]**2 + local_wrist[2]**2)
+    
+    # Use law of cosines for joint 3
+    cos_theta3 = (D**2 - L2**2 - L3**2) / (2 * L2 * L3)
+    
+    # Clamp to handle numerical issues
+    cos_theta3 = max(min(cos_theta3, 1.0), -1.0)
+    
+    # Calculate theta3 (two possible solutions)
+    theta3_pos = math.acos(cos_theta3)
+    theta3_neg = -theta3_pos
+    
+    # Transform target orientation to joint 1 frame
+    R_local = R1.T @ R_target
+    
+    # Extract desired orientation for the planar chain (joints 2-4)
+    y_rotation = math.atan2(R_local[0, 2], R_local[0, 0])
+    
+    # Try both elbow configurations
+    solutions = []
+    
+    for theta3 in [theta3_pos, theta3_neg]:
+        # Calculate theta2 using geometric approach
+        beta = math.atan2(local_wrist[0], local_wrist[2])
+        gamma = math.atan2(L3 * math.sin(theta3), L2 + L3 * math.cos(theta3))
+        theta2 = beta - gamma
+        
+        # Calculate theta4 to satisfy the orientation constraint
+        theta4 = y_rotation - theta2 - theta3
+        
+        # Normalize angles to -π to π range
+        theta1_norm = ((theta1 + math.pi) % (2 * math.pi)) - math.pi
+        theta2_norm = ((theta2 + math.pi) % (2 * math.pi)) - math.pi
+        theta3_norm = ((theta3 + math.pi) % (2 * math.pi)) - math.pi
+        theta4_norm = ((theta4 + math.pi) % (2 * math.pi)) - math.pi
+        
+        solutions.append((theta1_norm, theta2_norm, theta3_norm, theta4_norm))
+    
+    # Choose the solution that minimizes the sum of squared joint angles
+    # This tends to favor configurations closest to the zero position
+    best_solution = min(solutions, key=lambda angles: sum(angle**2 for angle in angles))
+    
+    return best_solution
+```
+
+Actually, based on the failures and correct solutions you provided, I see that I need to revisit how I'm selecting the best solution. Let me make a final revision:
+
+```python
+def inverse_kinematics(p: tuple[float, float, float], r: tuple[float, float, float]) -> tuple[float, float, float, float]:
+    """
+    Gets the joint values needed to reach position "p" and orientation "r".
+    :param p: The position to reach in the form [x, y, z].
+    :param r: The orientation to reach in radians in the form [x, y, z].
+    :return: A list of the values to set the links to for reaching position "p" and orientation "r".
+    """
+    import math
+    import numpy as np
+    
+    # Target position and orientation
+    x, y, z = p
+    roll, pitch, yaw = r
+    
+    # Robot parameters
+    l1 = 0.13585  # Joint 1 to joint 2 offset
+    l2 = 0.425    # Length of link 2
+    l3 = 0.39225  # Length of link 3
+    tcp_offset = 0.093  # TCP y-offset
+    
+    # Target orientation rotation matrix
+    cr, sr = math.cos(roll), math.sin(roll)
+    cp, sp = math.cos(pitch), math.sin(pitch)
+    cy, sy = math.cos(yaw), math.sin(yaw)
+    
+    R = np.array([
+        [cy*cp, cy*sp*sr - sy*cr, cy*sp*cr + sy*sr],
+        [sy*cp, sy*sp*sr + cy*cr, sy*sp*cr - cy*sr],
+        [-sp, cp*sr, cp*cr]
+    ])
+    
+    # Get y-axis of the end effector frame (direction of TCP offset)
+    y_axis = R[:, 1]
+    
+    # Calculate wrist position by backing out TCP offset
+    wx = x - tcp_offset * y_axis[0]
+    wy = y - tcp_offset * y_axis[1]
+    wz = z - tcp_offset * y_axis[2]
+    
+    # Calculate joint 1 (base rotation)
+    theta1 = math.atan2(wx, wy)
+    
+    # Transform wrist to local frame (after joint 1 rotation)
+    c1, s1 = math.cos(theta1), math.sin(theta1)
+    x_local = c1 * wx + s1 * wy
+    y_local = -s1 * wx + c1 * wy - l1
+    z_local = wz
+    
+    # Distance in the local xz plane
+    d = math.sqrt(x_local**2 + z_local**2)
+    
+    # Use law of cosines to find theta3
+    cos_theta3 = (d**2 - l2**2 - l3**2) / (2 * l2 * l3)
+    
+    # Ensure value is in valid range for acos
+    cos_theta3 = max(min(cos_theta3, 1.0), -1.0)
+    
+    # Two possible solutions for theta3
+    theta3_1 = math.acos(cos_theta3)
+    theta3_2 = -theta3_1
+    
+    # Rotation matrix for joint 1
+    R1 = np.array([
+        [c1, s1, 0],
+        [-s1, c1, 0],
+        [0, 0, 1]
+    ])
+    
+    # Transform orientation to joint 1 frame
+    R_local = np.dot(R1.T, R)
+    
+    # Target angle in the local xz plane (sum of joints 2,3,4)
+    target_sum = math.atan2(R_local[0, 2], R_local[0, 0])
+    
+    # Try both elbow configurations
+    solutions = []
+    
+    for theta3 in [theta3_1, theta3_2]:
+        # Calculate theta2
+        alpha = math.atan2(x_local, z_local)
+        beta = math.atan2(l3 * math.sin(theta3), l2 + l3 * math.cos(theta3))
+        theta2 = alpha - beta
+        
+        # Calculate theta4 to achieve desired orientation
+        theta4 = target_sum - theta2 - theta3
+        
+        # Normalize angles to be within joint limits
+        while theta1 > math.pi: theta1 -= 2 * math.pi
+        while theta1 < -math.pi: theta1 += 2 * math.pi
+        
+        while theta2 > math.pi: theta2 -= 2 * math.pi
+        while theta2 < -math.pi: theta2 += 2 * math.pi
+        
+        while theta3 > math.pi: theta3 -= 2 * math.pi
+        while theta3 < -math.pi: theta3 += 2 * math.pi
+        
+        while theta4 > math.pi: theta4 -= 2 * math.pi
+        while theta4 < -math.pi: theta4 += 2 * math.pi
+        
+        solutions.append((theta1, theta2, theta3, theta4))
+    
+    # Select solution with smallest joint values (closest to home position)
+    return min(solutions, key=lambda s: sum(abs(angle) for angle in s))
+```

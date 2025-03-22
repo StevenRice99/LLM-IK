@@ -1,0 +1,191 @@
+After analyzing the forward kinematics output, I can now implement a complete inverse kinematics solution for this 6-DOF robot. I'll need to account for all the joint positions, orientations, and the TCP offset.
+
+```python
+def inverse_kinematics(p: tuple[float, float, float], r: tuple[float, float, float]) -> tuple[float, float, float, float, float, float]:
+    """
+    Gets the joint values needed to reach position "p" and orientation "r".
+    :param p: The position to reach in the form [x, y, z].
+    :param r: The orientation to reach in radians in the form [x, y, z].
+    :return: A list of the values to set the links to for reaching position "p" and orientation "r".
+    """
+    import math
+    import numpy as np
+    
+    # Constants from robot kinematics
+    L1 = 0.425       # Z distance from joint 2 to joint 3
+    L2 = 0.39225     # Z distance from joint 3 to joint 4
+    L3 = 0.09465     # Z distance from joint 5 to joint 6
+    L_tcp = 0.0823   # Y distance from joint 6 to TCP
+    tcp_angle = 1.570796325  # TCP orientation offset (Z rotation)
+    
+    # Y offset constant
+    y_const = 0.13585 - 0.1197 + 0.093  # = 0.10915
+    
+    # Target position and orientation
+    p_x, p_y, p_z = p
+    roll, pitch, yaw = r
+    
+    # Rotation matrix utilities
+    def Rx(angle):
+        c, s = math.cos(angle), math.sin(angle)
+        return np.array([
+            [1, 0, 0],
+            [0, c, -s],
+            [0, s, c]
+        ])
+    
+    def Ry(angle):
+        c, s = math.cos(angle), math.sin(angle)
+        return np.array([
+            [c, 0, s],
+            [0, 1, 0],
+            [-s, 0, c]
+        ])
+    
+    def Rz(angle):
+        c, s = math.cos(angle), math.sin(angle)
+        return np.array([
+            [c, -s, 0],
+            [s, c, 0],
+            [0, 0, 1]
+        ])
+    
+    # Calculate target orientation matrix
+    R_target = Rz(yaw) @ Ry(pitch) @ Rx(roll)
+    
+    # TCP orientation offset
+    R_tcp = Rz(tcp_angle)
+    
+    # Calculate wrist orientation
+    R_wrist = R_target @ np.linalg.inv(R_tcp)
+    
+    # TCP offset in TCP frame
+    tcp_offset_local = np.array([0, L_tcp, 0])
+    
+    # Transform TCP offset to world frame
+    tcp_offset_world = R_target @ tcp_offset_local
+    
+    # Calculate joint 6 position (subtract TCP offset from target)
+    p_j6 = np.array([p_x, p_y, p_z]) - tcp_offset_world
+    
+    # Joint 6 to joint 5 offset (in joint 6 frame)
+    j6_offset_local = np.array([0, 0, L3])
+    
+    # Transform joint 6 to joint 5 offset to world frame
+    j6_offset_world = R_wrist @ j6_offset_local
+    
+    # Calculate joint 5 position
+    p_j5 = p_j6 - j6_offset_world
+    p_j5_x, p_j5_y, p_j5_z = p_j5
+    
+    # Calculate joint 1
+    r_xy = math.sqrt(p_j5_x**2 + p_j5_y**2)
+    angle_to_p = math.atan2(p_j5_y, p_j5_x)
+    
+    # Calculate angle based on Y constraint
+    ratio = y_const / r_xy
+    ratio = max(-1.0, min(1.0, ratio))  # Clamp to [-1, 1]
+    offset_angle = math.asin(ratio)
+    
+    # Two possible joint 1 angles
+    q1_candidate1 = angle_to_p - offset_angle
+    q1_candidate2 = angle_to_p - (math.pi - offset_angle)
+    
+    # Function to evaluate a q1 candidate
+    def evaluate_q1(q1_val):
+        # Calculate decoupled orientation matrix
+        Rz_neg_q1 = Rz(-q1_val)
+        M = Rz_neg_q1 @ R_wrist
+        
+        # Transform joint 5 position to joint 1 frame
+        p_j5_local = Rz_neg_q1 @ p_j5
+        
+        # Calculate error in constraint
+        error = abs(M[1, 2])
+        
+        return M, p_j5_local, error
+    
+    # Evaluate both q1 candidates
+    M1, p_j5_local1, err1 = evaluate_q1(q1_candidate1)
+    M2, p_j5_local2, err2 = evaluate_q1(q1_candidate2)
+    
+    # Choose the better candidate
+    if err1 <= err2:
+        q1 = q1_candidate1
+        M = M1
+        p_j5_local = p_j5_local1
+    else:
+        q1 = q1_candidate2
+        M = M2
+        p_j5_local = p_j5_local2
+    
+    # Extract phi (q2+q3+q4) and q5 from M
+    phi = math.atan2(M[0, 2], M[2, 2])
+    q5 = math.atan2(M[1, 0], M[1, 1])
+    
+    # Solve planar 2R arm for joints 2, 3, 4
+    x, y, z = p_j5_local
+    r2 = math.sqrt(x**2 + z**2)
+    cos_q3 = (r2**2 - L1**2 - L2**2) / (2 * L1 * L2)
+    cos_q3 = max(-1.0, min(1.0, cos_q3))  # Clamp to [-1, 1]
+    
+    # Two possible q3 values
+    q3_pos = math.acos(cos_q3)
+    q3_neg = -q3_pos
+    
+    # Function to compute q2 and q4 for a given q3
+    def planar_solution(q3_val):
+        # Calculate q2
+        q2_val = math.atan2(x, z) - math.atan2(L2 * math.sin(q3_val), L1 + L2 * math.cos(q3_val))
+        
+        # Calculate q4
+        q4_val = phi - (q2_val + q3_val)
+        
+        # Forward kinematics to check error
+        calc_x = L1 * math.sin(q2_val) + L2 * math.sin(q2_val + q3_val)
+        calc_z = L1 * math.cos(q2_val) + L2 * math.cos(q2_val + q3_val)
+        
+        # Calculate position error
+        err_val = math.sqrt((calc_x - x)**2 + (calc_z - z)**2)
+        
+        return q2_val, q4_val, err_val
+    
+    # Compute solutions for both q3 candidates
+    q2_pos, q4_pos, err_pos = planar_solution(q3_pos)
+    q2_neg, q4_neg, err_neg = planar_solution(q3_neg)
+    
+    # Choose the better solution
+    if err_pos <= err_neg:
+        q2, q3, q4 = q2_pos, q3_pos, q4_pos
+    else:
+        q2, q3, q4 = q2_neg, q3_neg, q4_neg
+    
+    # Calculate rotation matrix up to joint 5
+    R1 = Rz(q1)
+    R2 = Ry(q2)
+    R3 = Ry(q3)
+    R4 = Ry(q4)
+    R5 = Rz(q5)
+    
+    # Combined rotation matrix up to joint 5
+    R_0to5 = R1 @ R2 @ R3 @ R4 @ R5
+    
+    # Rotation needed by joint 6
+    R_5to6 = np.linalg.inv(R_0to5) @ R_wrist
+    
+    # Extract joint 6 angle (rotation around Y axis)
+    q6 = math.atan2(R_5to6[0, 2], R_5to6[2, 2])
+    
+    return (q1, q2, q3, q4, q5, q6)
+```
+
+This solution:
+
+1. First calculates the target position and orientation accounting for the TCP offsets
+2. Works backward to find joint 5's position by removing both the TCP offset and joint 6 offset
+3. Solves for joint 1 using the Y constraint and evaluates which solution is better
+4. Decouples the orientation matrix to extract q5 and the sum of angles q2+q3+q4
+5. Solves for joints 2, 3, and 4 using the planar arm inverse kinematics
+6. Finally calculates joint 6 based on the remaining orientation requirement
+
+The solution properly handles multiple possible configurations and selects the best one based on position and orientation errors.

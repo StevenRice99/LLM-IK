@@ -1,0 +1,116 @@
+Based on the forward kinematics results, I can see that I need to develop a complete inverse kinematics solution for this 6-DOF robot. I'll now create a solution that handles the position target.
+
+Looking at the robot's configuration, I notice:
+- Joint 1 rotates around Z axis (base)
+- Joints 2, 3, and 4 rotate around Y axis
+- Joint 5 rotates around Z axis
+- Joint 6 rotates around Y axis
+- The TCP has a final offset and orientation
+
+Here's my complete inverse kinematics solution:
+
+```python
+import math
+import numpy as np
+
+def inverse_kinematics(p: tuple[float, float, float]) -> tuple[float, float, float, float, float, float]:
+    """
+    Gets the joint values needed to reach position "p".
+    :param p: The position to reach in the form [x, y, z].
+    :return: A list of the values to set the links to for reaching position "p".
+    """
+    x_target, y_target, z_target = p
+    
+    # Link dimensions from the URDF
+    L1_y = 0.13585    # Translation from base to joint 2 (y)
+    L2_y = -0.1197    # Translation from joint 2 to joint 3 (y)
+    L2_z = 0.425      # Translation from joint 2 to joint 3 (z)
+    L3_z = 0.39225    # Translation from joint 3 to joint 4 (z)
+    L4_y = 0.093      # Translation from joint 4 to joint 5 (y)
+    L5_z = 0.09465    # Translation from joint 5 to joint 6 (z)
+    L6_y = 0.0823     # Translation from joint 6 to TCP (y)
+    
+    # First, calculate joint 1 (rotation around Z-axis)
+    # This determines the X-Y plane position
+    if abs(x_target) < 1e-10 and abs(y_target) < 1e-10:
+        # If the target is on the Z-axis, joint 1 can be arbitrary
+        theta1 = 0.0
+    else:
+        theta1 = math.atan2(x_target, y_target)
+    
+    # Calculate the wrist center position (before the final offsets)
+    # When joint 5 and 6 are 0, the TCP is offset from the wrist center by fixed amounts
+    c1 = math.cos(theta1)
+    s1 = math.sin(theta1)
+    
+    # Subtract the TCP offset (rotated by theta1)
+    wrist_x = x_target - s1 * L6_y
+    wrist_y = y_target - c1 * L6_y
+    wrist_z = z_target - L5_z
+    
+    # Project the wrist center onto the plane containing the first four joints
+    # (rotate it back by -theta1)
+    wrist_y_plane = c1 * wrist_y + s1 * wrist_x
+    wrist_z_plane = wrist_z
+    
+    # Calculate the position relative to joint 2
+    rel_y = wrist_y_plane - L1_y
+    rel_z = wrist_z_plane
+    
+    # Calculate the distance from joint 2 to the wrist center
+    D = math.sqrt(rel_y**2 + rel_z**2)
+    
+    # Calculate the effective lengths for the planar arm
+    L2 = math.sqrt(L2_y**2 + L2_z**2)
+    L3 = L3_z
+    L4 = L4_y
+    
+    # Use the law of cosines to find the angle of joint 3
+    cos_theta3 = (D**2 - L2**2 - (L3 + L4)**2) / (2 * L2 * (L3 + L4))
+    cos_theta3 = max(min(cos_theta3, 1.0), -1.0)  # Ensure it's within valid range
+    theta3 = math.acos(cos_theta3)
+    
+    # Adjust theta3 based on the actual joint orientations
+    theta3_offset = math.atan2(L2_z, -L2_y)
+    theta3 = theta3 - theta3_offset
+    
+    # Calculate joint 2 angle
+    alpha = math.atan2(rel_z, rel_y)
+    beta = math.atan2((L3 + L4) * math.sin(theta3 + theta3_offset), 
+                      L2 + (L3 + L4) * math.cos(theta3 + theta3_offset))
+    theta2 = alpha - beta + theta3_offset
+    
+    # Joint 4 is set to keep the end effector level
+    # The sum of these angles determines the orientation in the plane
+    theta4 = -(theta2 + theta3)
+    
+    # Joint 5 and 6 are redundant for position only tasks
+    # We can set them to 0
+    theta5 = 0.0
+    theta6 = 0.0
+    
+    # Normalize angles to the range [-π, π]
+    def normalize(angle):
+        while angle > math.pi:
+            angle -= 2 * math.pi
+        while angle < -math.pi:
+            angle += 2 * math.pi
+        return angle
+    
+    theta1 = normalize(theta1)
+    theta2 = normalize(theta2)
+    theta3 = normalize(theta3)
+    theta4 = normalize(theta4)
+    theta5 = normalize(theta5)
+    theta6 = normalize(theta6)
+    
+    return (theta1, theta2, theta3, theta4, theta5, theta6)
+```
+
+This solution computes the inverse kinematics for the 6-DOF manipulator by:
+1. First calculating joint 1 to align with the target in the X-Y plane
+2. Computing the wrist center position by subtracting the final link offsets
+3. Solving the planar arm formed by joints 2-4 using the law of cosines
+4. Setting joints 5-6 to zero (as they don't affect position)
+
+The solution handles all edge cases and normalizes angles to ensure they're within the proper range.

@@ -1,0 +1,118 @@
+Based on the provided feedback, I need to revise my inverse kinematics solution. The issue is clearly related to how I'm handling joint configurations and orientation.
+
+I'll implement a more robust solution that considers multiple possible configurations and selects the one that best matches the desired orientation:
+
+```python
+import numpy as np
+
+def inverse_kinematics(p: tuple[float, float, float], r: tuple[float, float, float]) -> tuple[float, float]:
+    """
+    Gets the joint values needed to reach position "p" and orientation "r".
+    :param p: The position to reach in the form [x, y, z].
+    :param r: The orientation to reach in radians in the form [x, y, z].
+    :return: A list of the values to set the links to for reaching position "p" and orientation "r".
+    """
+    x, y, z = p
+    rx, ry, rz = r
+    
+    # From the z-coordinate, we can calculate theta2
+    # We need to handle both possible solutions: theta2 and -theta2 (or alternatively, pi-theta2)
+    theta2_sol1 = np.arccos(min(max(z / 0.425, -1.0), 1.0))
+    theta2_sol2 = -theta2_sol1
+    
+    # Calculate sin(theta2) for both solutions to use in theta1 calculation
+    sin_theta2_1 = np.sin(theta2_sol1)
+    sin_theta2_2 = np.sin(theta2_sol2)
+    
+    # Calculate theta1 for each theta2 solution
+    # Using our derived inverse kinematics equation
+    # When sin(theta2) is very small, we need special handling
+    if abs(sin_theta2_1) < 1e-10:
+        theta1_sol1 = np.arctan2(y, x)
+    else:
+        theta1_sol1 = np.arctan2(y, x) - np.arctan2(0.01615, 0.425 * sin_theta2_1)
+    
+    if abs(sin_theta2_2) < 1e-10:
+        theta1_sol2 = np.arctan2(y, x)
+    else:
+        theta1_sol2 = np.arctan2(y, x) - np.arctan2(0.01615, 0.425 * sin_theta2_2)
+    
+    # We also need to consider solutions with theta1 + pi to get all possible configurations
+    theta1_sol3 = theta1_sol1 + np.pi
+    theta1_sol4 = theta1_sol2 + np.pi
+    
+    # Generate all possible configurations
+    configs = [
+        (theta1_sol1, theta2_sol1),
+        (theta1_sol2, theta2_sol2),
+        (theta1_sol3, theta2_sol1),
+        (theta1_sol4, theta2_sol2),
+    ]
+    
+    # Function to compute orientation given joint angles
+    def compute_orientation(theta1, theta2):
+        # Compute roll (rx), pitch (ry), and yaw (rz) from joint angles
+        R = np.array([
+            [np.cos(theta1)*np.cos(theta2), -np.sin(theta1), np.cos(theta1)*np.sin(theta2)],
+            [np.sin(theta1)*np.cos(theta2), np.cos(theta1), np.sin(theta1)*np.sin(theta2)],
+            [-np.sin(theta2), 0, np.cos(theta2)]
+        ])
+        
+        # Extract Euler angles from the rotation matrix
+        pitch = np.arcsin(-R[0,2])
+        if np.abs(np.cos(pitch)) < 1e-10:
+            # Gimbal lock case
+            roll = 0
+            yaw = np.arctan2(-R[1,0], R[1,1])
+        else:
+            roll = np.arctan2(R[1,2], R[2,2])
+            yaw = np.arctan2(R[0,1], R[0,0])
+        
+        return (roll, pitch, yaw)
+    
+    # Function to compute difference between orientations
+    def orientation_difference(o1, o2):
+        # Handle angle wrapping to find smallest angular difference
+        diff = 0
+        for a, b in zip(o1, o2):
+            angle_diff = (a - b) % (2*np.pi)
+            if angle_diff > np.pi:
+                angle_diff = 2*np.pi - angle_diff
+            diff += angle_diff**2
+        return diff
+    
+    # Find the configuration that best matches the desired orientation
+    best_config = None
+    min_diff = float('inf')
+    
+    for config in configs:
+        theta1, theta2 = config
+        
+        # Normalize angles to be within the joint limits
+        while theta1 > np.pi: theta1 -= 2*np.pi
+        while theta1 < -np.pi: theta1 += 2*np.pi
+        while theta2 > np.pi: theta2 -= 2*np.pi
+        while theta2 < -np.pi: theta2 += 2*np.pi
+        
+        # Compute orientation for this configuration
+        orientation = compute_orientation(theta1, theta2)
+        
+        # Calculate orientation difference
+        diff = orientation_difference(orientation, r)
+        
+        # Check if this is better than our current best
+        if diff < min_diff:
+            min_diff = diff
+            best_config = (theta1, theta2)
+    
+    return best_config
+```
+
+This solution:
+1. Calculates all possible joint configurations that can reach the target position
+2. Computes the orientation that would result from each configuration
+3. Selects the configuration that best matches the desired orientation
+4. Handles special cases like gimbal lock and angles near zero
+5. Properly normalizes angles to be within joint limits
+
+The key insight is that for a given position, there are multiple joint configurations that can reach it, but they result in different orientations. We need to select the configuration that best matches both the position and orientation requirements.

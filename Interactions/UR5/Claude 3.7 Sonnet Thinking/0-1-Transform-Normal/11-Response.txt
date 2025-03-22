@@ -1,0 +1,156 @@
+After analyzing the feedback, I need to completely revise my inverse kinematics solution. I need to properly account for the specific geometry of this robot and the relationship between joint values and end-effector pose.
+
+Let me implement a more accurate solution:
+
+```python
+import numpy as np
+
+def inverse_kinematics(p: tuple[float, float, float], r: tuple[float, float, float]) -> tuple[float, float]:
+    """
+    Gets the joint values needed to reach position "p" and orientation "r".
+    :param p: The position to reach in the form [x, y, z].
+    :param r: The orientation to reach in radians in the form [x, y, z].
+    :return: A list of the values to set the links to for reaching position "p" and orientation "r".
+    """
+    x, y, z = p
+    rx, ry, rz = r
+    
+    # Robot parameters from the description
+    L1 = 0.13585  # Z-offset of joint 2 from joint 1
+    L2 = 0.425    # Length of the second link
+    d = 0.1197    # Y-offset of TCP from second link
+    
+    # Compute the IK solution
+    
+    # First determine the position of joint 2 (wrist) from desired TCP position and orientation
+    # This requires understanding how the orientation affects the TCP position relative to joint 2
+    
+    # Extract rotation matrix from the orientation (roll, pitch, yaw)
+    # For this specific robot with revolute joints around Z and Y:
+    # - rx corresponds to roll
+    # - ry corresponds to pitch
+    # - rz corresponds to yaw
+    
+    # For a 2-DOF robot with joints around Z and Y, the orientation is directly related to joint angles
+    # Joint 1 (Z-axis rotation) primarily affects rz
+    # Joint 2 (Y-axis rotation) primarily affects ry
+    
+    # For this specific robot, we need to use the provided orientation to determine the correct solution
+    # among the mathematically possible ones
+    
+    # Step 1: Calculate the squared distance from the origin to the target in the XY plane
+    r_xy = np.sqrt(x**2 + y**2)
+    
+    # Step 2: Determine joint 2 angle (theta2)
+    # We need to account for the TCP offset from joint 2
+    
+    # The Z coordinate after accounting for first link height
+    z_prime = z - L1
+    
+    # Using geometric approach to find theta2
+    # We know that the effective reach of the arm is affected by both L2 and d (the y-offset)
+    
+    # Calculate the effective coordinates of the wrist (joint 2)
+    # Since joint 2 rotates around Y-axis, the angle of this joint affects how the offset d translates
+    # to the global coordinates
+    
+    # For determining theta2, we need to solve the constraint equation:
+    # √(x² + y²) = L2*sin(theta2) - d*cos(theta2)
+    # z' = L2*cos(theta2) + d*sin(theta2)
+    
+    # This gives us the quadratic equation:
+    # (L2² + d²) - (√(x² + y²))² - (z')² = 2*(d*√(x² + y²) - L2*z')sin(theta2)
+    
+    D = L2**2 + d**2 - r_xy**2 - z_prime**2
+    E = 2 * (d * r_xy - L2 * z_prime)
+    
+    # Avoid division by zero
+    if abs(E) < 1e-10:
+        if abs(D) < 1e-10:
+            # Infinite solutions, choose theta2 = 0
+            theta2 = 0
+        else:
+            # No solution, choose closest approximation
+            theta2 = np.pi/2 if D > 0 else -np.pi/2
+    else:
+        # Calculate theta2
+        sin_theta2 = D / E
+        # Ensure within valid range for arcsin
+        sin_theta2 = max(min(sin_theta2, 1.0), -1.0)
+        theta2 = np.arcsin(sin_theta2)
+    
+    # Step 3: Determine joint 1 angle (theta1)
+    
+    # For theta1, we need to consider how the arm is oriented in the XY plane
+    # The base angle (phi) is the angle of the target in the XY plane
+    phi = np.arctan2(y, x)
+    
+    # We also need to account for the effect of theta2 on the position
+    # The angle adjustment (alpha) depends on how theta2 affects the TCP position
+    
+    # Calculate the offset angle
+    # The effective reach in XY plane is affected by both theta2 and the offsets
+    cos_theta2 = np.cos(theta2)
+    sin_theta2 = np.sin(theta2)
+    
+    # Calculate the offset in the XY plane due to theta2
+    effective_d = d * cos_theta2 - L2 * sin_theta2
+    
+    # Calculate theta1 considering the XY offset
+    if abs(effective_d) < 1e-10:
+        # No offset, theta1 is just the angle in XY plane
+        theta1 = phi
+    else:
+        # Adjust theta1 based on the offset
+        # The sign is negative because the offset works in the opposite direction
+        offset_angle = np.arctan2(effective_d, 0)
+        theta1 = phi - offset_angle
+    
+    # Determine the correct branch of the solution (multiple solutions exist)
+    # We can use the orientation information to choose
+    
+    # For many inverse kinematics problems with multiple solutions,
+    # the orientation helps determine which solution branch to use
+    
+    # Check if the resulting orientation matches the target
+    # If not, try alternative solutions
+    
+    # Alternative solution: theta1 + π, -theta2 + π
+    alt_theta1 = theta1 + np.pi
+    alt_theta2 = np.pi - theta2
+    
+    # Normalize angles to [-π, π]
+    while theta1 > np.pi: theta1 -= 2*np.pi
+    while theta1 < -np.pi: theta1 += 2*np.pi
+    while theta2 > np.pi: theta2 -= 2*np.pi
+    while theta2 < -np.pi: theta2 += 2*np.pi
+    
+    while alt_theta1 > np.pi: alt_theta1 -= 2*np.pi
+    while alt_theta1 < -np.pi: alt_theta1 += 2*np.pi
+    while alt_theta2 > np.pi: alt_theta2 -= 2*np.pi
+    while alt_theta2 < -np.pi: alt_theta2 += 2*np.pi
+    
+    # Use orientation information to choose between solutions
+    # For this robot, rz is most closely related to theta1
+    # and ry is most closely related to theta2
+    
+    # Calculate which solution better matches the desired orientation
+    solution1_rz_diff = min(abs(rz - theta1), abs(rz - theta1 + 2*np.pi), abs(rz - theta1 - 2*np.pi))
+    solution2_rz_diff = min(abs(rz - alt_theta1), abs(rz - alt_theta1 + 2*np.pi), abs(rz - alt_theta1 - 2*np.pi))
+    
+    # Choose the solution with the smaller difference in rz
+    if solution1_rz_diff <= solution2_rz_diff:
+        return (theta1, theta2)
+    else:
+        return (alt_theta1, alt_theta2)
+```
+
+This solution:
+
+1. Takes a pure geometric approach to the inverse kinematics
+2. Properly accounts for the arm structure, including the offset of the TCP from the second joint
+3. Solves explicitly for the joint angles using the geometric constraints
+4. Handles multiple solution branches and uses orientation information to select the correct one
+5. Normalizes all angles to ensure they're within the expected range
+
+The key insight is understanding the geometric relationship between the joint positions, joint angles, and the resulting TCP position, while using the orientation information to disambiguate between multiple possible solutions.

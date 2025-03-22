@@ -1,0 +1,197 @@
+```python
+import math
+import numpy as np
+
+def inverse_kinematics(p: tuple[float, float, float], r: tuple[float, float, float]) -> tuple[float, float, float, float]:
+    """
+    Closed-form analytical inverse kinematics for a 4-DOF serial manipulator.
+    
+    The kinematic chain (all dimensions in meters, angles in radians):
+      - Joint 1: Revolute about Z at [0, 0, 0].
+      - Joint 2: Revolute about Y; its fixed translation is [0, 0.13585, 0] from Joint 1.
+      - Joint 3: Revolute about Y; its fixed translation is [0, -0.1197, 0.425] from Joint 2.
+      - Joint 4: Revolute about Y; its fixed translation is [0, 0, 0.39225] from Joint 3.
+      - TCP offset: [0, 0.093, 0] (applied after Joint 4).
+      
+    Note: The constant y‐offset sums to 0.13585 - 0.1197 + 0.093 = 0.10915.
+    In our solution the base joint is “decoupled” by forcing the rotated TCP’s y–component to equal 0.10915.
+    
+    The IK is solved by:
+      1. Finding all candidate base angles theta1 that satisfy
+             p_rot_y = -sin(theta1)*x + cos(theta1)*y = 0.10915,
+         where (x,y,z)=p. This gives two solutions:
+             theta1 = phi ± Δ   with phi = atan2(-x, y) and Δ = arccos(0.10915/sqrt(x^2+y^2)).
+      2. With each candidate theta1 the target position is “rotated”:
+             p_rot = Rz(-theta1)*p,
+         so that its y–component becomes 0.10915 and the arm’s 2-R subchain must achieve 
+             X_target = p_rot_x   and   Z_target = p_rot_z.
+         The two arm links have lengths L1 = 0.425 and L2 = 0.39225 and satisfy:
+             X_target = L1*sin(theta2) + L2*sin(theta2+theta3)
+             Z_target = L1*cos(theta2) + L2*cos(theta2+theta3)
+         which yield (after some algebra):
+             theta3 = ± acos( (r_planar^2 - L1^2 - L2^2) / (2*L1*L2) )
+         and with gamma = atan2(X_target, Z_target),
+             theta2 = gamma - atan2( L2*sin(theta3), L1 + L2*cos(theta3) ).
+      3. Finally, since joints 2–4 (all about Y) produce an overall rotation 
+             theta_total = theta2 + theta3 + theta4,
+         the desired end–effector orientation (given in roll-pitch-yaw with R = Rz(yaw)*Ry(pitch)*Rx(roll))
+         must satisfy (when the base rotation is removed) Ry(theta_total) = Rz(-theta1)*R_desired.
+         Thus one extracts:
+             theta_total = atan2( R_prime[0,2], R_prime[0,0] )
+         and sets:
+             theta4 = theta_total - (theta2 + theta3).
+    
+    Because of multiple solution branches (two choices for theta1 and for theta3) we 
+    compute all candidate sets and select the one that minimizes the error in forward kinematics.
+    
+    :param p: The target TCP position as (x, y, z)
+    :param r: The target TCP roll-pitch-yaw angles (in radians) as (roll, pitch, yaw)
+    :return: A tuple (theta1, theta2, theta3, theta4) of joint angles in radians.
+    """
+    # Link/transformation parameters
+    L1 = 0.425
+    L2 = 0.39225
+    constant_offset = 0.10915  # sum of y offsets
+
+    x, y, z = p
+    roll, pitch, yaw = r
+
+    # -------------------------------------------------------------------
+    # 1. Solve for base joint (theta1) by forcing the rotated y to equal constant_offset.
+    R_xy = math.sqrt(x*x + y*y)
+    # To avoid domain errors assume target is reachable so R_xy >= constant_offset.
+    # The equation is: -sin(theta1)*x + cos(theta1)*y = constant_offset.
+    # This can be written as R_xy * cos(theta1 - phi) = constant_offset, with:
+    phi = math.atan2(-x, y)
+    ratio = constant_offset / R_xy
+    # Clamp ratio to [-1, 1] (should be <=1 by reachability assumption)
+    if ratio > 1: 
+        ratio = 1
+    elif ratio < -1:
+        ratio = -1
+    delta_base = math.acos(ratio)
+    # Two candidate solutions for theta1:
+    theta1_candidates = [phi + delta_base, phi - delta_base]
+
+    # -------------------------------------------------------------------
+    # 2. Build desired end-effector rotation matrix.
+    # Using convention: R_desired = Rz(yaw)*Ry(pitch)*Rx(roll)
+    cr, sr = math.cos(roll), math.sin(roll)
+    cp, sp = math.cos(pitch), math.sin(pitch)
+    cy, sy = math.cos(yaw), math.sin(yaw)
+    R_des = np.array([
+        [ cy*cp,              cy*sp*sr - sy*cr,    cy*sp*cr + sy*sr ],
+        [ sy*cp,              sy*sp*sr + cy*cr,    sy*sp*cr - cy*sr ],
+        [   -sp,                      cp*sr,             cp*cr    ]
+    ])
+    
+    solutions = []
+    # Evaluate each candidate branch:
+    for theta1 in theta1_candidates:
+        # ----------------------------------------------------------------
+        # 2a. Rotate p by -theta1: p_rot = Rz(-theta1)*p.
+        c1 = math.cos(theta1)
+        s1 = math.sin(theta1)
+        # Rz(-theta1) = [[c1,  s1, 0],
+        #                [-s1, c1, 0],
+        #                [0,   0,  1]]
+        p_rot_x = c1*x + s1*y
+        p_rot_y = -s1*x + c1*y  # by design, should equal constant_offset (within rounding)
+        p_rot_z = z  # unchanged
+        
+        # For the 2-R chain, we use (X_target, Z_target) = (p_rot_x, p_rot_z)
+        X_target = p_rot_x
+        Z_target = p_rot_z
+        r_planar = math.sqrt(X_target**2 + Z_target**2)
+        
+        # ----------------------------------------------------------------
+        # 2b. Solve the planar 2R subproblem for joints 2 and 3.
+        cos_theta3 = (r_planar**2 - L1**2 - L2**2) / (2 * L1 * L2)
+        # Clamp due to numerical issues.
+        if cos_theta3 > 1:
+            cos_theta3 = 1
+        if cos_theta3 < -1:
+            cos_theta3 = -1
+        # Two options for theta3:
+        theta3_options = [math.acos(cos_theta3), -math.acos(cos_theta3)]
+        for theta3 in theta3_options:
+            # With X_target and Z_target, let gamma = atan2(X_target, Z_target)
+            gamma = math.atan2(X_target, Z_target)
+            # The offset angle for the 2R chain:
+            delta = math.atan2(L2 * math.sin(theta3), L1 + L2 * math.cos(theta3))
+            theta2 = gamma - delta
+
+            # ----------------------------------------------------------------
+            # 3. Solve for joint 4 using the orientation requirement.
+            # The overall rotation about Y from joints 2-4 is:
+            #    theta_total = theta2 + theta3 + theta4.
+            # We remove the base rotation from the desired end–effector orientation:
+            #    R_prime = Rz(-theta1)*R_desired, which (if only a Y–rotation remains)
+            #    has the form Ry(theta_total) with:
+            #         [ cos(theta_total)   0   sin(theta_total)]
+            #         [       0            1         0         ]
+            #         [ -sin(theta_total)  0   cos(theta_total)]
+            # We extract:
+            #    theta_total = atan2(R_prime[0,2], R_prime[0,0])
+            c1 = math.cos(theta1)  # recompute for clarity
+            s1 = math.sin(theta1)
+            Rz_neg = np.array([
+                [c1, s1, 0],
+                [-s1, c1, 0],
+                [0, 0, 1]
+            ])
+            R_prime = Rz_neg.dot(R_des)
+            theta_total = math.atan2(R_prime[0, 2], R_prime[0, 0])
+            theta4 = theta_total - (theta2 + theta3)
+            
+            # ----------------------------------------------------------------
+            # 4. Assemble the candidate joint vector.
+            candidate = (theta1, theta2, theta3, theta4)
+            
+            # For verification, we compute the forward kinematics using the candidate
+            # (based on the given link transforms) and compute a simple error metric.
+            # Transform sequence:
+            #   T1: rotation about Z by theta1.
+            T1 = np.array([
+                [math.cos(theta1), -math.sin(theta1), 0, 0],
+                [math.sin(theta1),  math.cos(theta1), 0, 0],
+                [0, 0, 1, 0],
+                [0, 0, 0, 1]
+            ])
+            #   T2: translation [0, 0.13585, 0] then rotation about Y by theta2.
+            T2 = np.array([
+                [ math.cos(theta2), 0, math.sin(theta2), 0],
+                [0, 1, 0, 0.13585],
+                [-math.sin(theta2), 0, math.cos(theta2), 0],
+                [0, 0, 0, 1]
+            ])
+            #   T3: translation [0, -0.1197, 0.425] then rotation about Y by theta3.
+            T3 = np.array([
+                [ math.cos(theta3), 0, math.sin(theta3), 0],
+                [0, 1, 0, -0.1197],
+                [-math.sin(theta3), 0, math.cos(theta3), 0.425],
+                [0, 0, 0, 1]
+            ])
+            #   T4: translation [0, 0, 0.39225] then rotation about Y by theta4.
+            T4 = np.array([
+                [ math.cos(theta4), 0, math.sin(theta4), 0],
+                [0, 1, 0, 0],
+                [-math.sin(theta4), 0, math.cos(theta4), 0.39225],
+                [0, 0, 0, 1]
+            ])
+            #   T_tcp: translation [0, 0.093, 0]
+            T_tcp = np.array([
+                [1, 0, 0, 0],
+                [0, 1, 0, 0.093],
+                [0, 0, 1, 0],
+                [0, 0, 0, 1]
+            ])
+            T_fk = T1.dot(T2).dot(T3).dot(T4).dot(T_tcp)
+            pos_fk = T_fk[0:3, 3]
+            pos_error = math.sqrt((pos_fk[0] - x)**2 + (pos_fk[1] - y)**2 + (pos_fk[2] - z)**2)
+            solutions.append((candidate, pos_error))
+    
+    # Select the candidate with minimal position error
+    best_candidate, best_err = min(solutions, key=lambda s: s[1])
+    return best_candidate
+```

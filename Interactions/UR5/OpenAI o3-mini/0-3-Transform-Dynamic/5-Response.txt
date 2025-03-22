@@ -1,0 +1,128 @@
+```python
+import math
+import numpy as np
+
+def inverse_kinematics(p: tuple[float, float, float],
+                       r: tuple[float, float, float]) -> tuple[float, float, float, float]:
+    """
+    Gets the joint values needed to reach position "p" and orientation "r" for the 4-DOF serial manipulator.
+
+    Kinematic chain:
+      - Joint 1 rotates about Z.
+      - Joint 2 is offset by [0, 0.13585, 0] (in link1 frame) and rotates about Y.
+      - Joint 3 is located at [0, -0.1197, 0.425] (in link2 frame) and rotates about Y.
+      - Joint 4 is located at [0, 0, 0.39225] (in link3 frame) and rotates about Y.
+      - The TCP is offset by [0, 0.093, 0] (in link4 frame).
+      
+    For IK, we exploit the fact that (apart from the base rotation) the remaining motion
+    happens in a plane (using the z–components of the translations) so that the two “planar links”
+      L1 = 0.425   (from joint2-to-joint3)
+      L2 = 0.39225 (from joint3-to-joint4)
+    govern the x–z positioning in the joint2 frame.
+    
+    This function first extracts a desired rotation matrix R_desired from the input r (roll, pitch, yaw)
+    using the same convention as in the EXISTING code. Then, by noting that the full end‐effector
+    orientation is a product R = Rz(theta1)*Ry(ψ) (with ψ = θ2+θ3+θ4), we choose the base angle (joint1)
+    so that, when we “remove” the Rz(theta1) rotation from R_desired, the remainder R_planar = Rz(–theta1)*R_desired
+    is a pure rotation about Y (i.e. its (0,0) and (0,2) elements define an angle ψ). Next, the TCP position p
+    is “shifted” into joint2’s coordinate system. (Because the joint2 frame is translated by T2 = Rz(theta1)*[0,0.13585,0],
+    one finds that the effective planar target coordinates become:
+            x_eff = p_x*cos(theta1) + p_y*sin(theta1)
+            z_eff = p_z   )
+    The two-link planar IK (using the cosine law) is then used to solve for joints 2 and 3; finally joint 4 is
+    obtained so that the sum (θ2+θ3+θ4) matches the planar target sum.
+    
+    Any candidate solution is acceptable.
+    
+    :param p: The desired TCP position as (x, y, z) in global coordinates.
+    :param r: The desired TCP orientation as (roll, pitch, yaw) in radians.
+    :return: A tuple (theta1, theta2, theta3, theta4) with the computed joint angles in radians.
+    """
+    # --- Step 1. Compute the desired end–effector rotation matrix R_desired from r ---
+    roll, pitch, yaw = r
+    cr, sr = math.cos(roll), math.sin(roll)
+    cp, sp = math.cos(pitch), math.sin(pitch)
+    cy, sy = math.cos(yaw), math.sin(yaw)
+    # Using the same convention as EXISTING Code 2:
+    R_desired = np.array([
+        [cy * cp,            cy * sp * sr - sy * cr,   cy * sp * cr + sy * sr],
+        [sy * cp,            sy * sp * sr + cy * cr,   sy * sp * cr - cy * sr],
+        [-sp,                cp * sr,                  cp * cr]
+    ])
+
+    # --- Step 2. Determine candidate values for joint 1.
+    # We use the observation that if R = Rz(theta1) * Ry(ψ), then:
+    #    R_planar = Rz(-theta1)*R  must be a pure rotation about Y.
+    # One can show that a valid theta1 satisfies: tan(theta1) = R[1,0] / R[0,0].
+    theta1_cand = math.atan2(R_desired[1, 0], R_desired[0, 0])
+    # There is an inherent π ambiguity; form an alternative candidate.
+    theta1_alt = theta1_cand + math.pi
+    # Normalize theta1_alt to (-π, π]
+    theta1_alt = ((theta1_alt + math.pi) % (2*math.pi)) - math.pi
+    # We'll try both candidates.
+    theta1_candidates = [theta1_cand, theta1_alt]
+
+    # --- Link lengths used in the planar chain (from the z–components of the translations) ---
+    L1 = 0.425     # from joint2-to-joint3 (using [0, -0.1197, 0.425])
+    L2 = 0.39225   # from joint3-to-joint4 (using [0, 0, 0.39225])
+
+    best_error = float('inf')
+    best_solution = None
+
+    # --- Loop over candidate joint1 angles ---
+    for theta1 in theta1_candidates:
+        # Transform the desired TCP position into the frame of joint2.
+        # Joint2 is located at T2 = Rz(theta1)*[0, 0.13585, 0].
+        # A short derivation shows that the effective coordinates for the planar IK become:
+        #      x_eff = p_x*cos(theta1) + p_y*sin(theta1)
+        #      z_eff = p_z   (since the translation in T2 cancels in the x-component).
+        x_eff = p[0] * math.cos(theta1) + p[1] * math.sin(theta1)
+        z_eff = p[2]
+        d = math.hypot(x_eff, z_eff)  # distance in the plane
+
+        # --- Solve for joint 3 using the cosine law.
+        # cos(theta3) = (d^2 - L1^2 - L2^2) / (2 * L1 * L2)
+        cos_theta3 = (d**2 - L1**2 - L2**2) / (2 * L1 * L2)
+        # Clamp to valid range to avoid numerical errors.
+        cos_theta3 = max(min(cos_theta3, 1.0), -1.0)
+        theta3_options = [math.acos(cos_theta3), -math.acos(cos_theta3)]
+        for theta3 in theta3_options:
+            # --- Solve for joint 2.
+            # The planar forward kinematics give:
+            #    x_eff = L1*sin(theta2) + L2*sin(theta2+theta3)
+            #    z_eff = L1*cos(theta2) + L2*cos(theta2+theta3)
+            # A standard solution is:
+            theta2 = math.atan2(x_eff, z_eff) - math.atan2(L2 * math.sin(theta3), L1 + L2 * math.cos(theta3))
+
+            # Compute the forward (planar) position from joints 2 and 3.
+            x_calc = L1 * math.sin(theta2) + L2 * math.sin(theta2 + theta3)
+            z_calc = L1 * math.cos(theta2) + L2 * math.cos(theta2 + theta3)
+            pos_error = abs(x_calc - x_eff) + abs(z_calc - z_eff)
+
+            # --- Determine the desired planar rotation angle.
+            # Remove joint1’s rotation from the overall desired orientation.
+            cos_minus_t1 = math.cos(-theta1)
+            sin_minus_t1 = math.sin(-theta1)
+            Rz_neg = np.array([[cos_minus_t1, -sin_minus_t1, 0],
+                               [sin_minus_t1,  cos_minus_t1, 0],
+                               [0,             0,            1]])
+            R_planar = Rz_neg.dot(R_desired)
+            # For a pure rotation about Y, the rotation angle can be extracted from:
+            target_sum = math.atan2(R_planar[0, 2], R_planar[0, 0])
+            # Enforce that (theta2 + theta3 + theta4) equals this target.
+            theta4 = target_sum - (theta2 + theta3)
+            
+            # (Optionally, one could recompute the full forward kinematics but here we use the
+            # planar position error as a proxy for solution quality.)
+            orient_error = abs(((theta2 + theta3 + theta4) - target_sum + math.pi) % (2*math.pi) - math.pi)
+            total_error = pos_error + orient_error
+
+            if total_error < best_error:
+                best_error = total_error
+                best_solution = (theta1, theta2, theta3, theta4)
+
+    # If no solution was found (should not happen for reachable targets), default to zeros.
+    if best_solution is None:
+        return (0.0, 0.0, 0.0, 0.0)
+    return best_solution
+```

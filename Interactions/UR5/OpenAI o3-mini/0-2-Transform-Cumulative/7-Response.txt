@@ -1,0 +1,64 @@
+```python
+import math
+
+def inverse_kinematics(p: tuple[float, float, float], r: tuple[float, float, float]) -> tuple[float, float, float]:
+    """
+    Computes the joint angles (theta1, theta2, theta3 in radians) required to achieve the target TCP
+    position and orientation. The kinematic chain is defined as follows:
+      • Revolute 1: at [0, 0, 0] rotating about Z.
+      • Revolute 2: at [0, 0.13585, 0] rotating about Y.
+      • Revolute 3: at [0, -0.1197, 0.425] rotating about Y.
+      • TCP: at [0, 0, 0.39225] (in the frame of joint 3).
+    The input orientation r is provided as roll, pitch, yaw.
+    """
+    # ---------------- Joint 1 (Base Rotation) ----------------
+    # Since joint 1 rotates about the Z-axis, its angle can be computed
+    # from the TCP's (x, y) coordinates (using a convention similar to EXISTING 1).
+    # Note: We use -x and y in the atan2 to align with the given robot configuration.
+    x, y, z = p
+    theta1 = math.atan2(-x, y)
+
+    # ---------------- Extract Remaining Rotation (Joints 2 and 3) ----------------
+    # The remaining orientation is produced by the cumulative rotation of joints 2 and 3 about Y.
+    # Using the target roll, pitch, yaw we extract a desired summed rotation angle.
+    # Following EXISTING 3, we use:
+    #   theta_sum = atan2(sin(ry), cos(ry)*cos(rz))
+    rx, ry, rz = r
+    theta_sum = math.atan2(math.sin(ry), math.cos(ry) * math.cos(rz))
+    
+    # ---------------- Compute Relative Position for the Planar Subchain ----------------
+    # Remove the offset from Revolute 1 to Revolute 2.
+    L1 = 0.13585  # Translation along the Y-axis from base to joint 2.
+    # Compute joint 2's origin in the base frame after applying theta1.
+    joint2_origin = (-math.sin(theta1) * L1, math.cos(theta1) * L1, 0)
+    
+    # Compute the TCP position relative to joint 2.
+    p_rel = (x - joint2_origin[0],
+             y - joint2_origin[1],
+             z - joint2_origin[2])
+    
+    # For joints 2 and 3 (which rotate about the Y-axis), the effective planar motion is
+    # in the X–Z plane. We remove the effect of theta1 by rotating p_rel by -theta1.
+    cos_m1 = math.cos(-theta1)
+    sin_m1 = math.sin(-theta1)
+    p2_x = cos_m1 * p_rel[0] - sin_m1 * p_rel[1]
+    p2_z = p_rel[2]
+    
+    # ---------------- Solve for Joints 2 and 3 ----------------
+    # Link parameters:
+    a = 0.425    # Effective length from joint 2 to joint 3.
+    b = 0.39225  # TCP offset from joint 3.
+    #
+    # In the planar chain (joints 2 and 3), the TCP position must satisfy:
+    #   p2_x = a*sin(theta2) + b*sin(theta_sum)
+    #   p2_z = a*cos(theta2) + b*cos(theta_sum)
+    # We solve for theta2 by first removing the TCP offset contribution, then using atan2.
+    term_x = p2_x - b * math.sin(theta_sum)
+    term_z = p2_z - b * math.cos(theta_sum)
+    theta2 = math.atan2(term_x, term_z)
+    
+    # Joint 3 is determined from the desired total rotation:
+    theta3 = theta_sum - theta2
+
+    return (theta1, theta2, theta3)
+```

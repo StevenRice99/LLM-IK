@@ -1,0 +1,149 @@
+```python
+import math
+import numpy as np
+
+def inverse_kinematics(p: tuple[float, float, float],
+                       r: tuple[float, float, float]) -> tuple[float, float, float, float, float]:
+    """
+    Computes a closed‐form analytical inverse kinematics solution for a 5-DOF serial manipulator.
+    
+    The robot’s kinematic chain is defined as:
+      • Joint 1 (Revolute about Y): at [0,0,0].
+      • Joint 2 (Revolute about Y): fixed translation T2 = [0, -0.1197, 0.425] (in parent frame).
+      • Joint 3 (Revolute about Y): fixed translation T3 = [0, 0, 0.39225].
+      • Joint 4 (Revolute about Z): fixed translation T4 = [0, 0.093, 0].
+      • Joint 5 (Revolute about Y): fixed translation T5 = [0, 0, 0.09465].
+      • TCP: fixed translation TCP_offset = [0, 0.0823, 0] and an extra fixed rotation R_z(psi) with psi = 1.570796325.
+    
+    The full forward kinematics can be summarized as:
+      P_TCP = R_y(θ1)*T2 +
+              R_y(θ1+θ2)*T3 +
+              R_y(θ1+θ2)*T4 +
+              R_y(θ1+θ2+θ3)*T5 +
+              R_y(θ1+θ2+θ3)*R_z(θ4)*TCP_offset
+    and the overall orientation is:
+      R_total = R_y(θ1+θ2+θ3) · R_z(θ4) · R_y(θ5) · R_z(psi)
+    
+    In this closed–form solution the strategy is:
+      1. Use the desired end–effector orientation R_target (from roll, pitch, yaw) to extract the overall arm angle S,
+         defined as S = θ1+θ2+θ3. We get S = atan2(R_target[0,2], R_target[2,2]).
+      2. Since the TCP_offset is applied after Joint 4, and because T5 (of length C_tcp=0.09465 m) is added
+         after the arm, we “subtract” from the measured x–z target a wrist correction that depends on Joint 4.
+         Meanwhile, the vertical (y) coordinate is used to solve for θ4 via:
+             cos(θ4) = (p_y – (T2_y+T4_y)) / TCP_offset_y 
+                     = (p_y + 0.0267) / 0.0823,
+         where T2_y + T4_y = -0.1197 + 0.093 = -0.0267.
+      3. With θ4 known, define D = TCP_offset_y*sin(θ4) and let C = T5_z = 0.09465.
+         Then the effective target for the “arm” (joints 1–3) is adjusted as:
+             X_eff = x_target + D*cos(S) - C*sin(S)
+             Z_eff = z_target - D*sin(S) - C*cos(S)
+      4. With effective link lengths a = 0.425 and b = 0.39225 (the z components of T2 and T3),
+         solve the planar 2-link IK:
+             cos(θ2) = (r_eff² - a² - b²) / (2ab)
+         and choose the “elbow–down” solution (θ2 negative), with:
+             θ1 = atan2(X_eff, Z_eff) - atan2(b*sin(θ2), a + b*cos(θ2))
+         and then θ3 = S – (θ1+θ2).
+      5. Finally, the wrist’s remaining joint (θ5) is found by isolating it from the overall orientation:
+             R_y(θ5) = [R_y(S)*R_z(θ4)]ᵀ · R_target · R_z(–psi)
+         and then θ5 = atan2(M[0,2], M[0,0]), where M is the matrix above.
+    
+    Assumptions:
+      • The target pose (p, r) is reachable.
+      • When multiple solutions exist, the “elbow–down” solution is chosen.
+    
+    :param p: Target TCP position as (x, y, z) in meters.
+    :param r: Target TCP orientation as (roll, pitch, yaw) in radians.
+    :return: Tuple (θ1, θ2, θ3, θ4, θ5) of joint angles in radians.
+    """
+    # Helper rotation matrices
+    def rot_x(a: float) -> np.ndarray:
+        ca, sa = math.cos(a), math.sin(a)
+        return np.array([[1, 0, 0],
+                         [0, ca, -sa],
+                         [0, sa, ca]])
+    
+    def rot_y(a: float) -> np.ndarray:
+        ca, sa = math.cos(a), math.sin(a)
+        return np.array([[ ca, 0, sa],
+                         [  0, 1,  0],
+                         [-sa, 0, ca]])
+    
+    def rot_z(a: float) -> np.ndarray:
+        ca, sa = math.cos(a), math.sin(a)
+        return np.array([[ca, -sa, 0],
+                         [sa,  ca, 0],
+                         [ 0,   0, 1]])
+    
+    # Robot constant parameters (from URDF)
+    T2_y = -0.1197
+    T2_z = 0.425    # from Joint1 to Joint2 (z component)
+    T3_z = 0.39225  # from Joint2 to Joint3 (z component)
+    T4_y = 0.093    # from Joint3 to Joint4 (y component)
+    T5_z = 0.09465  # from Joint4 to Joint5 (z component)
+    TCP_y  = 0.0823 # TCP offset (y component)
+    psi    = 1.570796325  # fixed TCP yaw offset
+
+    # For the planar arm (joints 1-3) we define effective link lengths:
+    a = T2_z      # 0.425
+    b = T3_z      # 0.39225
+    C = T5_z      # 0.09465
+
+    # Compute the target rotation matrix from roll, pitch, yaw
+    roll, pitch, yaw = r
+    R_target = rot_z(yaw) @ rot_y(pitch) @ rot_x(roll)
+
+    # Step 1: Extract overall arm orientation S = θ1+θ2+θ3 from the approach vector.
+    S = math.atan2(R_target[0, 2], R_target[2, 2])
+    
+    # Step 2: Solve for Joint 4 (θ4) from the y-coordinate.
+    # The y-coordinate of the TCP is given by:
+    #   p_y = (T2_y + T4_y) + TCP_y * cos(θ4)
+    # Note: T2_y + T4_y = -0.1197 + 0.093 = -0.0267.
+    p_x, p_y, p_z = p
+    val = (p_y - (T2_y + T4_y)) / TCP_y  # = (p_y + 0.0267) / 0.0823
+    val = max(min(val, 1.0), -1.0)
+    theta4 = math.acos(val)  # principal value in [0, π]
+    
+    # Step 3: Form the wrist correction in the x-z plane.
+    # The TCP offset (TCP_y) rotates by θ4 about Z, so its contribution (in the TCP frame) becomes:
+    #   R_z(θ4)*[0, TCP_y, 0] = [-TCP_y*sin(θ4), TCP_y*cos(θ4), 0]
+    # This vector, when rotated by R_y(S), gives correction components:
+    #   Δx = -TCP_y*sin(θ4)*cos(S)
+    #   Δz = -TCP_y*sin(θ4)*(-sin(S)) = TCP_y*sin(θ4)*sin(S)
+    # To “remove” the wrist effect from the target x,z, we add back these (with sign adjusted)
+    D = TCP_y * math.sin(theta4)
+    # Also, T5 (of length C = 0.09465) is applied along the z–axis of the arm (i.e. along [sin(S), 0, cos(S)]),
+    # so its contribution is:
+    #   [C*sin(S), 0, C*cos(S)]
+    # Remove this contribution as well.
+    X_eff = p_x + D * math.cos(S) - C * math.sin(S)
+    Z_eff = p_z - D * math.sin(S) - C * math.cos(S)
+    
+    # Step 4: Solve the planar 2-link IK (for joints 1 and 2) to reach (X_eff, Z_eff).
+    r_eff = math.hypot(X_eff, Z_eff)
+    # Compute cosine of joint 2 angle
+    cos_theta2 = (r_eff**2 - a**2 - b**2) / (2 * a * b)
+    cos_theta2 = max(min(cos_theta2, 1.0), -1.0)
+    # Choose elbow-down solution: set θ2 negative.
+    theta2 = -math.acos(cos_theta2)
+    # Compute joint 1:
+    theta1 = math.atan2(X_eff, Z_eff) - math.atan2(b * math.sin(theta2), a + b * math.cos(theta2))
+    # Joint 3 is the remainder:
+    theta3 = S - (theta1 + theta2)
+    
+    # Step 5: Solve for wrist joint θ5 from the orientation.
+    # We have R_total = R_y(S) · R_z(θ4) · R_y(θ5) · R_z(psi) = R_target.
+    # Isolate R_y(θ5):
+    R_yS = rot_y(S)
+    R_z_theta4 = rot_z(theta4)
+    R_A = R_yS @ R_z_theta4  # contribution from joints 1-4
+    # Use orthonormality: inv(R_A) = R_Aᵀ.
+    M = R_A.T @ R_target @ rot_z(-psi)
+    # For a pure rotation about Y, the matrix should be of the form:
+    #    [[cos(θ5), 0, sin(θ5)],
+    #     [   0,    1,    0   ],
+    #     [-sin(θ5),0, cos(θ5)]]
+    theta5 = math.atan2(M[0, 2], M[0, 0])
+    
+    return (theta1, theta2, theta3, theta4, theta5)
+```

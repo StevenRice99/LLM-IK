@@ -1,0 +1,93 @@
+Below is one acceptable closed‐form solution. In our reasoning we note that (because of the fixed “vertical” offsets) the TCP always lies in a horizontal plane (with y = –0.0267) so that only the x–z coordinates need be “reached” by the rotations about Y. In fact one may show that when all fixed translations are “collected” the chain’s effective contribution in the horizontal plane appears as a two‐link arm with one link of length 
+  a = 0.425 (from the [0, –0.1197, 0.425] offset)
+and a second “link” of length 
+  b = (0.39225 + 0.09465) = 0.4869 (the sum of the [0, 0, 0.39225] and the TCP offset along z). 
+
+Then one may solve the 2R inverse kinematics using the cosine law. (A “sign‐flip” is performed on the inner–angle if a cross–product test indicates the “elbow” should be “flipped.”) Finally, since the remaining two joints do not affect position, we set them to 0. One acceptable implementation is as follows:
+
+--------------------------------------------------
+def inverse_kinematics(p: tuple[float, float, float]) -> tuple[float, float, float, float]:
+    """
+    Gets the joint values needed to reach TCP position "p".
+    The kinematics (from the URDF) yield the following chain:
+       • Joint 1 (revolute about Y) is at the base.
+       • A fixed offset [0, -0.1197, 0.425] is applied.
+       • Joint 2 (revolute about Y) rotates.
+       • A fixed translation [0, 0, 0.39225] is applied.
+       • Joint 3 (revolute about Y) rotates.
+       • A fixed translation [0, 0.093, 0] is applied (this does not affect the horizontal
+         position because it is along Y).
+       • Joint 4 (revolute about Z) rotates but, when followed by a translation [0, 0, 0.09465],
+         the TCP is displaced only along Z.
+    In the end the TCP “sits” at:
+         x = effect from (a 2R arm rotated by joint1),
+         y = –0.1197 + 0.093  = –0.0267 (a fixed value), and
+         z = 0.425 + 0.39225 + 0.09465.
+    Thus, if we “collect” the translations that do affect x and z, the arm is equivalent to
+    a planar 2R manipulator with link lengths:
+         a = 0.425   (from [0, –0.1197, 0.425])
+         b = 0.39225 + 0.09465 = 0.4869.
+    We then define r = sqrt(x^2+z^2) (note that p[1] must equal –0.0267 for a valid solution).
+    The 2R inverse kinematics are computed as follows:
+         cos(theta2) = (r^2 – a^2 – b^2) / (2ab)
+         Then theta2 = acos(…) (with sign chosen based on a cross–product test),
+         and theta1 = atan2(x, z) – atan2(b*sin(theta2), a + b*cos(theta2)).
+    Finally, since joints 3 and 4 do not affect TCP position they are chosen to be 0.
+    :param p: A tuple of [x, y, z] representing the target TCP position.
+    :return: A tuple (theta1, theta2, theta3, theta4) of joint angles (in radians).
+    """
+    import math
+
+    x, y, z = p
+
+    # (The chain forces p[1] = –0.0267, so we could check that here if desired.)
+
+    # Define the two effective links in the x–z plane:
+    a = 0.425
+    b = 0.39225 + 0.09465  # 0.4869
+
+    # The distance in the horizontal (x-z) plane:
+    r = math.sqrt(x * x + z * z)
+
+    # Use the cosine law to compute the effective inner angle.
+    cos_theta2 = (r**2 - a**2 - b**2) / (2 * a * b)
+    # Clamp cos_theta2 to the valid range to avoid numerical issues.
+    if cos_theta2 > 1.0:
+        cos_theta2 = 1.0
+    elif cos_theta2 < -1.0:
+        cos_theta2 = -1.0
+
+    # Compute the candidate (absolute value) inner angle.
+    theta2_eff = math.acos(cos_theta2)
+
+    # To choose between the two IK branches, use a cross–product test.
+    # Compute:
+    #   cross = x*(a + b*cos(theta2_eff)) - z*(b*sin(theta2_eff))
+    sin_theta2_eff = math.sin(theta2_eff)
+    cross = x * (a + b * cos_theta2) - z * (b * sin_theta2_eff)
+    if cross < 0:
+        theta2_eff = -theta2_eff
+
+    # Now compute the offset angle phi.
+    phi = math.atan2(b * math.sin(theta2_eff), a + b * math.cos(theta2_eff))
+    # psi is the direction of the target in the x–z plane.
+    psi = math.atan2(x, z)
+    theta1 = psi - phi
+
+    # Since joints 3 (about Y) and 4 (about Z) do not affect TCP position,
+    # we choose:
+    theta3 = 0.0
+    theta4 = 0.0
+
+    return (theta1, theta2_eff, theta3, theta4)
+--------------------------------------------------
+
+Explanation:
+
+• We “collect” all translations that affect the x–z plane into two effective link lengths (a and b).
+• The horizontal distance r = √(x²+z²) is reached by a standard 2R arm.
+• The usual cosine–law yields theta2 (here named theta2_eff) while the angle difference between
+  the target direction (psi) and the “shoulder-to-wrist” direction (phi) gives theta1.
+• Finally, joints 3 and 4 are free for position (and so we set them to zero).
+
+This solution meets the requirement of an analytical closed–form inverse kinematics for reaching TCP p.

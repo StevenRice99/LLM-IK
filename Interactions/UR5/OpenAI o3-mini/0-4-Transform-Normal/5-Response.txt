@@ -1,0 +1,134 @@
+```python
+def inverse_kinematics(p: tuple[float, float, float],
+                       r: tuple[float, float, float]) -> tuple[float, float, float, float, float]:
+    """
+    Computes the joint values (in radians) for the 5-DOF serial manipulator to reach
+    the desired TCP position 'p' and orientation 'r' (given as roll, pitch, yaw).
+    
+    The robot’s kinematics are specified as:
+      • Revolute 1: rotation about Z (joint axis Z) at [0, 0, 0].
+      • Revolute 2: translation [0, 0.13585, 0] then rotation about Y.
+      • Revolute 3: translation [0, -0.1197, 0.425] then rotation about Y.
+      • Revolute 4: translation [0, 0, 0.39225] then rotation about Y.
+      • Revolute 5: translation [0, 0.093, 0] then rotation about Z.
+      • TCP: final translation [0, 0, 0.09465].
+    
+    The overall forward kinematics can be factored into a base rotation about Z (q1)
+    and a planar 3R chain where the summed rotation about Y (q2+q3+q4) forms the direction
+    of the end-effector, with the final revolute q5 about Z decoupling the TCP orientation.
+    
+    A breakdown of the derivation:
+    
+      1. Unrotate the target position p by –q1 so that its y–component equals the sum of
+         the fixed y offsets from joints 2, 3, and 5:
+               y_const = 0.13585 – 0.1197 + 0.093 = 0.10915.
+         Writing:
+               p̄_y = -sin(q1)*p_x + cos(q1)*p_y = y_const,
+         we have:
+               √(p_x²+p_y²)·cos(q1+δ) = y_const,  with δ = atan2(-p_x, p_y),
+         so one solution is:
+               q1 = acos(y_const/√(p_x²+p_y²)) – δ.
+    
+      2. The tool rotation R_des is built from r = (roll, pitch, yaw) as:
+               R_des = Rz(yaw) · Ry(pitch) · Rx(roll)
+         and then “decoupled” by Rz(–q1) to yield:
+               M = Rz(–q1)·R_des.
+         One can then set:
+               φ = q2+q3+q4 = atan2(M[0,2], M[2,2])
+           and
+               q5 = atan2(M[1,0], M[1,1]).
+    
+      3. Remove the TCP offset (L3 = 0.09465) along the direction φ from the rotated position,
+         yielding an effective 2R arm where:
+              [P_x, P_z] = [p̄_x – L3*sin(φ), p̄_z – L3*cos(φ)].
+         With L1 = 0.425 and L2 = 0.39225, use the cosine law:
+              q3 = arccos((r2² – L1² – L2²) / (2·L1·L2))  where r2 = √(P_x²+P_z²),
+         and then:
+              q2 = atan2(P_x, P_z) – atan2(L2*sin(q3), L1+L2*cos(q3)).
+         Finally, q4 = φ – (q2+q3).
+    
+    This closed-form computation returns one valid set of joint angles.
+    """
+    import math
+    import numpy as np
+
+    # Define link lengths/offsets
+    L1 = 0.425        # Effective length from Revolute 2->3 (planar arm)
+    L2 = 0.39225      # Effective length from Revolute 3->4 (planar arm)
+    L3 = 0.09465      # TCP offset (translation along the final direction)
+
+    # Constant y offset from fixed translations:
+    y_const = 0.13585 - 0.1197 + 0.093  # Equals 0.10915
+
+    # Unpack target position (p_x, p_y, p_z)
+    p_x, p_y, p_z = p
+
+    # Step 1: Solve for base joint angle q1.
+    r_xy = math.sqrt(p_x**2 + p_y**2)
+    # We have: -sin(q1)*p_x + cos(q1)*p_y = y_const
+    # Write: r_xy * cos(q1 + delta) = y_const, where delta = atan2(-p_x, p_y)
+    delta = math.atan2(-p_x, p_y)
+    ratio = y_const / r_xy
+    # Ensure numeric safety.
+    ratio = max(-1.0, min(1.0, ratio))
+    q1 = math.acos(ratio) - delta
+
+    # Rotate p by –q1 to get p_bar.
+    cos_q1 = math.cos(q1)
+    sin_q1 = math.sin(q1)
+    p_bar_x = cos_q1 * p_x + sin_q1 * p_y
+    p_bar_y = -sin_q1 * p_x + cos_q1 * p_y  # Expected to be approximately y_const
+    p_bar_z = p_z
+
+    # Step 2: Build desired rotation matrix R_des from r = (roll, pitch, yaw)
+    # URDF order: R_des = Rz(yaw) * Ry(pitch) * Rx(roll)
+    roll, pitch, yaw = r
+    R_x = np.array([
+        [1, 0, 0],
+        [0, math.cos(roll), -math.sin(roll)],
+        [0, math.sin(roll),  math.cos(roll)]
+    ])
+    R_y = np.array([
+        [ math.cos(pitch), 0, math.sin(pitch)],
+        [0, 1, 0],
+        [-math.sin(pitch), 0, math.cos(pitch)]
+    ])
+    R_z = np.array([
+        [math.cos(yaw), -math.sin(yaw), 0],
+        [math.sin(yaw),  math.cos(yaw), 0],
+        [0, 0, 1]
+    ])
+    R_des = R_z @ R_y @ R_x
+
+    # Remove the base rotation effect by multiplying with Rz(-q1)
+    Rz_neg_q1 = np.array([
+        [cos_q1, sin_q1, 0],
+        [-sin_q1, cos_q1, 0],
+        [0, 0, 1]
+    ])
+    M = Rz_neg_q1 @ R_des
+
+    # Extract φ = q2+q3+q4 and q5 from M.
+    # Note: M should be equal to Ry(φ)*Rz(q5).
+    phi = math.atan2(M[0, 2], M[2, 2])
+    q5 = math.atan2(M[1, 0], M[1, 1])
+
+    # Step 3: Account for the TCP offset L3 by subtracting off its contribution.
+    # The effective target position for the 2R chain:
+    P_x = p_bar_x - L3 * math.sin(phi)
+    P_z = p_bar_z - L3 * math.cos(phi)
+    r2 = math.sqrt(P_x**2 + P_z**2)
+
+    # Solve for q3 using the cosine law.
+    cos_q3 = (r2**2 - L1**2 - L2**2) / (2 * L1 * L2)
+    cos_q3 = max(-1.0, min(1.0, cos_q3))
+    q3 = math.acos(cos_q3)  # Select the elbow-up configuration
+
+    # Solve for q2.
+    q2 = math.atan2(P_x, P_z) - math.atan2(L2 * math.sin(q3), L1 + L2 * math.cos(q3))
+
+    # Solve for q4 from the relation: φ = q2 + q3 + q4.
+    q4 = phi - (q2 + q3)
+
+    return (q1, q2, q3, q4, q5)
+```

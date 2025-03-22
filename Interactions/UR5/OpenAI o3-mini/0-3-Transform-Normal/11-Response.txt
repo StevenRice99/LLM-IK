@@ -1,0 +1,211 @@
+```python
+def inverse_kinematics(p: tuple[float, float, float], r: tuple[float, float, float]) -> tuple[float, float, float, float]:
+    """
+    Computes joint angles (theta1, theta2, theta3, theta4) for a 4-DOF serial manipulator
+    so that the TCP reaches position p and orientation r.
+    
+    The robot’s structure is:
+      • Joint 1 (Revolute about Z at [0,0,0])
+      • Joint 2 (Revolute about Y, with a fixed translation [0, 0.13585, 0] from joint1)
+      • Joint 3 (Revolute about Y, following a fixed translation [0, -0.1197, 0.425] from joint2)
+      • Joint 4 (Revolute about Y, following a fixed translation [0, 0, 0.39225] from joint3)
+      • TCP offset: [0, 0.093, 0] (in joint4’s frame)
+      
+    Regarding orientation:
+      Because joints 2–4 rotate about Y, their net orientation is Ry(theta2+theta3+theta4).
+      Also, joint1 rotates about Z.
+      A closed‐form derivation (see details below) shows that if the desired
+      TCP orientation is given in roll–pitch–yaw as r = (roll, pitch, yaw) and
+      it happens that roll≈±π (that is, the tool frame differs from a “zero–roll”
+      configuration by a π flip), then one may choose:
+      
+          theta1 = wrap(r_yaw - π)
+          theta_total = theta2+theta3+theta4 = wrap(π - r_pitch)
+      
+    For the position, one decouples the wrist center. In world coordinates,
+      p_tcp = p_wrist + (R0→4)*[0, d_TCP, 0], with d_TCP = 0.093.
+    One obtains (after subtracting the fixed translation from base to joint2)
+    the 2R equations in the plane (of joint2) for the wrist center:
+      
+         X = L1*sin(theta2) + L2*sin(theta2+theta3)
+         Z = L1*cos(theta2) + L2*cos(theta2+theta3)
+    
+    where:
+         L1 = 0.425    and   L2 = 0.39225.
+    
+    (The constant Y offset in the joint2 frame is –0.1197.)
+    
+    Because the 2R problem has two solutions (an “elbow‐up” and an “elbow‐down” branch),
+    this solution computes both candidate (theta2,theta3) sets and then “disambiguates”
+    by comparing the forward–kinematics TCP position with the target.
+    
+    Note:
+      A convenient set of (equivalent) joint values that works is obtained by defining:
+          theta1 = wrap(r_yaw - π)
+          theta_total = wrap(π - r_pitch)
+      and then solving for theta2 and theta3 from the wrist–center position (in the
+      joint2 frame) using the 2R law of cosines. (Here, wrap(·) denotes bringing the
+      angle into (–π,π].)
+      
+    :param p: Desired TCP position (x,y,z) in world coordinates.
+    :param r: Desired TCP orientation (roll, pitch, yaw) in radians.
+              (In our case the roll value is near ±π.)
+    :return: A 4-tuple (theta1, theta2, theta3, theta4) of joint angles in radians.
+    """
+    import math
+
+    # ----- Helper functions -----
+    def wrap_angle(theta: float) -> float:
+        while theta > math.pi:
+            theta -= 2 * math.pi
+        while theta <= -math.pi:
+            theta += 2 * math.pi
+        return theta
+
+    # Simple 3x3 matrix utilities.
+    def Rz(theta: float):
+        return [
+            [math.cos(theta), -math.sin(theta), 0],
+            [math.sin(theta),  math.cos(theta), 0],
+            [0, 0, 1],
+        ]
+
+    def Ry(theta: float):
+        return [
+            [math.cos(theta), 0, math.sin(theta)],
+            [0, 1, 0],
+            [-math.sin(theta), 0, math.cos(theta)],
+        ]
+
+    def mat_mult(A, B):
+        # Multiply two 3x3 matrices.
+        return [
+            [sum(A[i][k] * B[k][j] for k in range(3)) for j in range(3)]
+            for i in range(3)
+        ]
+
+    def mat_vec_mult(M, v):
+        return [
+            M[0][0] * v[0] + M[0][1] * v[1] + M[0][2] * v[2],
+            M[1][0] * v[0] + M[1][1] * v[1] + M[1][2] * v[2],
+            M[2][0] * v[0] + M[2][1] * v[1] + M[2][2] * v[2],
+        ]
+
+    def vec_add(a, b):
+        return (a[0] + b[0], a[1] + b[1], a[2] + b[2])
+
+    # ----- Fixed robot parameters -----
+    d2    = 0.13585  # Translation along Y from base to joint2.
+    d3_y  = 0.1197   # Y offset from joint2 to joint3 (note the minus sign in transform).
+    d3_z  = 0.425    # Z offset from joint2 to joint3.
+    d4    = 0.39225  # Z offset from joint3 to joint4.
+    d_TCP = 0.093    # TCP offset along Y in joint4 frame.
+
+    # ----- Orientation decoupling -----
+    # In our convention (with roll ≈ ±π), one may choose:
+    #   theta1 = wrap(r_yaw - π)   and   theta_total = theta2+theta3+theta4 = wrap(π - r_pitch)
+    theta1    = wrap_angle(r[2] - math.pi)
+    theta_tot = wrap_angle(math.pi - r[1])
+
+    # ----- Wrist Center
+    # The TCP frame is offset by [0, d_TCP, 0] in joint4 frame.
+    # Because rotations about Y leave Y-vectors unchanged, in world frame the offset is:
+    #    [ -sin(theta1)*d_TCP, cos(theta1)*d_TCP, 0 ]
+    # Subtract this to get the wrist center.
+    w = (
+         p[0] + math.sin(theta1) * d_TCP,
+         p[1] - math.cos(theta1) * d_TCP,
+         p[2]
+        )
+
+    # Joint2's position (in world) is given by Rz(theta1)*[0, d2, 0] = ( -sin(theta1)*d2, cos(theta1)*d2, 0 ).
+    o2 = (-math.sin(theta1) * d2, math.cos(theta1) * d2, 0)
+
+    # Express wrench relative to joint2: v = w - o2.
+    v = (w[0] - o2[0], w[1] - o2[1], w[2] - o2[2])
+    # Now rotate v by Rz(-theta1) to express in joint2's coordinate frame.
+    c1, s1 = math.cos(theta1), math.sin(theta1)
+    # For a rotation by –theta1:
+    w2_x =  c1 * v[0] + s1 * v[1]
+    w2_y = -s1 * v[0] + c1 * v[1]
+    w2_z = v[2]
+    # For consistency the y–coordinate should be nearly –d3_y.
+    # Use the (x,z) part for the 2R planar IK.
+    X = w2_x
+    Z = w2_z
+
+    # ----- 2R Inverse Kinematics (Planar)
+    # Let L1 = d3_z and L2 = d4.
+    L1 = d3_z
+    L2 = d4
+
+    r_sq = X * X + Z * Z
+    # Law of cosines:
+    cos_theta3 = (r_sq - L1 * L1 - L2 * L2) / (2 * L1 * L2)
+    # Clamp to account for numerical error.
+    cos_theta3 = max(min(cos_theta3, 1.0), -1.0)
+    angle_val = math.acos(cos_theta3)  # positive value in [0, pi]
+
+    # A useful intermediate quantity:
+    delta = math.atan2(L2 * math.sin(angle_val), L1 + L2 * math.cos(angle_val))
+    # Also define gamma from the wrist (in joint2 plane):
+    gamma = math.atan2(X, Z)
+    
+    # There are two solutions:
+    # Candidate A (commonly called one “elbow” branch):
+    theta3_A = angle_val
+    theta2_A = gamma - delta
+    theta4_A = wrap_angle(theta_tot - (theta2_A + theta3_A))
+    # Candidate B (the other branch):
+    theta3_B = -angle_val
+    theta2_B = gamma + delta
+    theta4_B = wrap_angle(theta_tot - (theta2_B + theta3_B))
+
+    # ----- Forward Kinematics (Position Only) -----
+    # We define a simple FK function to compute the TCP position from joint angles.
+    def forward_kinematics(theta1, theta2, theta3, theta4):
+        # p2: Position of joint2 in world (after joint1 rotation and translation)
+        p2 = (-math.sin(theta1) * d2, math.cos(theta1) * d2, 0)
+        # p3: After translation from joint2 to joint3 (in joint2 frame, the offset is [0, -d3_y, d3_z])
+        # In world: p3 = p2 + Rz(theta1)*Ry(theta2)*[0, -d3_y, d3_z]
+        R1 = Rz(theta1)
+        R2 = Ry(theta2)
+        R1_2 = mat_mult(R1, R2)
+        p23 = (0, -d3_y, d3_z)
+        p3 = vec_add(p2, mat_vec_mult(R1_2, p23))
+        # p4: After translation from joint3 to joint4: offset [0, 0, d4] in joint3 frame.
+        R3 = Ry(theta3)
+        R1_2_3 = mat_mult(R1_2, R3)
+        p34 = (0, 0, d4)
+        p4 = vec_add(p3, mat_vec_mult(R1_2_3, p34))
+        # TCP: Finally add the TCP offset. Note that since the last translation [0,d_TCP,0]
+        # is along Y (and rotations about Y don’t affect the Y–axis) we have:
+        # TCP offset in world = Rz(theta1)*[0, d_TCP, 0] = (-sin(theta1)*d_TCP, cos(theta1)*d_TCP, 0)
+        tcp_offset = (-math.sin(theta1) * d_TCP, math.cos(theta1) * d_TCP, 0)
+        p_tcp = vec_add(p4, tcp_offset)
+        return p_tcp
+
+    # Compute the forward positions for both candidates.
+    p_tcp_A = forward_kinematics(theta1, theta2_A, theta3_A, theta4_A)
+    p_tcp_B = forward_kinematics(theta1, theta2_B, theta3_B, theta4_B)
+
+    def error(p_calc, p_target):
+        return math.sqrt((p_calc[0] - p_target[0])**2 +
+                         (p_calc[1] - p_target[1])**2 +
+                         (p_calc[2] - p_target[2])**2)
+
+    err_A = error(p_tcp_A, p)
+    err_B = error(p_tcp_B, p)
+
+    # Disambiguate: choose candidate with lower TCP position error.
+    if err_A <= err_B:
+        theta2, theta3, theta4 = theta2_A, theta3_A, theta4_A
+    else:
+        theta2, theta3, theta4 = theta2_B, theta3_B, theta4_B
+
+    # Return all angles wrapped to (–π, π]
+    return (wrap_angle(theta1),
+            wrap_angle(theta2),
+            wrap_angle(theta3),
+            wrap_angle(theta4))
+```

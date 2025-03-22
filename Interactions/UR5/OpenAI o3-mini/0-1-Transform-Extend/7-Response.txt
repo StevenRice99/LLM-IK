@@ -1,0 +1,96 @@
+```python
+import math
+
+def inverse_kinematics(p: tuple[float, float, float], r: tuple[float, float, float]) -> tuple[float, float]:
+    """
+    Computes the joint angles for a 2-DOF serial manipulator with the following kinematic chain:
+      - Joint 1 rotates about the Z axis at the base.
+      - Joint 2 rotates about the Y axis.
+      - The TCP is located (in the frame of joint2) at [0, -0.1197, 0.425].
+      - There is a fixed translation from joint1 to joint2 given by [0, 0.13585, 0].
+      
+    The overall forward kinematics position is:
+        p = Rz(theta1) * ( [ L_tcp*sin(theta2),
+                              (0.13585 - 0.1197),
+                              L_tcp*cos(theta2) ] )
+    where L_tcp = 0.425.
+    
+    Note on orientation:
+      When you multiply Rz(theta1) by Ry(theta2), the resulting rotation (expressed as ZYX Euler angles)
+      is:
+           roll  = 0      if cos(theta2) > 0, else π   (i.e. depending on the branch)
+           pitch = asin(sin(theta2))   (a sawtooth function with range [-pi/2, pi/2])
+           yaw   = theta1 (or theta1 ± π)
+      The provided target orientation "r" is given as (roll, pitch, yaw). In particular the target pitch r[1]
+      equals asin(sin(theta2)). Thus we use r[1] to decide the branch for theta2.
+      
+    To solve inverse kinematics:
+      1. The z-component gives:  z = L_tcp*cos(theta2)  →  theta2 = acos(z/L_tcp) or -acos(z/L_tcp).
+      2. We choose the branch so that asin(sin(theta2)) matches the supplied pitch (r[1]). Since asin(sin(θ))
+         always returns a value in [-pi/2, pi/2], note that when the “true” theta2 lies outside that range the
+         principal value will be shifted by ±pi. For example, if theta2 is near 3.26 rad then asin(sin(theta2))
+         is approximately π – theta2. In our solver we assume that if the target pitch r[1] is negative we choose
+         theta2 = –acos(z/L_tcp) (which, when wrapped into the principal value, equals –[π – acos(z/L_tcp)]),
+         and if r[1] is nonnegative we choose theta2 = acos(z/L_tcp).
+         
+      3. The x-y components satisfy:
+             [x, y] = Rz(theta1) * [ A, B ]
+         where A = L_tcp*sin(theta2) and B = (0.13585 - 0.1197) = 0.01615.
+         Let δ = atan2(B, A) and ψ = atan2(y, x). Then
+             theta1 = ψ – δ   (modulo 2π)
+         We return theta1 normalized to (–π, π].
+    
+    :param p: Target TCP position as (x, y, z).
+    :param r: Target TCP orientation (roll, pitch, yaw) in radians.
+              (Note: only the pitch r[1] is used to choose the correct solution branch for theta2.)
+    :return: A tuple (theta1, theta2) representing the joint angles.
+    """
+    # Unpack target position and orientation.
+    x, y, z = p
+    roll_target, pitch_target, yaw_target = r
+
+    L_tcp = 0.425
+    # There is a fixed translation from joint1 to joint2 and from joint2 to TCP.
+    # The only effect in the XY plane is from the constant offset in the y-direction of joint2's position 
+    # relative to joint1 and the TCP offset. Their net effect is:
+    offset = 0.13585 - 0.1197  # = 0.01615
+
+    # --- Solve for theta2 using the z-coordinate. ---
+    # Position in z:  z = L_tcp*cos(theta2)  →  cos(theta2) = z / L_tcp.
+    # Clamp the value to avoid domain errors.
+    cos_theta2 = max(min(z / L_tcp, 1.0), -1.0)
+    base_candidate = math.acos(cos_theta2)  # This yields a value in [0, π].
+
+    # The forward chain rotation is Rz(theta1)*Ry(theta2) so that, when expressed in ZYX Euler angles,
+    # the pitch = asin(sin(theta2)). Since asin returns values in [-π/2, π/2], note:
+    #   · If theta2 is in (–π/2, π/2), then pitch = theta2.
+    #   · If theta2 is not in that interval, then pitch = π – theta2 (if theta2 > π/2)
+    #     or –π – theta2 (if theta2 < –π/2).
+    # We decide the branch for theta2 based on the target pitch (r[1]).
+    if pitch_target >= 0:
+        # When the target pitch is nonnegative we choose the candidate in [0, π]:
+        theta2 = base_candidate
+    else:
+        # If target pitch is negative, choose the negative candidate.
+        theta2 = -base_candidate
+
+    # --- Solve for theta1 using the x-y equations.
+    # The effective contribution from the second chain is:
+    #   A = L_tcp*sin(theta2)
+    #   B = offset
+    A = L_tcp * math.sin(theta2)
+    B = offset
+    # δ is the angle of the vector [A, B] in the (joint2's) local XY plane.
+    delta = math.atan2(B, A)
+
+    # ψ is the polar angle of the target position in the base frame.
+    psi = math.atan2(y, x)
+
+    # The equation [x, y] = Rz(theta1) * [A, B] implies:
+    theta1 = psi - delta
+
+    # Normalize theta1 to the interval (-π, π].
+    theta1 = (theta1 + math.pi) % (2 * math.pi) - math.pi
+
+    return (theta1, theta2)
+```

@@ -1,0 +1,110 @@
+import math
+import numpy as np
+
+def inverse_kinematics(p: tuple[float, float, float], r: tuple[float, float, float]) -> tuple[float, float, float, float]:
+    """
+    Computes an analytical inverse kinematics solution for a 4-DOF serial manipulator.
+    
+    Kinematic details (all dimensions in meters and angles in radians):
+      • Joint 1: Revolute about Z at [0,0,0]
+      • Joint 2: Located at [0, 0.13585, 0] (in base) and rotates about Y
+      • Joint 3: Offset [0, -0.1197, 0.425] (relative to joint2) and rotates about Y
+      • Joint 4: Offset [0, 0, 0.39225] (relative to joint3) and rotates about Y
+      • TCP: Offset [0, 0.093, 0] (relative to joint4)
+    
+    Because joints 2–4 all rotate about Y the “arm” (sagittal) sub–problem decouples.
+    In our treatment the two “planar links” have lengths:
+         L1 = 0.425      (from joint2 to joint3, using the z–component of [0, -0.1197, 0.425])
+         L2 = 0.39225    (from joint3 to joint4, using [0, 0, 0.39225])
+    The fixed translations contribute a constant offset in y:
+         T2 = [0, 0.13585, 0]  from base to joint2.
+         (Also note that the sum of the y offsets from Joint2, Joint3 and the TCP is:
+              0.13585 + (-0.1197) + 0.093 = 0.10915.)
+    
+    The full forward kinematics can be decoupled as:
+         p = Rz(theta1) * { (p_planar from joints 2–4) } 
+    and the end–effector’s orientation is given by:
+         R = Rz(theta1) * Ry(theta2+theta3+theta4).
+    Meanwhile, the desired TCP orientation R_desired is formed from the provided roll, pitch, yaw.
+    
+    A standard decoupling approach is to first solve for theta1. However, due to the extra
+    TCP offset and link translations, the proper base angle is not given solely by the TCP position.
+    In practice, one may show that theta1 is “coupled” to the desired TCP yaw (r[2]) up to an offset
+    of π. In our solution we therefore iterate over three candidates for theta1:
+         candidate values: { r_yaw, r_yaw+π, r_yaw-π }
+    (All angles are normalized to the range [-π, π].)
+    
+    For a given theta1 candidate we transform the TCP position into the shoulder (joint2) frame
+    using T2. Then letting
+         p_eff = Rz(-theta1) * (p - T2)
+    the remaining 2R inverse kinematics (for joints 2 and 3) is obtained by writing:
+         x_target = p_eff[0]
+         z_target = p_eff[2]
+    and using the cosine law:
+         cos(theta3) = (d^2 - L1^2 - L2^2) / (2*L1*L2)
+    (with d^2 = x_target²+z_target²).
+    
+    Meanwhile, the overall rotation about Y (from joints 2–4) must match the desired arm rotation.
+    To obtain that value we remove the base rotation from the desired orientation:
+         R_planar = Rz(-theta1) * R_desired,   where R_desired is computed from r.
+         target_sum = atan2(R_planar[0, 2], R_planar[0, 0])
+    and we require (θ2+θ3+θ4) = target_sum.
+    
+    For each candidate theta1 and for each elbow option (two choices for theta3), we compute:
+         theta2 = atan2(x_target, z_target) - atan2(L2*sin(theta3), L1+L2*cos(theta3))
+         theta4 = target_sum - (theta2+theta3)
+    and then select the solution that minimizes the error in reproducing the shoulder’s planar target.
+    
+    This solution returns one valid inverse kinematics solution (assuming the target is reachable).
+    
+    :param p: The desired TCP global position (x, y, z).
+    :param r: The desired TCP orientation as (roll, pitch, yaw) in radians.
+    :return: A tuple (theta1, theta2, theta3, theta4) in radians.
+    """
+
+    def wrap(angle):
+        return (angle + math.pi) % (2 * math.pi) - math.pi
+
+    def rotz(angle):
+        c = math.cos(angle)
+        s = math.sin(angle)
+        return np.array([[c, -s, 0], [s, c, 0], [0, 0, 1]])
+    roll, pitch, yaw = r
+    cr, sr = (math.cos(roll), math.sin(roll))
+    cp, sp = (math.cos(pitch), math.sin(pitch))
+    cy, sy = (math.cos(yaw), math.sin(yaw))
+    R_desired = np.array([[cy * cp, cy * sp * sr - sy * cr, cy * sp * cr + sy * sr], [sy * cp, sy * sp * sr + cy * cr, sy * sp * cr - cy * sr], [-sp, cp * sr, cp * cr]])
+    T2 = np.array([0, 0.13585, 0])
+    L1 = 0.425
+    L2 = 0.39225
+    candidates_theta1 = [wrap(yaw), wrap(yaw + math.pi), wrap(yaw - math.pi)]
+    best_error = float('inf')
+    best_solution = None
+    for theta1 in candidates_theta1:
+        p_shoulder = np.array(p) - T2
+        p_eff = rotz(-theta1).dot(p_shoulder)
+        x_target = p_eff[0]
+        z_target = p_eff[2]
+        d_sq = x_target ** 2 + z_target ** 2
+        R_planar = rotz(-theta1).dot(R_desired)
+        target_sum = math.atan2(R_planar[0, 2], R_planar[0, 0])
+        cos_theta3 = (d_sq - L1 ** 2 - L2 ** 2) / (2 * L1 * L2)
+        cos_theta3 = max(min(cos_theta3, 1.0), -1.0)
+        theta3_options = [math.acos(cos_theta3), -math.acos(cos_theta3)]
+        for theta3 in theta3_options:
+            theta2 = math.atan2(x_target, z_target) - math.atan2(L2 * math.sin(theta3), L1 + L2 * math.cos(theta3))
+            theta4 = target_sum - (theta2 + theta3)
+            theta2 = wrap(theta2)
+            theta3 = wrap(theta3)
+            theta4 = wrap(theta4)
+            x_calc = L1 * math.sin(theta2) + L2 * math.sin(theta2 + theta3)
+            z_calc = L1 * math.cos(theta2) + L2 * math.cos(theta2 + theta3)
+            pos_error = math.hypot(x_calc - x_target, z_calc - z_target)
+            orient_error = abs(wrap(theta2 + theta3 + theta4 - target_sum))
+            total_error = pos_error + orient_error
+            if total_error < best_error:
+                best_error = total_error
+                best_solution = (theta1, theta2, theta3, theta4)
+    if best_solution is None:
+        return (0.0, 0.0, 0.0, 0.0)
+    return best_solution

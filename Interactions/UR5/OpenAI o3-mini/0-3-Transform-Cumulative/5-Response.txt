@@ -1,0 +1,123 @@
+```python
+def inverse_kinematics(p: tuple[float, float, float], r: tuple[float, float, float]) -> tuple[float, float, float, float]:
+    """
+    Gets the joint values needed to reach position "p" and orientation "r" for the 4-DOF manipulator.
+    
+    The manipulator is composed of:
+      - Joint 1: Revolute about Z (base)
+      - Joints 2-4: Revolute about Y (arm joints)
+    
+    The link frames (from the URDF) have:
+      Link2 translation: [0, 0.13585, 0]
+      Link3 translation: [0, -0.1197, 0.425]
+      Link4 translation: [0, 0, 0.39225]
+      TCP offset:      [0, 0.093, 0]
+      
+    Note that the constant y-offset is 0.13585 - 0.1197 + 0.093 = 0.10915.
+    This solution decouples the inverse kinematics: first the base rotation that places
+    the target into the arm's plane, then the arm's 2-R problem for joints 2 and 3, and finally
+    the alignment of the end–effector that determines joint 4.
+    
+    :param p: The target TCP position as (x, y, z)
+    :param r: The target TCP roll-pitch-yaw orientation (radians) as (roll, pitch, yaw)
+    :return: A tuple of joint angles (theta1, theta2, theta3, theta4) in radians.
+    """
+    import math
+    
+    # Unpack target position
+    x, y, z = p
+
+    # --------------------------------------------------
+    # 1. Solve for Joint 1 (Base rotation about Z)
+    # Rotate p about Z to align the arm plane. We choose theta1 so that the rotated x-component is nearly 0.
+    theta1 = math.atan2(-x, y)
+    
+    # Precompute cos and sin for theta1:
+    c1 = math.cos(theta1)
+    s1 = math.sin(theta1)
+    
+    # Compute the rotated target position p_prime = Rz(-theta1)*p.
+    # Rz(-theta1) = [ [ cos(theta1), sin(theta1), 0 ],
+    #                 [ -sin(theta1), cos(theta1), 0 ],
+    #                 [      0,           0,      1 ] ]
+    p_prime_x = c1 * x + s1 * y
+    # p_prime_y is not used for the 2-R chain solution.
+    p_prime_y = -s1 * x + c1 * y  
+    p_prime_z = z  # z remains unchanged
+    
+    # --------------------------------------------------
+    # 2. Solve the 2-R planar sub-chain (joints 2 and 3) in the rotated (x,z) plane.
+    # The two arm link lengths are:
+    L1 = 0.425
+    L2 = 0.39225
+    
+    # Define target for the arm chain. The links operate in the (x,z) plane.
+    X_target = p_prime_x
+    Z_target = p_prime_z
+    r_planar = math.sqrt(X_target**2 + Z_target**2)
+    
+    # Use the law of cosines to compute the elbow angle (joint 3)
+    cos_theta3 = (r_planar**2 - L1**2 - L2**2) / (2 * L1 * L2)
+    # Clamp cos_theta3 to avoid numerical issues:
+    if cos_theta3 > 1.0:
+        cos_theta3 = 1.0
+    elif cos_theta3 < -1.0:
+        cos_theta3 = -1.0
+    theta3 = math.acos(cos_theta3)  # Choosing the principal (elbow-down) configuration
+    
+    # Compute joint 2 angle using geometric relations.
+    gamma = math.atan2(X_target, Z_target)
+    theta2 = gamma - math.atan2(L2 * math.sin(theta3), L1 + L2 * math.cos(theta3))
+    
+    # --------------------------------------------------
+    # 3. Solve for joint 4 via the orientation requirement.
+    # Joints 2, 3, and 4 are about Y, with the cumulative rotation:
+    #   theta_total = theta2 + theta3 + theta4.
+    # The full forward kinematics from the arm is: 
+    #   R_tcp = Rz(theta1) * Ry(theta_total)
+    #
+    # The desired orientation is provided as roll-pitch-yaw r (with convention R = Rz(yaw)*Ry(pitch)*Rx(roll)).
+    # To extract the needed arm-plane rotation, we “remove” the base rotation via:
+    #   R_prime = Rz(-theta1)*R_desired.
+    # For a pure Ry rotation matrix:
+    #   Ry(theta_total) = [ [ cos(theta_total), 0, sin(theta_total) ],
+    #                        [       0,          1,         0         ],
+    #                        [ -sin(theta_total),0, cos(theta_total) ] ]
+    # We can extract theta_total from the (0,0) and (0,2) elements.
+    
+    roll, pitch, yaw = r
+    # Compute R_desired = Rz(yaw) * Ry(pitch) * Rx(roll)
+    cr = math.cos(roll)
+    sr = math.sin(roll)
+    cp = math.cos(pitch)
+    sp = math.sin(pitch)
+    cy = math.cos(yaw)
+    sy = math.sin(yaw)
+    
+    R_des = [
+        [ cy * cp,          cy * sp * sr - sy * cr,      cy * sp * cr + sy * sr ],
+        [ sy * cp,          sy * sp * sr + cy * cr,      sy * sp * cr - cy * sr ],
+        [   -sp,                     cp * sr,                    cp * cr      ]
+    ]
+    
+    # Form Rz(-theta1)
+    Rz_neg = [
+        [ c1,  s1, 0 ],
+        [ -s1, c1, 0 ],
+        [  0,  0,  1 ]
+    ]
+    
+    # Compute R_prime = Rz(-theta1) * R_des
+    R_prime = [[0, 0, 0] for _ in range(3)]
+    for i in range(3):
+        for j in range(3):
+            R_prime[i][j] = Rz_neg[i][0] * R_des[0][j] + Rz_neg[i][1] * R_des[1][j] + Rz_neg[i][2] * R_des[2][j]
+    
+    # Extract theta_total from the rotation about Y: using Ry(theta_total)'s elements:
+    theta_total = math.atan2(R_prime[0][2], R_prime[0][0])
+    
+    # Now, joint 4 compensates the remaining rotation:
+    theta4 = theta_total - (theta2 + theta3)
+    
+    return (theta1, theta2, theta3, theta4)
+```

@@ -1,0 +1,159 @@
+```python
+def inverse_kinematics(p: tuple[float, float, float], r: tuple[float, float, float]) -> tuple[float, float, float, float, float, float]:
+    """
+    Computes the closed‐form analytical solution for the inverse kinematics of the 6-DOF serial manipulator.
+    
+    Kinematic structure:
+       - The overall transformation is factored as:
+             R_total = Rz(q1) · Ry(q2+q3+q4) · Rz(q5) · [Ry(q6)·R_tcp]
+         where R_tcp is the fixed rotation from joint 6 to the TCP (here, R_tcp = Rz(1.570796325)).
+       - The first stage solves for joints 1–5 by decoupling the position based on a fixed Y-offset (y_const)
+         and then accounting for the wrist offset (L_wrist).
+       - The second stage computes q6 by isolating the residual rotation needed to match the desired orientation.
+    
+    Parameters:
+       p: The target TCP position as a tuple (x, y, z).
+       r: The target TCP orientation (roll, pitch, yaw) in radians (using URDF convention: R_des = Rz(yaw) @ Ry(pitch) @ Rx(roll)).
+    
+    Returns:
+       A tuple (q1, q2, q3, q4, q5, q6) with each joint angle in radians.
+    """
+    import math
+    import numpy as np
+
+    # Geometric constants from link details
+    L1 = 0.425        # Length from joint 2 to joint 3 (planar subchain)
+    L2 = 0.39225      # Length from joint 3 to joint 4
+    L_wrist = 0.09465 # Translation offset from joint 5 to joint 6 (wrist offset)
+    # Fixed offset in Y due to the structure: [0, 0.13585, 0] then [0, -0.1197, 0.425] then [0, 0.093, 0]
+    y_const = 0.13585 - 0.1197 + 0.093  # equals 0.10915
+
+    p_x, p_y, p_z = p
+
+    # --- Solve for q1 using the decoupled XY constraint ---
+    r_xy = math.sqrt(p_x**2 + p_y**2)
+    theta = math.atan2(p_y, p_x)
+    ratio = y_const / r_xy
+    # Clamp in case of numerical issues
+    ratio = max(-1.0, min(1.0, ratio))
+    a = math.asin(ratio)
+    q1_candidate1 = theta - a
+    q1_candidate2 = theta - (math.pi - a)
+
+    # Helper: Compute the decoupled orientation matrix M = Rz(-q1)*R_des.
+    def compute_M(q1_val: float) -> np.ndarray:
+        cos_q1 = math.cos(q1_val)
+        sin_q1 = math.sin(q1_val)
+        Rz_neg_q1 = np.array([[cos_q1, sin_q1, 0],
+                              [-sin_q1, cos_q1, 0],
+                              [0, 0, 1]])
+        roll, pitch, yaw = r
+        R_x = np.array([[1, 0, 0],
+                        [0, math.cos(roll), -math.sin(roll)],
+                        [0, math.sin(roll), math.cos(roll)]])
+        R_y = np.array([[math.cos(pitch), 0, math.sin(pitch)],
+                        [0, 1, 0],
+                        [-math.sin(pitch), 0, math.cos(pitch)]])
+        R_z = np.array([[math.cos(yaw), -math.sin(yaw), 0],
+                        [math.sin(yaw),  math.cos(yaw), 0],
+                        [0, 0, 1]])
+        R_des = R_z @ R_y @ R_x
+        return Rz_neg_q1 @ R_des
+
+    M1 = compute_M(q1_candidate1)
+    M2 = compute_M(q1_candidate2)
+    # Select candidate minimizing an error measure (here using the (1,2)-element)
+    err1 = abs(M1[1, 2])
+    err2 = abs(M2[1, 2])
+    q1 = q1_candidate1 if err1 <= err2 else q1_candidate2
+
+    # --- Transform the target position into the decoupled frame ---
+    cos_q1 = math.cos(q1)
+    sin_q1 = math.sin(q1)
+    Rz_neg_q1 = np.array([[cos_q1, sin_q1, 0],
+                          [-sin_q1, cos_q1, 0],
+                          [0, 0, 1]])
+    p_vec = np.array([p_x, p_y, p_z])
+    p_bar = Rz_neg_q1 @ p_vec
+    p_bar_x, p_bar_y, p_bar_z = p_bar
+
+    # --- Compute the desired rotation R_des from (roll, pitch, yaw) ---
+    roll, pitch, yaw = r
+    R_x = np.array([[1, 0, 0],
+                    [0, math.cos(roll), -math.sin(roll)],
+                    [0, math.sin(roll), math.cos(roll)]])
+    R_y = np.array([[math.cos(pitch), 0, math.sin(pitch)],
+                    [0, 1, 0],
+                    [-math.sin(pitch), 0, math.cos(pitch)]])
+    R_z = np.array([[math.cos(yaw), -math.sin(yaw), 0],
+                    [math.sin(yaw),  math.cos(yaw), 0],
+                    [0, 0, 1]])
+    R_des = R_z @ R_y @ R_x
+
+    # --- Decouple orientation: M = Rz(-q1)*R_des factors as M = Ry(phi)*Rz(q5) ---
+    M = Rz_neg_q1 @ R_des
+    phi = math.atan2(M[0, 2], M[2, 2])
+    q5 = math.atan2(M[1, 0], M[1, 1])
+
+    # --- Solve the 2R planar subchain for joints 2,3,4 ---
+    # Remove the wrist offset along the direction phi.
+    P_x = p_bar_x - L_wrist * math.sin(phi)
+    P_z = p_bar_z - L_wrist * math.cos(phi)
+    r2 = math.sqrt(P_x**2 + P_z**2)
+    # Cosine law for joint 3
+    cos_q3 = (r2**2 - L1**2 - L2**2) / (2 * L1 * L2)
+    cos_q3 = max(-1.0, min(1.0, cos_q3))
+    q3_candidateA = math.acos(cos_q3)
+    q3_candidateB = -q3_candidateA
+
+    def planar_solution(q3_val: float) -> tuple[float, float, float]:
+        q2_val = math.atan2(P_x, P_z) - math.atan2(L2 * math.sin(q3_val), L1 + L2 * math.cos(q3_val))
+        q4_val = phi - (q2_val + q3_val)
+        # Recompute the forward position to check error
+        calc_x = L1 * math.sin(q2_val) + L2 * math.sin(q2_val + q3_val) + L_wrist * math.sin(phi)
+        calc_z = L1 * math.cos(q2_val) + L2 * math.cos(q2_val + q3_val) + L_wrist * math.cos(phi)
+        err_val = math.sqrt((calc_x - p_bar_x)**2 + (calc_z - p_bar_z)**2)
+        return (q2_val, q4_val, err_val)
+
+    q2_A, q4_A, err_A = planar_solution(q3_candidateA)
+    q2_B, q4_B, err_B = planar_solution(q3_candidateB)
+    
+    if err_A <= err_B:
+        q3 = q3_candidateA
+        q2 = q2_A
+        q4 = q4_A
+    else:
+        q3 = q3_candidateB
+        q2 = q2_B
+        q4 = q4_B
+
+    # --- Compute the rotation matrix for the arm (up to the wrist center) ---
+    R_z_q1 = np.array([[math.cos(q1), -math.sin(q1), 0],
+                       [math.sin(q1),  math.cos(q1), 0],
+                       [0, 0, 1]])
+    angle_y = q2 + q3 + q4
+    R_y_combined = np.array([[math.cos(angle_y), 0, math.sin(angle_y)],
+                             [0, 1, 0],
+                             [-math.sin(angle_y), 0, math.cos(angle_y)]])
+    R_z_q5 = np.array([[math.cos(q5), -math.sin(q5), 0],
+                       [math.sin(q5),  math.cos(q5), 0],
+                       [0, 0, 1]])
+    R_arm = R_z_q1 @ R_y_combined @ R_z_q5  # Rotation from base to wrist center
+
+    # --- Compute q6 from the residual orientation ---
+    # Fixed TCP rotation from joint6 to TCP (rotation about Z by 1.570796325)
+    R_tcp = np.array([[math.cos(1.570796325), -math.sin(1.570796325), 0],
+                      [math.sin(1.570796325),  math.cos(1.570796325), 0],
+                      [0, 0, 1]])
+    # The desired overall orientation must satisfy:
+    #    R_arm · (Ry(q6) · R_tcp) = R_des
+    # Hence, isolate the wrist rotation:
+    X = (R_arm.T @ R_des) @ R_tcp.T
+    # For a rotation purely about Y: X should be of the form:
+    #    [ [ cos(q6), 0, sin(q6)],
+    #      [   0,     1,   0    ],
+    #      [-sin(q6), 0, cos(q6)] ]
+    q6 = math.atan2(X[0, 2], X[0, 0])
+
+    return (q1, q2, q3, q4, q5, q6)
+```

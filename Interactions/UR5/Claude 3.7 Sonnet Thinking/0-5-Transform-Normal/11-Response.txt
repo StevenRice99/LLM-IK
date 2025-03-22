@@ -1,0 +1,163 @@
+I need to revise my inverse kinematics solution completely. Let me create a more accurate and robust solution based on the robot's geometry and the given feedback.
+
+```python
+def inverse_kinematics(p: tuple[float, float, float], r: tuple[float, float, float]) -> tuple[float, float, float, float, float, float]:
+    """
+    Gets the joint values needed to reach position "p" and orientation "r".
+    :param p: The position to reach in the form [x, y, z].
+    :param r: The orientation to reach in radians in the form [x, y, z].
+    :return: A list of the values to set the links to for reaching position "p" and orientation "r".
+    """
+    import numpy as np
+    
+    # Define link parameters from the robot description
+    # Joint offsets
+    d1 = 0  # Joint 1
+    d2 = 0.13585  # Joint 2
+    l3 = 0.425  # Link length from joint 2 to 3 in Z
+    y3 = -0.1197  # Y offset from joint 2 to 3
+    d4 = 0.39225  # Joint 4
+    d5 = 0.093  # Joint 5
+    d6 = 0.09465  # Joint 6
+    d7 = 0.0823  # TCP Y offset
+    tcp_rz = 1.570796325  # TCP Z rotation
+    
+    # Rotation matrix functions
+    def rot_x(angle):
+        return np.array([
+            [1, 0, 0],
+            [0, np.cos(angle), -np.sin(angle)],
+            [0, np.sin(angle), np.cos(angle)]
+        ])
+    
+    def rot_y(angle):
+        return np.array([
+            [np.cos(angle), 0, np.sin(angle)],
+            [0, 1, 0],
+            [-np.sin(angle), 0, np.cos(angle)]
+        ])
+    
+    def rot_z(angle):
+        return np.array([
+            [np.cos(angle), -np.sin(angle), 0],
+            [np.sin(angle), np.cos(angle), 0],
+            [0, 0, 1]
+        ])
+    
+    # Convert Euler angles to rotation matrix (XYZ convention)
+    def euler_to_rotation(rx, ry, rz):
+        return np.dot(rot_z(rz), np.dot(rot_y(ry), rot_x(rx)))
+    
+    # Target position and orientation
+    target_pos = np.array(p)
+    target_rot = euler_to_rotation(r[0], r[1], r[2])
+    
+    # Calculate desired wrist orientation
+    tcp_rot_offset = rot_z(tcp_rz)
+    wrist_rot = np.dot(target_rot, np.linalg.inv(tcp_rot_offset))
+    
+    # Calculate wrist center by backtracking from target position
+    tool_offset = np.array([0, d7, 0])
+    wrist_offset = np.array([0, 0, d6])
+    wc = target_pos - np.dot(target_rot, tool_offset) - np.dot(wrist_rot, wrist_offset)
+    
+    # Solve for joint 1 (base rotation)
+    theta1 = np.arctan2(wc[1], wc[0])
+    
+    # Calculate distance from joint 2 to wrist center in the XZ plane
+    # First transform wrist center to joint 1 frame
+    R0_1 = rot_z(theta1)
+    wc_1 = np.dot(R0_1.T, wc)
+    
+    # Adjust for offset from joint 1 to joint 2
+    wc_2 = np.array([wc_1[0], wc_1[1] - d2, wc_1[2]])
+    
+    # Distance from joint 2 to wrist center
+    r_2_wc = np.sqrt(wc_2[0]**2 + wc_2[1]**2 + wc_2[2]**2)
+    
+    # Calculate effective lengths
+    l2_3 = np.sqrt(l3**2 + y3**2)  # Effective length from joint 2 to 3
+    l3_wc = d4  # Effective length from joint 3 to wrist center
+    
+    # Calculate angle of link 2-3 when theta2 = 0
+    phi = np.arctan2(l3, -y3)
+    
+    # Use law of cosines to find joint 2 and 3 angles
+    cos_beta = (r_2_wc**2 + l2_3**2 - l3_wc**2) / (2 * r_2_wc * l2_3)
+    # Clamp to handle numerical precision issues
+    cos_beta = np.clip(cos_beta, -1.0, 1.0)
+    beta = np.arccos(cos_beta)
+    
+    # Find angle between X-axis and line to wrist center in frame 2
+    alpha = np.arctan2(wc_2[2], np.sqrt(wc_2[0]**2 + wc_2[1]**2))
+    
+    # Calculate theta2 (accounting for the angle offset)
+    theta2 = alpha + beta - phi
+    
+    # Calculate theta3 using law of cosines
+    cos_gamma = (l2_3**2 + l3_wc**2 - r_2_wc**2) / (2 * l2_3 * l3_wc)
+    # Clamp to handle numerical precision issues
+    cos_gamma = np.clip(cos_gamma, -1.0, 1.0)
+    gamma = np.arccos(cos_gamma)
+    theta3 = gamma - (np.pi/2 + phi)
+    
+    # Calculate rotation matrices for the first three joints
+    R1_2 = rot_y(theta2)
+    R2_3 = rot_y(theta3)
+    R3_4 = rot_y(0)  # No rotation, just a translation in frame 3
+    
+    # Combined rotation matrix from base to frame 4
+    R0_4 = np.dot(R0_1, np.dot(R1_2, np.dot(R2_3, R3_4)))
+    
+    # Get the rotation matrix needed for the wrist (from frame 4 to end effector)
+    R4_6 = np.dot(R0_4.T, wrist_rot)
+    
+    # Extract joint angles 4, 5, 6 from R4_6
+    # For this robot, joint 4 is Y, joint 5 is Z, joint 6 is Y
+    
+    # Check for singularity
+    if np.abs(R4_6[0, 1]) > 0.9999:
+        # Singularity case (joints 4 and 6 align)
+        # Choose arbitrary value for theta4
+        theta4 = 0
+        
+        # Calculate theta5 and theta6
+        if R4_6[0, 1] > 0:
+            theta5 = np.pi/2
+            theta6 = theta4 + np.arctan2(R4_6[2, 0], R4_6[2, 2])
+        else:
+            theta5 = -np.pi/2
+            theta6 = -theta4 + np.arctan2(-R4_6[2, 0], -R4_6[2, 2])
+    else:
+        # Non-singular case
+        # For Y-Z-Y Euler angles
+        theta5 = np.arctan2(R4_6[0, 1], R4_6[2, 1])
+        
+        # Calculate sin and cos of theta5
+        s5 = np.sin(theta5)
+        c5 = np.cos(theta5)
+        
+        # Calculate theta4 and theta6 based on theta5
+        theta4 = np.arctan2(R4_6[1, 2], -R4_6[1, 0])
+        theta6 = np.arctan2(-R4_6[0, 2]/c5, R4_6[2, 2]/c5)
+    
+    # Ensure all angles are in the range [-pi, pi]
+    theta1 = ((theta1 + np.pi) % (2 * np.pi)) - np.pi
+    theta2 = ((theta2 + np.pi) % (2 * np.pi)) - np.pi
+    theta3 = ((theta3 + np.pi) % (2 * np.pi)) - np.pi
+    theta4 = ((theta4 + np.pi) % (2 * np.pi)) - np.pi
+    theta5 = ((theta5 + np.pi) % (2 * np.pi)) - np.pi
+    theta6 = ((theta6 + np.pi) % (2 * np.pi)) - np.pi
+    
+    return (theta1, theta2, theta3, theta4, theta5, theta6)
+```
+
+This new solution makes significant improvements:
+
+1. I've reworked the calculation of the wrist center to properly account for the TCP offset and orientation.
+2. I've corrected the approach to finding joint angles 2 and 3 by considering the actual robot geometry.
+3. I've restructured the wrist joint (4,5,6) calculations to properly handle the Y-Z-Y rotation sequence.
+4. I've added angle normalization to ensure all joint angles are in the range [-π, π].
+5. I've revised the handling of singularity cases.
+
+The solution considers the exact geometric relationships between the robot's links and properly applies the law of cosines for the first three joints. For the wrist joints, I've carefully analyzed the rotation matrices to extract the appropriate Euler angles.

@@ -1,0 +1,79 @@
+Below is one acceptable closed‐form solution. Notice that with only two joints the TCP’s full pose is over‐constrained, so if the desired orientation is reachable it must satisfy
+
+  TCP_pitch = θ₂  and  TCP_yaw = θ₁,
+
+with the TCP’s position given by
+
+  x = 0.425·sin(θ₂)·cos(θ₁) – 0.01615·sin(θ₁)
+  y = 0.425·sin(θ₂)·sin(θ₁) + 0.01615·cos(θ₁)
+  z = 0.425·cos(θ₂).
+
+In the solution below we first use the z‐coordinate to compute a candidate for θ₂ (note that cos(θ₂) = z/0.425 so that θ₂ can be ±acos(z/0.425)). We then pick the sign to be consistent with the desired pitch (r[1]), and finally we “solve” for θ₁ from the x,y equations (which, when the target is reachable, will agree with the desired yaw r[2]). (One might also simply “command” the yaw and pitch if p and r are consistent. Here we follow the method provided for position only.) 
+
+Below is one valid implementation:
+
+------------------------------------------------------------
+def inverse_kinematics(p: tuple[float, float, float], r: tuple[float, float, float]) -> tuple[float, float]:
+    """
+    Computes the joint angles needed to reach the given TCP pose.
+    Assumes that the joint rotations (theta1, theta2) produce a TCP 
+    orientation given by the yaw–pitch pair (theta1, theta2) and position:
+        x = 0.425*sin(theta2)*cos(theta1) - 0.01615*sin(theta1)
+        y = 0.425*sin(theta2)*sin(theta1) + 0.01615*cos(theta1)
+        z = 0.425*cos(theta2)
+    The desired orientation is given as roll, pitch, yaw (r[0], r[1], r[2])
+    where the roll must be zero for the chain to be consistent.
+    
+    :param p: The TCP position as [x, y, z].
+    :param r: The TCP orientation in radians as [roll, pitch, yaw].
+    :return: A tuple (theta1, theta2) to set the revolute joints.
+    """
+    import math
+
+    x_d, y_d, z_d = p
+    
+    # From forward kinematics we have: z_d = 0.425*cos(theta2)
+    # so theta2 can be found (up to a sign) by acos(z_d/0.425).
+    # (Assuming |z_d/0.425|<=1 because the target is reachable.)
+    theta2_candidate = math.acos(z_d / 0.425)
+    # Two possible solutions: theta2_candidate or -theta2_candidate.
+    # Choose the one closer to the desired pitch (r[1]).
+    if abs(theta2_candidate - r[1]) <= abs(-theta2_candidate - r[1]):
+        theta2 = theta2_candidate
+    else:
+        theta2 = -theta2_candidate
+
+    # With theta2 determined, the TCP’s position (in the frame of joint 1)
+    # is given by (denote A and B for compactness):
+    #   A = 0.425*sin(theta2)    and    B = 0.01615
+    # such that:
+    #   x_d = A*cos(theta1) - B*sin(theta1)
+    #   y_d = A*sin(theta1) + B*cos(theta1)
+    #
+    # Solving these for theta1 we can write:
+    A = 0.425 * math.sin(theta2)
+    B = 0.01615
+    denominator = A**2 + B**2
+    # Compute intermediate values:
+    C = (A * x_d + B * y_d) / denominator
+    S = (-B * x_d + A * y_d) / denominator
+    theta1_from_pos = math.atan2(S, C)
+    
+    # The TCP orientation from the chain is given by R = Rz(theta1)*Ry(theta2).
+    # In a roll–pitch–yaw representation (with roll = 0) this yields
+    # pitch = theta2 and yaw = theta1.
+    # The desired orientation r is [roll, pitch, yaw]. If the target is reachable
+    # then we must have r[0] ≈ 0, r[1] = theta2, and r[2] = theta1 (modulo 2π).
+    # In case of minor numerical differences we choose theta1 from the position solution:
+    theta1 = theta1_from_pos
+    # (Alternatively, one might enforce theta1 = r[2] if p and r are exactly consistent.)
+    
+    return (theta1, theta2)
+------------------------------------------------------------
+
+For example, if you call this inverse kinematics method with:
+
+  position p = (0.09650000129532091, 0.18018052128708778, 0.3729725888034084)
+  orientation r = (0, 0.5, 1)
+
+the computed joint angles will be approximately (1.0, 0.5), which yields the given TCP pose when used in the forward kinematics.

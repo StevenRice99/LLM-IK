@@ -1,0 +1,106 @@
+Based on the forward kinematics results, I can now develop a complete inverse kinematics solution for this 3-DOF robot. Looking at the robot structure and the provided test cases, I understand that:
+
+1. Joint 1 rotates around the Z-axis, affecting the X-Y position
+2. Joints 2 and 3 rotate around the Y-axis, mainly affecting the X-Z position in the rotated frame
+3. I need to combine both existing solutions to handle the full 3-DOF chain
+
+Let me complete the inverse kinematics method:
+
+```python
+def inverse_kinematics(p: tuple[float, float, float], r: tuple[float, float, float]) -> tuple[float, float, float]:
+    """
+    Gets the joint values needed to reach position "p" and orientation "r".
+    :param p: The position to reach in the form [x, y, z].
+    :param r: The orientation to reach in radians in the form [x, y, z].
+    :return: A list of the values to set the links to for reaching position "p" and orientation "r".
+    """
+    import math
+    import numpy as np
+    
+    x_target, y_target, z_target = p
+    rx, ry, rz = r
+    
+    # Solve for theta1 (joint 1) - rotation around Z axis
+    theta1 = math.atan2(x_target, y_target)
+    
+    # Create rotation matrix for joint 1
+    R1 = np.array([
+        [math.cos(theta1), -math.sin(theta1), 0],
+        [math.sin(theta1), math.cos(theta1), 0],
+        [0, 0, 1]
+    ])
+    
+    # Transform target position to frame after joint 1 rotation
+    target_in_joint1_frame = R1.T @ np.array([x_target, y_target, z_target])
+    x_in_joint1, y_in_joint1, z_in_joint1 = target_in_joint1_frame
+    
+    # Extract the necessary part of the orientation
+    # For a Y-axis rotation chain, we care about the orientation in the X-Z plane
+    cx = math.cos(rx)
+    sx = math.sin(rx)
+    cy = math.cos(ry)
+    sy = math.sin(ry)
+    cz = math.cos(rz)
+    sz = math.sin(rz)
+    
+    # Calculate rotation matrix from orientation angles
+    R_target = np.array([
+        [cy*cz, cy*sz, -sy],
+        [sx*sy*cz-cx*sz, sx*sy*sz+cx*cz, sx*cy],
+        [cx*sy*cz+sx*sz, cx*sy*sz-sx*cz, cx*cy]
+    ])
+    
+    # Account for joint 1 rotation in the orientation
+    R_j1_inv = np.array([
+        [math.cos(-theta1), -math.sin(-theta1), 0],
+        [math.sin(-theta1), math.cos(-theta1), 0],
+        [0, 0, 1]
+    ])
+    R_23_target = R_j1_inv @ R_target
+    
+    # Extract the desired orientation for joints 2 and 3
+    theta_sum = math.atan2(R_23_target[0, 2], R_23_target[0, 0])
+    
+    # Link lengths
+    a = 0.425  # Distance from joint 2 to joint 3
+    b = 0.39225  # Distance from joint 3 to TCP
+    
+    # Calculate distance from joint 2 to TCP projection in the X-Z plane
+    d_sq = x_in_joint1**2 + (z_in_joint1 - 0.13585)**2  # Adjust for joint 2 height
+    d = math.sqrt(d_sq)
+    
+    # Solve for theta2 and theta3 using law of cosines
+    cos_theta3 = (d_sq - a**2 - b**2) / (2 * a * b)
+    cos_theta3 = max(min(cos_theta3, 1.0), -1.0)  # Clamp to valid range
+    
+    theta3 = math.acos(cos_theta3)
+    
+    # There are two possible solutions, try both
+    solutions = []
+    for theta3_candidate in [theta3, -theta3]:
+        # Calculate theta2 based on theta3
+        beta = math.atan2(x_in_joint1, z_in_joint1 - 0.13585)
+        gamma = math.atan2(b * math.sin(theta3_candidate), a + b * math.cos(theta3_candidate))
+        theta2_candidate = beta - gamma
+        
+        # Check if the solution matches the target orientation
+        if math.isclose(theta2_candidate + theta3_candidate, theta_sum, abs_tol=1e-4):
+            solutions.append((theta2_candidate, theta3_candidate))
+    
+    # Choose the solution that best meets the target position and orientation
+    if solutions:
+        theta2, theta3 = solutions[0]  # Take first solution if available
+    else:
+        # Fallback solution based on orientation only
+        theta3 = 0
+        theta2 = theta_sum
+    
+    return (theta1, theta2, theta3)
+```
+
+This solution:
+1. First solves for joint 1 angle using the target position's X-Y coordinates
+2. Transforms the target position into the reference frame after joint 1 rotation
+3. Computes the desired orientation after joint 1 rotation
+4. Calculates the sum of joint 2 and 3 angles needed for orientation
+5. Uses geometric approach to solve for joint 2 and 3 angles that satisfy both position and orientation

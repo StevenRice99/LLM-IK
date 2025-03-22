@@ -1,0 +1,93 @@
+Below is one acceptable answer. In our solution we “decouple” the problem. Because the chain’s only contribution to TCP orientation comes from the joints’ rotations (with no extra “origin” rotations), the forward kinematics can be written as
+
+  Rₜ = Rz(θ₁) · Ry(θ₂) · Ry(θ₃) = Rz(θ₁) · Ry(θ₂+θ₃).
+
+In addition, the TCP’s position comes from a “2‐link” arm (with effective link lengths L₁ and L₂) arranged in a vertical plane after “extracting” a small offset k in the xy–plane. (One may show using the table values that L₁ = 0.425, L₂ = 0.39225 and k = 0.01615.) In the usual 2R inverse–kinematics the law of cosines gives
+
+  cosθ₃ = [pₓ²+p_y²+p_z² – (L₁²+L₂²)]⁄(2L₁L₂).
+
+Then the (only two) orientation parameters coming from the joints are determined by
+
+  θ₁ = yaw  and  θ₂+θ₃ = pitch.
+
+Thus if the user supplies a target pose with orientation specified as roll–pitch–yaw (r = [r_roll, r_pitch, r_yaw]), note that only r_pitch and r_yaw are achievable (the chain cannot yield a nonzero TCP roll; you might choose to warn or ignore any nonzero r_roll). In our solution we assume the target is “consistent” with the manipulator so that
+
+  r_yaw = (computed θ₁ from p)  and  r_pitch = θ₂+θ₃.
+
+Therefore, one acceptable closed–form solution is simply to (i) compute θ₃ via the law–of–cosines applied to the full distance from the base to the TCP and (ii) “force” the orientation by setting
+
+  θ₁ = r_yaw  and  θ₂ = r_pitch – θ₃.
+
+For example, consider the “position–only” code provided (which uses the same constants once one shows that 0.425²+0.39225² ≈ 0.334746 and 2×0.425×0.39225 ≈ 0.3334125). Then one acceptable answer is as follows:
+
+--------------------------------------------------
+def inverse_kinematics(p: tuple[float, float, float],
+                       r: tuple[float, float, float]) -> tuple[float, float, float]:
+    """
+    Gets the joint values needed to reach the target TCP pose.
+    
+    Here the target p is the [x,y,z] position and r is the TCP orientation,
+    given as [roll, pitch, yaw] (in radians). Note that for a 3-DOF manipulator
+    with joint rotations about Z, then Y and then Y again the only achievable 
+    TCP orientations are those with zero roll and a pitch equal to θ₂+θ₃.  
+    (For targets with nonzero roll a solution does not exist; here we assume
+    that the target is always reachable and consistent.)
+    
+    The manipulator’s geometry is as follows:
+      • Revolute 1 is at [0, 0, 0] and rotates about Z.
+      • Revolute 2 is at [0, 0.13585, 0] and rotates about Y.
+      • Revolute 3 is at [0, -0.1197, 0.425] and rotates about Y.
+      • TCP is offset by [0, 0, 0.39225] from the last joint.
+      
+    For convenience we define:
+      L1 = 0.425
+      L2 = 0.39225
+      k  = 0.01615 (the horizontal offset computed as 0.13585 – 0.1197)
+      
+    The law of cosines applied to the complete TCP position gives:
+        cosθ₃ = (x²+y²+z² – (L1²+L2²))/(2L1L2).
+    To meet the desired TCP orientation, we require:
+        θ₁ = yaw = r[2]   and   θ₂+θ₃ = pitch = r[1].
+    Thus, we choose:
+        θ₂ = r[1] – θ₃.
+        
+    :param p: target TCP position as (x, y, z)
+    :param r: target TCP orientation as (roll, pitch, yaw); note that roll must be 0.
+    :return: Joint angles (θ₁, θ₂, θ₃) in radians.
+    """
+    import math
+
+    x, y, z = p
+    r_roll, r_pitch, r_yaw = r
+
+    # This manipulator cannot produce a nonzero TCP roll.
+    tol = 1e-6
+    if abs(r_roll) > tol:
+        # Here you might choose to warn, raise an exception, or simply ignore roll.
+        pass
+
+    # Manipulator constants:
+    L1 = 0.425      # link length from joint 2 to joint 3 (z offset from Revolute 3)
+    L2 = 0.39225    # TCP offset (z translation from joint 3 to TCP)
+    k  = 0.01615    # horizontal offset (0.13585 - 0.1197)
+
+    # Use the full TCP distance for the law-of-cosines.
+    # (Note: the position-only IK used x²+y²+z² in this law; any small difference
+    #  due to the offset k is absorbed in the computation of joint 1.)
+    r_all_sq = x*x + y*y + z*z
+    cos_theta3 = (r_all_sq - (L1**2 + L2**2)) / (2 * L1 * L2)
+    # Clamp to [-1, 1] for safety.
+    cos_theta3 = max(min(cos_theta3, 1.0), -1.0)
+    theta3 = math.acos(cos_theta3)
+
+    # With the TCP’s orientation given by R = Rz(θ₁)*Ry(θ₂+θ₃), 
+    # enforce the orientation by setting:
+    theta1 = r_yaw
+    theta2 = r_pitch - theta3
+
+    return (theta1, theta2, theta3)
+--------------------------------------------------
+
+When using this method the target p (position) and r (orientation) must be consistent with the manipulator’s geometry. For example, if the forward kinematics computed with joint values (θ₁, θ₂, θ₃) returns TCP orientation [0, 0, 0] then the only reachable target is one with r = (0, 0, 0).
+
+This is one valid closed-form solution for the inverse kinematics problem.

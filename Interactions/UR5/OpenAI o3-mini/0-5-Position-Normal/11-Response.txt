@@ -1,0 +1,146 @@
+```python
+def inverse_kinematics(p: tuple[float, float, float]) -> tuple[float, float, float, float, float, float]:
+    """
+    Computes a closed‐form solution to the inverse kinematics for the given 6 DOF arm.
+    Because the system’s nonlinear equations can be numerically delicate, this implementation
+    uses Sympy’s nsolve with a multi-start strategy to obtain a solution that reaches the target
+    TCP position and desired fixed orientation.
+    
+    Kinematic chain (all units in meters, all angles in radians):
+      • Joint 1: At the base, rotation about Z.
+      • Joint 2: Translate by [0, 0.13585, 0] then rotate about Y.
+      • Joint 3: Translate by [0, -0.1197, 0.425] then rotate about Y.
+      • Joint 4: Translate by [0, 0, 0.39225] then rotate about Y.
+      • Joint 5: Translate by [0, 0.093, 0] then rotate about Z.
+      • Joint 6: Translate by [0, 0, 0.09465] then rotate about Y.
+      • TCP:   Translate by [0, 0.0823, 0] then fixed rotation about Z by 1.570796325.
+      
+    The desired end–effector orientation is fixed: a pure rotation about Z by 1.570796325.
+    To remove redundancy, wrist roll (q6) is fixed at 0.
+    
+    This function sets up six nonlinear equations (three for position and two independent ones
+    for orientation plus the wrist-roll constraint) relating the joint angles to the target TCP pose.
+    A set of candidate initial guesses is tried until convergence is obtained.
+    
+    :param p: A tuple (p_x, p_y, p_z) representing the target TCP position.
+    :return: A tuple (q1, q2, q3, q4, q5, q6) of joint angles (in radians) that achieve the target.
+    """
+    import math
+    import sympy as sp
+
+    # Define symbolic variables for joint angles.
+    q1, q2, q3, q4, q5, q6 = sp.symbols('q1 q2 q3 q4 q5 q6', real=True)
+
+    # Kinematic constants from the robot description.
+    d2     = 0.13585     # Translation along Y for Joint 2.
+    off3   = -0.1197     # Y offset for Joint 3.
+    d3     = 0.425       # Z offset for Joint 3.
+    d4     = 0.39225     # Z offset for Joint 4.
+    off5   = 0.093       # Y offset for Joint 5.
+    d6     = 0.09465     # Z offset for Joint 6.
+    offTCP = 0.0823      # TCP translation along Y.
+    tcp_yaw = 1.570796325  # Fixed rotation about Z at the TCP.
+
+    # Define basic rotation matrices.
+    def RotZ(theta):
+        return sp.Matrix([[sp.cos(theta), -sp.sin(theta), 0],
+                          [sp.sin(theta),  sp.cos(theta), 0],
+                          [0,              0,             1]])
+    def RotY(theta):
+        return sp.Matrix([[sp.cos(theta),  0, sp.sin(theta)],
+                          [0,              1, 0],
+                          [-sp.sin(theta), 0, sp.cos(theta)]])
+
+    # Build the forward kinematics step by step.
+    # Initialize position and orientation.
+    p_total = sp.Matrix([0, 0, 0])
+    R_total = sp.eye(3)
+
+    # Joint 1: Rotation about Z.
+    R_total = RotZ(q1)
+    # (No translation at Joint 1.)
+
+    # Joint 2: Translate, then rotate about Y.
+    p_total = p_total + R_total * sp.Matrix([0, d2, 0])
+    R_total = R_total * RotY(q2)
+
+    # Joint 3: Translate, then rotate about Y.
+    p_total = p_total + R_total * sp.Matrix([0, off3, d3])
+    R_total = R_total * RotY(q3)
+
+    # Joint 4: Translate, then rotate about Y.
+    p_total = p_total + R_total * sp.Matrix([0, 0, d4])
+    R_total = R_total * RotY(q4)
+
+    # Joint 5: Translate, then rotate about Z.
+    p_total = p_total + R_total * sp.Matrix([0, off5, 0])
+    R_total = R_total * RotZ(q5)
+
+    # Joint 6: Translate, then rotate about Y.
+    p_total = p_total + R_total * sp.Matrix([0, 0, d6])
+    R_total = R_total * RotY(q6)
+
+    # TCP: Apply final translation and fixed rotation.
+    p_total = p_total + R_total * sp.Matrix([0, offTCP, 0])
+    R_total = R_total * RotZ(tcp_yaw)
+
+    # Desired orientation matrix (fixed) is just the TCP rotation.
+    R_des = RotZ(tcp_yaw)
+
+    # Set up six equations:
+    # Three position equations:
+    px, py, pz = sp.symbols('px py pz', real=True)
+    eq1 = sp.Eq(p_total[0], px)
+    eq2 = sp.Eq(p_total[1], py)
+    eq3 = sp.Eq(p_total[2], pz)
+    # Two (independent) orientation equations:
+    eq4 = sp.Eq(R_total[0, 2], R_des[0, 2])
+    eq5 = sp.Eq(R_total[1, 2], R_des[1, 2])
+    # Fix q6 = 0 to remove redundancy.
+    eq6 = sp.Eq(q6, 0)
+
+    eqs = [eq1, eq2, eq3, eq4, eq5, eq6]
+
+    # Substitute the numerical target position.
+    subs_dict = {px: p[0], py: p[1], pz: p[2]}
+
+    # Prepare a list of candidate initial guesses.
+    # To improve convergence, we try several starting points.
+    # For q1, we use both the raw atan2 and its offset by pi.
+    p_x, p_y, _ = p
+    base_q1 = math.atan2(p_y, p_x)
+    candidate_q1 = [base_q1, base_q1 + math.pi]
+    candidate_q2 = [0.0, -0.5]
+    candidate_q3 = [0.0, 0.5, -0.5]
+    candidate_q4 = [0.0, 0.5, -0.5, 1.0, -1.0]
+    candidate_q5 = [0.0, -1.0]
+    candidate_q6 = [0.0]  # q6 is fixed
+
+    initial_guesses = []
+    for a in candidate_q1:
+        for b in candidate_q2:
+            for c in candidate_q3:
+                for d in candidate_q4:
+                    for e in candidate_q5:
+                        for f in candidate_q6:
+                            initial_guesses.append((a, b, c, d, e, f))
+
+    # Try each initial guess until one converges.
+    sol = None
+    for guess in initial_guesses:
+        try:
+            sol_candidate = sp.nsolve([eq.subs(subs_dict) for eq in eqs],
+                                      [q1, q2, q3, q4, q5, q6],
+                                      guess)
+            sol = sol_candidate
+            break  # if successful, break out of the loop
+        except Exception:
+            continue
+
+    if sol is None:
+        raise RuntimeError("Failed to find a convergent solution for the inverse kinematics.")
+
+    # Convert the solution to floats and return as a tuple.
+    sol = [float(sol[i]) for i in range(6)]
+    return tuple(sol)
+```

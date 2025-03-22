@@ -1,0 +1,164 @@
+```python
+def inverse_kinematics(p: tuple[float, float, float], 
+                       r: tuple[float, float, float]) -> tuple[float, float, float, float, float, float]:
+    """
+    Computes a closed‐form inverse kinematics solution for a 6 DOF serial manipulator.
+    
+    This robot has:
+      • Joint 1 about Z at the base.
+      • Joints 2 and 3 (both about Y) forming a planar “arm”. The origins:
+           - Joint2: [0, 0.13585, 0]
+           - Joint3: [0, -0.1197, 0.425]
+         Hence the effective shoulder point (joint3 origin) relative to joint2 is at 
+         [0, 0.13585-0.1197, 0] = [0, 0.01615, 0].
+         The two effective link lengths are:
+           A = 0.425     (shoulder to elbow)
+           B = 0.39225   (elbow to wrist center)
+      • Joints 4,5,6 form a spherical wrist.
+         The TCP (tool center point) is offset from joint6 by a fixed transform:
+            Translation: [0, 0.0823, 0]
+            Rotation: Rz(1.570796325)
+         Analysis shows that in joint6’s frame the effective TCP offset is d_tcp = [0, 0, 0.0823].
+         
+    The steps are:
+      1. Compute the wrist center p_wc by subtracting the rotated TCP offset from the target position.
+      2. Solve for q1 (rotation about Z). In the base frame the shoulder (joint3) lies at 
+         [0, d2 - 0.1197, 0] where d2 = 0.13585. By projecting p_wc onto the XY–plane and requiring 
+         that its Y–component (after rotation by –q1) equals the shoulder offset (0.13585-0.1197 = 0.01615),
+         we use:
+             q1 = φ_wc + asin( d_shoulder / sqrt(Xw²+Yw²) )
+         where φ_wc = atan2(Yw, Xw) and d_shoulder = 0.01615.
+      3. In the frame of joint2, define the shoulder frame by subtracting [0, d2-0.1197, 0] from 
+         Rz(-q1)*p_wc. Then, using the (x,z) components solve the 2-link planar IK:
+             Let x_p = p_wc_shoulder[0] and z_p = p_wc_shoulder[2], with D = sqrt(x_p²+z_p²).
+             Compute the cosine term: C = (D² - A² - B²)/(2*A*B). Clamp C to [-1, 1] and let angle = acos(C).
+         To choose the proper branch:
+             if x_p >= 0, choose q3 = -angle (elbow‐down)
+             else, q3 = +angle (elbow–up).
+         Then compute:
+             q2 = atan2(x_p, z_p) - atan2(B*sin(q3), A+B*cos(q3))
+      4. Compute the rotation R_0_3 from base to end of arm: 
+             R_0_3 = Rz(q1) · Ry(q2+q3)
+      5. The residual wrist rotation is:
+             R_w = (R_0_3)ᵀ · R_target · (R_tcp_fixed)ᵀ
+         where R_target is built from the target Euler angles r = (roll, pitch, yaw) using 
+             R_target = Rz(yaw) · Ry(pitch) · Rx(roll)
+         and R_tcp_fixed = Rz(1.570796325).
+      6. Decompose R_w = Ry(q4) · Rz(q5) · Ry(q6). A robust extraction is:
+             q4 = atan2(M[2,1], -M[0,1])
+             q5_candidate = atan2(sqrt(M[0,1]**2 + M[2,1]**2), M[1,1])
+             -- then, to pick the correct wrist branch, if q4 < 0 set q5 = -q5_candidate, else q5 = q5_candidate.
+             q6 = atan2(M[1,2], M[1,0])
+             
+    A helper function "wrap" is used to normalize angles to (-pi, pi].
+    """
+    import numpy as np
+    from math import sin, cos, atan2, acos, asin, sqrt, pi
+
+    # -------- Helper Functions --------
+    def wrap(angle: float) -> float:
+        """Wraps angle to (-pi, pi]."""
+        while angle <= -pi:
+            angle += 2*pi
+        while angle > pi:
+            angle -= 2*pi
+        return angle
+
+    def R_x(angle: float) -> np.ndarray:
+        return np.array([[1, 0, 0],
+                         [0, cos(angle), -sin(angle)],
+                         [0, sin(angle),  cos(angle)]])
+    
+    def R_y(angle: float) -> np.ndarray:
+        return np.array([[cos(angle),  0, sin(angle)],
+                         [0,           1, 0],
+                         [-sin(angle), 0, cos(angle)]])
+    
+    def R_z(angle: float) -> np.ndarray:
+        return np.array([[cos(angle), -sin(angle), 0],
+                         [sin(angle),  cos(angle), 0],
+                         [0,           0,          1]])
+
+    # -------- Build the Target Orientation --------
+    # r = (roll, pitch, yaw); convention: R_target = Rz(yaw) · Ry(pitch) · Rx(roll)
+    roll, pitch, yaw = r
+    R_target = R_z(yaw) @ R_y(pitch) @ R_x(roll)
+    
+    # -------- Constants from the Manipulator --------
+    d2 = 0.13585                      # Translation from base to joint2 along Y.
+    shoulder_offset = d2 - 0.1197       # = 0.01615 (from joint2 to joint3 in Y).
+    A = 0.425                         # Link from shoulder (joint3) to elbow.
+    B = 0.39225                       # Link from elbow to wrist center.
+    
+    # TCP offset (from joint6 to TCP)
+    d_tcp = np.array([0, 0, 0.0823])
+    R_tcp_fixed = R_z(1.570796325)
+    
+    # -------- Step 1: Wrist Center --------
+    p_vec = np.array(p)
+    p_wc = p_vec - R_target @ d_tcp
+    
+    # -------- Step 2: Solve for q1 --------
+    Xw, Yw, _ = p_wc
+    R_xy = sqrt(Xw**2 + Yw**2)
+    d_shoulder = shoulder_offset  # 0.01615
+    # Clamp ratio to avoid domain error in asin:
+    ratio = d_shoulder / R_xy if R_xy != 0 else 0
+    if ratio > 1.0: 
+        ratio = 1.0
+    elif ratio < -1.0:
+        ratio = -1.0
+    phi_wc = atan2(Yw, Xw)
+    # Revised q1: use addition of asin instead of subtraction.
+    q1 = phi_wc + asin(ratio)
+    q1 = wrap(q1)
+    
+    # -------- Step 3: Solve for q2 and q3 using the planar arm --------
+    # Transform p_wc into joint2 frame and then into the shoulder frame by subtracting the shoulder offset.
+    p_wc_joint2 = R_z(-q1) @ p_wc  # expressed in joint2 frame
+    # The shoulder (joint3 origin) in joint2 frame is at [0, d2 - 0.1197, 0].
+    p_wc_shoulder = p_wc_joint2 - np.array([0, shoulder_offset, 0])
+    x_p = p_wc_shoulder[0]
+    z_p = p_wc_shoulder[2]
+    D = sqrt(x_p**2 + z_p**2)
+    # Law of cosines:
+    cos_val = (D**2 - A**2 - B**2) / (2 * A * B)
+    if cos_val > 1.0:
+        cos_val = 1.0
+    elif cos_val < -1.0:
+        cos_val = -1.0
+    angle = acos(cos_val)
+    # Choose branch: if x_p is >= 0 (elbow-down), take q3 negative; else (elbow-up) positive.
+    if x_p >= 0:
+        q3 = -angle
+    else:
+        q3 = angle
+    # Compute q2 from geometry:
+    q2 = atan2(x_p, z_p) - atan2(B * sin(q3), A + B * cos(q3))
+    q2 = wrap(q2)
+    q3 = wrap(q3)
+    
+    # -------- Step 4: Compute the rotation up to joint3 --------
+    R_0_3 = R_z(q1) @ R_y(q2 + q3)
+    
+    # -------- Step 5: Wrist Rotation --------
+    R_w = R_0_3.T @ R_target @ R_tcp_fixed.T
+    
+    # -------- Step 6: Extract q4, q5, q6 from the wrist rotation --------
+    # Let M = R_w.
+    M = R_w
+    q4 = atan2(M[2, 1], -M[0, 1])
+    # Compute candidate for q5 (in [0, pi])
+    q5_candidate = atan2(sqrt(M[0,1]**2 + M[2,1]**2), M[1,1])
+    # Choose wrist branch based on q4: if q4 is negative, take q5 negative.
+    if q4 < 0:
+        q5 = -q5_candidate
+    else:
+        q5 = q5_candidate
+    q6 = atan2(M[1, 2], M[1, 0])
+    q4 = wrap(q4)
+    q5 = wrap(q5)
+    q6 = wrap(q6)
+    
+    return (q1, q2, q3, q4, q5, q6)
+```

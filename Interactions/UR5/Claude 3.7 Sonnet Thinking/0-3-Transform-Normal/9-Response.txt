@@ -1,0 +1,79 @@
+Based on the robot details and the forward kinematics tests, I'll develop a solution for the inverse kinematics of this 4-DOF serial manipulator.
+
+Looking at the test cases, I can see:
+1. Joint 1 rotates around Z-axis and controls the orientation in the XY plane
+2. Joints 2, 3, and 4 all rotate around Y-axis and determine the position in the resulting plane
+
+I'll now complete the inverse kinematics function:
+
+```python
+def inverse_kinematics(p: tuple[float, float, float], r: tuple[float, float, float]) -> tuple[float, float, float, float]:
+    """
+    Gets the joint values needed to reach position "p" and orientation "r".
+    :param p: The position to reach in the form [x, y, z].
+    :param r: The orientation to reach in radians in the form [x, y, z].
+    :return: A list of the values to set the links to for reaching position "p" and orientation "r".
+    """
+    import numpy as np
+    
+    # Extract target position
+    px, py, pz = p
+    rx, ry, rz = r
+    
+    # Robot dimensions
+    l1 = 0.13585  # Joint 1 to Joint 2 in y-axis
+    l2_y = -0.1197  # y-component of Joint 2 to Joint 3
+    l2_z = 0.425   # z-component of Joint 2 to Joint 3
+    l3 = 0.39225   # Joint 3 to Joint 4 in z-axis
+    l4 = 0.093     # Joint 4 to TCP in y-axis
+    
+    # Step 1: Calculate joint 1 angle (rotation around Z)
+    theta1 = np.arctan2(py, px)
+    
+    # Step 2: Transform the target point into the YZ plane after rotation by theta1
+    r_distance = np.sqrt(px**2 + py**2)  # Distance from z-axis to target in XY plane
+    
+    # Step 3: Compute the position of the wrist (Joint 4) from TCP
+    # TCP is offset from Joint 4 by [0, 0.093, 0] in local frame
+    # We need to account for this offset
+    wrist_y = r_distance - l4 * np.cos(ry)
+    wrist_z = pz - l4 * np.sin(ry)
+    
+    # Step 4: Solve the inverse kinematics for a planar 3R manipulator
+    # Using the law of cosines for the joint angles 2 and 3
+    
+    # Distance from Joint 2 to wrist
+    wrist_to_j2_y = wrist_y - l1
+    wrist_to_j2_distance = np.sqrt(wrist_to_j2_y**2 + wrist_z**2)
+    
+    # Calculate joint 3 angle using law of cosines
+    # cos(theta3) = (L2^2 + L3^2 - D^2) / (2*L2*L3)
+    l2 = np.sqrt(l2_y**2 + l2_z**2)
+    cos_theta3 = (l2**2 + l3**2 - wrist_to_j2_distance**2) / (2 * l2 * l3)
+    # Clamp to valid range to handle numerical issues
+    cos_theta3 = np.clip(cos_theta3, -1.0, 1.0)
+    theta3 = np.arccos(cos_theta3)
+    
+    # Calculate joint 2 angle
+    # First, get the angle between the y-axis and the line from J2 to wrist
+    psi = np.arctan2(wrist_z, wrist_to_j2_y)
+    # Second, get the angle between the line from J2 to J3 and the line from J2 to wrist
+    phi = np.arccos((l2**2 + wrist_to_j2_distance**2 - l3**2) / (2 * l2 * wrist_to_j2_distance))
+    # Adjust for the offset angle of the J2-J3 link from the y-axis
+    offset_angle = np.arctan2(l2_z, -l2_y)
+    theta2 = psi - phi - offset_angle
+    
+    # Calculate joint 4 angle
+    # The sum of joint angles 2, 3, and 4 must match the desired orientation (ry)
+    theta4 = ry - theta2 - theta3
+    
+    return (theta1, theta2, theta3, theta4)
+```
+
+This solution:
+1. Calculates theta1 based on the target position in the XY plane
+2. Transforms the target to find its distance from the Z-axis
+3. Accounts for the TCP offset to find the wrist position
+4. Uses the law of cosines to solve for theta2 and theta3
+5. Derives theta4 from the orientation constraint
+6. Returns all joint angles in radians

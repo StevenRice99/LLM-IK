@@ -1,0 +1,342 @@
+Based on the feedback, I can see that my initial approach had several issues. Let me develop a better inverse kinematics solution that correctly handles the robot's kinematic structure.
+
+```python
+import math
+import numpy as np
+
+def inverse_kinematics(p: tuple[float, float, float]) -> tuple[float, float, float, float, float]:
+    """
+    Gets the joint values needed to reach position "p".
+    :param p: The position to reach in the form [x, y, z].
+    :return: A list of the values to set the links to for reaching position "p".
+    """
+    x, y, z = p
+    
+    # Link dimensions from the URDF
+    # Link offsets
+    J1_to_J2_y = 0.13585
+    J2_to_J3_y = -0.1197
+    J2_to_J3_z = 0.425
+    J3_to_J4_z = 0.39225
+    J4_to_J5_y = 0.093
+    J5_to_TCP_z = 0.09465
+    
+    # We'll first determine the position of the wrist center (joint 5)
+    # by subtracting the TCP offset from the target position
+    # Since joint 5 rotates around Z, it doesn't affect the TCP position for a fixed joint 5 angle
+    # For now we'll set joint 5 = 0, as this doesn't affect the position
+    theta5 = 0.0
+    
+    # First we need to find the wrist center (joint 4 position)
+    # We know that the TCP is offset by [0, 0, J5_to_TCP_z] from joint 5 in local coordinates
+    # We need to account for both the J4_to_J5_y and J5_to_TCP_z offsets
+    
+    # Calculate squared distance from the base to the target point in the XY plane
+    xy_dist_squared = x**2 + y**2
+    
+    # Total offset in y direction from joint 1 to TCP
+    y_offset = J1_to_J2_y + J2_to_J3_y + J4_to_J5_y
+    
+    # First solve for joint 1 (base rotation)
+    theta1 = math.atan2(x, y)
+    
+    # Calculate distance from joint 2 to the target in the rotated plane
+    # This is the plane containing joints 2, 3, 4 and the target
+    r_target = math.sqrt(xy_dist_squared) - y_offset  # Distance in the XY plane adjusted for Y offset
+    
+    # Now we solve the position for joints 2, 3, and 4 as a three-link planar manipulator
+    # First, we compute the wrist position (position of joint 4)
+    # The position of joint 4 is offset from the TCP by the last link length
+    wrist_x = x - J5_to_TCP_z * math.sin(theta1)
+    wrist_y = y - J5_to_TCP_z * math.cos(theta1)
+    wrist_z = z
+    
+    # Now calculate the planar distance from joint 2 to the wrist in the rotated frame
+    r_wrist = math.sqrt(wrist_x**2 + wrist_y**2) - y_offset
+    s_wrist = wrist_z - J1_to_J2_y
+    
+    # Calculate the distance from joint 2 to the wrist center
+    D = math.sqrt(r_wrist**2 + s_wrist**2)
+    
+    # Use the law of cosines to find the angle for joint 3
+    cos_theta3 = (D**2 - J2_to_J3_z**2 - J3_to_J4_z**2) / (2 * J2_to_J3_z * J3_to_J4_z)
+    
+    # Clamp to handle numerical errors
+    cos_theta3 = max(-1.0, min(1.0, cos_theta3))
+    
+    # Calculate theta3
+    theta3 = -math.acos(cos_theta3)  # Using negative for elbow down configuration
+    
+    # Calculate theta2 using the law of sines and the known theta3
+    beta = math.atan2(s_wrist, r_wrist)
+    
+    # Calculate the angle gamma using the law of sines
+    sin_gamma = (J3_to_J4_z * math.sin(-theta3)) / D
+    gamma = math.asin(sin_gamma)
+    
+    # Calculate theta2
+    theta2 = beta - gamma
+    
+    # Calculate theta4 to keep the end effector at the desired orientation
+    # In this case, we want to make joint 4 compensate for joints 2 and 3
+    theta4 = -(theta2 + theta3)
+    
+    # Normalize angles to be in the range [-pi, pi]
+    def normalize_angle(angle):
+        while angle > math.pi:
+            angle -= 2 * math.pi
+        while angle < -math.pi:
+            angle += 2 * math.pi
+        return angle
+    
+    theta1 = normalize_angle(theta1)
+    theta2 = normalize_angle(theta2)
+    theta3 = normalize_angle(theta3)
+    theta4 = normalize_angle(theta4)
+    
+    return (theta1, theta2, theta3, theta4, theta5)
+```
+
+Wait, I notice that my implementation still has issues with the geometry calculations. Let me revise this solution once more:
+
+```python
+import math
+import numpy as np
+
+def inverse_kinematics(p: tuple[float, float, float]) -> tuple[float, float, float, float, float]:
+    """
+    Gets the joint values needed to reach position "p".
+    :param p: The position to reach in the form [x, y, z].
+    :return: A list of the values to set the links to for reaching position "p".
+    """
+    x, y, z = p
+    
+    # Link dimensions from the URDF
+    J1_to_J2_y = 0.13585
+    J2_to_J3_y = -0.1197
+    J2_to_J3_z = 0.425
+    J3_to_J4_z = 0.39225
+    J4_to_J5_y = 0.093
+    J5_to_TCP_z = 0.09465
+    
+    # First, we'll solve for joint 1 (rotation around Z-axis)
+    theta1 = math.atan2(x, y)
+    
+    # Since joint 5 doesn't affect the TCP position when set to a fixed angle,
+    # we'll work backward from the target to find the wrist center
+    # The wrist center is the position of joint 4
+    
+    # Calculate the wrist center by removing the effect of the last link
+    wrist_x = x - J5_to_TCP_z * math.sin(theta1)
+    wrist_y = y - J5_to_TCP_z * math.cos(theta1)
+    wrist_z = z
+    
+    # Now we'll solve for joints 2, 3, and 4 using the wrist center position
+    # This is a 3-DOF planar manipulator problem in the rotated plane
+    
+    # Project the wrist center into the YZ plane rotated by theta1
+    # (This is the plane containing joints 2, 3, and 4)
+    r = math.sqrt(wrist_x**2 + wrist_y**2)
+    
+    # Account for the Y offsets in the chain
+    r_adj = r - (J1_to_J2_y + J2_to_J3_y + J4_to_J5_y)
+    s = wrist_z
+    
+    # Calculate the distance from joint 2 to the wrist center
+    D = math.sqrt(r_adj**2 + s**2)
+    
+    # Use the law of cosines to find the angle for joint 3
+    L1 = J2_to_J3_z
+    L2 = J3_to_J4_z
+    
+    cos_theta3 = (D**2 - L1**2 - L2**2) / (2 * L1 * L2)
+    cos_theta3 = max(-1.0, min(1.0, cos_theta3))
+    
+    # Calculate theta3 (negative for elbow down configuration)
+    theta3 = -math.acos(cos_theta3)
+    
+    # Calculate theta2 using the law of sines
+    # First, find the angle between the line from joint 2 to the wrist and the vertical
+    alpha = math.atan2(r_adj, s)
+    
+    # Then find the angle between the first link and the line from joint 2 to the wrist
+    sin_beta = (L2 * math.sin(-theta3)) / D
+    beta = math.asin(sin_beta)
+    
+    # Calculate theta2
+    theta2 = alpha - beta
+    
+    # Calculate theta4 to achieve the desired orientation
+    theta4 = -(theta2 + theta3)
+    
+    # Set theta5 (it doesn't affect the position)
+    theta5 = 0.0
+    
+    # Normalize angles to be in the range [-pi, pi]
+    def normalize_angle(angle):
+        while angle > math.pi:
+            angle -= 2 * math.pi
+        while angle < -math.pi:
+            angle += 2 * math.pi
+        return angle
+    
+    theta1 = normalize_angle(theta1)
+    theta2 = normalize_angle(theta2)
+    theta3 = normalize_angle(theta3)
+    theta4 = normalize_angle(theta4)
+    
+    return (theta1, theta2, theta3, theta4, theta5)
+```
+
+I'm still not fully confident in this solution, as the robot's geometry is complex. Let me provide a properly corrected version that addresses all the feedback issues:
+
+```python
+import math
+import numpy as np
+
+def inverse_kinematics(p: tuple[float, float, float]) -> tuple[float, float, float, float, float]:
+    """
+    Gets the joint values needed to reach position "p".
+    :param p: The position to reach in the form [x, y, z].
+    :return: A list of the values to set the links to for reaching position "p".
+    """
+    x, y, z = p
+    
+    # Constants from the URDF
+    L1 = 0.425       # Z offset from joint 2 to joint 3
+    L2 = 0.39225     # Z offset from joint 3 to joint 4
+    L3 = 0.09465     # Z offset from joint 5 to TCP
+    y_j2 = 0.13585   # Y offset from joint 1 to joint 2
+    y_j3 = -0.1197   # Y offset from joint 2 to joint 3
+    y_j5 = 0.093     # Y offset from joint 4 to joint 5
+    
+    # Joint 5 doesn't affect the position, so we'll set it to 0
+    theta5 = 0.0
+    
+    # Calculate joint 1 (base rotation)
+    theta1 = math.atan2(x, y)
+    
+    # Adjust the target position to account for the offsets in the chain
+    # We need to find the position of joint 4 (wrist center)
+    
+    # First subtract the effect of the TCP offset
+    # The TCP is offset by L3 in the direction determined by joint 1
+    wrist_x = x - L3 * math.sin(theta1)
+    wrist_y = y - L3 * math.cos(theta1)
+    wrist_z = z
+    
+    # Project the wrist into the plane of joints 2, 3, and 4
+    # We need to account for all Y offsets in the chain
+    total_y_offset = y_j2 + y_j3 + y_j5
+    
+    # Calculate coordinates in the planar frame
+    r = math.sqrt(wrist_x**2 + wrist_y**2) - total_y_offset
+    s = wrist_z
+    
+    # Calculate the distance from joint 2 to the wrist
+    D = math.sqrt(r**2 + s**2)
+    
+    # Use the law of cosines to find theta3
+    cos_theta3 = (D**2 - L1**2 - L2**2) / (2 * L1 * L2)
+    
+    # Clamp in case of numerical errors
+    cos_theta3 = max(-1.0, min(1.0, cos_theta3))
+    
+    # Two possible solutions for theta3 (elbow up/down)
+    # Here we choose the negative solution (elbow down)
+    theta3 = -math.acos(cos_theta3)
+    
+    # Calculate theta2
+    alpha = math.atan2(r, s)
+    beta = math.atan2(L2 * math.sin(-theta3), L1 + L2 * math.cos(-theta3))
+    theta2 = alpha - beta
+    
+    # Calculate theta4 to maintain the end effector orientation
+    theta4 = -(theta2 + theta3)
+    
+    # Normalize all angles to the range [-pi, pi]
+    def normalize(angle):
+        return ((angle + math.pi) % (2 * math.pi)) - math.pi
+    
+    theta1 = normalize(theta1)
+    theta2 = normalize(theta2)
+    theta3 = normalize(theta3)
+    theta4 = normalize(theta4)
+    
+    return (theta1, theta2, theta3, theta4, theta5)
+```
+
+The above solution still has issues. Let me provide one final, carefully constructed solution:
+
+```python
+import math
+
+def inverse_kinematics(p: tuple[float, float, float]) -> tuple[float, float, float, float, float]:
+    """
+    Gets the joint values needed to reach position "p".
+    :param p: The position to reach in the form [x, y, z].
+    :return: A list of the values to set the links to for reaching position "p".
+    """
+    x, y, z = p
+    
+    # Robot dimensions from URDF
+    L1 = 0.425       # Z distance from joint 2 to joint 3
+    L2 = 0.39225     # Z distance from joint 3 to joint 4
+    L3 = 0.09465     # Z distance from joint 5 to TCP
+    
+    # Y offsets
+    y1 = 0.13585     # Y offset from joint 1 to joint 2
+    y2 = -0.1197     # Y offset from joint 2 to joint 3
+    y3 = 0.093       # Y offset from joint 4 to joint 5
+    
+    total_y_offset = y1 + y2 + y3
+    
+    # Calculate joint 1 angle (base rotation around Z)
+    theta1 = math.atan2(x, y)
+    
+    # Calculate the wrist center position (where joint 4 is located)
+    # by removing the effect of the TCP offset in the rotated plane
+    xw = x - L3 * math.sin(theta1)
+    yw = y - L3 * math.cos(theta1)
+    zw = z
+    
+    # Project the wrist into the rotated plane
+    planar_dist = math.sqrt(xw**2 + yw**2) - total_y_offset
+    
+    # Now we're solving a 2D problem in the rotated plane
+    # with the wrist at position (planar_dist, zw)
+    
+    # Calculate distance from joint 2 to wrist
+    D = math.sqrt(planar_dist**2 + zw**2)
+    
+    # Use law of cosines to find joint 3 angle
+    cos_theta3 = (D**2 - L1**2 - L2**2) / (2 * L1 * L2)
+    
+    # Clamp to valid range
+    cos_theta3 = max(-1.0, min(1.0, cos_theta3))
+    
+    # Solve for joint 3 angle
+    theta3 = math.acos(cos_theta3)
+    
+    # Calculate joint 2 angle
+    alpha = math.atan2(zw, planar_dist)
+    beta = math.atan2(L2 * math.sin(theta3), L1 + L2 * math.cos(theta3))
+    theta2 = alpha + beta
+    
+    # Joint 4 angle to maintain orientation
+    theta4 = -(theta2 + theta3)
+    
+    # Joint 5 angle (doesn't affect position)
+    theta5 = 0.0
+    
+    # Ensure all angles are within [-π, π]
+    def normalize(angle):
+        return ((angle + math.pi) % (2 * math.pi)) - math.pi
+    
+    theta1 = normalize(theta1)
+    theta2 = normalize(theta2)
+    theta3 = normalize(theta3)
+    theta4 = normalize(theta4)
+    
+    return (theta1, theta2, theta3, theta4, theta5)
+```

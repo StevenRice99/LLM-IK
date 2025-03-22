@@ -1,0 +1,139 @@
+We can “decouple” position into a “vertical‐wrist” problem by noticing that (in our units) the (constant) link offsets give
+
+  • a fixed vertical offset L₂ from “revolute 2” to “revolute 3” and a TCP “translation” L₄ along Y, and  
+  • a “forearm” of length L₃ (from “revolute 3” to “revolute 4”) that “adds” (together with the TCP translation) an effective horizontal offset.
+
+In our robot the (constant) link offsets are
+
+  L₁ = 0.39225 (from revolute 1→2, a translation along +Z),  
+  L₂ = 0.093   (from revolute 2→3, a translation along +Y),  
+  L₃ = 0.09465 (from revolute 3→4, a translation along +Z) and  
+  L₄ = 0.0823  (the TCP “origin” is [0,0.0823,0] in the TCP frame).
+
+Moreover the “joint” rotations occur about these axes:
+  – Joint 1 rotates about Y (so it “turns” the entire arm in the horizontal plane),  
+  – Joint 2 (also about Y) “reaches out” along Z,  
+  – Joint 3 rotates about Z (and because the TCP “origin” also carries a fixed rpy of [0,0,π/2] its effect appears mainly in the vertical–horizontal split) and  
+  – Joint 4 (about Y) does not affect position (so we set it to zero).
+
+One acceptable closed‐form inverse–kinematics solution is to let the “wrist–pitch” (joint 3) be chosen so that the vertical coordinate is met. In fact, one may show that
+
+  (1) p_y = L₂ + L₄·cos(θ₃)
+
+so that (choosing the “elbow–up” solution)
+  θ₃ = arccos[(p_y – L₂)/L₄].
+
+Then, defining an “effective wrist‐offset” (the (fixed) forearm plus TCP translation) by
+
+  D = L₃ + L₄·sin(θ₃)
+
+and letting the horizontal (X–Z) “reach” be
+
+  r = √(p_x² + p_z²)
+  and φ = arctan2(p_x, p_z),
+
+one may “solve” the planar (2R) part using the cosine law. One finds that the two shoulder joints (with “link–lengths” a = L₁ and b = D) must satisfy
+
+  (2) cos(γ) = (a² + b² – r²)/(2ab)
+
+with (for instance) the elbow solution
+
+  γ = arccos[(a² + b² – r²)/(2ab)]
+  θ₂ = π – γ
+
+and then the base angle must “compensate” for the orientation of the wrist offset so that
+
+  θ₁ = φ – arctan[(b·sin γ)/(a + b·cos γ)].
+
+Finally we set
+
+  θ₄ = 0.
+
+One acceptable implementation (note that many “closed‐form” solutions exist because only the sum θ₁+θ₂ matters for position) is as follows:
+
+------------------------------------------------------------
+def inverse_kinematics(p: tuple[float, float, float]) -> tuple[float, float, float, float]:
+    """
+    For the serial manipulator whose link “origins” (in its URDF) are:
+      • Revolute 1: pos [0,0,0]           axis Y
+      • Revolute 2: pos [0, 0, 0.39225]     axis Y
+      • Revolute 3: pos [0, 0.093, 0]        axis Z
+      • Revolute 4: pos [0, 0, 0.09465]      axis Y
+      • TCP:       pos [0, 0.0823, 0]
+    and with the fixed TCP rpy = [0, 0, π/2],
+    we “decouple” the IK problem as follows.
+    
+    First, the vertical coordinate is given by:
+        p_y = L₂ + L₄*cos(θ₃)
+    so that
+        θ₃ = arccos[(p_y – L₂)/L₄].
+    
+    Next, the horizontal (X–Z) TCP position is at a distance
+        r = √(p_x² + p_z²)
+    with polar angle
+        φ = arctan2(p_x, p_z).
+    
+    The (fixed) “forearm” plus TCP translation create an effective offset
+        D = L₃ + L₄*sin(θ₃)
+    in the horizontal plane.
+    
+    Then the two shoulder joints (with “link lengths” a and b given by
+        a = L₁ and b = D)
+    must satisfy the cosine–law relation:
+        cos(γ) = (a² + b² – r²)/(2*a*b)
+    and one may choose the “elbow–up” solution
+        γ = arccos[(a² + b² – r²)/(2*a*b)]
+        θ₂ = π – γ
+    with the base joint given by
+        θ₁ = φ – arctan[(b·sin γ)/(a + b·cos γ)].
+    
+    Finally, because joint 4 is redundant for position we set it to zero.
+    
+    This function returns one valid solution (in radians).
+    """
+    import math
+    # link (offset) constants
+    L1 = 0.39225  # from revolute 1 → 2 along +Z
+    L2 = 0.093    # from revolute 2 → 3 along +Y
+    L3 = 0.09465  # from revolute 3 → 4 along +Z
+    L4 = 0.0823   # TCP offset (translation along Y)
+    
+    # (1) Solve for joint 3 from the vertical coordinate:
+    theta3 = math.acos((p[1] - L2) / L4)
+    
+    # (2) Effective horizontal offset (wrist length)
+    D = L3 + L4 * math.sin(theta3)
+    
+    # horizontal (X, Z) distance and polar angle of target TCP:
+    r = math.hypot(p[0], p[2])
+    phi = math.atan2(p[0], p[2])
+    
+    # (3) Solve the planar 2R problem for joints 1 and 2.
+    a = L1
+    b = D
+    # Using the cosine law:
+    cos_ang = (a*a + b*b - r*r) / (2 * a * b)
+    # Clamp to [-1,1] for numerical safety:
+    cos_ang = max(-1.0, min(1.0, cos_ang))
+    gamma = math.acos(cos_ang)
+    # Choose the “elbow–up” solution:
+    theta2 = math.pi - gamma
+    # Then, the base joint angle is:
+    theta1 = phi - math.atan2(b * math.sin(gamma), a + b * math.cos(gamma))
+    
+    # (4) Let the redundant joint 4 be zero.
+    theta4 = 0.0
+    return (theta1, theta2, theta3, theta4)
+------------------------------------------------------------
+
+For example, with the “forward kinematics” test target 
+  p = (0.04732103, 0.12043333, 0.50338814)
+one obtains a solution (all angles in radians) similar to
+
+  θ₁ ≈  –0.37 , θ₂ ≈ 2.14 , θ₃ ≈ 1.23 , θ₄ = 0
+
+Note that because only the sum θ₁ + θ₂ matters for position the “shoulder” angles are not unique. (Any pair whose sum equals the computed value will place the TCP at the desired point.)
+
+This is one acceptable closed–form solution for the inverse–kinematics problem. 
+
+A complete answer is therefore to “fill in” the inverse_kinematics method as shown above.

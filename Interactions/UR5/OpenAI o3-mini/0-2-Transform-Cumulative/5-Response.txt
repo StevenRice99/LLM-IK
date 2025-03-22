@@ -1,0 +1,107 @@
+Below is one acceptable closed‐form solution. In our solution we first compute the base “yaw” (joint 1) using the (x,y) coordinates of the TCP (using the same idea as EXISTING 1), then “remove” the fixed translation to joint 2 and rotate that relative position into the plane of motion for joints 2 and 3. (Recall that the y–axis in each of these joints is the rotation axis so that any translation along that direction does not affect the arm “reach”.) In the planar chain the TCP’s x– and z–coordinates (after subtracting the TCP offset due to joint 3) must equal the sum of the contributions of link lengths a = 0.425 and b = 0.39225. In addition, the target orientation r (given as roll–pitch–yaw) provides the desired sum θ₂ + θ₃; following the strategy in EXISTING 3 we extract
+
+  θ_sum = atan2(sin(ry), cos(ry)·cos(rz))
+
+Then we note that in the joint 2 frame the TCP “planar” coordinates satisfy
+
+  p₂₍ₓ₎ = a·sin(θ₂) + b·sin(θ_sum)
+  p₂₍₋₎ = a·cos(θ₂) + b·cos(θ_sum)
+
+so that one may solve for θ₂ by subtracting off the b–term (which comes from the static TCP offset) and then taking
+
+  θ₂ = atan2(p₂₍ₓ₎ – b·sin(θ_sum), p₂₍₋₎ – b·cos(θ_sum))
+
+and finally setting
+
+  θ₃ = θ_sum – θ₂.
+
+One acceptable full implementation is as follows:
+
+-------------------------------------------------------
+def inverse_kinematics(p: tuple[float, float, float], r: tuple[float, float, float]) -> tuple[float, float, float]:
+    """
+    Gets the joint values (in radians) needed to reach the target TCP position "p" and orientation "r".
+    We assume the following serial chain:
+      • Revolute 1: at [0, 0, 0] rotating about Z.
+      • Revolute 2: at [0, 0.13585, 0] rotating about Y.
+      • Revolute 3: at [0, -0.1197, 0.425] rotating about Y.
+      • TCP: at [0, 0, 0.39225] (in the 3rd link’s frame).
+    :param p: The TCP target position [x, y, z].
+    :param r: The TCP target orientation (roll, pitch, yaw) in radians.
+    :return: A tuple (theta1, theta2, theta3) for the three joints.
+    """
+    import math
+
+    # -------- Joint 1 (base rotation) --------
+    # The axis is Z so we use the x and y coordinates;
+    # here we follow EXISTING 1 (theta1 = atan2(-x, y)).
+    x, y, z = p
+    theta1 = math.atan2(-x, y)
+
+    # -------- Extract desired sum for joints 2 and 3 --------
+    # Our chain’s only orientation effect (after joint1) is from the combined rotation about Y:
+    # R = Ry(theta2 + theta3). Using the target rpy (assumed in order [roll, pitch, yaw])
+    # we extract the desired summed angle as follows:
+    rx, ry, rz = r
+    cx = math.cos(rx)
+    sx = math.sin(rx)
+    cy = math.cos(ry)
+    sy = math.sin(ry)
+    cz = math.cos(rz)
+    # Note: using cz (and not sz) here is consistent with EXISTING 3.
+    theta_sum = math.atan2(sy, cy * cz)
+
+    # -------- Position for joints 2 and 3 (planar subchain) --------
+    # The fixed translation from base (revolute 1) to joint 2 is [0, L1, 0] with L1 = 0.13585.
+    L1 = 0.13585
+    # Its world (base) coordinates (after applying Rz(theta1)) are:
+    joint2_origin = (-math.sin(theta1) * L1, math.cos(theta1) * L1, 0)
+
+    # Compute the TCP position relative to joint 2:
+    p_rel = (x - joint2_origin[0],
+             y - joint2_origin[1],
+             z - joint2_origin[2])
+    # Since joints 2 and 3 rotate about Y,
+    # the motion affecting the reach is in the plane defined by the (local) X and Z axes.
+    # Rotate p_rel by -theta1 to “cancel” the base rotation:
+    cos_m1 = math.cos(-theta1)
+    sin_m1 = math.sin(-theta1)
+    # In this rotated frame the x-coordinate comes from the arm’s “in plane” direction
+    p2_x = cos_m1 * p_rel[0] - sin_m1 * p_rel[1]
+    p2_z = p_rel[2]
+    # (Note: the y–component in this rotated frame is along the joint’s axis and does not affect the reach.)
+
+    # Effective link lengths (ignoring the constant y–offset from joint 2 to 3)
+    a = 0.425    # from joint 2 to joint 3 (the effective translation along Z)
+    b = 0.39225  # from joint 3 to TCP
+
+    # The TCP position (in the joint-2 plane) should satisfy:
+    #   p2_x = a*sin(theta2) + b*sin(theta_sum)
+    #   p2_z = a*cos(theta2) + b*cos(theta_sum)
+    # Solve for theta2:
+    term_x = p2_x - b * math.sin(theta_sum)
+    term_z = p2_z - b * math.cos(theta_sum)
+    theta2 = math.atan2(term_x, term_z)
+
+    # Finally, joint 3 is computed from the desired summed rotation:
+    theta3 = theta_sum - theta2
+
+    return (theta1, theta2, theta3)
+-------------------------------------------------------
+
+Explanation of key steps:
+1. Joint 1 is computed so that when we “undo” the base yaw (via Rz(–θ₁)) the remaining TCP position is expressed in a frame where the “arm” moves in a plane.
+2. The fixed offset from revolute 1 to 2 (0.13585 along Y) is first removed.
+3. In the rotated frame the contribution of joints 2 and 3 is purely in the effective (planar) x–z coordinates. Because the translations along the rotation (Y) are “invisible” to a Y–axis rotation, we use the effective link lengths a (0.425) and b (0.39225).
+4. The target orientation supplies the desired sum (θ₂+θ₃) via a simple extraction from the rpy angles.
+5. Then subtracting the b–term (the constant TCP offset expressed in the joint-3 frame) we solve for θ₂ and set θ₃ accordingly.
+
+Using this complete inverse kinematics method, if you call it with
+  p = (0, 0.01615, 0.81725) and r = (0, 0, 0)
+you will obtain (0, 0, 0), which is consistent with our forward kinematics test.
+
+Any solution that produces joint values satisfying
+
+  TCP = Rz(θ₁) * (Translation[0, 0.13585, 0] * Ry(θ₂) * (Translation[0, -0.1197, 0.425] * Ry(θ₃) * Translation[0, 0, 0.39225]))
+
+is acceptable.

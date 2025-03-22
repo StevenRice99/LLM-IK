@@ -1,0 +1,112 @@
+Below is one acceptable analytical solution. In our approach we first compute joint 1 from the horizontal (x,y) components using the same method as Existing Code 1. Then, we “bring” the TCP into the coordinate frame of joint 2 by first “undoing” the base (joint 1) rotation and subtracting the translation of joint 2. In that frame the remaining joints (2–4) form a planar chain with link lengths L₁ = 0.425 and L₂ = 0.39225 (taken from the z‐offsets in the URDF). (Note that the TCP “y” offset does not affect the planar (x,z) kinematics.) Finally, we “extract” the desired rotation for the planar chain by removing the base rotation from the full TCP orientation so that the desired sum θ₂+θ₃+θ₄ is given by the arctan2 of the transformed rotation matrix elements. (This is exactly how Existing Code 2 defined its target sum.) A pair of alternatives for the “elbow” (joint 3) is considered and the solution that best reproduces both the TCP’s position (via forward kinematics in the x–z plane) and the desired orientation is returned.
+
+Below is the complete code:
+
+-------------------------------------------------
+def inverse_kinematics(p: tuple[float, float, float],
+                       r: tuple[float, float, float]) -> tuple[float, float, float, float]:
+    """
+    Gets the joint values needed to reach position "p" and orientation "r".
+    p: The TCP position [x, y, z] in global coordinates.
+    r: The TCP orientation [roll, pitch, yaw] in radians.
+    Returns a tuple (θ1, θ2, θ3, θ4) for the four revolute joints.
+    """
+    import math
+    import numpy as np
+
+    # ---- Solve for joint 1 (base rotation about Z) ----
+    # Using the method from EXISTING 1: θ1 = atan2(-x, y)
+    p_x, p_y, p_z = p
+    theta1 = math.atan2(-p_x, p_y)
+
+    # ---- Transform TCP into joint 2 frame ----
+    # Joint 2 is translated by T2 = [0, 0.13585, 0] in joint1 frame.
+    # Remove the effect of joint1 by rotating by -θ1.
+    cos_t1 = math.cos(theta1)
+    sin_t1 = math.sin(theta1)
+    Rz_neg = np.array([[cos_t1, -sin_t1, 0],
+                       [sin_t1,  cos_t1, 0],
+                       [0,       0,      1]])
+    T2 = np.array([0, 0.13585, 0])
+    # p_eff is the TCP position expressed in joint2’s frame
+    p_eff = Rz_neg.dot(np.array(p) - T2)
+    # For the planar chain (joints 2–4) only x and z are used
+    x_target = p_eff[0]
+    z_target = p_eff[2]
+
+    # ---- Set link lengths from the table ----
+    L1 = 0.425     # from the offset [0, -0.1197, 0.425]
+    L2 = 0.39225   # from the offset [0, 0, 0.39225]
+
+    # ---- Compute candidate for joint 3 using the cosine law ----
+    d_sq = x_target**2 + z_target**2
+    cos_theta3 = (d_sq - L1**2 - L2**2) / (2 * L1 * L2)
+    cos_theta3 = max(min(cos_theta3, 1.0), -1.0)
+    theta3_candidate = math.acos(cos_theta3)
+    theta3_candidate_alt = -theta3_candidate  # the alternative elbow configuration
+
+    solutions = []
+
+    # ---- Compute the desired planar rotation angle from the TCP orientation ----
+    # First compute the full rotation matrix R_desired from r (roll, pitch, yaw)
+    roll, pitch, yaw = r
+    cr, sr = math.cos(roll), math.sin(roll)
+    cp, sp = math.cos(pitch), math.sin(pitch)
+    cy, sy = math.cos(yaw), math.sin(yaw)
+    R_desired = np.array([
+        [cy*cp,          cy*sp*sr - sy*cr,  cy*sp*cr + sy*sr],
+        [sy*cp,          sy*sp*sr + cy*cr,  sy*sp*cr - cy*sr],
+        [-sp,            cp*sr,             cp*cr]
+    ])
+    # Remove the base rotation so that the planar rotation (about Y) remains:
+    R_planar = Rz_neg.dot(R_desired)
+    # For a pure rotation about Y (i.e. Ry(θ)) the (0,0) and (0,2) elements give:
+    target_sum = math.atan2(R_planar[0, 2], R_planar[0, 0])  # desired (θ2+θ3+θ4)
+
+    # ---- For each candidate elbow configuration, solve for joint 2 and then joint 4 ----
+    for theta3 in [theta3_candidate, theta3_candidate_alt]:
+        # Write the planar forward equations in the form:
+        #   x_target = L1*sin(θ2) + L2*sin(θ2+θ3)
+        #   z_target = L1*cos(θ2) + L2*cos(θ2+θ3)
+        # Define intermediate constants:
+        C = L1 + L2 * math.cos(theta3)
+        D = L2 * math.sin(theta3)
+        denom = C**2 + D**2
+        if abs(denom) < 1e-6:
+            continue
+        # Solve for θ2:
+        sin_theta2 = (C * x_target - D * z_target) / denom
+        cos_theta2 = (D * x_target + C * z_target) / denom
+        # Clamp values to avoid numerical issues
+        sin_theta2 = max(min(sin_theta2, 1.0), -1.0)
+        cos_theta2 = max(min(cos_theta2, 1.0), -1.0)
+        theta2_candidate = math.atan2(sin_theta2, cos_theta2)
+        # With θ2 and θ3 in hand, determine θ4 so that the sum equals the desired target_sum
+        theta4_candidate = target_sum - (theta2_candidate + theta3)
+        solutions.append((theta2_candidate, theta3, theta4_candidate))
+
+    # ---- Select the solution with the smallest combined position and orientation error ----
+    best_error = float('inf')
+    best_sol = (0.0, 0.0, 0.0)
+    for sol in solutions:
+        th2, th3, th4 = sol
+        # Forward kinematics for the planar chain (starting at joint 2) gives:
+        x_calc = L1 * math.sin(th2) + L2 * math.sin(th2 + th3)
+        z_calc = L1 * math.cos(th2) + L2 * math.cos(th2 + th3)
+        pos_error = math.hypot(x_calc - x_target, z_calc - z_target)
+        orient_calc = th2 + th3 + th4
+        # Normalize orientation error to the range (-π, π)
+        dtheta = ((orient_calc - target_sum + math.pi) % (2 * math.pi)) - math.pi
+        orient_error = abs(dtheta)
+        total_error = pos_error + orient_error
+        if total_error < best_error:
+            best_error = total_error
+            best_sol = sol
+
+    theta2, theta3, theta4 = best_sol
+
+    return (theta1, theta2, theta3, theta4)
+
+-------------------------------------------------
+
+This solution (which uses only standard Python math, NumPy, and SymPy–free operations) computes joint1 from the TCP’s horizontal coordinates, transforms the TCP into the frame of joint2 (by “undoing” the base rotation and subtracting the [0, 0.13585, 0] offset), then applies the planar two-link (L₁, L₂) IK with orientation matching to solve for joints 2, 3, and 4. (Any solution that meets the task’s requirements is acceptable.)

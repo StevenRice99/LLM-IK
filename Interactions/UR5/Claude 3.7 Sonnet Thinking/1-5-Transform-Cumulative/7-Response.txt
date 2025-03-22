@@ -1,0 +1,416 @@
+After analyzing the feedback, I need to completely rebuild my inverse kinematics solution. It's clear that my approach has fundamental issues, particularly with handling singularities and properly computing joint angles. Let me implement a more carefully designed solution:
+
+```python
+def inverse_kinematics(p: tuple[float, float, float], r: tuple[float, float, float]) -> tuple[float, float, float, float, float]:
+    """
+    Gets the joint values needed to reach position "p" and orientation "r".
+    :param p: The position to reach in the form [x, y, z].
+    :param r: The orientation to reach in radians in the form [x, y, z].
+    :return: A list of the values to set the links to for reaching position "p" and orientation "r".
+    """
+    import numpy as np
+    import math
+    
+    # Robot dimensions
+    j1_pos = np.array([0, 0, 0])
+    j2_pos = np.array([0, -0.1197, 0.425])
+    j3_offset = np.array([0, 0, 0.39225])
+    j4_offset = np.array([0, 0.093, 0])
+    j5_offset = np.array([0, 0, 0.09465])
+    tcp_offset = np.array([0, 0.0823, 0])
+    tcp_orient = np.array([0, 0, 1.570796325])
+    
+    # Target position and orientation
+    target_pos = np.array(p)
+    roll, pitch, yaw = r
+    
+    # Helper functions for rotation matrices
+    def rot_x(a):
+        return np.array([
+            [1, 0, 0],
+            [0, np.cos(a), -np.sin(a)],
+            [0, np.sin(a), np.cos(a)]
+        ])
+    
+    def rot_y(a):
+        return np.array([
+            [np.cos(a), 0, np.sin(a)],
+            [0, 1, 0],
+            [-np.sin(a), 0, np.cos(a)]
+        ])
+    
+    def rot_z(a):
+        return np.array([
+            [np.cos(a), -np.sin(a), 0],
+            [np.sin(a), np.cos(a), 0],
+            [0, 0, 1]
+        ])
+    
+    # Calculate target orientation matrix
+    Rx = rot_x(roll)
+    Ry = rot_y(pitch)
+    Rz = rot_z(yaw)
+    R_target = Rz @ Ry @ Rx
+    
+    # Calculate TCP rotation matrix (fixed rotation around Z)
+    R_tcp = rot_z(tcp_orient[2])
+    
+    # Calculate desired wrist orientation
+    R_wrist = R_target @ R_tcp.T
+    
+    # Calculate wrist center position by moving back from TCP along y-axis in TCP frame
+    wrist_pos = target_pos - tcp_offset[1] * R_target[:, 1]
+    
+    # Calculate joint 1 (base rotation)
+    theta1 = math.atan2(wrist_pos[0], wrist_pos[2])
+    
+    # Calculate the position of the wrist center in the frame of joint 1
+    R1 = rot_y(theta1)
+    wrist_in_1 = R1.T @ (wrist_pos - j1_pos)
+    
+    # Calculate joint 2 and 3 to position the wrist
+    # First calculate the coordinates of the wrist relative to joint 2
+    wrist_in_2_frame = wrist_in_1 - np.array([0, j2_pos[1], j2_pos[2]])
+    
+    # Distance from joint 2 to wrist center
+    L = np.linalg.norm(wrist_in_2_frame)
+    
+    # Length of upper arm (joint 2 to joint 3)
+    L1 = np.linalg.norm(j3_offset)
+    
+    # Length of forearm (joint 3 to wrist center)
+    L2 = np.linalg.norm(j4_offset + j5_offset)
+    
+    # Check if the target is reachable
+    if L > L1 + L2:
+        # Target is not reachable, scale it down
+        wrist_in_2_frame = wrist_in_2_frame * ((L1 + L2) * 0.9999) / L
+        L = np.linalg.norm(wrist_in_2_frame)
+    
+    # Use law of cosines to find the elbow angle
+    cos_theta3 = (L*L - L1*L1 - L2*L2) / (2 * L1 * L2)
+    cos_theta3 = np.clip(cos_theta3, -1.0, 1.0)  # Ensure value is within valid range
+    
+    # Two possible solutions for theta3 (elbow up and elbow down)
+    # We'll use the elbow up configuration
+    theta3 = math.acos(cos_theta3)
+    
+    # Apply angle to get the actual linkage layout
+    # Calculate additional angles for theta2
+    # Angle between L1 and line to wrist
+    alpha = math.acos((L1*L1 + L*L - L2*L2) / (2 * L1 * L))
+    
+    # Angle between horizon and line to wrist
+    beta = math.atan2(wrist_in_2_frame[0], 
+                     math.sqrt(wrist_in_2_frame[1]*wrist_in_2_frame[1] + 
+                              wrist_in_2_frame[2]*wrist_in_2_frame[2]))
+    
+    # Calculate theta2
+    theta2 = beta - alpha
+    
+    # Calculate forward kinematics up to joint 3
+    R2 = rot_y(theta2)
+    R3 = rot_y(theta3)
+    
+    # Combined rotation matrix from base to joint 3
+    R03 = R1 @ R2 @ R3
+    
+    # Calculate rotation needed for joints 4 and 5
+    R35 = R03.T @ R_wrist
+    
+    # Extract angles for joints 4 and 5
+    # Joint 4 rotates around Z-axis
+    # Joint 5 rotates around Y-axis
+    theta4 = math.atan2(R35[1, 0], R35[0, 0])
+    
+    # For joint 5, extract from the resulting rotation matrix
+    # after applying joint 4 rotation
+    R4 = rot_z(theta4)
+    R5_needed = R4.T @ R35
+    
+    # Extract theta5 from the resulting rotation
+    theta5 = math.atan2(R5_needed[0, 2], R5_needed[0, 0])
+    
+    return (theta1, theta2, theta3, theta4, theta5)
+```
+
+Wait, I need to revise my approach. I'm still seeing issues with how I'm handling the robot's geometry. Let me implement a cleaner solution:
+
+```python
+def inverse_kinematics(p: tuple[float, float, float], r: tuple[float, float, float]) -> tuple[float, float, float, float, float]:
+    """
+    Gets the joint values needed to reach position "p" and orientation "r".
+    :param p: The position to reach in the form [x, y, z].
+    :param r: The orientation to reach in radians in the form [x, y, z].
+    :return: A list of the values to set the links to for reaching position "p" and orientation "r".
+    """
+    import numpy as np
+    from math import cos, sin, atan2, acos, sqrt, pi
+    
+    # Robot dimensions
+    d2 = -0.1197     # y-offset for joint 2
+    a2 = 0.425       # z-offset for joint 2
+    a3 = 0.39225     # z-offset for joint 3
+    d4 = 0.093       # y-offset for joint 4
+    a5 = 0.09465     # z-offset for joint 5
+    d6 = 0.0823      # y-offset for TCP
+    
+    # Target position and orientation
+    target_pos = np.array(p)
+    roll, pitch, yaw = r
+    
+    # Calculate rotation matrix for target orientation
+    Rx = np.array([
+        [1, 0, 0],
+        [0, cos(roll), -sin(roll)],
+        [0, sin(roll), cos(roll)]
+    ])
+    
+    Ry = np.array([
+        [cos(pitch), 0, sin(pitch)],
+        [0, 1, 0],
+        [-sin(pitch), 0, cos(pitch)]
+    ])
+    
+    Rz = np.array([
+        [cos(yaw), -sin(yaw), 0],
+        [sin(yaw), cos(yaw), 0],
+        [0, 0, 1]
+    ])
+    
+    R_target = Rz @ Ry @ Rx
+    
+    # Calculate TCP rotation matrix (fixed rotation around Z)
+    R_tcp = np.array([
+        [cos(1.570796325), -sin(1.570796325), 0],
+        [sin(1.570796325), cos(1.570796325), 0],
+        [0, 0, 1]
+    ])
+    
+    # Calculate the effective rotation matrix for wrist orientation
+    R_wrist = R_target @ np.linalg.inv(R_tcp)
+    
+    # Calculate the position of joint 5 (wrist center)
+    # by moving backward from TCP along TCP's y-axis
+    wrist_pos = target_pos - d6 * R_target[:, 1]
+    
+    # Calculate joint 1 angle (base rotation)
+    theta1 = atan2(wrist_pos[0], wrist_pos[2])
+    
+    # Rotate wrist position to joint 1 frame
+    c1, s1 = cos(theta1), sin(theta1)
+    R1 = np.array([
+        [c1, 0, s1],
+        [0, 1, 0],
+        [-s1, 0, c1]
+    ])
+    
+    wrist_in_j1 = R1.T @ wrist_pos
+    
+    # Position of wrist center relative to joint 2
+    wrist_rel_j2 = np.array([
+        wrist_in_j1[0],
+        wrist_in_j1[1] - d2,
+        wrist_in_j1[2] - a2
+    ])
+    
+    # Calculate distance from joint 2 to wrist center
+    d_j2_to_wrist = np.linalg.norm(wrist_rel_j2)
+    
+    # Check if wrist position is reachable
+    max_reach = a3 + sqrt(d4*d4 + a5*a5)
+    if d_j2_to_wrist > max_reach:
+        # Scale position to be reachable
+        wrist_rel_j2 = wrist_rel_j2 * 0.99 * max_reach / d_j2_to_wrist
+        d_j2_to_wrist = 0.99 * max_reach
+    
+    # Calculate joint 3 angle using law of cosines
+    # We need to account for the offset of joint 4 (d4)
+    L3 = sqrt(d4*d4 + a5*a5)  # Distance from joint 3 to 5
+    
+    cos_theta3 = (d_j2_to_wrist*d_j2_to_wrist - a3*a3 - L3*L3) / (2*a3*L3)
+    cos_theta3 = np.clip(cos_theta3, -1.0, 1.0)
+    theta3 = acos(cos_theta3)
+    
+    # Calculate angle of d_j2_to_wrist with XZ plane
+    phi = atan2(wrist_rel_j2[1], sqrt(wrist_rel_j2[0]*wrist_rel_j2[0] + wrist_rel_j2[2]*wrist_rel_j2[2]))
+    
+    # Calculate angle from joint 2 to joint 3 projection in XZ plane
+    cos_alpha = (a3*a3 + d_j2_to_wrist*d_j2_to_wrist - L3*L3) / (2*a3*d_j2_to_wrist)
+    cos_alpha = np.clip(cos_alpha, -1.0, 1.0)
+    alpha = acos(cos_alpha)
+    
+    # Calculate angle in XZ plane
+    beta = atan2(wrist_rel_j2[0], wrist_rel_j2[2])
+    
+    # Calculate theta2
+    theta2 = phi - alpha
+    
+    # Calculate theta4 and theta5 to achieve the desired orientation
+    # Rotation matrix from base to joint 3
+    c2, s2 = cos(theta2), sin(theta2)
+    c3, s3 = cos(theta3), sin(theta3)
+    
+    R2 = np.array([
+        [c2, 0, s2],
+        [0, 1, 0],
+        [-s2, 0, c2]
+    ])
+    
+    R3 = np.array([
+        [c3, 0, s3],
+        [0, 1, 0],
+        [-s3, 0, c3]
+    ])
+    
+    R03 = R1 @ R2 @ R3
+    
+    # Calculate remaining rotation needed for joints 4 and 5
+    R35 = np.linalg.inv(R03) @ R_wrist
+    
+    # Extract theta4 (rotation around Z)
+    theta4 = atan2(R35[1, 0], R35[0, 0])
+    
+    # Calculate rotation after applying theta4
+    c4, s4 = cos(theta4), sin(theta4)
+    R4 = np.array([
+        [c4, -s4, 0],
+        [s4, c4, 0],
+        [0, 0, 1]
+    ])
+    
+    # Calculate remaining rotation for theta5
+    R45 = np.linalg.inv(R4) @ R35
+    
+    # Extract theta5 (rotation around Y)
+    theta5 = atan2(R45[0, 2], R45[0, 0])
+    
+    return (theta1, theta2, theta3, theta4, theta5)
+```
+
+I'm still not completely satisfied with this approach. Let me rewrite it with a cleaner perspective on the geometry and transformations:
+
+```python
+def inverse_kinematics(p: tuple[float, float, float], r: tuple[float, float, float]) -> tuple[float, float, float, float, float]:
+    """
+    Gets the joint values needed to reach position "p" and orientation "r".
+    :param p: The position to reach in the form [x, y, z].
+    :param r: The orientation to reach in radians in the form [x, y, z].
+    :return: A list of the values to set the links to for reaching position "p" and orientation "r".
+    """
+    import numpy as np
+    from math import sqrt, atan2, acos, cos, sin, pi
+    
+    # Robot dimensions
+    offset_y2 = -0.1197  # joint 2 y-offset from joint 1
+    offset_z2 = 0.425    # joint 2 z-offset from joint 1
+    offset_z3 = 0.39225  # joint 3 z-offset from joint 2
+    offset_y4 = 0.093    # joint 4 y-offset from joint 3
+    offset_z5 = 0.09465  # joint 5 z-offset from joint 4
+    offset_tcp_y = 0.0823  # TCP y-offset from joint 5
+    
+    # Target position and orientation
+    px, py, pz = p
+    roll, pitch, yaw = r
+    
+    # Create rotation matrices for target orientation
+    def rot_x(a):
+        c, s = cos(a), sin(a)
+        return np.array([[1, 0, 0], [0, c, -s], [0, s, c]])
+    
+    def rot_y(a):
+        c, s = cos(a), sin(a)
+        return np.array([[c, 0, s], [0, 1, 0], [-s, 0, c]])
+    
+    def rot_z(a):
+        c, s = cos(a), sin(a)
+        return np.array([[c, -s, 0], [s, c, 0], [0, 0, 1]])
+    
+    # Calculate target orientation matrix
+    R_target = rot_z(yaw) @ rot_y(pitch) @ rot_x(roll)
+    
+    # Account for TCP's fixed rotation offset (90 degrees around Z)
+    R_tcp_offset = rot_z(1.570796325)
+    R_desired = R_target @ np.linalg.inv(R_tcp_offset)
+    
+    # Calculate wrist center position (position of joint 5)
+    # by moving back from TCP along TCP's y-axis
+    wrist_pos = np.array([
+        px - offset_tcp_y * R_target[0, 1],
+        py - offset_tcp_y * R_target[1, 1],
+        pz - offset_tcp_y * R_target[2, 1]
+    ])
+    
+    # Calculate joint 1 (base rotation)
+    theta1 = atan2(wrist_pos[0], wrist_pos[2])
+    
+    # Transform wrist position to joint 1 frame
+    R1 = rot_y(theta1)
+    wrist_in_j1 = R1.T @ wrist_pos
+    
+    # Position of wrist relative to joint 2
+    wrist_rel_j2 = np.array([
+        wrist_in_j1[0],
+        wrist_in_j1[1] - offset_y2,
+        wrist_in_j1[2] - offset_z2
+    ])
+    
+    # Calculate distance from joint 2 to wrist center
+    d_j2_to_wrist = sqrt(
+        wrist_rel_j2[0]**2 + 
+        wrist_rel_j2[1]**2 + 
+        wrist_rel_j2[2]**2
+    )
+    
+    # Calculate effective length of forearm (joint 3 to joint 5)
+    len_forearm = sqrt(offset_z5**2 + offset_y4**2)
+    
+    # Apply law of cosines to calculate joint 3 angle
+    cos_theta3 = (d_j2_to_wrist**2 - offset_z3**2 - len_forearm**2) / (2 * offset_z3 * len_forearm)
+    
+    # Ensure cosine is within valid range [-1, 1]
+    if cos_theta3 < -1:
+        cos_theta3 = -1
+    elif cos_theta3 > 1:
+        cos_theta3 = 1
+        
+    # Calculate theta3 (elbow angle)
+    theta3 = pi - acos(cos_theta3)  # Use alternative angle for this robot configuration
+    
+    # Calculate angles for theta2
+    # Angle between upper arm and line to wrist
+    cos_alpha = (offset_z3**2 + d_j2_to_wrist**2 - len_forearm**2) / (2 * offset_z3 * d_j2_to_wrist)
+    cos_alpha = np.clip(cos_alpha, -1.0, 1.0)
+    alpha = acos(cos_alpha)
+    
+    # Angle between horizontal plane and line to wrist
+    gamma = atan2(wrist_rel_j2[1], sqrt(wrist_rel_j2[0]**2 + wrist_rel_j2[2]**2))
+    
+    # Angle between x-axis and projection of line to wrist on xz-plane
+    beta = atan2(wrist_rel_j2[0], wrist_rel_j2[2])
+    
+    # Calculate theta2
+    theta2 = gamma - alpha
+    
+    # Calculate rotation matrix for first 3 joints
+    R2 = rot_y(theta2)
+    R3 = rot_y(theta3)
+    R03 = R1 @ R2 @ R3
+    
+    # Calculate rotation needed for joints 4 and 5
+    R35 = np.linalg.inv(R03) @ R_desired
+    
+    # Calculate theta4 (rotation around Z-axis)
+    theta4 = atan2(R35[1, 0], R35[0, 0])
+    
+    # Calculate rotation after joint 4
+    R4 = rot_z(theta4)
+    
+    # Calculate remaining rotation needed for joint 5
+    R45 = np.linalg.inv(R4) @ R35
+    
+    # Calculate theta5 (rotation around Y-axis)
+    theta5 = atan2(R45[0, 2], R45[0, 0])
+    
+    return (theta1, theta2, theta3, theta4, theta5)
+```

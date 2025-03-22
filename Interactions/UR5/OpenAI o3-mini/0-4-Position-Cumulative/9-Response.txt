@@ -1,0 +1,134 @@
+```python
+import math
+
+def inverse_kinematics(p: tuple[float, float, float]) -> tuple[float, float, float, float, float]:
+    """
+    Closed–form inverse kinematics for the 5–DOF robot.
+    
+    Robot structure (meters, radians):
+      - Revolute 1: translation [0, 0, 0], axis Z.
+      - Revolute 2: translation [0, 0.13585, 0], axis Y.
+      - Revolute 3: translation [0, -0.1197, 0.425], axis Y.
+      - Revolute 4: translation [0, 0, 0.39225], axis Y.
+      - Revolute 5: translation [0, 0.093, 0], axis Z.
+      - TCP: translation [0, 0, 0.09465].
+    
+    When joints are zero the forward kinematics yield:
+         TCP = (0, 0.10915, 0.9119)
+    where the fixed lateral offset in the y–direction is 0.10915 (0.13585 - 0.1197 + 0.093)
+    and the TCP z–offset is 0.09465.
+    
+    We decouple the IK into:
+      (a) a rotation q1 about Z that maps a fixed vector [A; offset] to the target’s (x,y)
+          components. Here, offset = 0.10915 while A is unknown but constrained by:
+              A^2 + offset^2 = x² + y².
+          Thus, A = ±sqrt(r_xy² - offset²). We will choose the sign that best 
+          yields the correct candidate.
+      (b) a planar 2R arm (joints 2 and 3 about Y) that must satisfy:
+              L1*sin(q2) + L2*sin(q2+q3) = A   and
+              L1*cos(q2) + L2*cos(q2+q3) = B,
+          where B = z - tcp_z_offset and the link lengths are:
+              L1 = 0.425   and   L2 = 0.39225.
+      (c) the redundant joint q4 (about Y) is then chosen to set the overall pitch 
+          (q2+q3+q4) to one of two candidates derived from the target’s x–z orientation.
+      (d) q5 is not used for positioning and is set to zero.
+      
+    To resolve redundancy, we generate candidate solutions for:
+      - The sign s for A = s*sqrt(r_xy² - offset²) with s in {+1, -1}.
+      - Two solutions for q3 (elbow up and down): q3 = ±acos(cos_val)
+      - Two choices for the overall pitch “T” for joints 2–4: T = psi and T = psi + π,
+        where psi = atan2(x, z).
+    For each candidate we compute the (x,y,z) position from:
+         A_planar = L1*sin(q2) + L2*sin(q2+q3)
+         B_planar = L1*cos(q2) + L2*cos(q2+q3)
+         Then, applying q1 (rotation about Z) to the vector [A_planar; offset]:
+              FK_x = cos(q1)*A_planar - sin(q1)*offset
+              FK_y = sin(q1)*A_planar + cos(q1)*offset
+              FK_z = B_planar + tcp_z_offset
+    and select the candidate whose forward‐kinematics error is minimal.
+    
+    :param p: The target TCP position as (x, y, z).
+    :return: A tuple (q1, q2, q3, q4, q5) of joint angles (in radians).
+    """
+    # Helper to wrap angle to (-pi, pi)
+    def normalize(angle):
+        while angle > math.pi:
+            angle -= 2*math.pi
+        while angle < -math.pi:
+            angle += 2*math.pi
+        return angle
+
+    # Known constants from the robot geometry:
+    offset = 0.10915       # effective y offset (0.13585 - 0.1197 + 0.093)
+    tcp_z_offset = 0.09465
+    L1 = 0.425
+    L2 = 0.39225
+
+    x, y, z = p
+    r_xy = math.sqrt(x*x + y*y)
+    # Ensure target is reachable in xy (assumed reachable)
+    if r_xy < offset:
+        # In a proper solver, one might handle this case.
+        r_xy = offset
+
+    # Candidate overall pitch options from the target x-z orientation.
+    # psi is computed from the target (ignoring y):
+    psi = math.atan2(x, z)
+    T_options = [psi, psi + math.pi]
+
+    best_err = float('inf')
+    best_solution = None
+
+    # Loop over candidates for the sign of A:
+    for s in [1, -1]:
+        # A is determined by the relation: A^2 + offset^2 = r_xy^2.
+        A_candidate = s * math.sqrt(max(0, r_xy*r_xy - offset*offset))
+        # Solve for q1 from the relation: Rz(q1) * [A_candidate; offset] = [x; y]
+        # This gives: q1 = angle(x,y) - angle(A_candidate, offset)
+        angle_target = math.atan2(y, x)
+        # Note: angle of vector [A_candidate; offset]:
+        angle_ref = math.atan2(offset, A_candidate)
+        q1_candidate = normalize(angle_target - angle_ref)
+        
+        # Now, define B from the z target:
+        B = z - tcp_z_offset
+        # Effective planarm distance for the 2R chain:
+        R_eff = math.sqrt(A_candidate*A_candidate + B*B)
+        # Cosine for joint 3:
+        cos_val = (R_eff*R_eff - L1*L1 - L2*L2) / (2.0 * L1 * L2)
+        # Clamp due to numerical issues.
+        cos_val = max(-1.0, min(1.0, cos_val))
+        # Two possible solutions for q3:
+        for sign_q3 in [1, -1]:
+            q3 = sign_q3 * math.acos(cos_val)
+            # Compute q2 from standard 2R inverse kinematics:
+            # q2 = atan2(A_candidate, B) - atan2(L2*sin(q3), L1 + L2*cos(q3))
+            q2 = math.atan2(A_candidate, B) - math.atan2(L2 * math.sin(q3), L1 + L2 * math.cos(q3))
+            # Now for the redundant joint q4, try both candidate overall pitches T.
+            for T in T_options:
+                # We want the total pitch of joints 2-4 to equal T:
+                q4 = normalize(T - (q2 + q3))
+                # q5 does not affect position.
+                q5 = 0.0
+                # Forward kinematics (position only) using our decoupled model:
+                # Compute the effective planar position from joints 2 and 3:
+                A_planar = L1 * math.sin(q2) + L2 * math.sin(q2 + q3)
+                B_planar = L1 * math.cos(q2) + L2 * math.cos(q2 + q3)
+                # The position of the TCP (before applying joint1) would be [A_planar; offset; B_planar + tcp_z_offset].
+                # Then joint 1 rotates the (x,y) components:
+                FK_x = math.cos(q1_candidate) * A_planar - math.sin(q1_candidate) * offset
+                FK_y = math.sin(q1_candidate) * A_planar + math.cos(q1_candidate) * offset
+                FK_z = B_planar + tcp_z_offset
+                err = math.sqrt((FK_x - x)**2 + (FK_y - y)**2 + (FK_z - z)**2)
+                if err < best_err:
+                    best_err = err
+                    best_solution = (normalize(q1_candidate),
+                                     normalize(q2),
+                                     normalize(q3),
+                                     normalize(q4),
+                                     0.0)
+    # If no candidate is found (should not happen), return a default solution.
+    if best_solution is None:
+        best_solution = (0.0, 0.0, 0.0, 0.0, 0.0)
+    return best_solution
+```

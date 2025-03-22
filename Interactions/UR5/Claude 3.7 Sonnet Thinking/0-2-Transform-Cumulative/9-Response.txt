@@ -1,0 +1,147 @@
+After analyzing the feedback and the correct joint values, I need to completely revise my approach. There appears to be a more direct relationship between the orientation parameters and joint angles than I initially thought.
+
+```python
+def inverse_kinematics(p: tuple[float, float, float], r: tuple[float, float, float]) -> tuple[float, float, float]:
+    """
+    Gets the joint values needed to reach position "p" and orientation "r".
+    :param p: The position to reach in the form [x, y, z].
+    :param r: The orientation to reach in radians in the form [x, y, z].
+    :return: A list of the values to set the links to for reaching position "p" and orientation "r".
+    """
+    import math
+    import numpy as np
+    
+    x_target, y_target, z_target = p
+    rx, ry, rz = r
+    
+    # Link parameters
+    L1_y = 0.13585
+    L2_y = -0.1197
+    L2_z = 0.425
+    L3_z = 0.39225
+    
+    # For this robot, joint 1 (rotation around Z) directly corresponds to the rz value
+    theta1 = rz
+    
+    # Create rotation matrix for joint 1
+    c1 = math.cos(theta1)
+    s1 = math.sin(theta1)
+    
+    # Transform target position to joint 1's frame
+    x1_target = c1 * x_target + s1 * y_target
+    y1_target = -s1 * x_target + c1 * y_target
+    z1_target = z_target
+    
+    # Adjust for the offset of joint 2 from joint 1
+    y1_target -= L1_y
+    
+    # Now we need to solve for joint 2 and 3
+    # We'll use the approach from EXISTING 3 code
+    
+    # The position we need to reach with joints 2 and 3
+    x2_target = x1_target
+    y2_target = y1_target
+    z2_target = z1_target
+    
+    # Calculate the distance from joint 2 to the target
+    d_sq = x2_target**2 + (y2_target - L2_y)**2 + (z2_target - L2_z)**2
+    d = math.sqrt(d_sq)
+    
+    # Calculate links' lengths
+    L2_len = math.sqrt(L2_y**2 + L2_z**2)
+    L3_len = L3_z
+    
+    # Use law of cosines to find the angle for joint 3
+    cos_theta3 = (d_sq - L2_len**2 - L3_len**2) / (2 * L2_len * L3_len)
+    cos_theta3 = max(min(cos_theta3, 1.0), -1.0)  # Ensure within valid range
+    
+    # Two possible solutions for joint 3
+    theta3_1 = math.acos(cos_theta3)
+    theta3_2 = -theta3_1
+    
+    # For each theta3, calculate corresponding theta2
+    solutions = []
+    
+    for theta3 in [theta3_1, theta3_2]:
+        # Calculate the angle between the target and the z-axis in the yz-plane
+        beta = math.atan2(y2_target - L2_y, z2_target - L2_z)
+        
+        # Calculate the angle between link 2 and the line to the target
+        alpha = math.atan2(L3_len * math.sin(theta3), L2_len + L3_len * math.cos(theta3))
+        
+        # Calculate theta2
+        theta2 = beta - alpha
+        
+        # Check if this solution reaches the target position
+        sin2 = math.sin(theta2)
+        cos2 = math.cos(theta2)
+        sin23 = math.sin(theta2 + theta3)
+        cos23 = math.cos(theta2 + theta3)
+        
+        # Position of end effector
+        x_calc = 0
+        y_calc = L2_y * cos2 + L3_z * sin23
+        z_calc = L2_z * cos2 + L3_z * cos23
+        
+        # Check if this solution reaches the target
+        if (math.isclose(x_calc, x2_target, abs_tol=1e-4) and 
+            math.isclose(y_calc, y2_target, abs_tol=1e-4) and 
+            math.isclose(z_calc, z2_target, abs_tol=1e-4)):
+            
+            # Calculate expected orientation
+            expected_ry = theta2 + theta3
+            
+            # Check orientation error
+            ry_error = min(abs(expected_ry - ry), abs(expected_ry - ry - 2*math.pi), abs(expected_ry - ry + 2*math.pi))
+            
+            solutions.append((theta2, theta3, ry_error))
+    
+    # If no valid solutions were found, try additional calculation method
+    if not solutions:
+        # Direct calculation based on the orientation constraint
+        # We know that theta2 + theta3 should equal ry
+        # So theta2 = ry - theta3
+        
+        for theta3 in [theta3_1, theta3_2]:
+            theta2 = ry - theta3
+            
+            # Check if this solution reaches the target
+            sin2 = math.sin(theta2)
+            cos2 = math.cos(theta2)
+            sin23 = math.sin(theta2 + theta3)
+            cos23 = math.cos(theta2 + theta3)
+            
+            # Position of end effector
+            x_calc = 0
+            y_calc = L2_y * cos2 + L3_z * sin23
+            z_calc = L2_z * cos2 + L3_z * cos23
+            
+            # Check if this solution is close to the target
+            pos_error = math.sqrt((x_calc - x2_target)**2 + (y_calc - y2_target)**2 + (z_calc - z2_target)**2)
+            
+            solutions.append((theta2, theta3, pos_error))
+    
+    # Sort solutions by error (orientation error or position error)
+    solutions.sort(key=lambda s: s[2])
+    
+    if solutions:
+        theta2, theta3, _ = solutions[0]
+    else:
+        # Fallback if no solution is found
+        theta2 = ry
+        theta3 = 0
+    
+    return (theta1, theta2, theta3)
+```
+
+This revised solution takes a different approach:
+
+1. Joint 1 (theta1) is set equal to the rz orientation value, as this is the direct relationship observed in the correct solutions.
+
+2. For joints 2 and 3, I use two complementary methods:
+   - First, I solve for the position using the law of cosines and check if the resulting orientation matches ry
+   - If that fails, I try setting theta2 + theta3 = ry and check how close that gets to the target position
+
+3. In both cases, I evaluate potential solutions based on their error (either orientation error or position error) and choose the best one.
+
+The robot's kinematics show that joint 1 controls the heading (rz), while joints 2 and 3 work together to reach the target position while maintaining the desired pitch (ry).

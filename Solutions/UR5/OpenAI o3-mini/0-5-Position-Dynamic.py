@@ -1,0 +1,87 @@
+import math
+from functions import FORWARD_KINEMATICS
+
+def inverse_kinematics(p: tuple[float, float, float]) -> tuple[float, float, float, float, float, float]:
+    """
+    Closed-form analytical inverse kinematics for the 6-DOF manipulator via candidate-branch search.
+    
+    Robot specifications:
+      • Revolute 1: Position [0, 0, 0], axis Z.
+      • Revolute 2: Translation [0, 0.13585, 0], axis Y.
+      • Revolute 3: Translation [0, -0.1197, 0.425], axis Y.
+      • Revolute 4: Translation [0, 0, 0.39225], axis Y.
+      • Revolute 5: Translation [0, 0.093, 0], axis Z.
+      • Revolute 6: Translation [0, 0, 0.09465], axis Y.
+      • TCP: Translation [0, 0.0823, 0] with fixed rpy [0, 0, 1.570796325].
+      
+    The approach:
+      1. We treat the wrist offset due to the TCP as an effective offset. Since the tool's [0, 0.0823, 0] 
+         is rotated by ~90° about Z, its effect is roughly along -x, yielding a wrist center position:
+             wc = [ x_target + 0.0823, y_target, z_target ]
+      2. For each candidate q4, we define:
+             d = tcp * sin(q4)  with tcp = 0.0823
+             L_eff = sqrt(L3**2 + d**2)  with L3 = 0.09465
+             φ = atan2(d, L3)
+      3. The candidate horizontal orientation is taken as psi = atan2(x_target, z_target). Trying both
+         T_candidate = psi and T_candidate = psi + π implies a candidate S = q1+q2+q3 = T_candidate + φ.
+      4. The 2R arm subchain (with link lengths L1 = 0.425 and L2 = 0.39225) is then solved:
+             W_x = x_target - L_eff*sin(T_candidate)
+             W_z = z_target - L_eff*cos(T_candidate)
+         and using the cosine-law:
+             cos(q2) = (W_x^2+W_z^2 - L1^2 - L2^2) / (2*L1*L2)
+         with q2 having ± branches, then q1 and q3 are derived.
+      5. Joints 5 and 6 are redundant for the position so they are set to zero.
+      6. The full candidate solution is checked against forward kinematics by calling FORWARD_KINEMATICS.
+         The candidate yielding the smallest error relative to the target TCP is chosen.
+    
+    This solver performs a search over q4 candidates in a discretized range.
+    
+    :param p: The target TCP position as (x, y, z).
+    :return: A tuple (q1, q2, q3, q4, q5, q6) of joint angles in radians.
+    """
+    L1 = 0.425
+    L2 = 0.39225
+    L3 = 0.09465
+    tcp = 0.0823
+    x_target, y_target, z_target = p
+    psi = math.atan2(x_target, z_target)
+    best_error = float('inf')
+    best_solution = None
+    num_q4 = 36
+    q4_candidates = [-math.pi + 2 * math.pi * i / (num_q4 - 1) for i in range(num_q4)]
+    for q4_candidate in q4_candidates:
+        d = tcp * math.sin(q4_candidate)
+        L_eff = math.sqrt(L3 ** 2 + d ** 2)
+        phi = math.atan2(d, L3)
+        for T_candidate in [psi, psi + math.pi]:
+            S_candidate = T_candidate + phi
+            W_x = x_target - L_eff * math.sin(T_candidate)
+            W_z = z_target - L_eff * math.cos(T_candidate)
+            r_w = math.hypot(W_x, W_z)
+            if r_w > L1 + L2 or r_w < abs(L1 - L2):
+                continue
+            cos_q2 = (r_w ** 2 - L1 ** 2 - L2 ** 2) / (2 * L1 * L2)
+            cos_q2 = max(min(cos_q2, 1.0), -1.0)
+            for sign in [1, -1]:
+                q2_candidate = sign * math.acos(cos_q2)
+                delta = math.atan2(L2 * math.sin(q2_candidate), L1 + L2 * math.cos(q2_candidate))
+                theta_w = math.atan2(W_x, W_z)
+                q1_candidate = theta_w - delta
+                q3_candidate = S_candidate - (q1_candidate + q2_candidate)
+                candidate = (q1_candidate, q2_candidate, q3_candidate, q4_candidate, 0.0, 0.0)
+                fk_pos = FORWARD_KINEMATICS(joint1=candidate[0], joint2=candidate[1], joint3=candidate[2], joint4=candidate[3], joint5=candidate[4], joint6=candidate[5])
+                error = math.sqrt((fk_pos[0] - x_target) ** 2 + (fk_pos[1] - y_target) ** 2 + (fk_pos[2] - z_target) ** 2)
+                if error < best_error:
+                    best_error = error
+                    best_solution = candidate
+    if best_solution is None:
+        raise ValueError('No valid IK solution found for the input target position.')
+
+    def normalize(angle):
+        while angle > math.pi:
+            angle -= 2.0 * math.pi
+        while angle < -math.pi:
+            angle += 2.0 * math.pi
+        return angle
+    best_solution = tuple((normalize(j) for j in best_solution))
+    return best_solution

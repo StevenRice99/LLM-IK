@@ -1,0 +1,128 @@
+After analyzing the forward kinematics output, I can see the robot's configuration when all joints are at zero. I'll now develop the inverse kinematics solution by combining and extending the existing code samples.
+
+Looking at the robot structure, we have 5 revolute joints - 4 that rotate around the Y-axis (joints 1, 2, 3, and 5) and 1 that rotates around the Z-axis (joint 4). I'll need to develop a complete solution that handles this 5-DOF configuration.
+
+```python
+import numpy as np
+
+def inverse_kinematics(p: tuple[float, float, float], r: tuple[float, float, float]) -> tuple[float, float, float, float, float]:
+    """
+    Gets the joint values needed to reach position "p" and orientation "r".
+    :param p: The position to reach in the form [x, y, z].
+    :param r: The orientation to reach in radians in the form [x, y, z].
+    :return: A list of the values to set the links to for reaching position "p" and orientation "r".
+    """
+    # Robot dimensions from the DETAILS table
+    l1_z = 0.425
+    l1_y = -0.1197
+    l2_z = 0.39225
+    l3_y = 0.093
+    l4_z = 0.09465
+    l_tcp_y = 0.0823
+    tcp_rot_z = 1.570796325  # TCP has fixed orientation offset around Z
+
+    # Target position and orientation
+    x, y, z = p
+    roll, pitch, yaw = r
+
+    # Rotation matrix utilities
+    def rot_x(a):
+        ca, sa = (np.cos(a), np.sin(a))
+        return np.array([[1, 0, 0], [0, ca, -sa], [0, sa, ca]])
+
+    def rot_y(a):
+        ca, sa = (np.cos(a), np.sin(a))
+        return np.array([[ca, 0, sa], [0, 1, 0], [-sa, 0, ca]])
+
+    def rot_z(a):
+        ca, sa = (np.cos(a), np.sin(a))
+        return np.array([[ca, -sa, 0], [sa, ca, 0], [0, 0, 1]])
+
+    # Target rotation matrix
+    R_target = rot_z(yaw) @ rot_y(pitch) @ rot_x(roll)
+    
+    # Calculate theta1 - base joint rotation
+    theta1 = np.arctan2(x, z)
+    
+    # Transform target position to the local frame after joint 1
+    R1 = rot_y(theta1)
+    p_local = R1.T @ np.array([x, y, z])
+    R_local = R1.T @ R_target
+    
+    # Calculate roll, pitch, yaw in local frame
+    r_local = [0, 0, 0]  # This is a simplification - full conversion would be more complex
+    if abs(R_local[2, 0]) < 0.99999:
+        r_local[1] = np.arcsin(-R_local[2, 0])
+        r_local[0] = np.arctan2(R_local[2, 1] / np.cos(r_local[1]), 
+                               R_local[2, 2] / np.cos(r_local[1]))
+        r_local[2] = np.arctan2(R_local[1, 0] / np.cos(r_local[1]), 
+                               R_local[0, 0] / np.cos(r_local[1]))
+    else:
+        r_local[2] = 0
+        if R_local[2, 0] < 0:
+            r_local[1] = np.pi/2
+            r_local[0] = np.arctan2(R_local[0, 1], R_local[0, 2])
+        else:
+            r_local[1] = -np.pi/2
+            r_local[0] = np.arctan2(-R_local[0, 1], -R_local[0, 2])
+    
+    # Solve for the remaining 4 joints using the modified approach from existing code 2
+    d2 = l2_z
+    d3 = l3_y
+    d4 = l4_z
+    d_tcp = l_tcp_y
+    psi = tcp_rot_z
+    
+    p_x_local, p_y_local, p_z_local = p_local
+    
+    # Calculate theta3 (joint 4 in our robot - rotation about Z)
+    cos_theta3 = (p_y_local - d3) / d_tcp
+    cos_theta3 = np.clip(cos_theta3, -1.0, 1.0)
+    theta3_pos = np.arccos(cos_theta3)
+    theta3_neg = -theta3_pos
+    
+    # Calculate remaining values
+    r_target_local = np.sqrt(p_x_local**2 + p_z_local**2)
+    δ = np.arctan2(p_x_local, p_z_local)
+    
+    candidates = []
+    for theta3_candidate in [theta3_pos, theta3_neg]:
+        sin_theta3 = np.sin(theta3_candidate)
+        R_eff = np.sqrt(d4**2 + (d_tcp * sin_theta3)**2)
+        φ = np.arctan2(d_tcp * sin_theta3, d4)
+        
+        cos_term = (r_target_local**2 + d2**2 - R_eff**2) / (2 * d2 * r_target_local)
+        cos_term = np.clip(cos_term, -1.0, 1.0)
+        theta1_offset = np.arccos(cos_term)
+        
+        for theta2_candidate in [δ + theta1_offset, δ - theta1_offset]:
+            Vx = p_x_local - d2 * np.sin(theta2_candidate)
+            Vz = p_z_local - d2 * np.cos(theta2_candidate)
+            theta23 = np.arctan2(Vx, Vz) + φ
+            theta2_real = theta2_candidate  # Joint 2 in our robot
+            theta3_real = theta23 - theta2_candidate  # Joint 3 in our robot
+            
+            R_pre = rot_y(theta2_real + theta3_real) @ rot_z(theta3_candidate)
+            R_y_theta4 = R_pre.T @ R_local @ rot_z(-psi)
+            theta4_real = np.arctan2(R_y_theta4[0, 2], R_y_theta4[0, 0])  # Joint 5 in our robot
+            
+            candidate = (theta1, theta2_real, theta3_real, theta3_candidate, theta4_real)
+            
+            # Calculate forward kinematics to evaluate error
+            R_forward = rot_y(theta2_real + theta3_real) @ rot_z(theta3_candidate) @ rot_y(theta4_real) @ rot_z(psi)
+            err = np.linalg.norm(R_forward - R_local, ord='fro')
+            candidates.append((err, candidate))
+    
+    # Select the best candidate
+    best_candidate = min(candidates, key=lambda x: x[0])[1]
+    return best_candidate
+```
+
+I've combined elements from both existing code examples to create a complete 5-DOF inverse kinematics solution. The approach:
+
+1. Calculate theta1 (joint 1) using the base joint calculation
+2. Transform the target position and orientation to the local frame after joint 1
+3. Use a modified version of the second existing solution to solve for joints 2-5
+4. Evaluate multiple candidate solutions and select the best one based on orientation error
+
+This solution handles the 5-DOF configuration with the given joint arrangement and should correctly solve for all joint angles needed to reach the target position and orientation.

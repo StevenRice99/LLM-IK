@@ -1,0 +1,95 @@
+```python
+def inverse_kinematics(p: tuple[float, float, float], r: tuple[float, float, float]) -> tuple[float, float, float, float, float, float]:
+    """
+    Gets the joint values needed to reach position "p" and orientation "r" via a closed-form symbolic solve.
+    :param p: The position to reach in the form [x, y, z].
+    :param r: The orientation to reach in radians in the form [rx, ry, rz] (roll-pitch-yaw).
+    :return: A tuple of the six joint values (in radians).
+    """
+    import sympy
+    from sympy import symbols, sin, cos, Matrix, pi
+
+    # Helper rotation/translation matrices
+    def rot_x(q):
+        return Matrix([
+            [1,      0,       0, 0],
+            [0,  cos(q), -sin(q), 0],
+            [0,  sin(q),  cos(q), 0],
+            [0,      0,       0, 1]
+        ])
+
+    def rot_y(q):
+        return Matrix([
+            [ cos(q), 0, sin(q), 0],
+            [      0, 1,      0, 0],
+            [-sin(q), 0, cos(q), 0],
+            [      0, 0,      0, 1]
+        ])
+
+    def rot_z(q):
+        return Matrix([
+            [cos(q), -sin(q), 0, 0],
+            [sin(q),  cos(q), 0, 0],
+            [     0,       0, 1, 0],
+            [     0,       0, 0, 1]
+        ])
+
+    def trans_xyz(x, y, z):
+        return Matrix([
+            [1, 0, 0, x],
+            [0, 1, 0, y],
+            [0, 0, 1, z],
+            [0, 0, 0, 1]
+        ])
+
+    # Define symbolic joint variables
+    th1, th2, th3, th4, th5, th6 = symbols('th1 th2 th3 th4 th5 th6', real=True)
+
+    # Build forward kinematics for each link based on the table from DETAILS.
+    T01 = rot_z(th1)
+    T12 = trans_xyz(0, 0.13585, 0) * rot_y(th2)
+    T23 = trans_xyz(0, -0.1197, 0.425) * rot_y(th3)
+    T34 = trans_xyz(0, 0, 0.39225) * rot_y(th4)
+    T45 = trans_xyz(0, 0.093, 0) * rot_z(th5)
+    T56 = trans_xyz(0, 0, 0.09465) * rot_y(th6)
+
+    # Final offset for the TCP includes translation in Y and rotation about Z by pi/2
+    T6TCP = trans_xyz(0, 0.0823, 0) * rot_z(pi/2)
+
+    # Full forward kinematics from base to TCP symbolically
+    T0TCP_sym = T01 * T12 * T23 * T34 * T45 * T56 * T6TCP
+
+    # Desired transform from input position p and orientation r.
+    # We interpret (r) as [roll, pitch, yaw] = [rx, ry, rz].
+    px, py, pz = p
+    rx, ry, rz = r
+
+    # Rotation from roll-pitch-yaw
+    R_des = rot_x(rx) * rot_y(ry) * rot_z(rz)
+    T_des = trans_xyz(px, py, pz) * R_des
+
+    # Build a list of equations that equate T0TCP_sym and T_des
+    eqs = []
+    for i in range(4):
+        for j in range(4):
+            eqs.append(sympy.Eq(T0TCP_sym[i, j], T_des[i, j]))
+
+    # Solve symbolically for th1..th6
+    solutions = sympy.solve(eqs, [th1, th2, th3, th4, th5, th6], dict=True)
+
+    # If no solutions found (unexpected per instructions), return zeros
+    if not solutions:
+        return (0.0, 0.0, 0.0, 0.0, 0.0, 0.0)
+
+    # Otherwise, pick the first valid solution
+    sol = solutions[0]
+    j1 = float(sol[th1].evalf()) if sol[th1] is not None else 0.0
+    j2 = float(sol[th2].evalf()) if sol[th2] is not None else 0.0
+    j3 = float(sol[th3].evalf()) if sol[th3] is not None else 0.0
+    j4 = float(sol[th4].evalf()) if sol[th4] is not None else 0.0
+    j5 = float(sol[th5].evalf()) if sol[th5] is not None else 0.0
+    j6 = float(sol[th6].evalf()) if sol[th6] is not None else 0.0
+
+    # Return the joint values
+    return (j1, j2, j3, j4, j5, j6)
+```

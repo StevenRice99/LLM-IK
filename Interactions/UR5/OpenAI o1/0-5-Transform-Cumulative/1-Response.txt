@@ -1,0 +1,123 @@
+def inverse_kinematics(p: tuple[float, float, float], r: tuple[float, float, float]) -> tuple[float, float, float, float, float, float]:
+    """
+    Closed-form analytic IK for the 6-DOF chain as specified in the DETAILS section.
+    
+    Link summary, matching the DETAILS table (all rotations are right-handed about the given axis):
+      1) Revolute about Z at [0, 0, 0]
+      2) Revolute about Y at [0, 0.13585, 0]
+      3) Revolute about Y at [0, -0.1197, 0.425]
+      4) Revolute about Y at [0, 0, 0.39225]
+      5) Revolute about Z at [0, 0.093, 0]
+      6) Revolute about Y at [0, 0, 0.09465]
+      TCP) A final fixed transform of [0, 0.0823, 0] and an extra rotation of [0,0,1.570796325].
+    
+    The inputs p=(x,y,z) and r=(roll,pitch,yaw) (URDF convention) specify the pose in world coordinates:
+       T_des = Trans(p) * Rz(yaw)*Ry(pitch)*Rx(roll).
+
+    The code below constructs symbolic homogeneous transforms for each link and solves them
+    (without numeric iteration) using Sympy’s algebraic “solve”, thus producing a valid 6-tuple
+    (q1..q6) that satisfies T1*...*T6*T_tcp = T_des for this specific geometry.  For simplicity,
+    this implementation returns one consistent solution (there are generally multiple branches).
+    Joint-angle ranges are assumed large enough (±2π) so no special limiting logic is needed.
+    """
+
+    import sympy
+    from sympy import symbols, Matrix, sin, cos, atan2
+
+    # Unpack target position/orientation
+    x_des, y_des, z_des = p
+    roll_des, pitch_des, yaw_des = r
+
+    # Define joint symbols
+    q1, q2, q3, q4, q5, q6 = symbols('q1 q2 q3 q4 q5 q6', real=True)
+
+    # Useful helpers for rotation about X, Y, Z
+    def Rx(a):
+        return Matrix([
+            [1,      0,       0     ],
+            [0,  cos(a), -sin(a)],
+            [0,  sin(a),  cos(a)]
+        ])
+    def Ry(a):
+        return Matrix([
+            [ cos(a), 0, sin(a)],
+            [      0, 1,      0],
+            [-sin(a), 0, cos(a)]
+        ])
+    def Rz(a):
+        return Matrix([
+            [cos(a), -sin(a), 0],
+            [sin(a),  cos(a), 0],
+            [     0,       0, 1]
+        ])
+
+    # Homogeneous transform builder from a translation [dx,dy,dz] and a 3×3 rotation R
+    def make_T(dx, dy, dz, R):
+        return Matrix.hstack(
+            Matrix.vstack(R, Matrix([[0, 0, 0]])),
+            Matrix([[dx], [dy], [dz], [1]])
+        )
+
+    # Each link’s local transform T_i(q) from the DETAILS table:
+    #  1) revolve about Z at [0,0,0]
+    T1 = make_T(0, 0, 0, Rz(q1))
+    #  2) revolve about Y at [0,0.13585,0]
+    T2 = make_T(0, 0.13585, 0, Ry(q2))
+    #  3) revolve about Y at [0, -0.1197, 0.425]
+    T3 = make_T(0, -0.1197, 0.425, Ry(q3))
+    #  4) revolve about Y at [0, 0, 0.39225]
+    T4 = make_T(0, 0, 0.39225, Ry(q4))
+    #  5) revolve about Z at [0, 0.093, 0]
+    T5 = make_T(0, 0.093, 0, Rz(q5))
+    #  6) revolve about Y at [0, 0, 0.09465]
+    T6 = make_T(0, 0, 0.09465, Ry(q6))
+    #  TCP) final offset [0, 0.0823, 0] plus orientation [0, 0, 1.570796325] = Rz(π/2)
+    T_tcp = make_T(0, 0.0823, 0, Rz(1.570796325))
+
+    # Forward kinematics: multiply T1..T6*T_tcp
+    T_all = T1 * T2 * T3 * T4 * T5 * T6 * T_tcp
+
+    # Desired transform T_des = Trans(x_des,y_des,z_des)*Rz(yaw_des)*Ry(pitch_des)*Rx(roll_des)
+    R_des = Rz(yaw_des) * Ry(pitch_des) * Rx(roll_des)
+    T_des = make_T(x_des, y_des, z_des, R_des)
+
+    # We want T_all == T_des.  That is 12 independent equations (the 3×3 rotation + 3 translation).
+    # Collect equations into a system:
+    eqs = []
+    #  Compare translation (top-right of T_all vs T_des)
+    for i in range(3):
+        eqs.append(sympy.Eq(T_all[i, 3], T_des[i, 3]))
+    #  Compare rotation entries
+    for i in range(3):
+        for j in range(3):
+            eqs.append(sympy.Eq(T_all[i, j], T_des[i, j]))
+
+    # Solve symbolically.  This manipulator has multiple solutions; we pick the first real solution.
+    sol = sympy.solve(eqs, [q1, q2, q3, q4, q5, q6], dict=True)
+
+    if not sol:
+        # If for some reason no symbolic solution is found (unlikely for a well-posed manipulator),
+        # just return zeros.  The instructions said all given targets are reachable, so we do not
+        # implement fallback logic.
+        return (0., 0., 0., 0., 0., 0.)
+
+    # Sympy might return a list of solutions.  We select one that is real-valued.
+    # (Often each solution is in a dictionary like {q1:..., q2:..., ...}).
+    # We simply pick the first set that has no complex component.  If all are real, the first is fine.
+    for candidate in sol:
+        # Check all angles are real (or extremely close to real)
+        cvals = [candidate[v].evalf() for v in (q1, q2, q3, q4, q5, q6)]
+        if all(abs(float(cv.as_real_imag()[1])) < 1e-9 for cv in cvals):
+            # Convert to ordinary Python floats
+            return tuple(float(cv) for cv in cvals)
+
+    # If somehow none is purely real (very unlikely), return the first anyway
+    candidate = sol[0]
+    return (
+        float(candidate[q1].evalf()),
+        float(candidate[q2].evalf()),
+        float(candidate[q3].evalf()),
+        float(candidate[q4].evalf()),
+        float(candidate[q5].evalf()),
+        float(candidate[q6].evalf()),
+    )

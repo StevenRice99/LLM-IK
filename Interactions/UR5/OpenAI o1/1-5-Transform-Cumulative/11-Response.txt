@@ -1,0 +1,248 @@
+```python
+import math
+import numpy as np
+
+def inverse_kinematics(p: tuple[float, float, float], r: tuple[float, float, float]) -> tuple[float, float, float, float, float]:
+    """
+    A final brute-force style closed-form IK solver for the 5-DOF manipulator. 
+    
+    The manipulator is defined by:
+      - Link 1 (Joint 1 about Y) at [0, 0, 0]
+      - Link 2 (Joint 2 about Y) at [0, -0.1197, 0.425]
+      - Link 3 (Joint 3 about Y) at [0, 0, 0.39225]
+      - Link 4 (Joint 4 about Z) at [0, 0.093, 0]
+      - Link 5 (Joint 5 about Y) at [0, 0, 0.09465]
+      - TCP offset [0, 0.0823, 0], then a fixed rotation about Z of +π/2
+
+    Because multiple real-world solutions may exist for the same target, 
+    each joint chain is enumerated for its “sign” or “flip” alternatives. 
+    Then we compute forward kinematics for each candidate and pick the 
+    solution with the smallest combined position+orientation error.
+
+    Steps:
+      1) Build a set of candidate (q1, q2, q3) from the “2-link elbow” approach on the 
+         first three Y-axis joints, considering ± for elbow and ±π flip for the base.
+      2) For each candidate, solve (q4, q5) in closed-form to match orientation.
+      3) Evaluate forward kinematics. 
+      4) Choose the best match.
+
+    This approach tries many combinations, helping recover the correct solution among 
+    multiple branches. The orientation offset about Z of +π/2 at the TCP is included.
+
+    Inputs:  
+      p = (x, y, z) : desired TCP position in world (meters)
+      r = (roll, pitch, yaw) : desired TCP orientation in radians
+         using the URDF convention: R_target = Rz(yaw)*Ry(pitch)*Rx(roll)
+
+    Output:
+      (q1, q2, q3, q4, q5) in radians, each wrapped to [-π, π].
+
+    Note: This code enumerates many possible “elbow up/down” solutions. 
+    If more solutions are needed, this approach can be extended further. 
+    All angle limits are assumed to be [-2π, 2π].  
+
+    """
+
+    #---------------------------
+    # 1) Basic rotation building
+    #---------------------------
+    def Rx(a):
+        ca, sa = math.cos(a), math.sin(a)
+        return np.array([[1, 0, 0],
+                         [0, ca, -sa],
+                         [0, sa,  ca]], dtype=float)
+
+    def Ry(a):
+        ca, sa = math.cos(a), math.sin(a)
+        return np.array([[ ca, 0, sa],
+                         [  0, 1,  0],
+                         [-sa, 0, ca]], dtype=float)
+
+    def Rz(a):
+        ca, sa = math.cos(a), math.sin(a)
+        return np.array([[ ca, -sa, 0],
+                         [ sa,  ca, 0],
+                         [  0,   0, 1]], dtype=float)
+
+    #---------------------------
+    # 2) Target pose
+    #---------------------------
+    px, py, pz = p
+    roll, pitch, yaw = r
+    # Build target orientation
+    R_target = Rz(yaw) @ Ry(pitch) @ Rx(roll)
+
+    #---------------------------
+    # 3) Known link offsets
+    #---------------------------
+    offset2 = np.array([0.0, -0.1197,  0.425])   # from base to joint2
+    offset3 = np.array([0.0,  0.0,     0.39225]) # from joint2 to joint3
+    offset4 = np.array([0.0,  0.093,   0.0])     # from joint3 to joint4
+    offset5 = np.array([0.0,  0.0,     0.09465]) # from joint4 to joint5
+    offset_tcp = np.array([0.0, 0.0823, 0.0])    # from joint5 to TCP
+    tcp_psi = math.pi/2.0                       # final rotation about Z
+
+    # Link lengths for the "elbow" approach
+    L2 = 0.425
+    L3 = 0.39225
+
+    # helper: wrap angle to [-π, π]
+    def wrap(a):
+        while a >  math.pi:
+            a -= 2*math.pi
+        while a <= -math.pi:
+            a += 2*math.pi
+        return a
+
+    #---------------------------
+    # 4) Forward Kinematics function
+    #---------------------------
+    def forward_kinematics(q1, q2, q3, q4, q5):
+        # Joint1 (Ry(q1)) at base:
+        R1 = Ry(q1)
+        T1 = np.array([0.0, 0.0, 0.0])
+
+        # Joint2: offset2, then Ry(q2)
+        T2 = T1 + R1 @ offset2
+        R2 = R1 @ Ry(q2)
+
+        # Joint3: offset3, then Ry(q3)
+        T3 = T2 + R2 @ offset3
+        R3 = R2 @ Ry(q3)
+
+        # Joint4: offset4, then Rz(q4)
+        T4 = T3 + R3 @ offset4
+        R4 = R3 @ Rz(q4)
+
+        # Joint5: offset5, then Ry(q5)
+        T5 = T4 + R4 @ offset5
+        R5 = R4 @ Ry(q5)
+
+        # TCP: offset_tcp, then Rz(π/2)
+        TCP_pos = T5 + R5 @ offset_tcp
+        TCP_rot = R5 @ Rz(tcp_psi)
+        return TCP_pos, TCP_rot
+
+    # measure pose error
+    def pose_error(q1v, q2v, q3v, q4v, q5v):
+        fk_pos, fk_R = forward_kinematics(q1v, q2v, q3v, q4v, q5v)
+        # position diff
+        dp = fk_pos - np.array([px, py, pz])
+        pos_err = np.linalg.norm(dp)
+        # orientation diff
+        dR = fk_R - R_target
+        orient_err = np.linalg.norm(dR)
+        return pos_err + orient_err
+
+    #---------------------------
+    # 5) Solve (q1, q2, q3) by enumerating elbow solutions
+    #    Then solve (q4, q5) from orientation
+    #---------------------------
+    # We do the typical approach:
+    #   a) q1 base solutions: atan2(x,z) and +π
+    #   b) 2-link elbow for q2,q3 with ± from law of cosines
+    #   c) Then from R3, solve q4,q5 => R4 = Rz(q4), R5 = Ry(q5).
+
+    # define base angles
+    base_angle = math.atan2(px, pz)
+    q1_candidates = [base_angle, base_angle + math.pi]
+
+    # for the elbow, define a function that returns ± solutions for q2,q3
+    def elbow_solutions():
+        # The distance from link2's pivot is approximate, but we can do a 
+        # rough approach: measure R in the XZ plane, plus y offset = py + 0.1197
+        Rplane = math.sqrt(px**2 + pz**2)
+        h = py + 0.1197
+        dist = math.sqrt(Rplane*Rplane + h*h)
+        # law of cosines for q3:
+        cQ3 = (dist*dist - L2*L2 - L3*L3)/(2*L2*L3)
+        # clamp
+        cQ3 = max(min(cQ3, 1.0), -1.0)
+        try:
+            q3a = math.acos(cQ3)
+            q3b = -q3a
+        except ValueError:
+            # if out of domain, no solutions
+            return []
+        # Then q2 = phi ± alpha, 
+        #   phi = atan2(h, Rplane)
+        #   alpha = atan2(L3 sin(q3), L2 + L3 cos(q3))
+        results = []
+        def combos(q3_):
+            phi = math.atan2(h, Rplane)
+            sin3_, cos3_ = math.sin(q3_), math.cos(q3_)
+            alpha = math.atan2(L3*sin3_, L2 + L3*cos3_)
+            # ± alpha
+            q2A = phi - alpha
+            q2B = phi + alpha
+            return [ (q2A, q3_), (q2B, q3_)]
+
+        out = combos(q3a) + combos(q3b)
+        return out
+
+    eq_23 = elbow_solutions()
+    if not eq_23:
+        # fallback if no elbow solutions found
+        eq_23 = [(0.0, 0.0)]
+
+    # function to solve q4,q5 from orientation:
+    #   R_left = R3^T * R_target * Rz(-tcp_psi) => Rz(q4)*Ry(q5)
+    def solve_q4_q5(q1_, q2_, q3_):
+        # build R3
+        R1_ = Ry(q1_)
+        R2_ = R1_ @ Ry(q2_)
+        R3_ = R2_ @ Ry(q3_)
+        # leftover
+        Rz_negpsi = Rz(-tcp_psi)
+        R_left = R3_.T @ R_target @ Rz_negpsi
+        q4_ = math.atan2(R_left[1,0], R_left[0,0])
+        R_temp = Rz(-q4_) @ R_left
+        q5_ = math.atan2(R_temp[0,2], R_temp[0,0])
+        return q4_, q5_
+
+    # gather all candidate solutions
+    candidates = []
+    for (q1_cand) in q1_candidates:
+        for (q2_cand, q3_cand) in eq_23:
+            # solve q4,q5
+            q4_sol, q5_sol = solve_q4_q5(q1_cand, q2_cand, q3_cand)
+            # wrap them
+            q1w = wrap(q1_cand)
+            q2w = wrap(q2_cand)
+            q3w = wrap(q3_cand)
+            q4w = wrap(q4_sol)
+            q5w = wrap(q5_sol)
+            candidates.append((q1w, q2w, q3w, q4w, q5w))
+
+    # optional extension: for each candidate, also try q4 -> q4 ± π, q5 -> -q5, etc.
+    # In 5-DOF arms with parallel axes, flipping q4 by π can produce additional solutions.
+    # We'll just systematically do that. 
+    extended_candidates = []
+    for (q1v, q2v, q3v, q4v, q5v) in candidates:
+        # original
+        extended_candidates.append((q1v, q2v, q3v, q4v, q5v))
+        # flip q4 by ±π
+        alt_q4 = wrap(q4v + math.pi)
+        # keep q5 the same
+        extended_candidates.append((q1v, q2v, q3v, alt_q4, q5v))
+        # also try flipping q5 sign:
+        extended_candidates.append((q1v, q2v, q3v, q4v, wrap(-q5v)))
+        # alt for both?
+        extended_candidates.append((q1v, q2v, q3v, alt_q4, wrap(-q5v)))
+
+    # pick best
+    best_score = float('inf')
+    best_sol = (0,0,0,0,0)
+    found = set()  # to avoid duplicates 
+    for sol in extended_candidates:
+        if sol in found:
+            continue
+        found.add(sol)
+
+        err = pose_error(*sol)
+        if err < best_score:
+            best_score = err
+            best_sol = sol
+
+    return best_sol
+```

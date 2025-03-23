@@ -1,0 +1,166 @@
+```python
+def inverse_kinematics(p: tuple[float, float, float], r: tuple[float, float, float]) -> tuple[float, float, float, float, float, float]:
+    """
+    Closed-form analytic inverse kinematics for the 6-DOF serial manipulator described in the DETAILS.
+
+    Explanation of approach:
+      • We first treat joints 1 through 5 using the same approach as EXISTING 2, which solves a 5-DOF problem:
+           R_total_5 = Rz(q1) · [Ry(q2+q3+q4) · Rz(q5)]
+        and accounts for the chain’s overall position with the known link lengths. That yields (q1, q2, q3, q4, q5).
+
+      • Then, we solve for joint 6 (rotation about Y). The final rotation includes joint 6 and the fixed rotation
+        about Z by π/2 (the TCP’s built-in roll offset). In matrix form, the final orientation is:
+           Rz(q1)*Ry(q2+q3+q4)*Rz(q5)*Ry(q6)*Rz(π/2).
+        We factor out the part we’ve already determined (i.e., Rz(q1)*Ry(q2+q3+q4)*Rz(q5)), and the remaining orientation
+        must be Ry(q6)*Rz(π/2). From the target orientation R_des = Rz(yaw)*Ry(pitch)*Rx(roll), we isolate q6 by
+        multiplying from the left by the inverse of what we’ve found, and from the right by Rz(−π/2). This yields a
+        pure rotation about Y. We then extract q6 via atan2 of the appropriate matrix elements.
+
+    This code returns one consistent set of angles (q1..q6). Reachability checks are omitted as per instructions.
+    """
+    import math
+    import numpy as np
+    
+    # Step 1: Solve for joints 1..5 using the approach in EXISTING 2.
+    L1 = 0.425      # length before joint 4
+    L2 = 0.39225    # length before joint 5
+    L_tcp = 0.09465 # distance from joint 5 revolve to the old "TCP" in the 5-DOF sub-problem
+    y_const = 0.13585 - 0.1197 + 0.093  # net Y translation
+    p_x, p_y, p_z = p
+    r_roll, r_pitch, r_yaw = r
+
+    # We'll define a small function to extract a 3×3 rotation from roll,pitch,yaw (URDF: Rz*yRy*Rx).
+    def rotation_rpy(roll, pitch, yaw):
+        Rx = np.array([[1, 0, 0],
+                       [0, math.cos(roll), -math.sin(roll)],
+                       [0, math.sin(roll), math.cos(roll)]])
+        Ry = np.array([[math.cos(pitch), 0, math.sin(pitch)],
+                       [0, 1, 0],
+                       [-math.sin(pitch), 0, math.cos(pitch)]])
+        Rz = np.array([[math.cos(yaw), -math.sin(yaw), 0],
+                       [math.sin(yaw),  math.cos(yaw),  0],
+                       [0,              0,              1]])
+        return Rz @ Ry @ Rx
+
+    # 1a) Solve for q1 by geometry in XY-plane, picking the best branch as in code 2:
+    r_xy = math.sqrt(p_x**2 + p_y**2)
+    theta_raw = math.atan2(p_y, p_x)
+    # y_const / r_xy must be clipped to [-1,1].
+    ratio = y_const / (r_xy + 1e-12)
+    ratio = max(-1.0, min(1.0, ratio))
+    # Two possible q1 branches:
+    a = math.asin(ratio)
+    q1_candidate1 = theta_raw - a
+    q1_candidate2 = theta_raw - (math.pi - a)
+
+    # Build the target orientation R_des:
+    R_des = rotation_rpy(r_roll, r_pitch, r_yaw)
+
+    # Helper to compute orientation error for each q1:
+    def orientation_error_for_q1(q1_val):
+        cos_q1 = math.cos(q1_val)
+        sin_q1 = math.sin(q1_val)
+        Rz_neg_q1 = np.array([[cos_q1,  sin_q1, 0],
+                              [-sin_q1, cos_q1, 0],
+                              [0,       0,      1]])
+        M_val = Rz_neg_q1 @ R_des
+        # Code 2 uses the absolute value of M_val[1,2] as an error measure:
+        return abs(M_val[1, 2])
+
+    err1 = orientation_error_for_q1(q1_candidate1)
+    err2 = orientation_error_for_q1(q1_candidate2)
+    q1 = q1_candidate1 if err1 <= err2 else q1_candidate2
+
+    # 1b) With q1, define p_bar = Rz(-q1)*[p_x,p_y,p_z].
+    cos_q1 = math.cos(q1)
+    sin_q1 = math.sin(q1)
+    Rz_neg_q1 = np.array([[cos_q1,  sin_q1, 0],
+                          [-sin_q1, cos_q1, 0],
+                          [0,       0,      1]])
+    p_bar = Rz_neg_q1 @ np.array([p_x, p_y, p_z])
+    p_bar_x, p_bar_y, p_bar_z = p_bar
+
+    # 1c) Also define M = Rz(-q1)*R_des
+    M = Rz_neg_q1 @ R_des
+    # Extract phi = (q2 + q3 + q4) and q5:
+    phi = math.atan2(M[0, 2], M[2, 2])   # from the structure of Ry(phi)*Rz(q5)
+    q5  = math.atan2(M[1, 0], M[1, 1])
+
+    # 1d) Solve 2R subproblem for q2,q3, then q4 = phi - (q2+q3).
+    # Remove the final offset L_tcp along direction phi from p_bar.
+    Px = p_bar_x - L_tcp * math.sin(phi)
+    Pz = p_bar_z - L_tcp * math.cos(phi)
+    r2 = math.sqrt(Px**2 + Pz**2)
+    cos_q3 = (r2**2 - L1**2 - L2**2)/(2*L1*L2)
+    cos_q3 = max(-1.0, min(1.0, cos_q3))
+    q3_candidateA = math.acos(cos_q3)
+    q3_candidateB = -q3_candidateA
+
+    def planar_solution(q3_val):
+        # Solve for q2 and compute error
+        q2_val = math.atan2(Px, Pz) - math.atan2(L2*math.sin(q3_val), L1+L2*math.cos(q3_val))
+        q4_val = phi - (q2_val + q3_val)
+        # Re-check position difference:
+        calc_x = L1*math.sin(q2_val) + L2*math.sin(q2_val+q3_val) + L_tcp*math.sin(phi)
+        calc_z = L1*math.cos(q2_val) + L2*math.cos(q2_val+q3_val) + L_tcp*math.cos(phi)
+        err_val = math.hypot(calc_x - p_bar_x, calc_z - p_bar_z)
+        return (q2_val, q4_val, err_val)
+
+    q2A, q4A, errA = planar_solution(q3_candidateA)
+    q2B, q4B, errB = planar_solution(q3_candidateB)
+    if errA <= errB:
+        q3 = q3_candidateA
+        q2 = q2A
+        q4 = q4A
+    else:
+        q3 = q3_candidateB
+        q2 = q2B
+        q4 = q4B
+
+    # So far for joints 1..5:
+    #   q1, q2, q3, q4, q5
+
+    # Step 2: Solve for q6 given we want:
+    #   R_des = Rz(q1)*Ry(q2+q3+q4)*Rz(q5)*Ry(q6)*Rz(π/2).
+    # Let M_full = Rz(-q1)*R_des * Rz(-π/2).
+    # Then M_full = Ry(q2+q3+q4)*Rz(q5)*Ry(q6).
+    # We define M_partial = Ry(-phi)*Rz(-q5)*M_full => M_partial = Ry(q6).
+    # Then q6 = atan2(M_partial[0,2], M_partial[2,2]).
+
+    # 2a) Build M_full:
+    def rot_z(a):
+        cz, sz = math.cos(a), math.sin(a)
+        return np.array([
+            [cz, -sz, 0],
+            [sz,  cz, 0],
+            [0,   0,  1]
+        ])
+    def rot_y(a):
+        cy, sy = math.cos(a), math.sin(a)
+        return np.array([
+            [ cy,  0, sy],
+            [ 0,   1, 0 ],
+            [-sy,  0, cy]
+        ])
+
+    # Rz(-q1):
+    Rz_neg_q1 = np.array([[ cos_q1, sin_q1,  0],
+                          [-sin_q1, cos_q1,  0],
+                          [0,       0,       1]])
+    # Multiply R_des * Rz(-π/2)
+    Rz_neg_pi2 = np.array([[ 0,  1, 0],
+                           [-1, 0, 0],
+                           [ 0,  0, 1]])
+    M_full = Rz_neg_q1 @ R_des @ Rz_neg_pi2  # = Ry(phi)*Rz(q5)*Ry(q6)
+
+    # 2b) Factor out Ry(phi)*Rz(q5):
+    Ry_neg_phi = rot_y(-phi)
+    Rz_neg_q5  = rot_z(-q5)
+    M_partial = Ry_neg_phi @ Rz_neg_q5 @ M_full  # = Ry(q6)
+    # 2c) Extract q6 from M_partial (rotation about Y => M_partial = [[cos q6, 0, sin q6],
+    #                                                              [0, 1, 0],
+    #                                                              [-sin q6, 0, cos q6]])
+    q6 = math.atan2(M_partial[0,2], M_partial[2,2])
+
+    return (q1, q2, q3, q4, q5, q6)
+```

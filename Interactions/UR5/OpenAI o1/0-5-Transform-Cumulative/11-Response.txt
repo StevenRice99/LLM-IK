@@ -1,0 +1,205 @@
+```python
+def inverse_kinematics(p: tuple[float, float, float], r: tuple[float, float, float]) -> tuple[float, float, float, float, float, float]:
+    """
+    A final closed-form solution that enumerates multiple solution branches for the 6-DOF manipulator
+    and then selects the one with the smallest pose error. This is similar to the previous approach
+    but further includes +/- π branches for both q5 and q6, yielding up to 16 candidate configurations
+    for each of the two q1 solutions and the two q3 solutions. The manual enumeration is done to
+    avoid iterative solvers while still accounting for multiple ways the arm can fold.
+
+    Robot geometry (from the DETAILS):
+      Joint 1: revolve about Z at [0, 0, 0]
+      Joint 2: revolve about Y at [0, 0.13585, 0]
+      Joint 3: revolve about Y at [0, -0.1197, 0.425]
+      Joint 4: revolve about Y at [0, 0, 0.39225]
+      Joint 5: revolve about Z at [0, 0.093, 0]
+      Joint 6: revolve about Y at [0, 0, 0.09465]
+      TCP   : [0, 0.0823, 0] plus an intrinsic Rz(π/2).
+
+    Outline of solution:
+      1) Temporarily treat the robot as a 5-DOF chain (ignoring joint 6) from joint 1..5 plus
+         the final offset of 0.09465 + 0.0823 + Rz(π/2).
+         - We do a standard approach akin to "EXISTING 2" for q1..q5:
+           • Two possible q1 solutions from the base-plane geometry.
+           • Two possible q3 solutions (±acos(...)).
+           • Solve for q2, q4, and q5 from that geometry/decoupling approach.
+      2) For each (q1..q5) solution, we compute the leftover orientation that must be
+         compensated by joint 6. We do:
+            R_des = R_left * Ry(q6) * Rz(π/2)  =>  Ry(q6) = R_left^T * R_des * Rz(-π/2).
+         - The principal value for q6 is atan2(...). But we also consider adding π for the Y-axis
+           solution. Additionally, we consider q5 ± π as well, because rotating q5 by π changes
+           how the wrist orientation can be matched by q6 differently. This yields up to 4 ways
+           for each branch. Overall up to 16 total solutions from a single (q1, sign_q3) pair.
+      3) We compute the forward kinematics for each candidate (q1..q6) and measure pose error
+         relative to (p, r). We pick the solution with the smallest error. This approach remains
+         wholly closed-form (no iterative solver, just enumerating finite branches).
+
+    No joint-range checks or reachability checks are done; the instructions say all targets
+    will be reachable. We just return the best match.
+
+    """
+
+    import math
+    import numpy as np
+
+    # Unpack
+    x, y, z = p
+    roll, pitch, yaw = r
+
+    # Rotation utilities
+    def Rx(a):
+        ca, sa = math.cos(a), math.sin(a)
+        return np.array([[1, 0, 0],
+                         [0, ca, -sa],
+                         [0, sa,  ca]])
+    def Ry(a):
+        ca, sa = math.cos(a), math.sin(a)
+        return np.array([[ca, 0, sa],
+                         [0,  1, 0 ],
+                         [-sa,0, ca]])
+    def Rz(a):
+        ca, sa = math.cos(a), math.sin(a)
+        return np.array([[ca, -sa, 0],
+                         [sa,  ca, 0],
+                         [0,    0, 1]])
+
+    # Build T_des
+    T_des = np.eye(4)
+    T_des[0,3], T_des[1,3], T_des[2,3] = x, y, z
+    R_des = Rz(yaw) @ Ry(pitch) @ Rx(roll)
+    T_des[0:3,0:3] = R_des
+
+    # Forward kinematics for entire chain, returning 4×4.
+    def fk(q1_val, q2_val, q3_val, q4_val, q5_val, q6_val):
+        def make_T(dx, dy, dz, R_):
+            T_ = np.eye(4)
+            T_[0:3,0:3] = R_
+            T_[0,3] = dx
+            T_[1,3] = dy
+            T_[2,3] = dz
+            return T_
+
+        T1 = make_T(0, 0, 0, Rz(q1_val))
+        T2 = make_T(0, 0.13585, 0, Ry(q2_val))
+        T3 = make_T(0, -0.1197, 0.425, Ry(q3_val))
+        T4 = make_T(0, 0, 0.39225, Ry(q4_val))
+        T5 = make_T(0, 0.093, 0, Rz(q5_val))
+        T6 = make_T(0, 0, 0.09465, Ry(q6_val))
+        # TCP final: [0, 0.0823, 0] + Rz(π/2)
+        T_tcp = make_T(0, 0.0823, 0, Rz(math.pi/2))
+        return T1 @ T2 @ T3 @ T4 @ T5 @ T6 @ T_tcp
+
+    # Pose error function
+    def pose_error(Ta, Tb):
+        # position error
+        dx = Ta[0,3] - Tb[0,3]
+        dy = Ta[1,3] - Tb[1,3]
+        dz = Ta[2,3] - Tb[2,3]
+        pos_err = dx*dx + dy*dy + dz*dz
+        # orientation error
+        Ra = Ta[0:3,0:3]
+        Rb = Tb[0:3,0:3]
+        diff = Ra - Rb
+        rot_err = np.sum(diff*diff)
+        return pos_err + rot_err
+
+    # Constants for the 5-DOF sub-solution:
+    L1 = 0.425
+    L2 = 0.39225
+    L_tcp = 0.09465
+    y_const = 0.13585 - 0.1197 + 0.093  # 0.10915
+
+    # 1) get q1’s two branches from code-2 style
+    def q1_branches():
+        r_xy = math.hypot(x, y)
+        if r_xy < 1e-12:
+            # fallback
+            return [0.0, math.pi]
+        ratio = y_const / r_xy
+        ratio = max(-1.0, min(1.0, ratio))
+        a_ = math.asin(ratio)
+        theta_ = math.atan2(y, x)
+        return [theta_ - a_, theta_ - (math.pi - a_)]
+
+    # For each q1, we solve for q2,q3,q4,q5. That includes ±acos(...) for q3. 
+    # Code-2 approach: p_bar = Rz(-q1)*p, M = Rz(-q1)*R_des => phi=..., q5=...
+    # Then solve 2R subproblem for q2,q3 => q4=phi-(q2+q3)
+    def solve_5dof(q1_val, sign_q3_plus):
+        # Rz(-q1)
+        cq1, sq1 = math.cos(q1_val), math.sin(q1_val)
+        Rz_neg_q1 = np.array([[ cq1,  sq1, 0],
+                              [-sq1,  cq1, 0],
+                              [ 0,    0,   1]])
+        # p_bar
+        p_bar = Rz_neg_q1 @ np.array([x, y, z])
+        pxb, pyb, pzb = p_bar
+        # M
+        M_ = Rz_neg_q1 @ R_des
+        phi_ = math.atan2(M_[0,2], M_[2,2])
+        q5_ = math.atan2(M_[1,0], M_[1,1])
+
+        # remove L_tcp in direction phi
+        Px = pxb - L_tcp*math.sin(phi_)
+        Pz = pzb - L_tcp*math.cos(phi_)
+        # solve for q3 from r2
+        r2_ = math.hypot(Px, Pz)
+        cos_q3 = (r2_**2 - L1**2 - L2**2)/(2*L1*L2)
+        cos_q3 = max(-1.0, min(1.0, cos_q3))
+        base_q3 = math.acos(cos_q3)
+        if not sign_q3_plus:
+            base_q3 = -base_q3
+        # q2
+        q2_ = math.atan2(Px, Pz) - math.atan2(L2*math.sin(base_q3), L1 + L2*math.cos(base_q3))
+        # q4
+        q4_ = phi_ - (q2_ + base_q3)
+        return (q2_, base_q3, q4_, q5_)
+
+    # For any (q1..q5) we define leftover = Rz(q1)*Ry(q2+q3+q4)*Rz(q5). 
+    # Then we want leftover^T * R_des * Rz(-π/2) = Ry(q6). We get a principal q6 from
+    # atan2(...), but also consider q6 + π. Also consider q5 ± π. This yields 4 ways per set.
+
+    sol_candidates = []
+    q1opts = q1_branches()
+    for q1_ in q1opts:
+        for sign_q3 in [True, False]:
+            try:
+                q2_, q3_, q4_, q5_ = solve_5dof(q1_, sign_q3)
+            except ValueError:
+                # domain error from acos => skip
+                continue
+
+            # leftover
+            R_leftover = Rz(q1_) @ Ry(q2_+q3_+q4_) @ Rz(q5_)
+            # M6 = R_leftover^T * R_des
+            M6 = R_leftover.T @ R_des
+            # We define M6p = M6*Rz(-π/2)
+            M6p = M6 @ Rz(-math.pi/2)
+            # principal q6
+            base_q6 = math.atan2(M6p[0,2], M6p[2,2])
+
+            # We'll branch over q5->q5_ + kπ for k in {0,1}, q6-> base_q6 + mπ for m in {0,1}.
+            # (Adding π to q5 flips the wrist about Z, changing orientation, so let's see if that helps.)
+
+            for k5 in [0, 1]:
+                q5_alt = q5_ + k5*math.pi
+                # Recompute leftover with that q5
+                R_left2 = Rz(q1_) @ Ry(q2_+q3_+q4_) @ Rz(q5_alt)
+                M6b = R_left2.T @ R_des
+                M6p_b = M6b @ Rz(-math.pi/2)
+                q6_main_b = math.atan2(M6p_b[0,2], M6p_b[2,2])
+
+                for m6 in [0, 1]:
+                    q6_alt = q6_main_b + m6*math.pi
+                    # Evaluate
+                    T_ = fk(q1_, q2_, q3_, q4_, q5_alt, q6_alt)
+                    err_ = pose_error(T_, T_des)
+                    sol_candidates.append((err_, (q1_, q2_, q3_, q4_, q5_alt, q6_alt)))
+
+    if not sol_candidates:
+        # fallback
+        return (0,0,0,0,0,0)
+
+    sol_candidates.sort(key=lambda x: x[0])
+    best_sol = sol_candidates[0][1]
+    return best_sol
+```

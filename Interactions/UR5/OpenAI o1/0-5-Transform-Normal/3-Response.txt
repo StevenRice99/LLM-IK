@@ -1,0 +1,140 @@
+def inverse_kinematics(p: tuple[float, float, float], r: tuple[float, float, float]) -> tuple[float, float, float, float, float, float]:
+    """
+    Gets the joint values needed to reach position "p" and orientation "r" via a closed-form symbolic solve.
+    :param p: The position to reach in the form [x, y, z].
+    :param r: The orientation to reach in radians in the form [rx, ry, rz] (roll-pitch-yaw).
+    :return: A tuple of the six joint values (in radians).
+    """
+    import sympy
+    from sympy import symbols, sin, cos, Matrix, pi
+
+    # ------------------------------------------------------------------
+    # Helper rotation/translation matrices
+    # ------------------------------------------------------------------
+    def rot_x(q):
+        return Matrix([
+            [1,      0,       0, 0],
+            [0,  cos(q), -sin(q), 0],
+            [0,  sin(q),  cos(q), 0],
+            [0,      0,       0, 1]
+        ])
+
+    def rot_y(q):
+        return Matrix([
+            [ cos(q), 0, sin(q), 0],
+            [      0, 1,      0, 0],
+            [-sin(q), 0, cos(q), 0],
+            [      0, 0,      0, 1]
+        ])
+
+    def rot_z(q):
+        return Matrix([
+            [cos(q), -sin(q), 0, 0],
+            [sin(q),  cos(q), 0, 0],
+            [     0,       0, 1, 0],
+            [     0,       0, 0, 1]
+        ])
+
+    def trans_xyz(x, y, z):
+        return Matrix([
+            [1, 0, 0, x],
+            [0, 1, 0, y],
+            [0, 0, 1, z],
+            [0, 0, 0, 1]
+        ])
+
+    # ------------------------------------------------------------------
+    # Define symbolic joint variables
+    # ------------------------------------------------------------------
+    th1, th2, th3, th4, th5, th6 = symbols('th1 th2 th3 th4 th5 th6', real=True)
+
+    # ------------------------------------------------------------------
+    # Build forward kinematics from base to TCP
+    # Using the table in DETAILS:
+    #
+    #  Revolute 1: Axis Z,   offset [0, 0, 0]
+    #  Revolute 2: Axis Y,   offset [0, 0.13585, 0]
+    #  Revolute 3: Axis Y,   offset [0, -0.1197, 0.425]
+    #  Revolute 4: Axis Y,   offset [0, 0, 0.39225]
+    #  Revolute 5: Axis Z,   offset [0, 0.093, 0]
+    #  Revolute 6: Axis Y,   offset [0, 0, 0.09465]
+    #  TCP:         offset [0, 0.0823, 0], orientation [0, 0, pi/2]
+    #
+    #  T01 = Rz(th1)
+    #  T12 = Ty offset * Ry(th2)
+    #  T23 = T(0,-0.1197,0.425)*Ry(th3)
+    #  T34 = T(0,0,0.39225)*Ry(th4)
+    #  T45 = T(0,0.093,0)*Rz(th5)
+    #  T56 = T(0,0,0.09465)*Ry(th6)
+    #  T6TCP = T(0,0,0.0823)*Rz(pi/2)
+    #
+    # ------------------------------------------------------------------
+
+    T01 = rot_z(th1)
+
+    T12 = trans_xyz(0, 0.13585, 0) * rot_y(th2)
+
+    T23 = trans_xyz(0, -0.1197, 0.425) * rot_y(th3)
+
+    T34 = trans_xyz(0, 0, 0.39225) * rot_y(th4)
+
+    T45 = trans_xyz(0, 0.093, 0) * rot_z(th5)
+
+    T56 = trans_xyz(0, 0, 0.09465) * rot_y(th6)
+
+    # The final orientation offset of TCP: rotate Z by pi/2 after a small translation in Y=0.0823
+    # (the table says position [0, 0.0823, 0], orientation [0, 0, pi/2])
+    T6TCP = trans_xyz(0, 0.0823, 0) * rot_z(pi/2)
+
+    # Full forward kinematics from base to TCP
+    T0TCP_sym = T01 * T12 * T23 * T34 * T45 * T56 * T6TCP
+
+    # ------------------------------------------------------------------
+    # Desired transform based on input p (x, y, z) and r (roll, pitch, yaw)
+    # We interpret r as RPY = [rx, ry, rz].
+    # ------------------------------------------------------------------
+    rx, ry, rz = r
+    px, py, pz = p
+
+    # Build rotation from roll-pitch-yaw
+    # roll about X, pitch about Y, yaw about Z
+    R_des = rot_x(rx) * rot_y(ry) * rot_z(rz)
+    T_des = trans_xyz(px, py, pz) * R_des
+
+    # ------------------------------------------------------------------
+    # We set up equations T0TCP_sym - T_des = 0 in all 12 corresponding
+    # entries (the 3×3 rotation part and the 3×1 translation part).
+    #
+    # Because this manipulator geometry is fairly involved, Sympy's solve
+    # is used to symbolically (or semi-symbolically) find a closed-form.
+    # This is not an optimization; it is an analytical solve.
+    # ------------------------------------------------------------------
+    eqs = []
+    for i in range(4):
+        for j in range(4):
+            eqs.append(sympy.Eq(T0TCP_sym[i, j], T_des[i, j]))
+
+    # Attempt to solve. This can produce multiple solution branches.
+    # We pick the principal solution for each joint if multiple arise.
+    sol = sympy.solve(eqs, [th1, th2, th3, th4, th5, th6], dict=True)
+
+    if not sol:
+        # Per instructions, assume inputs are always reachable.
+        # But if for some reason no solution was found, just return zeros.
+        return (0.0, 0.0, 0.0, 0.0, 0.0, 0.0)
+
+    # If multiple solutions come back, pick the first. You could refine
+    # the branch selection logic if needed.
+    best_sol = sol[0]
+
+    # Extract each joint angle in a consistent numeric range
+    j1 = float(best_sol[th1].evalf()) if best_sol[th1] is not None else 0.0
+    j2 = float(best_sol[th2].evalf()) if best_sol[th2] is not None else 0.0
+    j3 = float(best_sol[th3].evalf()) if best_sol[th3] is not None else 0.0
+    j4 = float(best_sol[th4].evalf()) if best_sol[th4] is not None else 0.0
+    j5 = float(best_sol[th5].evalf()) if best_sol[th5] is not None else 0.0
+    j6 = float(best_sol[th6].evalf()) if best_sol[th6] is not None else 0.0
+
+    # The robot limits are ±2π for all joints as stated; you can mod them if needed.
+    # We'll just return them directly here.
+    return (j1, j2, j3, j4, j5, j6)

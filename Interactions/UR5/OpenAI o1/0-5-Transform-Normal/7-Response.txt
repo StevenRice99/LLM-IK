@@ -1,0 +1,145 @@
+```python
+def inverse_kinematics(p: tuple[float, float, float], r: tuple[float, float, float]) -> tuple[float, float, float, float, float, float]:
+    """
+    Computes a closed-form IK solution (without iterative numeric solving) for the 6-DOF robot
+    described. The solution is obtained symbolically but constrained to a minimal set of 6 equations
+    to avoid large, slow systems. The manipulator geometry is:
+
+     1) Revolute 1: Rotate Z by th1
+     2) Revolute 2: Translate (0, 0.13585, 0), Rotate Y by th2
+     3) Revolute 3: Translate (0, -0.1197, 0.425), Rotate Y by th3
+     4) Revolute 4: Translate (0, 0, 0.39225), Rotate Y by th4
+     5) Revolute 5: Translate (0, 0.093, 0), Rotate Z by th5
+     6) Revolute 6: Translate (0, 0, 0.09465), Rotate Y by th6
+     TCP:          Translate (0, 0.0823, 0), Rotate Z by pi/2
+
+    :param p: Desired position [x, y, z] of the TCP in world coordinates.
+    :param r: Desired orientation [rx, ry, rz] in radians as roll-pitch-yaw (about X, Y, Z).
+    :return: A tuple of (th1, th2, th3, th4, th5, th6) in radians that achieve (p, r).
+    """
+    import sympy
+    from sympy import symbols, sin, cos, Matrix, pi, Eq, simplify, trigsimp
+
+    # ----------------------------------------------------------------
+    # Helper transforms
+    # ----------------------------------------------------------------
+    def rot_x(q):
+        return Matrix([
+            [1,      0,       0, 0],
+            [0,  cos(q), -sin(q), 0],
+            [0,  sin(q),  cos(q), 0],
+            [0,      0,       0, 1]
+        ])
+
+    def rot_y(q):
+        return Matrix([
+            [ cos(q), 0, sin(q), 0],
+            [      0, 1,      0, 0],
+            [-sin(q), 0, cos(q), 0],
+            [      0, 0,      0, 1]
+        ])
+
+    def rot_z(q):
+        return Matrix([
+            [cos(q), -sin(q), 0, 0],
+            [sin(q),  cos(q), 0, 0],
+            [     0,       0, 1, 0],
+            [     0,       0, 0, 1]
+        ])
+
+    def trans_xyz(x, y, z):
+        return Matrix([
+            [1, 0, 0, x],
+            [0, 1, 0, y],
+            [0, 0, 1, z],
+            [0, 0, 0, 1]
+        ])
+
+    # ----------------------------------------------------------------
+    # Symbolic joint variables
+    # ----------------------------------------------------------------
+    th1, th2, th3, th4, th5, th6 = symbols('th1 th2 th3 th4 th5 th6', real=True)
+
+    # ----------------------------------------------------------------
+    # Define the forward kinematics up to joint 6
+    # ----------------------------------------------------------------
+    T01 = rot_z(th1)
+    T12 = trans_xyz(0, 0.13585, 0) * rot_y(th2)
+    T23 = trans_xyz(0, -0.1197, 0.425) * rot_y(th3)
+    T34 = trans_xyz(0, 0, 0.39225) * rot_y(th4)
+    T45 = trans_xyz(0, 0.093, 0) * rot_z(th5)
+    T56 = trans_xyz(0, 0, 0.09465) * rot_y(th6)
+
+    # T0_6
+    T0_6_sym = T01 * T12 * T23 * T34 * T45 * T56
+
+    # ----------------------------------------------------------------
+    # The TCP transform relative to joint 6: T6_TCP
+    # (translate Y=0.0823, then rotate about Z by pi/2)
+    # ----------------------------------------------------------------
+    T6_TCP = trans_xyz(0, 0.0823, 0) * rot_z(pi/2)
+
+    # ----------------------------------------------------------------
+    # We'll define T0_TCP_des from inputs p (px,py,pz) and r=(rx,ry,rz).
+    # Then we compute T0_6_des = T0_TCP_des * (T6_TCP^-1).
+    # So we only solve T0_6_sym - T0_6_des = 0.
+    #
+    # This is fewer equations if we pick 3 for translation and 3 from
+    # orientation (the end-effector Z-axis, for instance).
+    # ----------------------------------------------------------------
+    px, py, pz = p
+    rx, ry, rz = r
+
+    # Desired TCP orientation from roll-pitch-yaw
+    R_des = rot_x(rx) * rot_y(ry) * rot_z(rz)
+    T0_TCP_des = trans_xyz(px, py, pz) * R_des
+
+    # Invert T6_TCP once
+    T6_TCP_inv = T6_TCP.inv()
+
+    # So T0_6_des = T0_TCP_des * T6_TCP_inv
+    T0_6_des = simplify(T0_TCP_des * T6_TCP_inv)
+
+    # ----------------------------------------------------------------
+    # We'll build 6 equations:
+    #  - 3 for translation: T0_6_sym(0:2,3) == T0_6_des(0:2,3)
+    #  - 3 for orientation: match the (0:2,2) vector (the z-axis in base frame).
+    #
+    # This is a standard way to fix orientation with minimal equations.
+    # ----------------------------------------------------------------
+    eqs = []
+    # Translation constraints
+    eqs.append(Eq(T0_6_sym[0, 3], T0_6_des[0, 3]))
+    eqs.append(Eq(T0_6_sym[1, 3], T0_6_des[1, 3]))
+    eqs.append(Eq(T0_6_sym[2, 3], T0_6_des[2, 3]))
+
+    # Orientation constraints: match the end-effector's Z-axis
+    eqs.append(Eq(T0_6_sym[0, 2], T0_6_des[0, 2]))
+    eqs.append(Eq(T0_6_sym[1, 2], T0_6_des[1, 2]))
+    eqs.append(Eq(T0_6_sym[2, 2], T0_6_des[2, 2]))
+
+    # ----------------------------------------------------------------
+    # Solve symbolically. Because we only used 6 equations, it is less
+    # prone to heavy expansions than equating full 16 matrix elements.
+    # ----------------------------------------------------------------
+    sol = sympy.solve(eqs, [th1, th2, th3, th4, th5, th6], dict=True)
+
+    # If no solutions, return dummy (though instructions say it's always reachable).
+    if not sol:
+        return (0.0, 0.0, 0.0, 0.0, 0.0, 0.0)
+
+    # Pick the first solution in the list. If multiple solutions exist,
+    # more sophisticated branch selection might be added.
+    s = sol[0]
+
+    # Safely extract angles
+    j1 = float(s[th1].evalf()) if s[th1] is not None else 0.0
+    j2 = float(s[th2].evalf()) if s[th2] is not None else 0.0
+    j3 = float(s[th3].evalf()) if s[th3] is not None else 0.0
+    j4 = float(s[th4].evalf()) if s[th4] is not None else 0.0
+    j5 = float(s[th5].evalf()) if s[th5] is not None else 0.0
+    j6 = float(s[th6].evalf()) if s[th6] is not None else 0.0
+
+    # All joints have ±2π limits from the table; no extra wrap needed here.
+    return (j1, j2, j3, j4, j5, j6)
+```

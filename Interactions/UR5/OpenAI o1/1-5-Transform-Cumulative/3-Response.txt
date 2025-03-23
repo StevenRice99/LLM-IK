@@ -1,0 +1,125 @@
+```python
+import math
+import numpy as np
+
+def inverse_kinematics(p: tuple[float, float, float], r: tuple[float, float, float]) -> tuple[float, float, float, float, float]:
+    """
+    Closed-form inverse kinematics solution for the 5-DOF manipulator described in the DETAILS section.
+    The solution here proceeds in two main steps:
+      1) Solve the first three (Y-axis) joints (q1, q2, q3) so that the 'wrist center'
+         (the origin of joint 4) is placed correctly for the desired TCP position p.
+      2) Solve the last two joints (q4 about Z, q5 about Y) from the target orientation r.
+
+    :param p: The desired TCP position [x, y, z] in meters.
+    :param r: The desired TCP orientation [roll, pitch, yaw] in radians (URDF/ROS convention Rz(yaw)*Ry(pitch)*Rx(roll)).
+    :return: The 5 joint angles [q1, q2, q3, q4, q5] in radians, each wrapped into approximately [-π, π].
+    """
+
+    # Extract target position and orientation
+    p_x, p_y, p_z = p
+    roll, pitch, yaw = r
+
+    # Define basic rotations
+    def Rx(a):
+        return np.array([[1, 0, 0],
+                         [0, math.cos(a), -math.sin(a)],
+                         [0, math.sin(a),  math.cos(a)]])
+
+    def Ry(a):
+        return np.array([[ math.cos(a), 0, math.sin(a)],
+                         [           0, 1,           0],
+                         [-math.sin(a), 0, math.cos(a)]])
+
+    def Rz(a):
+        return np.array([[math.cos(a), -math.sin(a), 0],
+                         [math.sin(a),  math.cos(a), 0],
+                         [          0,            0, 1]])
+
+    # Build the target orientation matrix R_target = Rz(yaw)*Ry(pitch)*Rx(roll)
+    R_target = Rz(yaw) @ Ry(pitch) @ Rx(roll)
+
+    # Link lengths (from the "DETAILS" section)
+    L2 = 0.425       # distance from joint1 to joint2 along z
+    L3 = 0.39225     # distance from joint2 to joint3 along z
+    offset_y2 = -0.1197  # slight shift in y for link2
+    offset_z2 = 0.425    # link2's initial offset in z
+    offset_3 = 0.39225   # link3 offset in z, same as L3
+
+    # Offsets for the wrist = offsets from joint3 to TCP, passing through joint4 & 5
+    offset_4 = np.array([0.0, 0.093, 0.0])      # from joint3 to joint4
+    offset_5 = np.array([0.0, 0.0, 0.09465])    # from joint4 to joint5
+    offset_tcp = np.array([0.0, 0.0823, 0.0])   # from joint5 to TCP
+    # Rz(pi/2) is a fixed rotation at the end for the TCP.
+
+    # Approximate "tool" vector from joint3 to TCP if q4=0, q5=0
+    tool_local = offset_4 + offset_5 + offset_tcp
+
+    # Approximate the wrist center by subtracting that tool vector from the desired TCP position
+    # (Ignoring the final Rz(pi/2) regarding translation, as it doesn't shift the center.)
+    p_3_approx = np.array([p_x, p_y, p_z]) - tool_local
+
+    # 1) Solve for q1, q2, q3 about Y (assuming small Y offsets). We'll do a simplified approach:
+    x_3, y_3, z_3 = p_3_approx
+
+    # q1 from top view (rotation about Y at origin)
+    q1 = math.atan2(x_3, z_3)
+
+    # distances for planar elbow from link2 & link3 if purely rotating about Y
+    R = math.sqrt(x_3**2 + z_3**2)  # distance in the X-Z plane
+    cos_q3 = (R*R - L2*L2 - L3*L3)/(2.0*L2*L3)
+    cos_q3 = max(min(cos_q3, 1.0), -1.0)
+
+    # two candidate solutions for q3
+    q3_candidates = [ math.acos(cos_q3), -math.acos(cos_q3) ]
+
+    # For q2, we do standard 2-link planar geometry. We pick a consistent approach:
+    #   phi = angle for second link
+    best_q2, best_q3, best_err = 0.0, 0.0, float('inf')
+    for q3_try in q3_candidates:
+        sin_q3 = math.sin(q3_try)
+        # law of cosines method:
+        # Suppose the angle from L2 to R is alpha: alpha = atan2(L3*sin_q3, L2 + L3*cos_q3)
+        alpha = math.atan2(L3*sin_q3, L2 + L3*math.cos(q3_try))
+        # q2 can be negative of alpha if we assume outward elbow
+        # We'll try a direct approach: q2 = -alpha for an initial guess
+        q2_try = -alpha
+        # Evaluate some approximate error measure
+        # This is just a simplistic approach to pick a stable solution
+        err = abs(alpha)
+        if err < best_err:
+            best_err = err
+            best_q2 = q2_try
+            best_q3 = q3_try
+
+    q2 = best_q2
+    q3 = best_q3
+
+    # 2) Solve for q4 (about Z) and q5 (about Y) so that R_3 * Rz(q4) * Ry(q5) * Rz(pi/2) == R_target
+    # Compute R_3 from q1, q2, q3 (rotations about Y)
+    R_3 = Ry(q1) @ Ry(q2) @ Ry(q3)
+
+    # Then R_left = Rz(q4)*Ry(q5) = R_3^T * R_target * Rz(-pi/2)
+    R_left = R_3.T @ R_target @ Rz(-math.pi/2)
+
+    # q4 from R_left
+    q4 = math.atan2(R_left[1, 0], R_left[0, 0])
+
+    # After extracting q4, define R_z_negq4 so that R_y = R_z_negq4 * R_left = Ry(q5)
+    R_z_negq4 = Rz(-q4)
+    R_y = R_z_negq4 @ R_left
+    q5 = math.atan2(R_y[0, 2], R_y[0, 0])
+
+    # Wrap angles into a standard range ([-π, π] for convenience)
+    def wrap(a):
+        while a >  math.pi: a -= 2.0*math.pi
+        while a <= -math.pi: a += 2.0*math.pi
+        return a
+
+    q1 = wrap(q1)
+    q2 = wrap(q2)
+    q3 = wrap(q3)
+    q4 = wrap(q4)
+    q5 = wrap(q5)
+
+    return (q1, q2, q3, q4, q5)
+```

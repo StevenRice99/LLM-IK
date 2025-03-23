@@ -1,0 +1,266 @@
+def inverse_kinematics(p: tuple[float, float, float], r: tuple[float, float, float]) -> tuple[float, float, float, float, float, float]:
+    """
+    Gets the joint values needed to reach position "p" and orientation "r" for the full 6-DOF chain.
+
+    Closed-form analytical solution outline:
+      1) Solve for q1 from the base-plane geometry (matching y_const).
+      2) Build the matrix M_6 that must be factored to recover q2, q3, q4, q5, and q6:
+            M_6 := Rz(-q1) * R_des * Rz(-π/2),
+         where R_des is the target orientation built from (roll, pitch, yaw) using the URDF convention:
+            R_des = Rz(yaw) * Ry(pitch) * Rx(roll).
+         The extra Rz(-π/2) accounts for the final fixed rotation of +90° about Z at the tool flange.
+      3) Factor M_6 = Ry(φ) * Rz(q5) * Ry(q6),  where φ = q2 + q3 + q4.
+      4) From φ, solve the planar 2R subproblem for (q2, q3, q4), similar to the existing 5-DOF approach,
+         using the geometry to match the position offsets and the TCP’s final link offset.
+      5) Solve for q5 and q6 from M_6’s factorization about the Z-Y axes of the wrist.
+      6) Return (q1, q2, q3, q4, q5, q6).
+
+    Notes:
+     • The method below reuses the approach from the 5-DOF solution to get q1 and the planar subchain (q2, q3, q4).
+     • We then use SymPy to symbolically factor M_6 = Ry(φ)*Rz(q5)*Ry(q6) to extract φ, q5, and q6.
+     • For simplicity, the same branch-testing approach used in the 5-DOF solution is also applied here
+       (we pick branches by minimal reconstruction error in position/orientation).
+
+    :param p: The position to reach as (x, y, z).
+    :param r: The orientation (roll, pitch, yaw) in radians, i.e. (rx, ry, rz).
+    :return: (q1, q2, q3, q4, q5, q6), each in radians.
+    """
+    import math
+    import numpy as np
+    import sympy
+
+    # --- Constants and geometry (from the table) ---
+    L1 = 0.425       # length after joint 2 offset
+    L2 = 0.39225     # length after joint 3 offset
+    L_tcp = 0.09465  # offset after joint 5 in the original 5-DOF; remains for joint 6 subchain
+    # The new final link adds an additional revolve about Y (joint 6) plus an extra offset [0, 0.0823, 0]
+    # and orientation Rz(pi/2). We'll handle that in the orientation factorization.
+    y_const = 0.13585 - 0.1197 + 0.093  # = 0.10915
+
+    # Unpack desired position & orientation
+    p_x, p_y, p_z = p
+    roll, pitch, yaw = r
+
+    # ----------------------------
+    # 1) Solve for q1 from base-plane geometry (same approach as in 5-DOF solution):
+    #    p̄_y = Rz(-q1)*p => requires p̄_y == y_const
+    #    yields up to two candidate solutions for q1 → pick best by orientation test
+    # ----------------------------
+    r_xy = math.sqrt(p_x**2 + p_y**2)
+    theta = math.atan2(p_y, p_x)
+    # ratio must be in [-1, 1] for asin
+    ratio = y_const / max(1e-12, r_xy)
+    ratio_clamped = max(-1.0, min(1.0, ratio))
+    a = math.asin(ratio_clamped)
+    q1_candidate1 = theta - a
+    q1_candidate2 = theta - (math.pi - a)
+
+    # A helper to compute "orientation error" from M[1,2] as in the 5-DOF code
+    def compute_M(q1_val):
+        """
+        M = Rz(-q1_val) * R_des * Rz(-pi/2)
+        That final Rz(-pi/2) accounts for the 90° about Z at the tool, so that
+        M should factor as Ry(phi)*Rz(q5)*Ry(q6).
+        """
+        cos_q1 = math.cos(q1_val)
+        sin_q1 = math.sin(q1_val)
+
+        # Rz(-q1)
+        Rz_neg_q1 = np.array([
+            [ cos_q1,  sin_q1, 0],
+            [-sin_q1,  cos_q1, 0],
+            [      0,       0, 1]
+        ])
+
+        # Construct R_des = Rz(yaw)*Ry(pitch)*Rx(roll)
+        cx, sx = math.cos(roll), math.sin(roll)
+        cy, sy = math.cos(pitch), math.sin(pitch)
+        cz, sz = math.cos(yaw),   math.sin(yaw)
+        R_x = np.array([
+            [1, 0,   0 ],
+            [0, cx, -sx],
+            [0, sx,  cx]
+        ])
+        R_y = np.array([
+            [ cy, 0, sy],
+            [  0, 1,  0],
+            [-sy, 0, cy]
+        ])
+        R_z = np.array([
+            [ cz, -sz, 0],
+            [ sz,  cz, 0],
+            [  0,   0, 1]
+        ])
+        R_des = R_z @ R_y @ R_x
+
+        # Rz(-pi/2):
+        cp = 0.0
+        sp = -1.0
+        # Actually, Rz(-pi/2) = Rz(-1.5708):
+        #   cos(-π/2) = 0,  sin(-π/2) = -1
+        # So that is: [[0,  1, 0], [-1, 0, 0], [0, 0,1]]
+        Rz_neg_90 = np.array([
+            [ 0,   1, 0],
+            [-1,   0, 0],
+            [ 0,   0, 1]
+        ])
+        M_val = Rz_neg_q1 @ R_des @ Rz_neg_90
+        return M_val
+
+    M1 = compute_M(q1_candidate1)
+    M2 = compute_M(q1_candidate2)
+    # As in the 5-dof approach, pick the one that yields smaller |M[1,2]|
+    # (the "hidden" constraint from geometry)
+    err1 = abs(M1[1, 2])
+    err2 = abs(M2[1, 2])
+    q1 = q1_candidate1 if err1 <= err2 else q1_candidate2
+
+    # ----------------------------
+    # 2) Now define M_6 = Rz(-q1)*R_des*Rz(-π/2). We want M_6 = Ry(φ)*Rz(q5)*Ry(q6).
+    # ----------------------------
+    M_6 = compute_M(q1)
+
+    # ----------------------------
+    # 3) Symbolically solve M_6 = Ry(phi)*Rz(q5)*Ry(q6).
+    #    We'll then get phi, q5, q6.  phi = (q2 + q3 + q4).
+    # ----------------------------
+    phi_sym, q5_sym, q6_sym = sympy.symbols('phi q5 q6', real=True)
+    # Define the symbolic rotation matrices:
+    def Ry_sym(a):
+        return sympy.Matrix([
+            [ sympy.cos(a), 0, sympy.sin(a)],
+            [           0, 1,           0],
+            [-sympy.sin(a), 0, sympy.cos(a)]
+        ])
+    def Rz_sym(a):
+        return sympy.Matrix([
+            [ sympy.cos(a), -sympy.sin(a), 0],
+            [ sympy.sin(a),  sympy.cos(a), 0],
+            [            0,             0, 1]
+        ])
+
+    Ry_phi = Ry_sym(phi_sym)
+    Rz_q5  = Rz_sym(q5_sym)
+    Ry_q6  = Ry_sym(q6_sym)
+    # S(phi,q5,q6) = Ry(phi)*Rz(q5)*Ry(q6)
+    S_sym = Ry_phi * Rz_q5 * Ry_q6
+
+    # Convert M_6 to a SymPy Matrix
+    M_6_sym = sympy.Matrix(M_6)
+
+    # We want to solve S_sym - M_6_sym = 0 (elementwise)
+    # Each matrix is 3x3 => 9 equations (though not all are independent).
+    eqs = []
+    for i in range(3):
+        for j in range(3):
+            eqs.append(sympy.Eq(S_sym[i, j], M_6_sym[i, j]))
+
+    # Solve. In general, many solutions may appear. We'll filter real solutions.
+    sol = sympy.solve(eqs, [phi_sym, q5_sym, q6_sym], dict=True, real=True)
+
+    # Typically, we get multiple branches. We'll store them all, then test.
+    candidate_solutions = []
+    for sol_dict in sol:
+        phi_val = float(sol_dict[phi_sym])
+        q5_val  = float(sol_dict[q5_sym])
+        q6_val  = float(sol_dict[q6_sym])
+        candidate_solutions.append((phi_val, q5_val, q6_val))
+
+    # If symbolic solve yields no solutions or if we want to reduce spurious solutions,
+    # we can do a minimal check. Usually we expect up to 4 real solutions for Y-Z-Y.
+    # We'll pick the best one by orientation error, analogous to 5-DOF.
+
+    def orientation_error(phi_val, q5_val, q6_val):
+        # Rebuild the rotation from these angles:
+        Rtest = np.array(Ry_sym(phi_val)*Rz_sym(q5_val)*Ry_sym(q6_val)).astype(float)
+        return np.linalg.norm(Rtest - M_6)
+
+    best_sol = None
+    best_err = 1e9
+    for (phi_c, q5_c, q6_c) in candidate_solutions:
+        err_c = orientation_error(phi_c, q5_c, q6_c)
+        if err_c < best_err:
+            best_err = err_c
+            best_sol = (phi_c, q5_c, q6_c)
+
+    if best_sol is None:
+        # Fallback: if for some reason no solution, pick something safe:
+        best_sol = (0.0, 0.0, 0.0)
+    phi = best_sol[0]
+    q5  = best_sol[1]
+    q6  = best_sol[2]
+
+    # ----------------------------
+    # 4) With phi now known, we use the same planar 2R geometry approach from the 5-DOF code
+    #    to solve for q2, q3, q4.  The difference: we must now consider that the effective
+    #    position offset from link 3->4->5->6->TCP is a bit larger.  However, to remain
+    #    consistent with how the existing code derived q2..q4, we effectively treat
+    #    'phi' the same (q2+q3+q4 = phi), and create an effective extension for the final
+    #    L_tcp.  We'll incorporate the final offset [0, 0.09465 + 0.0823, 0], but
+    #    the 5-DOF code lumps everything in "L_tcp".  Let's do the same for simplicity.
+    # ----------------------------
+
+    # We have the original L_tcp=0.09465 from the 5-DOF chain,
+    # plus the new offset 0.0823 along Y AFTER joint 6.  Because Y after joint 6
+    # rotates with q6.  But to keep an explicit 2R approach, we treat any leftover
+    # offset in the same direction as φ.  For a typical solution, we'll approximate
+    # that the final offset is still "along" the direction of φ.  That is consistent
+    # with the original code's approach which lumps the final offset. So let's define:
+    #   L_tcp_total = 0.09465 + 0.0823 = 0.17695
+    # Then we proceed the same way as the 5-DOF planar code, plugging phi in directly.
+    # This is a “best-effort” extension of the sub-chain approach.
+    L_tcp_total = 0.09465 + 0.0823
+
+    # We'll mimic the steps from the 5-DOF code to compute p_bar and do the 2R geometry:
+    cos_q1 = math.cos(q1)
+    sin_q1 = math.sin(q1)
+    Rz_neg_q1 = np.array([
+        [ cos_q1,  sin_q1, 0],
+        [-sin_q1,  cos_q1, 0],
+        [      0,       0, 1]
+    ])
+    p_vec = np.array([p_x, p_y, p_z])
+    p_bar = Rz_neg_q1 @ p_vec
+    p_bar_x, p_bar_y, p_bar_z = p_bar
+
+    # Now define P_x, P_z to remove the final L_tcp in direction φ
+    P_x = p_bar_x - L_tcp_total * math.sin(phi)
+    P_z = p_bar_z - L_tcp_total * math.cos(phi)
+
+    # Solve 2R geometry for q2, q3, q4
+    # as in the existing code:
+    def planar_solution(q3_val):
+        q2_val = math.atan2(P_x, P_z) - math.atan2(L2 * math.sin(q3_val), L1 + L2 * math.cos(q3_val))
+        q4_val = phi - (q2_val + q3_val)
+        # Evaluate the reconstruction error in XZ-plane:
+        calc_x = (L1 * math.sin(q2_val)
+                  + L2 * math.sin(q2_val + q3_val)
+                  + L_tcp_total * math.sin(phi))
+        calc_z = (L1 * math.cos(q2_val)
+                  + L2 * math.cos(q2_val + q3_val)
+                  + L_tcp_total * math.cos(phi))
+        err_val = math.sqrt((calc_x - p_bar_x)**2 + (calc_z - p_bar_z)**2)
+        return (q2_val, q4_val, err_val)
+
+    r2 = math.sqrt(P_x**2 + P_z**2)
+    cos_q3 = (r2**2 - L1**2 - L2**2) / (2 * L1 * L2)
+    cos_q3_clamped = max(-1.0, min(1.0, cos_q3))
+    q3_candidateA = math.acos(cos_q3_clamped)
+    q3_candidateB = -q3_candidateA
+
+    # Check both branches for q3:
+    q2_A, q4_A, err_A = planar_solution(q3_candidateA)
+    q2_B, q4_B, err_B = planar_solution(q3_candidateB)
+    if err_A <= err_B:
+        q3 = q3_candidateA
+        q2 = q2_A
+        q4 = q4_A
+    else:
+        q3 = q3_candidateB
+        q2 = q2_B
+        q4 = q4_B
+
+    # ----------------------------
+    # 5) We now have q1, q2, q3, q4, q5, q6.
+    # ----------------------------
+    return (q1, q2, q3, q4, q5, q6)

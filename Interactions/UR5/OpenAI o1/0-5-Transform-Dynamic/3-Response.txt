@@ -1,0 +1,205 @@
+def inverse_kinematics(p: tuple[float, float, float], r: tuple[float, float, float]) -> tuple[float, float, float, float, float, float]:
+    """
+    Closed‐form analytical inverse kinematics for a 6–DOF serial manipulator whose URDF links and axes
+    match the "DETAILS" table.  Joints 1..5 are solved largely as in the existing 5–DOF solution
+    (EXISTING 1), then joint 6 is determined by decoupling the final orientation.
+
+    Summary:  
+      1) We treat joints 1–5 just as the 5–DOF subproblem does, except we regard the "effective TCP"
+         as being up to the start of revolute–joint–6.  This means that for the position equations
+         we treat a "tool length" = 0.09465 (the link–6 offset along local Z) and an effective
+         y–constant offset = 0.13585 - 0.1197 + 0.093 = 0.10915 (same as the 5–DOF subchain).
+      2) Orientation is decoupled in two stages.  First, we remove the final known offset
+         of the TCP (rotation about Z by +π/2 at the very end, plus its translation),
+         and solve for q1..5 as if the chain ended in joint–6's frame.  Then we solve q6
+         from the residual rotation about Y needed to match the final orientation.
+
+    In steps:
+
+      Let R_des be the desired orientation built from the requested roll–pitch–yaw = (rx, ry, rz)
+      following the typical URDF convention:  Rz(rz)*Ry(ry)*Rx(rx).
+
+      (A) Compute a "reduced" desired orientation R_des' = R_des * Rz( -π/2 ).
+          This effectively removes the fixed +π/2 rotation about Z that happens
+          at the very tip of the robot (the URDF says the TCP has an orientation
+          offset of [0,0,π/2]).
+
+      (B) Solve joints q1..5 exactly as in the 5–DOF existing code, but using R_des'
+          as the target orientation.  This yields angles q1..5 for the subchain.
+
+      (C) Given q1..5, define M = Rz(-q1)*R_des'.  From the 5–DOF solution we know:
+          M ≈ Ry(q2+q3+q4)*Rz(q5)* Ry(q6).
+          We isolate q6 by “peeling off” Ry(q2+q3+q4) and Rz(q5).
+
+          So, M1 = Ry(-(q2+q3+q4))*M  =>  M1 = Rz(q5)*Ry(q6).
+          Then M2 = Rz(-q5)*M1        =>  M2 = Ry(q6).
+          From a rotation matrix of form Ry(q6) we extract:
+             q6 = atan2( M2[0,2], M2[2,2] ).
+          
+      (D) Return (q1, q2, q3, q4, q5, q6).
+
+      The net position solution is consistent with specifying a single “wrist offset”
+      (0.09465) for the planar 2R portion, and the additional 0.0823 offset along the
+      local Y–axis is accounted for by removing the final rotation offset above.
+      This is the same logic used in the 5–DOF code but extended for joint–6.
+
+      Notes:
+       • Because the problem statement says all posed (p, r) are reachable, no
+         reachability or boundary checks are done here.
+       • Joint–limit enforcement is similarly omitted, as the table says ±2π is allowed.
+       • For brevity, we embed the 5–DOF logic directly.  One could also call
+         the “EXISTING 1” function with the adjusted orientation, then compute q6.
+
+    Parameters:
+        p (float,float,float): desired TCP position [x, y, z]
+        r (float,float,float): desired TCP roll–pitch–yaw [rx, ry, rz]
+    Returns:
+        (q1, q2, q3, q4, q5, q6) in radians
+    """
+    import math
+    import numpy as np
+
+    # ---- STEP 1: constants consistent with the 5-DOF subchain (joints 1..5).
+    # L1, L2: lengths of the two big Y–rotation links
+    L1 = 0.425
+    L2 = 0.39225
+    # the offset from revolve–5 to revolve–6 link is 0.09465 in local Z
+    # the net "y_const" is the same as the 5–DOF subchain analysis
+    y_const = 0.13585 - 0.1197 + 0.093  # = 0.10915
+    # We'll treat that 0.09465 offset as the "tool" length in the 5–DOF planar geometry
+    L_tcp_5dof = 0.09465
+
+    # Unpack the target p, r
+    p_x, p_y, p_z = p
+    roll, pitch, yaw = r
+
+    # Build the desired orientation matrix R_des in typical URDF order: Rz(yaw)*Ry(pitch)*Rx(roll)
+    def Rx(a):
+        return np.array([[1, 0, 0],
+                         [0, math.cos(a), -math.sin(a)],
+                         [0, math.sin(a),  math.cos(a)]])
+    def Ry(a):
+        return np.array([[ math.cos(a), 0, math.sin(a)],
+                         [0,            1,           0],
+                         [-math.sin(a), 0, math.cos(a)]])
+    def Rz(a):
+        return np.array([[ math.cos(a), -math.sin(a), 0],
+                         [ math.sin(a),  math.cos(a), 0],
+                         [           0,            0, 1]])
+    R_x = Rx(roll)
+    R_y = Ry(pitch)
+    R_z = Rz(yaw)
+    R_des = R_z @ R_y @ R_x
+
+    # ---- STEP 2: Remove the final +π/2 rotation about Z from the target,
+    #              so that the 5–DOF subproblem sees an "effective" orientation that
+    #              ends in the revolve–6 frame (before the built-in π/2 offset).
+    Rz_neg90 = Rz(-math.pi/2)
+    R_des_5dof = R_des @ Rz_neg90  # orientation that the subchain 1..5 must achieve
+
+    # ---- STEP 3: Solve q1..5 exactly as in the existing 5–DOF code, but using R_des_5dof.
+    # The difference from the original (EXISTING 1) is that we now pass R_des_5dof
+    # instead of R_des, so the "final" revolve–5 in that subchain effectively lines up
+    # with revolve–6 here.
+
+    # (a) Solve q1 from the "y-constant" approach
+    r_xy = math.sqrt(p_x**2 + p_y**2)
+    theta = math.atan2(p_y, p_x)
+
+    # clamp ratio in [-1,1] to avoid numeric domain errors
+    ratio = y_const / (r_xy + 1.0e-14)
+    ratio = max(-1.0, min(1.0, ratio))
+    a_ = math.asin(ratio)
+    q1_candidate1 = theta - a_
+    q1_candidate2 = theta - (math.pi - a_)
+
+    # helper to compute "error" used for branch selection in orientation
+    def compute_M(q1_val):
+        cos_q1 = math.cos(q1_val)
+        sin_q1 = math.sin(q1_val)
+        Rz_neg_q1 = np.array([[cos_q1,  sin_q1, 0],
+                              [-sin_q1, cos_q1, 0],
+                              [0,       0,      1]])
+        return Rz_neg_q1 @ R_des_5dof
+
+    # pick whichever q1 candidate yields the best alignment in M's [1,2] element
+    M1 = compute_M(q1_candidate1)
+    M2 = compute_M(q1_candidate2)
+    err1 = abs(M1[1, 2])
+    err2 = abs(M2[1, 2])
+    q1 = q1_candidate1 if err1 <= err2 else q1_candidate2
+
+    # (b) define M for the chosen q1
+    cos_q1 = math.cos(q1)
+    sin_q1 = math.sin(q1)
+    Rz_neg_q1 = np.array([[cos_q1,  sin_q1, 0],
+                          [-sin_q1, cos_q1, 0],
+                          [0,       0,      1]])
+    M = Rz_neg_q1 @ R_des_5dof
+
+    # (c) from M = Ry(phi)*Rz(q5), extract q5 and phi = q2+q3+q4
+    phi = math.atan2(M[0, 2], M[2, 2])
+    q5 = math.atan2(M[1, 0], M[1, 1])
+
+    # (d) Solve position for the planar 2R subchain => q2,q3,q4 = define the "wrist center"
+    p_vec = np.array([p_x, p_y, p_z])
+    p_bar = Rz_neg_q1 @ p_vec  # coords in the base–rotated frame
+    p_bar_x, p_bar_y, p_bar_z = p_bar
+
+    # define the 2R geometry offset
+    P_x = p_bar_x - L_tcp_5dof * math.sin(phi)
+    P_z = p_bar_z - L_tcp_5dof * math.cos(phi)
+    r2 = math.sqrt(P_x**2 + P_z**2)
+
+    # clamp cos_q3
+    cos_q3 = (r2**2 - L1**2 - L2**2) / (2.0 * L1 * L2)
+    cos_q3 = max(-1.0, min(1.0, cos_q3))
+    q3_candidateA = math.acos(cos_q3)
+    q3_candidateB = -q3_candidateA
+
+    def planar_solution(q3_val):
+        q2_val = math.atan2(P_x, P_z) - math.atan2(L2 * math.sin(q3_val),
+                                                  L1 + L2 * math.cos(q3_val))
+        q4_val = phi - (q2_val + q3_val)
+        # forward check to see how close it matches
+        calc_x = (L1 * math.sin(q2_val)
+                  + L2 * math.sin(q2_val + q3_val)
+                  + L_tcp_5dof * math.sin(phi))
+        calc_z = (L1 * math.cos(q2_val)
+                  + L2 * math.cos(q2_val + q3_val)
+                  + L_tcp_5dof * math.cos(phi))
+        err_val = math.sqrt((calc_x - p_bar_x)**2 + (calc_z - p_bar_z)**2)
+        return (q2_val, q4_val, err_val)
+
+    q2A, q4A, errA = planar_solution(q3_candidateA)
+    q2B, q4B, errB = planar_solution(q3_candidateB)
+    if errA <= errB:
+        q3 = q3_candidateA
+        q2 = q2A
+        q4 = q4A
+    else:
+        q3 = q3_candidateB
+        q2 = q2B
+        q4 = q4B
+
+    # ---- STEP 4: Now solve for q6 from the leftover rotation. We have:
+    #    Rz(-q1)*R_des' = Ry(phi)*Rz(q5)*Ry(q6).
+    # We already “peeled off” Ry(phi)*Rz(q5).  So define:
+    #    M1 = Ry(-phi)* [Rz(-q1)*R_des'] = Rz(q5)*Ry(q6).
+    # Then M2 = Rz(-q5)*M1 = Ry(q6).
+    # Extract q6 from M2.  That matches the form Ry(a) = [[cos(a),0,sin(a)], [0,1,0], [-sin(a),0,cos(a)]].
+
+    Ry_neg_phi = np.array([[ math.cos(phi), 0, -math.sin(phi)],
+                           [0,             1,               0],
+                           [ math.sin(phi), 0,  math.cos(phi)]])
+    M1 = Ry_neg_phi @ M  # = Rz(q5)*Ry(q6)
+    Rz_neg_q5 = np.array([[ math.cos(-q5),  math.sin(-q5), 0],
+                          [-math.sin(-q5),  math.cos(-q5), 0],
+                          [             0,               0, 1]])
+    M2 = Rz_neg_q5 @ M1  # = Ry(q6)
+
+    # read off q6 from M2
+    # for a pure Ry(a), we have  [0,2] = sin(a) and [2,2] = cos(a)
+    q6 = math.atan2(M2[0, 2], M2[2, 2])
+
+    return (q1, q2, q3, q4, q5, q6)

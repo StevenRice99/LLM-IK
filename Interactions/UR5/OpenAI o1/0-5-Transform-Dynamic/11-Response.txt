@@ -1,0 +1,237 @@
+```python
+def inverse_kinematics(p: tuple[float, float, float], r: tuple[float, float, float]) -> tuple[float, float, float, float, float, float]:
+    """
+    A revised closed-form approach for the 6–DOF manipulator that systematically enumerates
+    only the main “branch flips” typical of a robotic arm (rather than applying ±2π to every joint).
+    Specifically, we:
+      1) Find the two possible solutions for q1 (based on the y-constant geometry).
+      2) For each q1, find the two possible solutions for q3 (±acos(...)).
+      3) For each (q1, q2, q3, q4) sub-solution, compute q5 from the decoupled rotation matrix.
+      4) Also try q5 + π as a possible flip (since rotating joint 5 by +π while adjusting q6
+         can yield the same end-effector orientation).
+      5) Compute q6 from the leftover rotation each time.
+      6) Normalize all 6 angles into the range [−π, +π].
+      7) Use forward kinematics to see which of these up to 2×2×2=8 solutions best matches (p, r).
+
+    This reduces the chance of jumping to large multiples of 2π, and tries the key
+    “elbow–up/elbow–down” and “wrist–flip/no–flip” branches.  Other ±2π solutions are
+    equivalent from a kinematic standpoint but can appear as large angles.  Since the
+    manipulator’s limits are ±2π, solutions in [−π, +π] should be acceptable.
+
+    Args:
+      p: (x, y, z) Target TCP position
+      r: (roll, pitch, yaw) Target TCP orientation in URDF convention
+
+    Returns:
+      (q1, q2, q3, q4, q5, q6), each in [−π, +π], that best achieves the pose.
+
+    Assumptions:
+      • The final (TCP) link has a fixed +π/2 rotation about Z (as per the "DETAILS").
+      • We assume the given (p, r) is reachable.
+    """
+    import math
+    import numpy as np
+
+    # ------------------ Utility matrix builders ------------------
+    def Rx(a):
+        return np.array([
+            [1, 0, 0],
+            [0, math.cos(a), -math.sin(a)],
+            [0, math.sin(a),  math.cos(a)]
+        ], dtype=float)
+
+    def Ry(a):
+        return np.array([
+            [ math.cos(a), 0, math.sin(a)],
+            [0,            1,           0],
+            [-math.sin(a), 0, math.cos(a)]
+        ], dtype=float)
+
+    def Rz(a):
+        return np.array([
+            [ math.cos(a), -math.sin(a), 0],
+            [ math.sin(a),  math.cos(a), 0],
+            [           0,            0, 1]
+        ], dtype=float)
+
+    def rot3x3_to_4x4(R):
+        M = np.eye(4)
+        M[:3,:3] = R
+        return M
+
+    def translate(x, y, z):
+        T = np.eye(4)
+        T[0,3] = x
+        T[1,3] = y
+        T[2,3] = z
+        return T
+
+    # ------------------ Forward Kinematics -----------------------
+    def forward_kin(j1, j2, j3, j4, j5, j6):
+        """
+        Returns a 4x4 transform from base to TCP, given the 6 joint angles. 
+        Matches the "DETAILS" table + final TCP rotation of +π/2 about Z.
+        """
+        T1 = rot3x3_to_4x4(Rz(j1))
+        T2 = translate(0,0.13585,0) @ rot3x3_to_4x4(Ry(j2))
+        T3 = translate(0,-0.1197,0.425) @ rot3x3_to_4x4(Ry(j3))
+        T4 = translate(0,0,0.39225) @ rot3x3_to_4x4(Ry(j4))
+        T5 = translate(0,0.093,0) @ rot3x3_to_4x4(Rz(j5))
+        T6 = translate(0,0,0.09465) @ rot3x3_to_4x4(Ry(j6))
+        # Final TCP: translate [0,0,0.0823], rotate +π/2 about Z
+        T_tcp = translate(0,0,0.0823) @ rot3x3_to_4x4(Rz(math.pi/2))
+
+        T_out = np.eye(4)
+        for Ti in [T1, T2, T3, T4, T5, T6, T_tcp]:
+            T_out = T_out @ Ti
+        return T_out
+
+    # ------------------ Pose Error Function ----------------------
+    def pose_error(Ta, Tb):
+        """
+        Returns a scalar measure of difference between two 4x4 transforms:
+        position error + orientation difference. 
+        """
+        dp = Ta[0:3,3] - Tb[0:3,3]
+        err_pos = np.linalg.norm(dp)
+        Ra = Ta[0:3,0:3]
+        Rb = Tb[0:3,0:3]
+        err_rot = np.linalg.norm(Ra - Rb, 'fro')
+        return err_pos + err_rot
+
+    # ------------------ Build the Desired Transform --------------
+    px, py, pz = p
+    roll, pitch, yaw = r
+
+    # R_des = Rz(yaw)*Ry(pitch)*Rx(roll)
+    R_des = Rz(yaw) @ Ry(pitch) @ Rx(roll)
+    T_des = np.eye(4)
+    T_des[:3,:3] = R_des
+    T_des[0,3] = px
+    T_des[1,3] = py
+    T_des[2,3] = pz
+
+    # ------------------ Subchain geometry solution ---------------
+    # Link constants
+    L1 = 0.425
+    L2 = 0.39225
+    L_tcp_5dof = 0.09465
+    # from revolve–2 to revolve–3 offsets: y_const = 0.13585 - 0.1197 + 0.093 = 0.10915
+    y_const = 0.13585 - 0.1197 + 0.093  
+
+    # Step A: Remove the final +π/2 from R_des -> orientation for subchain 1..5
+    # Because the TCP has a +π/2 about Z.
+    R_sub = R_des @ Rz(-math.pi/2)
+
+    # Solve q1 from y-constant geometry => 2 solutions
+    r_xy = math.sqrt(px**2 + py**2) + 1e-14
+    theta = math.atan2(py, px)
+    ratio = max(-1.0, min(1.0, y_const / r_xy))
+    a_ = math.asin(ratio)
+    q1_candidates = [theta - a_, theta - (math.pi - a_)]
+
+    def Rz_neg_q1(q1v):
+        c1 = math.cos(q1v)
+        s1 = math.sin(q1v)
+        return np.array([[ c1,  s1, 0], [-s1,  c1, 0], [0, 0, 1]], dtype=float)
+
+    def M_for_q1(q1v):
+        return Rz_neg_q1(q1v) @ R_sub
+
+    # We'll define a helper to pick which q1 is better, same logic as existing code:
+    def pick_q1_candidate(q1v_list):
+        best_q1 = None
+        best_err = 1e9
+        for q1v in q1v_list:
+            Mtest = M_for_q1(q1v)
+            this_err = abs(Mtest[1,2])
+            if this_err < best_err:
+                best_err = this_err
+                best_q1 = q1v
+        return best_q1
+
+    q1_main = pick_q1_candidate(q1_candidates)
+
+    # Build M from chosen q1: M = Rz(-q1)*R_sub = Ry(phi)*Rz(q5)
+    M_main = M_for_q1(q1_main)
+    phi_main = math.atan2(M_main[0,2], M_main[2,2])
+    q5_main = math.atan2(M_main[1,0], M_main[1,1])
+
+    # Solve planar 2R for q2, q3, q4
+    p_vec = np.array([px, py, pz], dtype=float)
+    p_bar = Rz_neg_q1(q1_main) @ p_vec
+    p_bx, _, p_bz = p_bar
+    # subtract offset
+    Px_ = p_bx - L_tcp_5dof*math.sin(phi_main)
+    Pz_ = p_bz - L_tcp_5dof*math.cos(phi_main)
+    rr = math.sqrt(Px_**2 + Pz_**2) + 1e-14
+    cos_q3 = (rr*rr - L1*L1 - L2*L2)/(2*L1*L2)
+    cos_q3 = max(-1.0, min(1.0, cos_q3))
+    q3A = math.acos(cos_q3)
+    q3B = -q3A
+
+    def planar_subchain_sol(q3v):
+        q2v = math.atan2(Px_, Pz_) - math.atan2(L2*math.sin(q3v), L1 + L2*math.cos(q3v))
+        q4v = phi_main - (q2v + q3v)
+        return (q2v, q4v)
+
+    # We'll produce 2 sub-solutions for (q1,q2,q3,q4,q5)
+    sub_solutions_5dof = []
+    for q3v in [q3A, q3B]:
+        q2v, q4v = planar_subchain_sol(q3v)
+        sub_solutions_5dof.append( (q1_main, q2v, q3v, q4v, q5_main) )
+
+    # Then solve for q6 from leftover rotation. 
+    # M_main = Ry(phi_main)*Rz(q5_main)*Ry(q6)
+    # => q6 from M2 = Rz(-q5_main)*Ry(-phi_main)* M_main = Ry(q6)
+    def compute_q6(phi, q5, M):
+        Ry_neg_phi = np.array([
+            [ math.cos(phi), 0, -math.sin(phi)],
+            [0, 1, 0],
+            [ math.sin(phi), 0,  math.cos(phi)]
+        ], dtype=float).T  # transpose => Ry(-phi)
+        Rz_neg_q5 = Rz(-q5)
+        M2 = Rz_neg_q5 @ (Ry_neg_phi @ M)
+        # M2 ~ Ry(q6)
+        return math.atan2(M2[0,2], M2[2,2])
+
+    # A small function to wrap angles to [−π, +π]
+    def wrap_to_pi(a):
+        # shift angle into [−π, +π]
+        return (a + math.pi) % (2*math.pi) - math.pi
+
+    # We'll create up to 8 solutions:
+    # For each sub-solution (q1,q2,q3,q4,q5), we try q5, q5+π as a “wrist flip”
+    # and compute q6 accordingly, storing them. Then we pick the best.
+    candidate_solutions = []
+    for (Q1, Q2, Q3, Q4, Q5) in sub_solutions_5dof:
+        # M again for q1
+        M_here = M_for_q1(Q1)
+
+        for flip5 in [0.0, math.pi]:
+            q5_new = Q5 + flip5
+            # re-derive q6
+            q6_new = compute_q6(phi_main, q5_new, M_here)
+            # wrap angles
+            qsol = [
+                wrap_to_pi(Q1),
+                wrap_to_pi(Q2),
+                wrap_to_pi(Q3),
+                wrap_to_pi(Q4),
+                wrap_to_pi(q5_new),
+                wrap_to_pi(q6_new)
+            ]
+            candidate_solutions.append(qsol)
+
+    # Evaluate them all, pick best
+    best_err = 1e9
+    best_sol = None
+    for sol in candidate_solutions:
+        T_fk = forward_kin(*sol)
+        err = pose_error(T_fk, T_des)
+        if err < best_err:
+            best_err = err
+            best_sol = sol
+
+    return tuple(best_sol)
+```

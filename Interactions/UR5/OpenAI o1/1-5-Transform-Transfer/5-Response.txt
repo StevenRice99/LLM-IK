@@ -1,0 +1,243 @@
+```python
+def inverse_kinematics(p: tuple[float, float, float], r: tuple[float, float, float]) -> tuple[float, float, float, float, float]:
+    """
+    Gets the joint values needed to reach position p = (x, y, z) and orientation r = (roll, pitch, yaw).
+    Returns a tuple (q1, q2, q3, q4, q5) in radians.
+    
+    This code extends the position-only IK by also matching the final orientation through joint5,
+    and it additionally tries some branch adjustments for S = q1+q2+q3 (and q5) to better cover
+    the multiple valid ways to achieve the same final orientation. This helps find solutions
+    that match the target orientation more closely, even when they differ by ±2π on certain joints.
+    
+    Assumptions:
+      • All inputs are reachable (no reachability checks).
+      • Joint limits are ±2π but we also allow intermediate angles to shift by ±2π
+        so long as the final angle remains in [-2π, +2π].
+    """
+    import math
+    import numpy as np
+
+    # ------------------------ Utility functions ------------------------
+    
+    def normalize(angle: float) -> float:
+        """Normalizes an angle to the range (-pi, pi]."""
+        while angle > math.pi:
+            angle -= 2.0 * math.pi
+        while angle <= -math.pi:
+            angle += 2.0 * math.pi
+        return angle
+
+    def in_valid_range(a: float) -> bool:
+        """Check if angle is in [-2π, 2π]."""
+        if a < -2.0*math.pi: 
+            return False
+        if a >  2.0*math.pi:
+            return False
+        return True
+
+    def rot_x(rx: float) -> np.ndarray:
+        c = math.cos(rx)
+        s = math.sin(rx)
+        return np.array([[1, 0, 0],
+                         [0, c, -s],
+                         [0, s,  c]], dtype=float)
+
+    def rot_y(ry: float) -> np.ndarray:
+        c = math.cos(ry)
+        s = math.sin(ry)
+        return np.array([[ c, 0, s],
+                         [ 0, 1, 0],
+                         [-s, 0, c]], dtype=float)
+
+    def rot_z(rz: float) -> np.ndarray:
+        c = math.cos(rz)
+        s = math.sin(rz)
+        return np.array([[ c, -s, 0],
+                         [ s,  c, 0],
+                         [ 0,   0, 1]], dtype=float)
+
+    def orientation_error_sq(Rtest: np.ndarray, Rtarget: np.ndarray) -> float:
+        """Squared Frobenius-norm difference between two 3x3 rotation matrices."""
+        diff = Rtest - Rtarget
+        return float(np.sum(diff * diff))
+
+    # ------------------ Build desired orientation ----------------------
+    
+    # The target orientation is given by RPY = (roll, pitch, yaw)
+    # in the usual URDF sense: R = Rx(roll)*Ry(pitch)*Rz(yaw).
+    roll, pitch, yaw = r
+    Rroll  = rot_x(roll)
+    Rpitch = rot_y(pitch)
+    Ryaw   = rot_z(yaw)
+    Rdes   = Rroll @ Rpitch @ Ryaw
+
+    # The tool has a constant +90° rotation about Z at the end. We remove that from the right:
+    #   RY( q1+q2+q3 ) * RZ( q4 ) * RY( q5 ) * RZ( π/2 ) = Rdes
+    #   => RY( q1+q2+q3 ) * RZ( q4 ) * RY( q5 ) = Rdes * RZ(-π/2)
+    R_offset = rot_z(-math.pi/2)
+    Rprime = Rdes @ R_offset
+
+    # -------------------- Robot geometry constants ---------------------
+    L1 = 0.425
+    L2 = 0.39225
+    L3 = 0.09465
+    y_offset = -0.1197 + 0.093  # = -0.0267
+    tcp_y_offset = 0.0823
+
+    x_target, y_target, z_target = p
+
+    # ---------------------- Position-only helper -----------------------
+    # Ignores q5 for position, because rotating joint5 about Y does not move the TCP in x or z
+    # if the link offset is along local Y.
+    def fk_position(q1, q2, q3, q4):
+        S = q1 + q2 + q3
+        d = tcp_y_offset * math.sin(q4)
+        x_fk = (L1 * math.sin(q1) +
+                L2 * math.sin(q1 + q2) +
+                L3 * math.sin(S) -
+                d   * math.cos(S))
+        z_fk = (L1 * math.cos(q1) +
+                L2 * math.cos(q1 + q2) +
+                L3 * math.cos(S) +
+                d   * math.sin(S))
+        y_fk = y_offset + tcp_y_offset * math.cos(q4)
+        return (x_fk, y_fk, z_fk)
+
+    # ------------------ Orientation measure / solve --------------------
+    # Evaluate orientation vs. Rdes for a given (q1, q2, q3, q4, q5).
+    def fk_orientation_error(q1, q2, q3, q4, q5):
+        S = q1 + q2 + q3
+        R_S = rot_y(S)
+        R_4 = rot_z(q4)
+        R_5 = rot_y(q5)
+        Rtcp = R_S @ R_4 @ R_5 @ rot_z(math.pi/2)
+        return orientation_error_sq(Rtcp, Rdes)
+
+    # Solve for q5 given (S, q4) so that RY(S)*RZ(q4)*RY(q5) ~= Rprime
+    # We'll define Rtemp^-1 Rprime = RY(q5) with Rtemp = RY(S)*RZ(q4).
+    def solve_q5_candidates(S, q4):
+        # Rtemp^-1 = RZ(-q4)*RY(-S)
+        R_temp_inv = rot_z(-q4) @ rot_y(-S)
+        R_double = R_temp_inv @ Rprime
+        # For a rotation about Y, we can read q5 from the [0,0] & [0,2] components:
+        base_val = math.atan2(R_double[0,2], R_double[0,0])
+        # Also consider ±π solutions for that same rotation about Y
+        cands = [base_val, base_val + math.pi, base_val - math.pi]
+        # We'll return all 3 for thoroughness, to better handle flips
+        return cands
+
+    # We'll gather candidate solutions over the branches from q4, T, q2, sign, etc.
+    # Then for each candidate, we refine possible q1 offsets in { -2π, 0, +2π } (which
+    # effectively shifts S = q1+q2+q3 by ±2π) and also refine q5 by ±2π to see if that
+    # yields a better orientation match.
+
+    # For the specialized geometry: y = -0.0267 + 0.0823*cos(q4)
+    # => cos(q4) = (y_target+0.0267)/0.0823
+    C = (y_target - y_offset)/tcp_y_offset
+    # clamp numeric issues
+    C = max(min(C, 1.0), -1.0)
+    try:
+        q4_candidates = [math.acos(C), -math.acos(C)]
+    except ValueError:
+        raise ValueError("No valid solution for q4 from the provided y coordinate.")
+
+    # We'll define two possible angles for T = psi or psi+π
+    psi = math.atan2(x_target, z_target)
+
+    best_error = float('inf')
+    best_solution = None
+
+    for q4_cand in q4_candidates:
+        d = tcp_y_offset * math.sin(q4_cand)
+        L_eff = math.sqrt(L3**2 + d**2)
+        phi = math.atan2(d, L3)
+
+        # T_candidate in {psi, psi+π}
+        for T_candidate in [psi, psi+math.pi]:
+            S_base = T_candidate + phi
+
+            # Wrist center
+            Wx = x_target - L_eff * math.sin(T_candidate)
+            Wz = z_target - L_eff * math.cos(T_candidate)
+            r_w = math.hypot(Wx, Wz)
+
+            # If outside the 2R range, skip
+            if r_w > L1 + L2 or r_w < abs(L1 - L2):
+                continue
+
+            # Solve the 2R subproblem for q1, q2
+            cos_q2 = (r_w**2 - L1**2 - L2**2)/(2*L1*L2)
+            cos_q2 = max(min(cos_q2, 1.0), -1.0)
+
+            # each sign_ => ±acos
+            for sign_ in [1, -1]:
+                try:
+                    q2_cand = sign_ * math.acos(cos_q2)
+                except ValueError:
+                    continue
+
+                # Solve q1 from triangle geometry
+                delta = math.atan2(L2*math.sin(q2_cand), L1 + L2*math.cos(q2_cand))
+                theta_w = math.atan2(Wx, Wz)
+                q1_cand = theta_w - delta
+                q3_cand = S_base - (q1_cand + q2_cand)
+
+                # Check basic position error first
+                x_fk, y_fk, z_fk = fk_position(q1_cand, q2_cand, q3_cand, q4_cand)
+                pos_err = math.sqrt((x_fk - x_target)**2 + 
+                                    (y_fk - y_target)**2 + 
+                                    (z_fk - z_target)**2)
+
+                # Next get candidate q5 from the factorization
+                q5_list = solve_q5_candidates(q1_cand + q2_cand + q3_cand, q4_cand)
+
+                # We'll try each q5 and also see if adding ±2π helps orientation.
+                for raw_q5 in q5_list:
+                    for shift_q5 in [0.0, 2.0*math.pi, -2.0*math.pi]:
+                        q5_cand = raw_q5 + shift_q5
+                        # Also consider shifting q1 by ±2π to adjust the sum S
+                        # (thus rotating the entire chain about Y an extra ±2π).
+                        for shift_q1 in [0.0, 2.0*math.pi, -2.0*math.pi]:
+                            q1_test = q1_cand + shift_q1
+                            # That also changes S => S + shift_q1
+                            # So q3_test = q3_cand (unchanged) => the sum S changed by shift_q1
+                            # We must keep q2 the same, so effectively the new sum is
+                            #   S' = S_base + shift_q1, which is consistent with q1 + q2 + q3.
+                            # We'll define q3_test so that q1_test + q2_cand + q3_test = S_base + shift_q1
+                            # but that is just q3_test = q3_cand, because S_base = q1_cand+q2_cand+q3_cand.
+                            # Adding shift_q1 to q1_cand => the sum increases by shift_q1 => so we do:
+                            q3_test = q3_cand
+                            # Check if angles remain in [-2π, 2π].
+                            if not (in_valid_range(q1_test) and in_valid_range(q2_cand) 
+                                    and in_valid_range(q3_test) and in_valid_range(q4_cand)
+                                    and in_valid_range(q5_cand)):
+                                continue
+
+                            # Evaluate orientation
+                            ori_err = fk_orientation_error(q1_test, 
+                                                          q2_cand, 
+                                                          q3_test, 
+                                                          q4_cand, 
+                                                          q5_cand)
+                            total_err = pos_err + ori_err
+                            if total_err < best_error:
+                                best_error = total_err
+                                best_solution = (q1_test, 
+                                                 q2_cand, 
+                                                 q3_test, 
+                                                 q4_cand, 
+                                                 q5_cand)
+
+    if best_solution is None:
+        raise ValueError("No valid IK solution found for position+orientation input.")
+
+    # Finally, clamp angles to (-π, π] for the actual return,
+    # though they are guaranteed to be within ±2π.
+    q1, q2, q3, q4, q5 = best_solution
+    q1 = normalize(q1)
+    q2 = normalize(q2)
+    q3 = normalize(q3)
+    q4 = normalize(q4)
+    q5 = normalize(q5)
+    return (q1, q2, q3, q4, q5)
+```

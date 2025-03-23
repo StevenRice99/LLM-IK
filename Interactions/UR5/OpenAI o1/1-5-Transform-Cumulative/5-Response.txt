@@ -1,0 +1,236 @@
+```python
+import math
+import numpy as np
+
+def inverse_kinematics(p: tuple[float, float, float], r: tuple[float, float, float]) -> tuple[float, float, float, float, float]:
+    """
+    Closed-form inverse kinematics solution for the 5-DOF serial manipulator.
+    
+    This solution attempts all valid elbow “sign” combinations and picks the solution whose
+    forward kinematics best matches the desired end-effector pose (both position and orientation).
+    In particular, the manipulator has:
+      - Joint 1 (q1): rotation about Y at the origin.
+      - Joint 2 (q2): rotation about Y at [0, -0.1197, 0.425].
+      - Joint 3 (q3): rotation about Y at [0, 0, 0.39225].
+      - Joint 4 (q4): rotation about Z at [0, 0.093, 0].
+      - Joint 5 (q5): rotation about Y at [0, 0, 0.09465].
+      - TCP offset: [0, 0.0823, 0] and a final fixed rotation about Z of +π/2.
+
+    All angles are returned in radians, wrapped roughly to the range [-π, π]. 
+    For each test, we generate multiple candidate solutions (due to ± in inverse trig) and
+    pick the one that most closely reproduces the desired pose.
+
+    :param p: The desired position [x, y, z] of the TCP in the world frame.
+    :param r: The desired orientation [roll, pitch, yaw] in radians, in URDF convention:
+              R_target = Rz(yaw) * Ry(pitch) * Rx(roll).
+    :return: A tuple (q1, q2, q3, q4, q5) of joint angles in radians.
+    """
+
+    # ---------------------------------------------------
+    # 1) Utility functions: rotation matrices & forward kinematics
+    # ---------------------------------------------------
+
+    def Rx(a):
+        ca, sa = math.cos(a), math.sin(a)
+        return np.array([[1, 0, 0],
+                         [0, ca, -sa],
+                         [0, sa,  ca]], dtype=float)
+
+    def Ry(a):
+        ca, sa = math.cos(a), math.sin(a)
+        return np.array([[ ca, 0, sa],
+                         [  0, 1,  0],
+                         [-sa, 0, ca]], dtype=float)
+
+    def Rz(a):
+        ca, sa = math.cos(a), math.sin(a)
+        return np.array([[ ca, -sa, 0],
+                         [ sa,  ca, 0],
+                         [  0,   0, 1]], dtype=float)
+
+    # Build target orientation matrix
+    roll, pitch, yaw = r
+    R_target = Rz(yaw) @ Ry(pitch) @ Rx(roll)
+
+    # Link offsets from the URDF "DETAILS" (in meters):
+    #   Joint1: at base (no offset)
+    #   Joint2: T(0, -0.1197, 0.425)
+    #   Joint3: T(0, 0, 0.39225)
+    #   Joint4: T(0, 0.093, 0), rotates about Z
+    #   Joint5: T(0, 0, 0.09465), rotates about Y
+    #   TCP   : T(0, 0.0823, 0), plus a fixed Rz(pi/2)
+    offset2 = np.array([0.0, -0.1197, 0.425])
+    offset3 = np.array([0.0, 0.0,    0.39225])
+    offset4 = np.array([0.0, 0.093,  0.0])
+    offset5 = np.array([0.0, 0.0,    0.09465])
+    offset_tcp = np.array([0.0, 0.0823, 0.0])
+    psi = math.pi / 2.0  # fixed rotation about Z at TCP
+
+    def wrap_angle(a):
+        """Wraps angle into [-π, π]."""
+        while a >  math.pi: a -= 2*math.pi
+        while a <= -math.pi: a += 2*math.pi
+        return a
+
+    def forward_kinematics(q1, q2, q3, q4, q5):
+        """
+        Forward Kinematics: returns (pos, rotMatrix) of the TCP in world frame,
+        given the 5 joint angles. This is used to evaluate solution candidates.
+        """
+        # Joint1 about Y at origin
+        R1 = Ry(q1)
+        p1 = np.array([0.0, 0.0, 0.0])
+
+        # Joint2 about Y at offset2
+        T2 = p1 + R1 @ offset2
+        R2 = R1 @ Ry(q2)
+
+        # Joint3 about Y at offset3
+        T3 = T2 + R2 @ offset3
+        R3 = R2 @ Ry(q3)
+
+        # Joint4 about Z at offset4
+        T4 = T3 + R3 @ offset4
+        R4 = R3 @ Rz(q4)
+
+        # Joint5 about Y at offset5
+        T5 = T4 + R4 @ offset5
+        R5 = R4 @ Ry(q5)
+
+        # TCP offset + Rz(psi)
+        TCP_pos = T5 + R5 @ offset_tcp
+        TCP_rot = R5 @ Rz(psi)
+
+        return TCP_pos, TCP_rot
+
+    # ---------------------------------------------------
+    # 2) Inverse kinematics approach
+    #    We'll treat joint1,2,3 as an "arm" to place T4 exactly.
+    #    Then solve q4,q5 to match final orientation.
+    #
+    #    To find T4 (the origin of joint4), we remove from p the
+    #    effect of joint5 + TCP (assuming q4=0, q5=0 or so).
+    #    But since we have a 2D wrist (Z then Y) and a final Rz(psi),
+    #    we do a multi-solution approach:
+    #      - For each possible ± in computing q2, q3 from geometry,
+    #      - For each possible offset in q1, etc.
+    #    We compute the final forward kinematics, measure error,
+    #    and pick the best solution.
+    # ---------------------------------------------------
+
+    # We'll define a function that tries a candidate (q1, q2, q3),
+    # then solves q4, q5 from the orientation. Next we measure the total error
+    # versus the target. (We do position difference + scaled orientation difference.)
+    # Return (err, (q1, q2, q3, q4, q5)).
+    def solve_and_score(q1, q2, q3):
+        """
+        Given q1,q2,q3, solve for q4,q5 that best aligns orientation to R_target,
+        then compute fwd-kin error vs target. Return (score, solution).
+        The 'score' is a sum of position & orientation error.
+        """
+        # Next figure out q4, q5 from R_3^T * R_target * Rz(-psi) = Rz(q4)*Ry(q5).
+        # Build R_3:
+        R1 = Ry(q1)
+        R2 = R1 @ Ry(q2)
+        R3 = R2 @ Ry(q3)
+
+        R_left = R3.T @ R_target @ Rz(-psi)
+
+        # q4 is rotation about Z => alpha = atan2(R_left[1,0], R_left[0,0])
+        q4 = math.atan2(R_left[1, 0], R_left[0, 0])
+
+        # Then Rz(-q4)*R_left = Ry(q5)
+        R_z_negq4 = Rz(-q4)
+        R_y_ = R_z_negq4 @ R_left
+        # For Ry(q5): q5 = atan2(R_y_[0,2], R_y_[0,0])
+        q5 = math.atan2(R_y_[0, 2], R_y_[0, 0])
+
+        # Wrap angles
+        q1w = wrap_angle(q1)
+        q2w = wrap_angle(q2)
+        q3w = wrap_angle(q3)
+        q4w = wrap_angle(q4)
+        q5w = wrap_angle(q5)
+
+        # Evaluate forward kinematics
+        fk_pos, fk_R = forward_kinematics(q1w, q2w, q3w, q4w, q5w)
+        fk_p_err = np.linalg.norm(fk_pos - np.array(p))
+        # Orientation error: measure Frobenius norm of difference or angle difference
+        diff_R = fk_R.T @ R_target
+        # ideally diff_R ~ Identity. We can measure angle from trace
+        trace_val = np.trace(diff_R)
+        # For a perfect match, trace=3.  The angle error ~ acos((trace-1)/2). 
+        # We'll just do a simpler measure:
+        orient_err = np.linalg.norm(diff_R - np.eye(3))
+
+        score = fk_p_err + orient_err
+        return (score, (q1w, q2w, q3w, q4w, q5w))
+
+    # To systematically find q1,q2,q3, we consider the needed position of T3
+    # or more directly T4 in the chain. However, closed-form for 3 consecutive Y-axis
+    # rotations + offset is complicated. Instead, we attempt a small discrete set of
+    # “candidate angles” from geometry. In many 5-DOF arms, the net rotation about Y
+    # after the first 3 joints can produce the needed direction for p. We'll try multiple
+    # sign combinations from an arccos-like approach. We also allow q1 to be an atan2 of x,z
+    # or plus π, etc. This is brute force for the typical ± solutions of an elbow manipulator.
+
+    # We'll define an array to store all candidate (q1,q2,q3).
+    candidates_123 = []
+
+    # a) We define q1_base = atan2(x, z). Also try q1_base ± π to account for alternative "flip" about Y.
+    px, py, pz = p
+    base_angle = math.atan2(px, pz)
+    q1_set = [base_angle, base_angle + math.pi]
+    
+    # b) We'll define an approximate "elbow" approach ignoring the offset -0.1197 in Y just to get some
+    # candidate angles for q2,q3. The total radial distance in the X-Z plane from base:
+    R_plane = math.sqrt(px*px + pz*pz)
+    # We have two links along Z: L2=0.425, L3=0.39225
+    L2 = 0.425
+    L3 = 0.39225
+    d2_sq = R_plane*R_plane + (py + 0.1197)**2  # incorporate the -0.1197 shift to the link2 a bit
+    # clamp cos
+    cos_val = (d2_sq - L2*L2 - L3*L3)/(2.0*L2*L3)
+    cos_val = max(min(cos_val,1.0),-1.0)
+
+    # two solutions for q3 ~ ± acos(cos_val)
+    try:
+        q3a = math.acos(cos_val)
+        q3b = -q3a
+        possible_q3 = [q3a, q3b]
+    except ValueError:
+        # If out of domain, just skip (the user said all targets are reachable, so presumably no error).
+        possible_q3 = [0.0]
+
+    # For each q3, we define a "phi" from the law of cosines approach
+    def safe_atan2(y, x):
+        return math.atan2(y, x)
+
+    for q3_try in possible_q3:
+        sin3, cos3 = math.sin(q3_try), math.cos(q3_try)
+        # Elbow angle approach
+        # alpha = atan2(L3*sin3, L2 + L3*cos3)
+        alpha = safe_atan2(L3*sin3, L2 + L3*cos3)
+        # We can produce two possible q2 from ± alpha, or simply q2 = -alpha (commonly used).
+        # but let's also try q2 = pi - alpha in case there's a behind-the-back solution
+        q2_cand = [ -alpha, math.pi - alpha ]
+        for q2_try in q2_cand:
+            for q1_try in q1_set:
+                candidates_123.append((q1_try, q2_try, q3_try))
+
+    # We'll also add a fallback if the above is degenerate: we might just add (q1 base, 0, 0) or ± small
+    if not candidates_123:
+        candidates_123.append((base_angle, 0.0, 0.0))
+        candidates_123.append((base_angle+math.pi, 0.0, 0.0))
+
+    # Now we evaluate all these candidates, solve q4,q5, measure error, pick best
+    best_score = float('inf')
+    best_sol = (0,0,0,0,0)
+    for (cand_q1, cand_q2, cand_q3) in candidates_123:
+        sc, sol_5dof = solve_and_score(cand_q1, cand_q2, cand_q3)
+        if sc < best_score:
+            best_score = sc
+            best_sol = sol_5dof
+
+    return best_sol
+```

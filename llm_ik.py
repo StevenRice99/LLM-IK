@@ -3661,8 +3661,8 @@ def llm_ik(robots: str or list[str] or None = None, max_length: int = 0, orienta
                 for o in [False, True]:
                     for m in [NORMAL, EXTEND, DYNAMIC, CUMULATIVE, TRANSFER]:
                         # Only generate for those which produced a code file.
-                        if os.path.exists(os.path.join(solver.code, f"{lower}-{upper}-{TRANSFORM if o else POSITION}-"
-                                                                    f"{m}.py")):
+                        if os.path.exists(os.path.join(solver.solutions, f"{lower}-{upper}-"
+                                                                         f"{TRANSFORM if o else POSITION}-{m}.py")):
                             solver.evaluate(lower, upper, o, m)
     # Evaluate all robots.
     for robot in created_robots:

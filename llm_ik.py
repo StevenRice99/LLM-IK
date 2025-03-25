@@ -1650,11 +1650,6 @@ class Solver:
                                              f"Waiting for {wait} second{'' if wait == 1 else 's'} before next API "
                                              f"call.")
                                 time.sleep(wait)
-                        # Perform one final evaluation.
-                        if os.path.exists(os.path.join(self.code, f"{lower}-{upper}-"
-                                                                  f"{TRANSFORM if current_orientation else POSITION}-"
-                                                                  f"{current_mode}.py")):
-                            self.evaluate(lower, upper, current_orientation, current_mode)
         # Return if everything was successful or not.
         return True
 
@@ -3655,12 +3650,20 @@ def llm_ik(robots: str or list[str] or None = None, max_length: int = 0, orienta
         logging.info(f"Waiting for {wait} second {'' if wait == 1 else 's'} between API calls.")
     # Run the solvers, making API calls only on those that should be.
     for solver in created_models:
-        if solver.url != "" and not run:
-            continue
-        run_instance = solver.robot.name in robots and solver.model in models
-        if not solver.perform(orientation, types, max_length, run_instance, wait):
-            logging.error("Not performing any more API calls as there were errors.")
-            run = False
+        if solver.url == "" or run:
+            run_instance = solver.robot.name in robots and solver.model in models
+            if not solver.perform(orientation, types, max_length, run_instance, wait):
+                logging.error("Not performing any more API calls as there were errors.")
+                run = False
+        # Perform one final evaluation for the solver.
+        for lower in range(0, solver.robot.joints):
+            for upper in range(lower, solver.robot.joints):
+                for o in [False, True]:
+                    for m in [NORMAL, EXTEND, DYNAMIC, CUMULATIVE, TRANSFER]:
+                        # Only generate for those which produced a code file.
+                        if os.path.exists(os.path.join(solver.code, f"{lower}-{upper}-{TRANSFORM if o else POSITION}-"
+                                                                    f"{m}.py")):
+                            solver.evaluate(lower, upper, o, m)
     # Evaluate all robots.
     for robot in created_robots:
         robot.evaluate()

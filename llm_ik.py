@@ -69,7 +69,7 @@ MAX_PROMPTS = 5
 EXAMPLES = 10
 DISTANCE_ERROR = 0.01
 ANGLE_ERROR = 0.01
-WAIT = 1
+WAIT = 10
 
 # Default bounding value.
 BOUND = 2 * np.pi

@@ -5,6 +5,7 @@ import importlib
 import importlib.util
 import json
 import logging
+import math
 import os.path
 import random
 import re
@@ -1649,6 +1650,11 @@ class Solver:
                                              f"Waiting for {wait} second{'' if wait == 1 else 's'} before next API "
                                              f"call.")
                                 time.sleep(wait)
+                        # Perform one final evaluation.
+                        if os.path.exists(os.path.join(self.code, f"{lower}-{upper}-"
+                                                                  f"{TRANSFORM if current_orientation else POSITION}-"
+                                                                  f"{current_mode}.py")):
+                            self.evaluate(lower, upper, current_orientation, current_mode)
         # Return if everything was successful or not.
         return True
 
@@ -2586,10 +2592,24 @@ class Solver:
                     break
                 errors += 1
                 continue
+            # Ensure all returned joints are valid.
+            valid = True
+            for joint in joints:
+                if isinstance(joint, float) and not math.isnan(joint):
+                    continue
+                valid = False
+                break
+            if not valid:
+                errors += 1
+                continue
             # See if the move was successful.
             positions, orientations = self.robot.forward_kinematics(lower, upper, joints)
             distance = difference_distance(target_position, positions[-1])
             angle = difference_angle(target_orientation, orientations[-1]) if orientation else 0
+            # See if there was an error reaching, which at this point should not happen.
+            if math.isnan(distance) or math.isnan(angle):
+                errors += 1
+                continue
             # If successful, update it.
             if reached(distance, angle):
                 successes += 1

@@ -1232,11 +1232,11 @@ class Robot:
                     # Display the start of this category.
                     if not solving_started:
                         solving_started = True
-                        t = f"\\subsection{{{target} Results}}"
+                        t = f"\n\n\\subsection{{{target} Results}}"
                         if s == "":
-                            s = t
+                            s = f"\\begin{{landscape}}{t}"
                         else:
-                            s += f"\n\n{t}"
+                            s += t
                     if len(results[lower][upper][solving]) < 0:
                         continue
                     # Display the title for this length.
@@ -1335,24 +1335,55 @@ class Robot:
 """
                     # Fill the rows
                     for entry in results[lower][upper][solving]:
-                        s += f"    {entry['Name']} & {entry['Mode']} & {float(entry['Success Rate (%)']):.2f}\\%"
+                        s += f"    {entry['Name']} & "
+                        if entry["Name"] == "IKPy":
+                            s += "-"
+                        elif entry["Mode"] == NORMAL:
+                            s += "Direct"
+                        else:
+                            s += entry["Mode"]
+                        s += f" & {entry['Success Rate (%)']:.2f}\\%"
                         if needs_errors:
-                            s += f" & {float(entry['Error Rate (%)']):.2f}\%"
+                            if entry["Success Rate (%)"] >= 100:
+                                s += " & -"
+                            else:
+                                s += f" & {entry['Error Rate (%)']:.2f}\\%"
                         if needs_distance:
-                            s += f" & {float(entry['Average Failure Distance']):.2f} mm"
+                            if entry["Success Rate (%)"] >= 100:
+                                s += " & -"
+                            else:
+                                s += f" & {entry['Average Failure Distance'] * 1000:.2f} mm"
                         if needs_angle:
-                            s += f" & {float(entry['Average Failure Angle (°)']):.2f}\\textdegree"
-                        s += f" & {float(entry['Average Elapsed Time (s)']) * 1000:.2f} ms"
+                            if entry["Success Rate (%)"] >= 100:
+                                s += " & -"
+                            else:
+                                s += f" & {entry['Average Failure Angle (°)']:.2f}\\textdegree"
+                        s += f" & {entry['Average Elapsed Time (s)'] * 1000:.2f} ms"
                         if needs_generated:
-                            s += f" & {float(entry['Generation Time (s)']):.2f} s"
+                            if entry["Name"] == "IKPy":
+                                s += " & -"
+                            else:
+                                s += f" & {entry['Generation Time (s)']:.2f} s"
                         if needs_feedbacks:
-                            s += f" & {entry['Feedbacks Given']}"
+                            if entry["Name"] == "IKPy":
+                                s += " & -"
+                            else:
+                                s += f" & {entry['Feedbacks Given']}"
                         if needs_forwards:
-                            s += f" & {entry['Forwards Kinematics Calls']}"
+                            if entry["Name"] == "IKPy":
+                                s += " & -"
+                            else:
+                                s += f" & {entry['Forwards Kinematics Calls']}"
                         if needs_tests:
-                            s += f" & {entry['Testing Calls']}"
+                            if entry["Name"] == "IKPy":
+                                s += " & -"
+                            else:
+                                s += f" & {entry['Testing Calls']}"
                         if needs_costs:
-                            s += f" & \\${float(entry['Cost ($)']):.6f}"
+                            if entry["Name"] == "IKPy":
+                                s += " & -"
+                            else:
+                                s += f" & \\${entry['Cost ($)']:.6f}"
                         s += r""" \\
     \hline
 """
@@ -1362,6 +1393,9 @@ class Robot:
                     s += r"""}
 \end{center}
 \end{table}"""
+        s += r"""
+
+\end{landscape}"""
         path = os.path.join(results_root, "Results.tex")
         with open(path, "w", encoding="utf-8", errors="ignore") as file:
             file.write(s)

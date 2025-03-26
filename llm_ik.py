@@ -70,7 +70,7 @@ SEED = 42
 MAX_PROMPTS = 5
 EXAMPLES = 10
 DISTANCE_ERROR = 0.01
-ANGLE_ERROR = 0.01
+ANGLE_ERROR = 1
 WAIT = 10
 
 # Default bounding value.
@@ -1190,30 +1190,6 @@ class Robot:
                     with open(path, "w", encoding="utf-8", errors="ignore") as file:
                         file.write(s)
         # Output to LaTeX as well for easy use.
-        header = r"""\begin{table}[H]
-\tiny
-\renewcommand{\arraystretch}{1.2}
-\caption{Results}
-\begin{center}
-\begin{tabular}{|c|c|c|c|c|c|c|c|c|c|c|c|}
-    \hline
-    \textbf{Model} & 
-    \textbf{Mode} & 
-    \makecell{\textbf{Success}\\\textbf{Rate (\%)}} & 
-    \makecell{\textbf{Error}\\\textbf{Rate (\%)}} & 
-    \makecell{\textbf{Avg. Fail}\\\textbf{Distance (mm)}} & 
-    \makecell{\textbf{Avg. Fail}\\\textbf{Angle (\textdegree)}} & 
-    \makecell{\textbf{Avg. Elapsed}\\\textbf{Time (ms)}} & 
-    \makecell{\textbf{Gen.}\\\textbf{Time (s)}} & 
-    \textbf{Feedbacks} & 
-    \makecell{\textbf{FK}\\\textbf{Calls}} & 
-    \makecell{\textbf{Test}\\\textbf{Calls}} & 
-    \textbf{Cost (\$)} \\
-    \hline"""
-        footer = r"""\end{tabular}
-\label{Results}
-\end{center}
-\end{table}"""
         s = ""
         # Get positions first.
         for solving in [POSITION, TRANSFORM]:
@@ -1342,28 +1318,34 @@ class Robot:
                             s += "Direct"
                         else:
                             s += entry["Mode"]
-                        s += f" & {entry['Success Rate (%)']:.2f}\\%"
+                        t = f"{entry['Success Rate (%)']:.2f}".rstrip("0").rstrip(".")
+                        s += f" & {t}\\%"
                         if needs_errors:
                             if entry["Success Rate (%)"] >= 100:
                                 s += " & -"
                             else:
-                                s += f" & {entry['Error Rate (%)']:.2f}\\%"
+                                t = f"{entry['Error Rate (%)']:.2f}".rstrip("0").rstrip(".")
+                                s += f" & {t}\\%"
                         if needs_distance:
                             if entry["Success Rate (%)"] >= 100:
                                 s += " & -"
                             else:
-                                s += f" & {entry['Average Failure Distance'] * 1000:.2f} mm"
+                                t = f"{entry['Average Failure Distance'] * 1000:.2f}".rstrip("0").rstrip(".")
+                                s += f" & {t} mm"
                         if needs_angle:
                             if entry["Success Rate (%)"] >= 100:
                                 s += " & -"
                             else:
-                                s += f" & {entry['Average Failure Angle (°)']:.2f}\\textdegree"
-                        s += f" & {entry['Average Elapsed Time (s)'] * 1000:.2f} ms"
+                                t = f"{entry['Average Failure Angle (°)']:.2f}".rstrip("0").rstrip(".")
+                                s += f" & {t}\\textdegree"
+                        t = f"{entry['Average Elapsed Time (s)'] * 1000:.2f}".rstrip("0").rstrip(".")
+                        s += f" & {t} ms"
                         if needs_generated:
                             if entry["Name"] == "IKPy":
                                 s += " & -"
                             else:
-                                s += f" & {entry['Generation Time (s)']:.2f} s"
+                                t = f"{entry['Generation Time (s)']:.2f}".rstrip("0").rstrip(".")
+                                s += f" & {t} s"
                         if needs_feedbacks:
                             if entry["Name"] == "IKPy":
                                 s += " & -"
@@ -1383,7 +1365,8 @@ class Robot:
                             if entry["Name"] == "IKPy":
                                 s += " & -"
                             else:
-                                s += f" & \\${entry['Cost ($)']:.6f}"
+                                t = f"{entry['Cost ($)']:.6f}".rstrip("0").rstrip(".")
+                                s += f" & \\${t}"
                         s += r""" \\
     \hline
 """
@@ -3869,7 +3852,6 @@ def llm_ik(robots: str or list[str] or None = None, max_length: int = 0, orienta
             if not solver.perform(orientation, types, max_length, run_instance, wait):
                 logging.error("Not performing any more API calls as there were errors.")
                 run = False
-        continue
         # Perform one final evaluation for the solver.
         for lower in range(0, solver.robot.joints):
             for upper in range(lower, solver.robot.joints):

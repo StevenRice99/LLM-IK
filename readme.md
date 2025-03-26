@@ -68,8 +68,8 @@ This repository is for generating and testing the [inverse kinematics](https://e
 - ``-a`` or ``--training`` - The number of training samples. Defaults to ``1000``.
 - ``-v`` or ``--evaluating`` - The number of evaluating samples. Defaults to ``1000``.
 - ``-s`` or ``--seed`` - The samples generation seed. Defaults to ``42``.
-- ``-d`` or ``--distance`` - The acceptable distance error. Defaults to ``0.001``.
-- ``-n`` or ``--angle`` - The acceptable angle error. Defaults to ``0.001``.
+- ``-d`` or ``--distance`` - The acceptable distance error. Defaults to ``0.01`` m.
+- ``-n`` or ``--angle`` - The acceptable angle error. Defaults to ``1`` degree.
 - ``-c`` or ``--cwd`` - The working directory. Defaults to ``None`` which gets the current working directory.
 - ``-l`` or ``--logging`` - The logging level. Defaults to ``INFO``.
 - ``-w`` or ``--wait`` - How long to wait between API calls. Defaults to ``1`` second.

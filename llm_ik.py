@@ -6,6 +6,7 @@ import importlib.util
 import json
 import logging
 import math
+import numbers
 import os.path
 import random
 import re
@@ -22,6 +23,7 @@ import pandas as pd
 from func_timeout import func_timeout, FunctionTimedOut
 from ikpy.link import URDFLink
 from matplotlib import pyplot as plt
+from num2words import num2words
 from openai import NOT_GIVEN, OpenAI
 from scipy.spatial.transform import Rotation
 from tabulate import tabulate
@@ -850,7 +852,8 @@ class Robot:
                 continue
             # If joint values were passed, set the joint value.
             if index < last:
-                values[i] = joints[index]
+                # noinspection PyTypeChecker
+                values[i] = float(joints[index])
                 index += 1
             # Otherwise, if not passed and there are bounds, set the midpoint.
             elif chain.links[i].bounds is not None:
@@ -1186,6 +1189,182 @@ class Robot:
                     path = os.path.join(results_root, f"{lower}-{upper}-{solving}.csv")
                     with open(path, "w", encoding="utf-8", errors="ignore") as file:
                         file.write(s)
+        # Output to LaTeX as well for easy use.
+        header = r"""\begin{table}[H]
+\tiny
+\renewcommand{\arraystretch}{1.2}
+\caption{Results}
+\begin{center}
+\begin{tabular}{|c|c|c|c|c|c|c|c|c|c|c|c|}
+    \hline
+    \textbf{Model} & 
+    \textbf{Mode} & 
+    \makecell{\textbf{Success}\\\textbf{Rate (\%)}} & 
+    \makecell{\textbf{Error}\\\textbf{Rate (\%)}} & 
+    \makecell{\textbf{Avg. Fail}\\\textbf{Distance (mm)}} & 
+    \makecell{\textbf{Avg. Fail}\\\textbf{Angle (\textdegree)}} & 
+    \makecell{\textbf{Avg. Elapsed}\\\textbf{Time (ms)}} & 
+    \makecell{\textbf{Gen.}\\\textbf{Time (s)}} & 
+    \textbf{Feedbacks} & 
+    \makecell{\textbf{FK}\\\textbf{Calls}} & 
+    \makecell{\textbf{Test}\\\textbf{Calls}} & 
+    \textbf{Cost (\$)} \\
+    \hline"""
+        footer = r"""\end{tabular}
+\label{Results}
+\end{center}
+\end{table}"""
+        s = ""
+        # Get positions first.
+        for solving in [POSITION, TRANSFORM]:
+            target = "Position" if solving == POSITION else "Position and Orientation"
+            solving_started = False
+            # Go from smallest to largest links.
+            for length in range(self.joints):
+                # Determine the last "first" joint for this size.
+                length_started = False
+                last = self.joints - length
+                for lower in range(last):
+                    # Get the upper joint index.
+                    upper = lower + length
+                    if solving not in results[lower][upper]:
+                        continue
+                    # Display the start of this category.
+                    if not solving_started:
+                        solving_started = True
+                        t = f"\\subsection{{{target} Results}}"
+                        if s == "":
+                            s = t
+                        else:
+                            s += f"\n\n{t}"
+                    if len(results[lower][upper][solving]) < 0:
+                        continue
+                    # Display the title for this length.
+                    if not length_started:
+                        length_started = True
+                        s += (f"\n\n\\subsubsection{{{num2words(length + 1).capitalize()} "
+                              f"Degree{'' if length == 0 else 's'}-of-Freedom {target} Results}}")
+                    # Determine what columns can be conditionally dropped.
+                    needs_errors = False
+                    needs_distance = False
+                    needs_angle = False
+                    needs_generated = False
+                    needs_feedbacks = False
+                    needs_forwards = False
+                    needs_tests = False
+                    needs_costs = False
+                    for entry in results[lower][upper][solving]:
+                        if entry["Error Rate (%)"] > 0:
+                            needs_errors = True
+                        if entry["Average Failure Distance"] > 0:
+                            needs_distance = True
+                        if entry["Average Failure Angle (°)"] > 0:
+                            needs_angle = True
+                        if entry["Generation Time (s)"] > 0:
+                            needs_generated = True
+                        if entry["Feedbacks Given"] > 0:
+                            needs_feedbacks = True
+                        if entry["Forwards Kinematics Calls"] > 0:
+                            needs_forwards = True
+                        if entry["Testing Calls"] > 0:
+                            needs_tests = True
+                        if entry["Cost ($)"] > 0:
+                            needs_costs = True
+                    # Build the table header
+                    s += r"""
+
+\begin{table}[H]
+\tiny
+\renewcommand{\arraystretch}{1.2}
+\caption{"""
+                    s += (f"Joint {num2words(lower + 1).capitalize()} {target} Results" if lower == upper else
+                          f"Joints {num2words(lower + 1).capitalize()} to {num2words(upper + 1).capitalize()} {target} "
+                          "Results")
+                    s += r"""}
+\begin{center}
+\begin{tabular}{|c|c|c|c|"""
+                    if needs_errors:
+                        s += "c|"
+                    if needs_distance:
+                        s += "c|"
+                    if needs_angle:
+                        s += "c|"
+                    if needs_generated:
+                        s += "c|"
+                    if needs_feedbacks:
+                        s += "c|"
+                    if needs_forwards:
+                        s += "c|"
+                    if needs_tests:
+                        s += "c|"
+                    if needs_costs:
+                        s += "c|"
+                    s += r"""}
+    \hline
+    \textbf{Model} & 
+    \textbf{Mode} & 
+    \makecell{\textbf{Success}\\\textbf{Rate (\%)}}"""
+                    if needs_errors:
+                        s += r""" &
+    \makecell{\textbf{Error}\\\textbf{Rate (\%)}}"""
+                    if needs_distance:
+                        s += r""" &
+    \makecell{\textbf{Avg. Fail}\\\textbf{Distance (mm)}}"""
+                    if needs_angle:
+                        s += r""" &
+    \makecell{\textbf{Avg. Fail}\\\textbf{Angle (\textdegree)}}"""
+                    s += r""" &
+    \makecell{\textbf{Avg. Elapsed}\\\textbf{Time (ms)}}"""
+                    if needs_generated:
+                        s += r""" &
+    \makecell{\textbf{Gen.}\\\textbf{Time (s)}}"""
+                    if needs_feedbacks:
+                        s += r""" &
+    \textbf{Feedbacks}"""
+                    if needs_forwards:
+                        s += r""" &
+    \makecell{\textbf{FK}\\\textbf{Calls}}"""
+                    if needs_tests:
+                        s += r""" &
+    \makecell{\textbf{Test}\\\textbf{Calls}}"""
+                    if needs_costs:
+                        s += r""" &
+    \textbf{Cost (\$)}"""
+                    s += r""" \\
+    \hline
+"""
+                    # Fill the rows
+                    for entry in results[lower][upper][solving]:
+                        s += f"    {entry['Name']} & {entry['Mode']} & {float(entry['Success Rate (%)']):.2f}\\%"
+                        if needs_errors:
+                            s += f" & {float(entry['Error Rate (%)']):.2f}\%"
+                        if needs_distance:
+                            s += f" & {float(entry['Average Failure Distance']):.2f} mm"
+                        if needs_angle:
+                            s += f" & {float(entry['Average Failure Angle (°)']):.2f}\\textdegree"
+                        s += f" & {float(entry['Average Elapsed Time (s)']) * 1000:.2f} ms"
+                        if needs_generated:
+                            s += f" & {float(entry['Generation Time (s)']):.2f} s"
+                        if needs_feedbacks:
+                            s += f" & {entry['Feedbacks Given']}"
+                        if needs_forwards:
+                            s += f" & {entry['Forwards Kinematics Calls']}"
+                        if needs_tests:
+                            s += f" & {entry['Testing Calls']}"
+                        if needs_costs:
+                            s += f" & \\${float(entry['Cost ($)']):.6f}"
+                        s += r""" \\
+    \hline
+"""
+                    s += r"""\end{tabular}
+\label{Results-"""
+                    s += f"{solving.capitalize()}-{lower + 1}-{upper + 1}"
+                    s += r"""}
+\end{center}
+\end{table}"""
+        path = os.path.join(results_root, "Results.tex")
+        with open(path, "w", encoding="utf-8", errors="ignore") as file:
+            file.write(s)
 
 
 class Solver:
@@ -2512,7 +2691,7 @@ class Solver:
         # Parse the joints.
         if joints is not None:
             # If a single float was returned (as should be for single-link chains), make it a list.
-            if isinstance(joints, float):
+            if isinstance(joints, numbers.Number):
                 joints = [joints]
             # Otherwise, get the list.
             else:
@@ -2590,7 +2769,8 @@ class Solver:
             # Ensure all returned joints are valid.
             valid = True
             for joint in joints:
-                if isinstance(joint, float) and not math.isnan(joint):
+                # noinspection PyTypeChecker
+                if isinstance(joint, numbers.Number) and not math.isnan(joint):
                     continue
                 valid = False
                 break
@@ -3655,6 +3835,7 @@ def llm_ik(robots: str or list[str] or None = None, max_length: int = 0, orienta
             if not solver.perform(orientation, types, max_length, run_instance, wait):
                 logging.error("Not performing any more API calls as there were errors.")
                 run = False
+        continue
         # Perform one final evaluation for the solver.
         for lower in range(0, solver.robot.joints):
             for upper in range(lower, solver.robot.joints):

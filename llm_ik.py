@@ -1327,19 +1327,24 @@ class Robot:
                                 t = f"{entry['Error Rate (%)']:.2f}".rstrip("0").rstrip(".")
                                 s += f" & {t}\\%"
                         if needs_distance:
-                            if entry["Success Rate (%)"] >= 100:
+                            if entry["Success Rate (%)"] >= 100 or entry['Error Rate (%)'] >= 100:
                                 s += " & -"
                             else:
                                 t = f"{entry['Average Failure Distance'] * 1000:.2f}".rstrip("0").rstrip(".")
                                 s += f" & {t} mm"
                         if needs_angle:
-                            if entry["Success Rate (%)"] >= 100:
+                            if entry["Success Rate (%)"] >= 100 or entry['Error Rate (%)'] >= 100:
                                 s += " & -"
                             else:
                                 t = f"{entry['Average Failure Angle (°)']:.2f}".rstrip("0").rstrip(".")
                                 s += f" & {t}\\textdegree"
-                        t = f"{entry['Average Elapsed Time (s)'] * 1000:.2f}".rstrip("0").rstrip(".")
-                        s += f" & {t} ms"
+                        if entry["Average Elapsed Time (s)"] == 0:
+                            s += " & -"
+                        elif str(entry["Average Elapsed Time (s)"]) == "inf":
+                            s += " & Timeout"
+                        else:
+                            t = f"{entry['Average Elapsed Time (s)'] * 1000:.2f}".rstrip("0").rstrip(".")
+                            s += f" & {t} ms"
                         if needs_generated:
                             if entry["Name"] == "IKPy":
                                 s += " & -"

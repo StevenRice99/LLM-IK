@@ -1007,6 +1007,7 @@ class Robot:
             return None
         results = None
         # Parse the saved individual results from all solvers.
+        total_cost = 0
         paths = get_directories(results_root)
         for solver in paths:
             root = os.path.join(results_root, solver)
@@ -1113,6 +1114,7 @@ class Robot:
                     elif title == "Cost ($)":
                         try:
                             data = float(data.replace("$", ""))
+                            total_cost += data
                         except Exception as e:
                             logging.error(f"{self.name} | Evaluate | Could not parse dollar data at index {i + 1} from "
                                           f"'{path}': {e}")
@@ -1387,6 +1389,7 @@ class Robot:
         path = os.path.join(results_root, "Results.tex")
         with open(path, "w", encoding="utf-8", errors="ignore") as file:
             file.write(s)
+        logging.info(f"{self.name} | Evaluate | Total Cost = ${total_cost}")
 
 
 class Solver:

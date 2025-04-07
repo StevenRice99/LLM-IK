@@ -1389,6 +1389,41 @@ class Robot:
         path = os.path.join(results_root, "Results.tex")
         with open(path, "w", encoding="utf-8", errors="ignore") as file:
             file.write(s)
+        # Make another LaTeX for beamer slides.
+        s = s.replace("\n\\renewcommand{\\arraystretch}{1.2}", "")
+        s = s.replace(r"\begin{landscape}", "").replace(r"\end{landscape}", "")
+        s = re.sub(r"\\(section|subsection|subsubsection|paragraph|subparagraph)\{.*?}", "", s)
+        s = s.replace(r"\begin{table}[H]", "\\begin{frame}{Results}\n\\vspace{-1em}\n\\begin{table}")
+        s = s.replace(r"\end{table}", "\\end{table}\n\\end{frame}").strip()
+        # Replace titles with the captions which are removed.
+        caption_pattern = re.compile(r'\\caption\{(.*?)}', re.DOTALL)
+        captions = caption_pattern.findall(s)
+        s = caption_pattern.sub("", s)
+        for caption in captions:
+            s = s.replace(r"\begin{frame}{Results}", f"\\begin{{frame}}{{{caption}}}", 1)
+        s = s.replace("\\tiny\n\n", "\\tiny\n")
+        # Shorten specific names.
+        s = s.replace("DeepSeek R1 Distill Llama 70B", "R1 Distill")
+        s = s.replace("DeepSeek V3", "V3")
+        s = s.replace("DeepSeek R1", "R1")
+        s = s.replace("Claude 3.7 Sonnet Thinking", "3.7 Think.")
+        s = s.replace("Claude 3.7 Sonnet", "3.7")
+        s = s.replace("OpenAI GPT-4o", "GPT-4o")
+        s = s.replace("OpenAI o3-mini", "o3-mini")
+        s = s.replace("OpenAI o1", "o1")
+        s = s.replace("Direct", "Dir.")
+        s = s.replace("Extend", "Ext.")
+        s = s.replace("Dynamic", "Dyn.")
+        s = s.replace("Cumulative", "Cum.")
+        s = s.replace("Transfer", "Trans.")
+        s = s.replace("Distance (mm)", "Dis. (mm)")
+        s = s.replace("Elapsed", "Elap.")
+        s = s.replace("Feedbacks", "Feed.")
+        while "\n\n\n" in s:
+            s = s.replace("\n\n\n", "\n\n")
+        path = os.path.join(results_root, "Results-Beamer.tex")
+        with open(path, "w", encoding="utf-8", errors="ignore") as file:
+            file.write(s)
         logging.info(f"{self.name} | Evaluate | Total Cost = ${total_cost}")
 
 

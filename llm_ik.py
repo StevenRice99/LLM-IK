@@ -1550,13 +1550,20 @@ class Robot:
 """
             # Fill the rows.
             for length in best[solving]:
+                first = True
+                entries = len(best[solving][length])
+                index = 0
                 for lower in best[solving][length]:
+                    if index == 0:
+                        dof_str = f"{length}" if entries == 1 else f"\\multirow{{{entries}}}{{*}}{{{length}}}"
+                    else:
+                        dof_str = ""
                     entry = best[solving][length][lower]
                     length_str = f"{lower + 1}" if length == 1 else f"{lower + 1} to {lower + length}"
                     if "IKPy" in solving:
-                        s += f"    {length} & {length_str}"
+                        s += f"    {dof_str} & {length_str}"
                     else:
-                        s += f"    {length} & {length_str} & {entry['Name']} & "
+                        s += f"    {dof_str} & {length_str} & {entry['Name']} & "
                     if entry["Mode"] == NORMAL:
                         s += "Direct"
                     else:
@@ -1600,9 +1607,14 @@ class Robot:
                     if needs_costs:
                         t = f"{entry['Cost ($)']:.6f}".rstrip("0").rstrip(".")
                         s += f" & \\${t}"
-                    s += r""" \\
+                    s += r" \\"
+                    if index == entries - 1:
+                        s += r"""
     \hline
 """
+                    else:
+                        s += "\n"
+                        index += 1
             s += r"""\end{tabular}
 \label{Results-"""
             s += f"{solving.replace(' ', '-')}-Summary"

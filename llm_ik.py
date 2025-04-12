@@ -1139,10 +1139,12 @@ class Robot:
                 if solving not in results[lower][upper]:
                     results[lower][upper][solving] = []
                 results[lower][upper][solving].append(result)
+        logging.info(f"{self.name} | Evaluate | Total Cost = ${total_cost}")
         # If there were no results, there is nothing else to do.
         if results is None:
             return None
         # Otherwise, write the results for all solvers for each individual chain.
+        best = {}
         for lower in results:
             for upper in results[lower]:
                 for solving in results[lower][upper]:
@@ -1171,6 +1173,31 @@ class Robot:
                             x["Name"]
                         )
                     )
+                    # Save the best for summary tables.
+                    result_ikpy = None
+                    result_llm = None
+                    for result in results[lower][upper][solving]:
+                        if result["Name"] == "IKPy":
+                            result_ikpy = result
+                        else:
+                            result_llm = result
+                        if result_ikpy is not None and result_llm is not None:
+                            break
+                    if result_ikpy is not None:
+                        ikpy_solving = f"IKPy {solving}"
+                        length = upper - lower + 1
+                        if solving not in best:
+                            best[ikpy_solving] = {}
+                        if length not in best[ikpy_solving]:
+                            best[ikpy_solving][length] = {}
+                        best[ikpy_solving][length][lower] = result_ikpy
+                    if result_llm is not None:
+                        length = upper - lower + 1
+                        if solving not in best:
+                            best[solving] = {}
+                        if length not in best[solving]:
+                            best[solving][length] = {}
+                        best[solving][length][lower] = result_llm
                     # Format the results.
                     s = "Name," + ",".join(FIELDS)
                     for entry in results[lower][upper][solving]:
@@ -1191,6 +1218,38 @@ class Robot:
                     path = os.path.join(results_root, f"{lower}-{upper}-{solving}.csv")
                     with open(path, "w", encoding="utf-8", errors="ignore") as file:
                         file.write(s)
+        # Sort and save the best results to a CSV.
+        best = {
+            solving: {length: solutions for length, solutions in sorted(ordered.items(), reverse=True)}
+            for solving, ordered in sorted(best.items())
+        }
+        for solving in best:
+            s = ("DOF,Joints" if "IKPy" in solving else "DOF,Joints,Name,") + ",".join(FIELDS)
+            for length in best[solving]:
+                for lower in best[solving][length]:
+                    entry = best[solving][length][lower]
+                    length_str = f"{lower + 1}" if length == 1 else f"{lower + 1} to {lower + length}"
+                    s += f"\n{length},{length_str},{entry['Name']}"
+                    if "IKPy" in solving:
+                        s += f"\n{length},{length_str}"
+                    else:
+                        s += f"\n{length},{length_str},{entry['Name']}"
+                    for field in FIELDS:
+                        data = entry[field]
+                        if field == "Success Rate (%)" or field == "Failure Rate (%)" or field == "Error Rate (%)":
+                            data = f"{neat(data)}%"
+                        elif field == "Average Failure Distance":
+                            data = neat(data)
+                        elif field == "Average Failure Angle (°)":
+                            data = f"{neat(data)}°"
+                        elif field == "Average Elapsed Time (s)" or field == "Generation Time (s)":
+                            data = f"{neat(data)} s"
+                        elif field == "Cost ($)":
+                            data = f"${neat(data)}"
+                        s += f",{data}"
+            path = os.path.join(results_root, f"Summary-{solving.replace(' ', '-')}.csv")
+            with open(path, "w", encoding="utf-8", errors="ignore") as file:
+                file.write(s)
         # Output to LaTeX as well for easy use.
         s = ""
         # Get positions first.
@@ -1311,7 +1370,7 @@ class Robot:
                     s += r""" \\
     \hline
 """
-                    # Fill the rows
+                    # Fill the rows.
                     for entry in results[lower][upper][solving]:
                         s += f"    {entry['Name']} & "
                         if entry["Name"] == "IKPy":
@@ -1390,41 +1449,190 @@ class Robot:
         with open(path, "w", encoding="utf-8", errors="ignore") as file:
             file.write(s)
         # Make another LaTeX for beamer slides.
-        s = s.replace("\n\\renewcommand{\\arraystretch}{1.2}", "")
-        s = s.replace(r"\begin{landscape}", "").replace(r"\end{landscape}", "")
-        s = re.sub(r"\\(section|subsection|subsubsection|paragraph|subparagraph)\{.*?}", "", s)
-        s = s.replace(r"\begin{table}[H]", "\\begin{frame}{Results}\n\\vspace{-1em}\n\\begin{table}")
-        s = s.replace(r"\end{table}", "\\end{table}\n\\end{frame}").strip()
-        # Replace titles with the captions which are removed.
-        caption_pattern = re.compile(r'\\caption\{(.*?)}', re.DOTALL)
-        captions = caption_pattern.findall(s)
-        s = caption_pattern.sub("", s)
-        for caption in captions:
-            s = s.replace(r"\begin{frame}{Results}", f"\\begin{{frame}}{{{caption}}}", 1)
-        s = s.replace("\\tiny\n\n", "\\tiny\n")
-        # Shorten specific names.
-        s = s.replace("DeepSeek R1 Distill Llama 70B", "R1 Distill")
-        s = s.replace("DeepSeek V3", "V3")
-        s = s.replace("DeepSeek R1", "R1")
-        s = s.replace("Claude 3.7 Sonnet Thinking", "3.7 Think.")
-        s = s.replace("Claude 3.7 Sonnet", "3.7")
-        s = s.replace("OpenAI GPT-4o", "GPT-4o")
-        s = s.replace("OpenAI o3-mini", "o3-mini")
-        s = s.replace("OpenAI o1", "o1")
-        s = s.replace("Direct", "Dir.")
-        s = s.replace("Extend", "Ext.")
-        s = s.replace("Dynamic", "Dyn.")
-        s = s.replace("Cumulative", "Cum.")
-        s = s.replace("Transfer", "Trans.")
-        s = s.replace("Distance (mm)", "Dis. (mm)")
-        s = s.replace("Elapsed", "Elap.")
-        s = s.replace("Feedbacks", "Feed.")
-        while "\n\n\n" in s:
-            s = s.replace("\n\n\n", "\n\n")
+        s = format_beamer(s)
         path = os.path.join(results_root, "Results-Beamer.tex")
         with open(path, "w", encoding="utf-8", errors="ignore") as file:
             file.write(s)
-        logging.info(f"{self.name} | Evaluate | Total Cost = ${total_cost}")
+        for solving in best:
+            # Determine what columns can be conditionally dropped.
+            needs_errors = False
+            needs_distance = False
+            needs_angle = False
+            needs_generated = False
+            needs_feedbacks = False
+            needs_forwards = False
+            needs_tests = False
+            needs_costs = False
+            for length in best[solving]:
+                for lower in best[solving][length]:
+                    entry = best[solving][length][lower]
+                    if entry["Error Rate (%)"] > 0:
+                        needs_errors = True
+                    if entry["Average Failure Distance"] > 0:
+                        needs_distance = True
+                    if entry["Average Failure Angle (°)"] > 0:
+                        needs_angle = True
+                    if entry["Generation Time (s)"] > 0:
+                        needs_generated = True
+                    if entry["Feedbacks Given"] > 0:
+                        needs_feedbacks = True
+                    if entry["Forwards Kinematics Calls"] > 0:
+                        needs_forwards = True
+                    if entry["Testing Calls"] > 0:
+                        needs_tests = True
+                    if entry["Cost ($)"] > 0:
+                        needs_costs = True
+            s = r"""\begin{table}[H]
+\tiny
+\renewcommand{\arraystretch}{1.2}
+\caption{"""
+            s += (f"{'IKPy' if 'IKPy' in solving else 'Best LLM-IK'} "
+                  f"{'Position' if POSITION in solving else 'Position and Orientation'} Results")
+            s += r"""}
+\begin{center}
+\begin{tabular}{|c|c|c|c|c|"""
+            if "IKPy" not in solving:
+                s += "c|"
+            if needs_errors:
+                s += "c|"
+            if needs_distance:
+                s += "c|"
+            if needs_angle:
+                s += "c|"
+            if needs_generated:
+                s += "c|"
+            if needs_feedbacks:
+                s += "c|"
+            if needs_forwards:
+                s += "c|"
+            if needs_tests:
+                s += "c|"
+            if needs_costs:
+                s += "c|"
+            s += r"""}
+    \hline
+    \textbf{DOF} & 
+    \textbf{Joints} & """
+            if "IKPy" not in solving:
+                s += r"""
+    \textbf{Model} & 
+    \textbf{Mode} & """
+            s += r"""
+    \makecell{\textbf{Success}\\\textbf{Rate (\%)}}"""
+            if needs_errors:
+                s += r""" &
+    \makecell{\textbf{Error}\\\textbf{Rate (\%)}}"""
+            if needs_distance:
+                s += r""" &
+    \makecell{\textbf{Avg. Fail}\\\textbf{Distance (mm)}}"""
+            if needs_angle:
+                s += r""" &
+    \makecell{\textbf{Avg. Fail}\\\textbf{Angle (\textdegree)}}"""
+            s += r""" &
+    \makecell{\textbf{Avg. Elapsed}\\\textbf{Time (ms)}}"""
+            if needs_generated:
+                s += r""" &
+    \makecell{\textbf{Gen.}\\\textbf{Time (s)}}"""
+            if needs_feedbacks:
+                s += r""" &
+    \textbf{Feedbacks}"""
+            if needs_forwards:
+                s += r""" &
+    \makecell{\textbf{FK}\\\textbf{Calls}}"""
+            if needs_tests:
+                s += r""" &
+    \makecell{\textbf{Test}\\\textbf{Calls}}"""
+            if needs_costs:
+                s += r""" &
+    \textbf{Cost (\$)}"""
+            s += r""" \\
+    \hline
+"""
+            # Fill the rows.
+            for length in best[solving]:
+                for lower in best[solving][length]:
+                    entry = best[solving][length][lower]
+                    length_str = f"{lower + 1}" if length == 1 else f"{lower + 1} to {lower + length}"
+                    if "IKPy" in solving:
+                        s += f"    {length} & {length_str}"
+                    else:
+                        s += f"    {length} & {length_str} & {entry['Name']} & "
+                    if entry["Mode"] == NORMAL:
+                        s += "Direct"
+                    else:
+                        s += entry["Mode"]
+                    t = f"{entry['Success Rate (%)']:.2f}".rstrip("0").rstrip(".")
+                    s += f" & {t}\\%"
+                    if needs_errors:
+                        if entry["Success Rate (%)"] >= 100:
+                            s += " & -"
+                        else:
+                            t = f"{entry['Error Rate (%)']:.2f}".rstrip("0").rstrip(".")
+                            s += f" & {t}\\%"
+                    if needs_distance:
+                        if entry["Success Rate (%)"] >= 100 or entry['Error Rate (%)'] >= 100:
+                            s += " & -"
+                        else:
+                            t = f"{entry['Average Failure Distance'] * 1000:.2f}".rstrip("0").rstrip(".")
+                            s += f" & {t} mm"
+                    if needs_angle:
+                        if entry["Success Rate (%)"] >= 100 or entry['Error Rate (%)'] >= 100:
+                            s += " & -"
+                        else:
+                            t = f"{entry['Average Failure Angle (°)']:.2f}".rstrip("0").rstrip(".")
+                            s += f" & {t}\\textdegree"
+                    if entry["Average Elapsed Time (s)"] == 0:
+                        s += " & -"
+                    elif str(entry["Average Elapsed Time (s)"]) == "inf":
+                        s += " & Timeout"
+                    else:
+                        t = f"{entry['Average Elapsed Time (s)'] * 1000:.2f}".rstrip("0").rstrip(".")
+                        s += f" & {t} ms"
+                    if needs_generated:
+                        t = f"{entry['Generation Time (s)']:.2f}".rstrip("0").rstrip(".")
+                        s += f" & {t} s"
+                    if needs_feedbacks:
+                        s += f" & {entry['Feedbacks Given']}"
+                    if needs_forwards:
+                        s += f" & {entry['Forwards Kinematics Calls']}"
+                    if needs_tests:
+                        s += f" & {entry['Testing Calls']}"
+                    if needs_costs:
+                        t = f"{entry['Cost ($)']:.6f}".rstrip("0").rstrip(".")
+                        s += f" & \\${t}"
+                    s += r""" \\
+    \hline
+"""
+            s += r"""\end{tabular}
+\label{Results-"""
+            s += f"{solving.replace(' ', '-')}-Summary"
+            s += r"""}
+\end{center}
+\end{table}"""
+            path = os.path.join(results_root, f"Summary-{solving.replace(' ', '-')}.tex")
+            with open(path, "w", encoding="utf-8", errors="ignore") as file:
+                file.write(s)
+        # Make one LaTeX file with all the summary tables.
+        tables = []
+        for f in [f"IKPy-{POSITION}", POSITION, f"IKPy-{TRANSFORM}", TRANSFORM]:
+            path = os.path.join(results_root, f"Summary-{f}.tex")
+            if not os.path.exists(path):
+                continue
+            with open(path, "r", encoding="utf-8", errors="ignore") as file:
+                s = file.read()
+            if s != "":
+                tables.append(s)
+        if len(tables) < 1:
+            return None
+        s = "\\begin{landscape}\n\n" + "\n\n".join(tables) + "\n\n\\end{landscape}"
+        path = os.path.join(results_root, f"Summary.tex")
+        with open(path, "w", encoding="utf-8", errors="ignore") as file:
+            file.write(s)
+        # Create the beamer version of the summary tables.
+        s = format_beamer(s)
+        path = os.path.join(results_root, f"Summary-Beamer.tex")
+        with open(path, "w", encoding="utf-8", errors="ignore") as file:
+            file.write(s)
 
 
 class Solver:
@@ -3600,6 +3808,47 @@ def get_directories(directory) -> list[str]:
     :return: The names of all directories in the directory.
     """
     return [f for f in os.listdir(directory) if os.path.isdir(os.path.join(directory, f))]
+
+
+def format_beamer(s: str) -> str:
+    """
+    Format regular LaTeX tables into beamer slides.
+    :param s: The regular LaTeX.
+    :return: The beamer LaTeX.
+    """
+    # Replace table parts.
+    s = s.replace("\n\\renewcommand{\\arraystretch}{1.2}", "")
+    s = s.replace(r"\begin{landscape}", "").replace(r"\end{landscape}", "")
+    s = re.sub(r"\\(section|subsection|subsubsection|paragraph|subparagraph)\{.*?}", "", s)
+    s = s.replace(r"\begin{table}[H]", "\\begin{frame}{Results}\n\\vspace{-1em}\n\\begin{table}")
+    s = s.replace(r"\end{table}", "\\end{table}\n\\end{frame}").strip()
+    # Replace titles with the captions which are removed.
+    caption_pattern = re.compile(r'\\caption\{(.*?)}', re.DOTALL)
+    captions = caption_pattern.findall(s)
+    s = caption_pattern.sub("", s)
+    for caption in captions:
+        s = s.replace(r"\begin{frame}{Results}", f"\\begin{{frame}}{{{caption}}}", 1)
+    s = s.replace("\\tiny\n\n", "\\tiny\n")
+    # Shorten specific names.
+    s = s.replace("DeepSeek R1 Distill Llama 70B", "R1 Distill")
+    s = s.replace("DeepSeek V3", "V3")
+    s = s.replace("DeepSeek R1", "R1")
+    s = s.replace("Claude 3.7 Sonnet Thinking", "3.7 Think.")
+    s = s.replace("Claude 3.7 Sonnet", "3.7")
+    s = s.replace("OpenAI GPT-4o", "GPT-4o")
+    s = s.replace("OpenAI o3-mini", "o3-mini")
+    s = s.replace("OpenAI o1", "o1")
+    s = s.replace("Direct", "Dir.")
+    s = s.replace("Extend", "Ext.")
+    s = s.replace("Dynamic", "Dyn.")
+    s = s.replace("Cumulative", "Cum.")
+    s = s.replace("Transfer", "Trans.")
+    s = s.replace("Distance (mm)", "Dis. (mm)")
+    s = s.replace("Elapsed", "Elap.")
+    s = s.replace("Feedbacks", "Feed.")
+    while "\n\n\n" in s:
+        s = s.replace("\n\n\n", "\n\n")
+    return s
 
 
 def llm_ik(robots: str or list[str] or None = None, max_length: int = 0, orientation: bool = True,

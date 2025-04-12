@@ -1550,7 +1550,6 @@ class Robot:
 """
             # Fill the rows.
             for length in best[solving]:
-                first = True
                 entries = len(best[solving][length])
                 index = 0
                 for lower in best[solving][length]:

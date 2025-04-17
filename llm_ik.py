@@ -2094,7 +2094,6 @@ class Solver:
                     # If there is already a solution for this, skip it.
                     if (solving in self.robot.solved and lower in self.robot.solved[solving]
                             and upper in self.robot.solved[solving][lower]):
-                        print(f"SKIPPING | {self.model} | {solving} | {lower + 1} to {upper + 1}")
                         continue
                     for current_mode in [NORMAL, EXTEND, DYNAMIC, CUMULATIVE, TRANSFER]:
                         # No solving for orientation with just one link and can only do normal prompting.
@@ -4174,7 +4173,6 @@ def llm_ik(robots: str or list[str] or None = None, max_length: int = 0, orienta
         logging.info(f"Waiting for {wait} second {'' if wait == 1 else 's'} between API calls.")
     # Run the solvers, making API calls only on those that should be.
     for solver in created_models:
-        print(solver.robot.solved)
         if solver.url == "" or run:
             run_instance = solver.robot.name in robots and solver.model in models
             if not solver.perform(orientation, types, max_length, run_instance, wait):

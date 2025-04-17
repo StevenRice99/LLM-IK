@@ -4180,8 +4180,8 @@ def llm_ik(robots: str or list[str] or None = None, max_length: int = 0, orienta
             if not solver.perform(orientation, types, max_length, run_instance, wait):
                 logging.error("Not performing any more API calls as there were errors.")
                 run = False
-        # Assume we want to do a manual run of evaulations in these conditions.
-        elif not run and not bypass:
+        # Assume we want to do a manual run of evaluations in these conditions.
+        elif not run and bypass:
             for lower in range(0, solver.robot.joints):
                 for upper in range(lower, solver.robot.joints):
                     for o in [False, True]:

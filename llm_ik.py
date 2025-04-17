@@ -331,7 +331,7 @@ class Robot:
         if not name.endswith(".urdf"):
             name = name + ".urdf"
         self.name = os.path.splitext(name)[0]
-        # Cache the to save info to.
+        # Cache the paths to save info to.
         self.info = os.path.join(INFO, self.name)
         self.results = os.path.join(RESULTS, self.name, "IKPy")
         self.chains = None
@@ -339,6 +339,7 @@ class Robot:
         self.training = 0
         self.evaluating = 0
         self.data = {}
+        self.solved = {}
         # Nothing to do if the file does not exist.
         path = os.path.join(ROBOTS, name)
         if not os.path.exists(path):
@@ -450,6 +451,7 @@ class Robot:
                               errors="ignore") as file:
                         file.write(self.prepare_llm(lower, upper, True))
         logging.info(f"{self.name} | Loaded.")
+        self.evaluate()
 
     def __str__(self) -> str:
         """
@@ -1198,6 +1200,14 @@ class Robot:
                         if length not in best[solving]:
                             best[solving][length] = {}
                         best[solving][length][lower] = result_llm
+                        # Get which are done.
+                        if result_llm["Success Rate (%)"] >= 100:
+                            if solving not in self.solved:
+                                self.solved[solving] = {}
+                            if lower not in self.solved[solving]:
+                                self.solved[solving][lower] = [upper]
+                            else:
+                                self.solved[solving][lower].append(upper)
                     # Format the results.
                     s = "Name," + ",".join(FIELDS)
                     for entry in results[lower][upper][solving]:
@@ -2038,6 +2048,7 @@ class Solver:
         options.append(self)
         # Save the options.
         self.options = options
+        return None
 
     def perform(self, orientation: bool = False, mode: str = NORMAL, max_length: int = 0, run: bool = False,
                 wait: int = WAIT) -> bool:
@@ -2072,6 +2083,7 @@ class Solver:
             max_length = self.robot.joints
         # Loop all possible combinations.
         for current_orientation in [False, True]:
+            solving = POSITION if not current_orientation else TRANSFORM
             # Solve smaller chains first so their solutions can be extended.
             for length in range(self.robot.joints):
                 # Determine the last "first" joint for this size.
@@ -2079,6 +2091,11 @@ class Solver:
                 for lower in range(last):
                     # Get the upper joint index.
                     upper = lower + length
+                    # If there is already a solution for this, skip it.
+                    if (solving in self.robot.solved and lower in self.robot.solved[solving]
+                            and upper in self.robot.solved[solving][lower]):
+                        print(f"SKIPPING | {self.model} | {solving} | {lower + 1} to {upper + 1}")
+                        continue
                     for current_mode in [NORMAL, EXTEND, DYNAMIC, CUMULATIVE, TRANSFER]:
                         # No solving for orientation with just one link and can only do normal prompting.
                         if length == 0 and (current_orientation or current_mode != NORMAL):
@@ -2796,6 +2813,13 @@ class Solver:
             with open(os.path.join(root, f"{total}-{MESSAGE_DONE}.txt"), "w", encoding="utf-8",
                       errors="ignore") as file:
                 file.write("Code performed perfectly; interactions with the model are done.")
+            # Ensure this is cached.
+            if solving not in self.robot.solved:
+                self.robot.solved[solving] = {}
+            if lower not in self.robot.solved[solving]:
+                self.robot.solved[solving][lower] = [upper]
+            else:
+                self.robot.solved[solving][lower].append(upper)
             return None
         # If there were errors but the maximum number of feedbacks have been given, stop.
         if are_done:
@@ -4150,23 +4174,29 @@ def llm_ik(robots: str or list[str] or None = None, max_length: int = 0, orienta
         logging.info(f"Waiting for {wait} second {'' if wait == 1 else 's'} between API calls.")
     # Run the solvers, making API calls only on those that should be.
     for solver in created_models:
+        print(solver.robot.solved)
         if solver.url == "" or run:
             run_instance = solver.robot.name in robots and solver.model in models
             if not solver.perform(orientation, types, max_length, run_instance, wait):
                 logging.error("Not performing any more API calls as there were errors.")
                 run = False
-        # Perform one final evaluation for the solver.
-        for lower in range(0, solver.robot.joints):
-            for upper in range(lower, solver.robot.joints):
-                for o in [False, True]:
-                    for m in [NORMAL, EXTEND, DYNAMIC, CUMULATIVE, TRANSFER]:
-                        # Only generate for those which produced a code file.
-                        if os.path.exists(os.path.join(solver.solutions, f"{lower}-{upper}-"
-                                                                         f"{TRANSFORM if o else POSITION}-{m}.py")):
-                            solver.evaluate(lower, upper, o, m)
+        # Assume we want to do a manual run of evaulations in these conditions.
+        elif not run and not bypass:
+            for lower in range(0, solver.robot.joints):
+                for upper in range(lower, solver.robot.joints):
+                    for o in [False, True]:
+                        for m in [NORMAL, EXTEND, DYNAMIC, CUMULATIVE, TRANSFER]:
+                            solving = TRANSFORM if o else POSITION
+                            if (solving in solver.robot.solved and lower in solver.robot.solved[solving]
+                                    and upper in solver.robot.solved[solving][lower]):
+                                continue
+                            # Only generate for those which produced a code file.
+                            if os.path.exists(os.path.join(solver.solutions, f"{lower}-{upper}-{solving}-{m}.py")):
+                                solver.evaluate(lower, upper, o, m)
     # Evaluate all robots.
     for robot in created_robots:
         robot.evaluate()
+    return None
 
 
 if __name__ == "__main__":

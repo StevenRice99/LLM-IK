@@ -1,0 +1,104 @@
+def inverse_kinematics(p: tuple[float, float, float]) -> tuple[float, float, float, float, float, float]:
+    """
+    Closed–form inverse kinematics for the 6‑DOF arm (Z–Y–Y–Y–Z–Y) to reach
+    the TCP at p=(x,y,z), ignoring any desired end‑effector orientation beyond
+    positioning.  The solution below uses the same reasoning as the 5–DOF
+    sub‑chain code (up to joint #5) and sets joints #5 and #6 to zero by default,
+    as there is no additional orientation constraint from p alone.
+
+    Link offsets (in local frames, matching the sub‑chain logic):
+      • d2  = [0,   0.13585, 0]
+      • d23 = [0,  −0.1197,  0.425]
+      • d34 = [0,   0,       0.39225]
+      • d45 = [0,   0.093,   0]
+      • d5E = [0,   0,       0.09465]   (In the 6–DOF chain, this is joint #6’s link offset.)
+      • TCP = [0,   0.0823,  0], rpy=[0,0,1.5708] (Not used for pure positioning.)
+    
+    We solve for joints (θ1..θ4) exactly as in the 5–DOF derivation, then set
+    θ5 = 0.0, θ6 = 0.0.  This yields a valid solution for positioning p.
+    """
+    import math
+
+    x_w, y_w, z_w = p
+    d2_y = 0.13585
+    # The code below matches the 5–DOF approach that considers an effective chain
+    # up to the (formerly) “end‑effector,” which is actually joint #6’s origin here:
+    y_chain = -0.1197 + 0.093   # = -0.0267
+    L1 = 0.425
+    L2 = 0.39225
+    # This final link length L3 = 0.09465 is effectively the offset up to link #6’s origin:
+    L3 = 0.09465
+
+    # We look for θ1 so that in joint‑2’s frame the target’s y exactly matches y_chain
+    r = math.hypot(x_w, y_w)
+    # phi = atan2(-x_w, y_w) so that sin(phi)= -x_w/r, cos(phi)= y_w/r
+    phi = math.atan2(-x_w, y_w)
+    # delta = offset / radius
+    delta = y_chain + d2_y  # = ( -0.0267 + 0.13585 ) = 0.10915
+    if r != 0.0:
+        arg = delta / r
+        arg = max(-1.0, min(1.0, arg))  # clamp for safety
+        gamma = math.acos(arg)
+        t1_cands = [phi + gamma, phi - gamma]
+    else:
+        # Degenerate case if x_w=y_w=0: just pick θ1=0 for simplicity
+        t1_cands = [0.0]
+
+    best = (1e30, 0, 0, 0, 0)
+    for t1 in t1_cands:
+        c1 = math.cos(t1)
+        s1 = math.sin(t1)
+        # Transform the target into joint‑2’s frame
+        x2 = c1 * x_w + s1 * y_w
+        y2 = -s1 * x_w + c1 * y_w - d2_y
+        z2 = z_w
+        # We then treat (x2,z2) as a 2R planar chain with a small final link L3
+        # We'll guess an angle T ~ the link-4 orientation that uses L3
+        psi = math.atan2(x2, z2)
+        # We check T = psi or T = psi+π
+        for T in (psi, psi + math.pi):
+            # Subtract the final small link offset
+            xw = x2 - L3 * math.sin(T)
+            zw = z2 - L3 * math.cos(T)
+            rw2 = xw * xw + zw * zw
+            # Solve the 2R problem:
+            cosb = (rw2 - L1 * L1 - L2 * L2) / (2 * L1 * L2)
+            cosb = max(-1.0, min(1.0, cosb))
+            for sign in (+1.0, -1.0):
+                b = sign * math.acos(cosb)
+                phi_w = math.atan2(xw, zw)
+                delta_w = math.atan2(L2 * math.sin(b), L1 + L2 * math.cos(b))
+                t2 = phi_w - delta_w
+                t3 = b
+                t4 = T - (t2 + t3)
+
+                # Check the squared error in the plane
+                x_fk = L1 * math.sin(t2) + L2 * math.sin(t2 + t3) + L3 * math.sin(t2 + t3 + t4)
+                z_fk = L1 * math.cos(t2) + L2 * math.cos(t2 + t3) + L3 * math.cos(t2 + t3 + t4)
+                err2 = (x_fk - x2) ** 2 + (z_fk - z2) ** 2 + (y2 - y_chain) ** 2
+                if err2 < best[0]:
+                    best = (err2, t1, t2, t3, t4)
+
+    # Retrieve the best angles
+    _, θ1, θ2, θ3, θ4 = best
+    # For the 6–DOF arm, joints #5 and #6 remain free if only position is constrained.
+    # We'll pick them as zero for a simple valid solution:
+    θ5 = 0.0
+    θ6 = 0.0
+
+    def norm(a: float) -> float:
+        # Normalize angle to -π..π
+        while a > math.pi:
+            a -= 2.0 * math.pi
+        while a < -math.pi:
+            a += 2.0 * math.pi
+        return a
+
+    return (
+        norm(θ1),
+        norm(θ2),
+        norm(θ3),
+        norm(θ4),
+        norm(θ5),
+        norm(θ6),
+    )

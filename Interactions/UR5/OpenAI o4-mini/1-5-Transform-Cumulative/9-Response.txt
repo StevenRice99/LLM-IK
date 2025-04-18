@@ -1,0 +1,103 @@
+Here is a closed‐form, fully‐analytic inverse‐kinematics routine for all five joints.  It follows the steps outlined above:  
+ 1. build the target rotation matrix R from roll–pitch–yaw  
+ 2. extract the total “arm” angle φ = θ1+θ2+θ3 from R  
+ 3. solve θ4 purely from the Y‑position  
+ 4. peel off the d4 and d_tcp offsets in XZ and solve the 2‑link planar subproblem for θ1,θ2,θ3  
+ 5. compute θ5 from the remaining rotation  
+```python
+import math
+import numpy as np
+
+def inverse_kinematics(p: tuple[float, float, float],
+                       r: tuple[float, float, float]
+                      ) -> tuple[float, float, float, float, float]:
+    """
+    Analytic inverse kinematics for the 5‑DOF arm.
+    :param p: target TCP position [x, y, z]
+    :param r: target TCP orientation [roll, pitch, yaw]
+    :return: (theta1, theta2, theta3, theta4, theta5)
+    """
+    # --- link / offset constants from URDF ---
+    d1 = 0.425     # Revolute2 → Revolute3 along local Z
+    d2 = 0.39225   # Revolute3 → Revolute4 along local Z
+    d4 = 0.09465   # Revolute4 → Revolute5 along local Z
+    d_tcp = 0.0823 # Revolute5 → TCP along local Y (after yaw offset)
+    # vertical offsets that affect p_y:
+    y_off_low  = -0.1197  # Revolute1→Revolute2 (along world Y)
+    y_off_high = +0.093   # Revolute3→Revolute4 (along world Y)
+    psi =  1.570796325    # fixed TCP yaw offset
+
+    x, y, z = p
+    roll, pitch, yaw = r
+
+    # --- 1) build the target rotation matrix R = Rz(yaw)·Ry(pitch)·Rx(roll)
+    def rot_x(a):
+        ca, sa = math.cos(a), math.sin(a)
+        return np.array([[1, 0,   0],
+                         [0, ca, -sa],
+                         [0, sa,  ca]])
+    def rot_y(a):
+        ca, sa = math.cos(a), math.sin(a)
+        return np.array([[ ca, 0, sa],
+                         [  0, 1,  0],
+                         [-sa, 0, ca]])
+    def rot_z(a):
+        ca, sa = math.cos(a), math.sin(a)
+        return np.array([[ca, -sa, 0],
+                         [sa,  ca, 0],
+                         [ 0,   0, 1]])
+
+    R_target = rot_z(yaw) @ rot_y(pitch) @ rot_x(roll)
+
+    # --- 2) extract φ = θ1+θ2+θ3 from the "pitch" in the X–Z plane of R_target
+    #     R_target[0,2] = sin(φ),  R_target[2,2] = cos(φ)
+    phi = math.atan2(R_target[0, 2], R_target[2, 2])
+
+    # --- 3) solve θ4 from the world‑Y position only:
+    #     p_y = y_off_low + y_off_high + d_tcp * cos(θ4)
+    cos4 = (y - (y_off_low + y_off_high)) / d_tcp
+    cos4 = max(min(cos4, 1.0), -1.0)
+    theta4 = math.acos(cos4)
+    sin4   = math.sin(theta4)
+
+    # --- 4) planar X–Z subproblem for θ1, θ2, θ3 ---
+    #     Subtract the known d4 and TCP offsets in XZ:
+    #     the link‑5 d4 is along local Z → contributes d4·[sinφ, cosφ]
+    #     the TCP y‑offset under current θ4 has XZ contribution
+    X = x - d4 * math.sin(phi) + d_tcp * sin4 * math.cos(phi)
+    Z = z - d4 * math.cos(phi) - d_tcp * sin4 * math.sin(phi)
+
+    # standard 2‑link (d1,d2) IK:
+    D = (X*X + Z*Z - d1*d1 - d2*d2) / (2 * d1 * d2)
+    D = max(min(D, 1.0), -1.0)
+
+    # pick one of the two elbow solutions (here we use the "elbow‑down" acos):
+    theta2 = math.acos(D)
+    # compute θ1:
+    theta1 = math.atan2(X, Z) - math.atan2(d2 * math.sin(theta2),
+                                          d1 + d2 * math.cos(theta2))
+    # now θ3 makes up the balance:
+    theta3 = phi - theta1 - theta2
+
+    # --- 5) solve θ5 from the remaining  orientation ---
+    #    R_total = Ry(φ)·Rz(θ4)·Ry(θ5)·Rz(psi)
+    #    ⇒ R4_5 = Rz(θ4)·Ry(θ5) = Ry(φ).T · R_target · Rz(-psi)
+    R_pre     = rot_y(phi)
+    R_invpre  = R_pre.T
+    R_post    = R_target @ rot_z(-psi)
+    R45       = R_pre.T @ R_post
+    # factor out Rz(θ4):  Rz(θ4).T · R45 = Ry(θ5)
+    R5 = rot_z(-theta4) @ R45
+    # Ry(θ5) = [[c5,0,s5],[0,1,0],[-s5,0,c5]]
+    sin5 = R5[0, 2]
+    cos5 = R5[0, 0]
+    theta5 = math.atan2(sin5, cos5)
+
+    return (theta1, theta2, theta3, theta4, theta5)
+```
+
+Explanation of key steps:  
+- We first recover the “arm sum” angle φ=θ1+θ2+θ3 directly from the target rotation matrix.  
+- The only joints contributing to the global Y position are the two fixed Y‐transports (–0.1197 and +0.093) and the TCP’s 0.0823​m offset along its local Y, which resolves θ4 by a single arccos.  
+- We then strip off the rotating d4 and the TCP Y‐offset’s X–Z tilt to get an X–Z point for the 2‑link subchain (d1=0.425, d2=0.39225), from which θ1 and θ2 follow in closed form; θ3 is the difference φ–θ1–θ2.  
+- Finally, we isolate the last pitch θ5 by peeling off the known rotations Ry(φ) and Rz(θ4) (and the fixed TCP yaw), leaving a pure Ry(θ5), from which θ5 = atan2(R5[0,2],R5[0,0]).

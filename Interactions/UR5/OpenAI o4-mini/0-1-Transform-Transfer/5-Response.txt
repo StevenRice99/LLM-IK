@@ -1,0 +1,79 @@
+```python
+import math
+
+def inverse_kinematics(p: tuple[float, float, float],
+                       r: tuple[float, float, float]) -> tuple[float, float]:
+    """
+    Closed‐form IK for the 2‐DOF serial chain:
+      Joint 1: revolute about Z, link1 origin at [0,0,0], axis Z
+      Link1→joint2 offset: [0, 0.13585, 0]
+      Joint 2: revolute about Y, link2→TCP offset: [0, -0.1197, 0.425]
+    Input:
+      p = (x, y, z)   target TCP position
+      r = (rx, ry, rz) target TCP orientation as R = Rz(rz)*Ry(ry)*Rx(rx)
+    Outputs:
+      (theta1, theta2) in radians
+
+    The chain can represent only two of the three rpy‐angles exactly:
+      • if rx ≃ 0:   θ1 = rz,       θ2 = ry
+      • if rx ≃ ±π:  θ1 = rz - sign(rx)*π,  θ2 = π - ry
+    All other rx → fall back to position‐only solution.
+    """
+
+    x, y, z = p
+    rx, ry, rz = r
+
+    # small‐angle tolerance:
+    tol = 1e-7
+
+    # helper: wrap any angle into (-π, π]
+    def wrap_pi(a: float) -> float:
+        return (a + math.pi) % (2*math.pi) - math.pi
+
+    # constant planar offset from sin‐term:
+    B = 0.13585 - 0.1197  # = 0.01615
+
+    # normalize roll
+    rxw = wrap_pi(rx)
+
+    # Case 1: pure roll ≃ 0 → directly take rz, ry
+    if abs(rxw) < tol:
+        theta1 = wrap_pi(rz)
+        theta2 = wrap_pi(ry)
+
+    # Case 2: pure roll ≃ ±π → factor Rx(π) = Rz(π)*Ry(π), so:
+    #    θ1 = rz - sign(rx)*π
+    #    θ2 = π - ry
+    elif abs(abs(rxw) - math.pi) < tol:
+        sign_rx = math.copysign(1.0, rxw)
+        theta1 = wrap_pi(rz - sign_rx * math.pi)
+        theta2 = wrap_pi(math.pi - ry)
+
+    # Fallback: use position‐only analytic 2‐link solution
+    else:
+        # z = 0.425*cos(θ2)
+        cos_t2 = z / 0.425
+        cos_t2 = max(-1.0, min(1.0, cos_t2))
+        # two principal branches
+        t2p = math.acos(cos_t2)
+        t2n = -t2p
+
+        # pick branch that satisfies the x–y planar equations
+        best = None
+        for t2 in (t2p, t2n):
+            A = 0.425 * math.sin(t2)
+            denom = A*A + B*B
+            # invert [x;y] = Rz(theta1)·[A;B]
+            C = (A*x + B*y) / denom
+            S = (-B*x + A*y) / denom
+            t1 = math.atan2(S, C)
+            # record first feasible
+            if best is None:
+                best = (t1, t2)
+
+        theta1, theta2 = best
+
+    # ensure within joint limits [-2π, 2π]
+    # (wrap into (-π,π] is already within those)
+    return (theta1, theta2)
+```

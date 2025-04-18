@@ -1,0 +1,111 @@
+Here is a fully closed‐form 2‐DOF inverse‐kinematics routine that picks the correct branch by checking the full orientation (roll–pitch–yaw) from the analytic forward kinematics (no optimizers or external libs beyond math).  It:
+
+ 1. solves for θ₂ from z,
+ 2. solves for θ₁ from x–y,
+ 3. builds the 3×3 rotation Rz(θ₁)·Ry(θ₂),
+ 4. converts R to RPY in the same convention as the input “r”,
+ 5. picks the branch whose RPY matches (within 1e‑6).
+
+```python
+import math
+
+def inverse_kinematics(p: tuple[float, float, float],
+                       r: tuple[float, float, float]) -> tuple[float, float]:
+    """
+    Closed‐form IK for a 2‑DOF chain:
+      Joint 1: revolute about Z, link‑1 offset [0,0.13585,0]
+      Joint 2: revolute about Y, TCP offset  [0,-0.1197,0.425]
+
+    :param p: desired TCP position (x,y,z)
+    :param r: desired TCP orientation in roll–pitch–yaw (r_x, r_y, r_z)
+    :return: (theta1, theta2) in radians
+    """
+    x, y, z = p
+    roll_tgt, pitch_tgt, yaw_tgt = r
+
+    # fixed offset in the plane
+    B = 0.13585 - 0.1197  # = 0.01615
+
+    # 1) candidate θ2 from z = 0.425*cos(θ2)
+    cos_t2 = z / 0.425
+    # clamp
+    cos_t2 = max(-1.0, min(1.0, cos_t2))
+    t2_cands = [math.acos(cos_t2),
+                -math.acos(cos_t2)]
+
+    # helper to wrap a into [-π,π]
+    def wrap(a: float) -> float:
+        return (a + math.pi) % (2*math.pi) - math.pi
+
+    tol = 1e-6
+    # try both θ2 branches
+    for t2 in t2_cands:
+        # 2) solve for θ1 from the x–y equations:
+        #    [ x ] = Rz(θ1) [  A ]
+        #    [ y ]        [  B ]
+        A = 0.425 * math.sin(t2)
+        D = x*x + y*y
+        if D < tol:
+            # singular in x–y, skip branch
+            continue
+        C = (A*x + B*y) / D
+        S = (A*y - B*x) / D
+        t1 = math.atan2(S, C)
+
+        # 3) build the analytic rotation R = Rz(t1)·Ry(t2)
+        c1, s1 = math.cos(t1), math.sin(t1)
+        c2, s2 = math.cos(t2), math.sin(t2)
+        R00 = c1*c2;  R01 = -s1;    R02 = c1*s2
+        R10 = s1*c2;  R11 =  c1;    R12 = s1*s2
+        R20 =   -s2;  R21 =   0.0;  R22 = c2
+
+        # 4) convert R to extrinsic RPY (roll about X, then pitch about Y, then yaw about Z)
+        #    R    = Rx(r_x)·Ry(r_y)·Rz(r_z)
+        #    R02 =  sin(pitch)
+        #    R12 = -sin(roll)*cos(pitch)
+        #    R22 =  cos(roll)*cos(pitch)
+        #    R01 = -cos(pitch)*sin(yaw)
+        #    R00 =  cos(pitch)*cos(yaw)
+        # from which:
+        pitch = math.asin(max(-1.0, min(1.0, R02)))
+        # protect against gimbal lock
+        if abs(math.cos(pitch)) < tol:
+            # near ±90°, roll and yaw are coupled; skip exact check here
+            continue
+        roll  = math.atan2(-R12, R22)
+        yaw   = math.atan2(-R01, R00)
+
+        # 5) compare to desired RPY
+        if (abs(wrap(roll  - roll_tgt))  < tol and
+            abs(wrap(pitch - pitch_tgt)) < tol and
+            abs(wrap(yaw   - yaw_tgt))   < tol):
+            return (t1, t2)
+
+    # if neither branch matched exactly, fall back to the principal θ2
+    t2 = t2_cands[0]
+    A = 0.425 * math.sin(t2)
+    D = x*x + y*y
+    if D < tol:
+        # direct on‐axis in x–y: we cannot solve uniquely;
+        # default to matching yaw
+        t1 = yaw_tgt
+    else:
+        C = (A*x + B*y) / D
+        S = (A*y - B*x) / D
+        t1 = math.atan2(S, C)
+
+    return (t1, t2)
+```
+
+Explanation of the main steps:
+
+-  θ₂ is pinned by the z‑axis constraint:  
+     z = 0.425·cos θ₂  
+  giving two acos‑branches.
+
+-  θ₁ comes from inverting the 2×2 in the x–y plane:
+     
+     [x;y] = Rz(θ₁)·[A;B],  
+  with A = 0.425·sin θ₂, B = 0.01615.
+
+-  We then re‑compute the full rotation Rz(θ₁)·Ry(θ₂), extract RPY in the same roll‑pitch‑yaw order as “r” and pick the branch whose RPY matches the requested orientation.

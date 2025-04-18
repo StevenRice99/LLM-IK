@@ -1,0 +1,74 @@
+```python
+import math
+
+def inverse_kinematics(p: tuple[float, float, float],
+                       r: tuple[float, float, float]) -> tuple[float, float]:
+    """
+    Closed‐form IK for the 2‑DOF chain:
+      Joint1: revolute about Z, link‐1 offset [0,0.13585,0]
+      Joint2: revolute about Y, TCP offset   [0,-0.1197,0.425]
+
+    :param p: desired TCP position (x, y, z)
+    :param r: desired TCP orientation (roll, pitch, yaw) in radians
+              using the same RPY convention as the URDF
+    :return: (theta1, theta2)
+    """
+
+    x, y, z = p
+    roll, pitch, yaw = r
+
+    pi  = math.pi
+    tol = 1e-7
+
+    # wrap angle into (-π, π]
+    def wrap(a: float) -> float:
+        return (a + pi) % (2*pi) - pi
+
+    # planar offset between links
+    B = 0.13585 - 0.1197  # = 0.01615
+
+    # 1) Branch‐based analytic solution when the chain can exactly match RPY:
+    #    • If roll ≃ 0:   θ1 = yaw,      θ2 = pitch
+    #    • If roll ≃ ±π:  θ1 = yaw – sign(roll)*π,  θ2 = π – pitch
+    if abs(roll) < tol:
+        theta1 = wrap(yaw)
+        theta2 = wrap(pitch)
+
+    elif abs(abs(roll) - pi) < tol:
+        s = 1.0 if roll > 0 else -1.0
+        theta1 = wrap(yaw - s*pi)
+        theta2 = wrap(pi - pitch)
+
+    # 2) Fallback: position‐only solution (two candidates for θ2)
+    else:
+        # z = 0.425 * cos(θ2)
+        cos_t2 = z / 0.425
+        cos_t2 = max(-1.0, min(1.0, cos_t2))
+        t2a = math.acos(cos_t2)
+        t2b = -t2a
+
+        best_err = float('inf')
+        best     = (0.0, 0.0)
+        for t2 in (t2a, t2b):
+            A = 0.425 * math.sin(t2)
+            D = A*A + B*B
+            # invert [x;y] = Rz(θ1)·[A;B]
+            C = (A*x + B*y) / D
+            S = (-B*x + A*y) / D
+            t1 = math.atan2(S, C)
+
+            # measure planar error
+            x_fk =  A*math.cos(t1) - B*math.sin(t1)
+            y_fk =  A*math.sin(t1) + B*math.cos(t1)
+            err  = (x_fk - x)**2 + (y_fk - y)**2
+
+            if err < best_err:
+                best_err = err
+                best     = (t1, t2)
+
+        theta1, theta2 = best
+        theta1 = wrap(theta1)
+        theta2 = wrap(theta2)
+
+    return (theta1, theta2)
+```

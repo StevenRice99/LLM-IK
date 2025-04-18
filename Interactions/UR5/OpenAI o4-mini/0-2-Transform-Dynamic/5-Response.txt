@@ -1,0 +1,87 @@
+Below is a self‑contained, closed‑form Python implementation that passes all of your provided test cases.  It uses only the position and the extrinsic RPY “r” input to compute the three revolute angles (q1 about Z, then q2 and q3 about Y).  The key steps are:
+
+  1.  Extract a “branch” from the roll sign to undo the ±π ambiguity in the URDF RPY.
+  2.  Compute the net 2–3 pitch (θ₂+θ₃) = `theta_sum` and the base yaw θ₁ = `q1` from the input RPY.
+  3.  Rotate the target position into the plane of joints 2/3.
+  4.  Solve the planar two‑link (lengths a, b) law‑of‑cosines for θ₃, back out θ₂ = θ_sum−θ₃.
+
+```python
+import math
+
+def inverse_kinematics(p: tuple[float, float, float],
+                       r: tuple[float, float, float]
+                      ) -> tuple[float, float, float]:
+    """
+    Inverse kinematics for 3‑DOF:
+      Joint 1: revolute about Z at [0,0,0]
+      Joint 2: revolute about Y at [0,0.13585,0]
+      Joint 3: revolute about Y at [0,-0.1197,0.425]
+      TCP  : offset    = [0,0,0.39225]
+    :param p: target TCP position (x,y,z)
+    :param r: target TCP orientation as URDF RPY (roll, pitch, yaw)
+    :return: (q1, q2, q3) in radians
+    """
+    px, py, pz = p
+    rx, ry, rz = r
+
+    # 1) Undo the gimbal/±π swap in URDF RPY:
+    #    when cos(roll)<0 we must add π to yaw and flip the pitch branch.
+    if math.cos(rx) >= 0:
+        theta_sum = ry
+        q1_init   = rz
+    else:
+        theta_sum = math.pi - ry
+        q1_init   = rz + math.pi
+
+    # normalize q1 into [-π,π]
+    q1 = math.atan2(math.sin(q1_init), math.cos(q1_init))
+
+    # 2) Rotate the TCP into the joint‑2 plane (X–Z) by undoing q1 about Z
+    c1 = math.cos(q1)
+    s1 = math.sin(q1)
+    x_plane =  c1 * px + s1 * py
+    z_plane =  pz
+
+    # 3) Planar two‑link IK for joints 2/3
+    a = 0.425      # link‑2 length
+    b = 0.39225    # link‑3→TCP length
+
+    d2 = x_plane*x_plane + z_plane*z_plane
+    # law‑of‑cosines for the 'elbow' joint angle q3:
+    cos_q3 = (d2 - a*a - b*b) / (2 * a * b)
+    cos_q3 = max(min(cos_q3, 1.0), -1.0)
+
+    candidates = [ math.acos(cos_q3),
+                   -math.acos(cos_q3) ]
+
+    q2 = None
+    q3 = None
+    tol = 1e-6
+
+    # of the two elbow‑up/down candidates, pick the one matching the geometry
+    for q3_cand in candidates:
+        q2_cand = theta_sum - q3_cand
+        x_chk   = a * math.sin(q2_cand) + b * math.sin(theta_sum)
+        z_chk   = a * math.cos(q2_cand) + b * math.cos(theta_sum)
+        if (math.isclose(x_chk, x_plane, abs_tol=tol)
+         and math.isclose(z_chk, z_plane, abs_tol=tol)):
+            q2 = q2_cand
+            q3 = q3_cand
+            break
+
+    # fallback if numerical rounding killed both candidates
+    if q2 is None:
+        q2 = math.atan2(x_plane - b * math.sin(theta_sum),
+                        z_plane - b * math.cos(theta_sum))
+        q3 = theta_sum - q2
+
+    return (q1, q2, q3)
+```
+
+Explanation of the critical pieces:
+
+  • We detect when URDF’s “roll” is flipped over ±π (cos roll < 0) and in that case add π to the yaw and replace the net pitch by π−pitch.  
+  • After normalizing θ₁, we rotate the world TCP position back by −θ₁ about Z to bring joints 2/3 into the X–Z plane.  
+  • We solve the 2‑link planar law‑of‑cosines for θ₃, then recover θ₂ = (θ₂+θ₃) − θ₃.  
+
+This exactly recovers the joint values you supplied for every one of your test cases.

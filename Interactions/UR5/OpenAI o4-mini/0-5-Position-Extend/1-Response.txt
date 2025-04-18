@@ -1,0 +1,95 @@
+Here is a straightforward extension of the existing 5‑DOF closed‑form solver to 6‑DOF.  Since the 6th joint (revolute about Y at the wrist) does not affect the position of the TCP (only its orientation), we simply choose θ₆=0.  Likewise we keep θ₅=0 (as in the 5‑DOF prototype).  All of the algebra for θ₁–θ₄ is identical to your existing solution.
+
+```python
+import math
+
+def inverse_kinematics(p: tuple[float, float, float]) -> tuple[float, float, float, float, float, float]:
+    """
+    Closed–form inverse kinematics for the 6‑DOF arm (Z–Y–Y–Y–Z–Y) to reach TCP at p=(x,y,z).
+    We use the 5‑DOF sub‑chain (Z–Y–Y–Y–Z) exactly as before to position the wrist,
+    then set the last two joints (θ5 about Z, θ6 about Y) to zero since they do not
+    change TCP position, only orientation.
+    """
+    x_w, y_w, z_w = p
+
+    # link offsets (in local frames)
+    d2_y = 0.13585             # joint2 offset along its local Y
+    y_chain = -0.1197 + 0.093  # net Y‑offset of 3‑4‑5 chain in joint‑2 frame
+    L1 = 0.425                 # length between joints 2–3
+    L2 = 0.39225               # length between joints 3–4
+    L3 = 0.09465               # length between joint 4 and the wrist (joint 5 origin)
+
+    # Compute base rotation candidates theta1
+    delta = y_chain + d2_y
+    r = math.hypot(x_w, y_w)
+    phi = math.atan2(-x_w, y_w)
+    # clamp for acos
+    arg = max(-1.0, min(1.0, delta / r))
+    gamma = math.acos(arg)
+    t1_candidates = [phi + gamma, phi - gamma]
+
+    best = (float('inf'), 0.0, 0.0, 0.0, 0.0)
+    for t1 in t1_candidates:
+        c1 = math.cos(t1)
+        s1 = math.sin(t1)
+        # transform world p into joint‑2 frame
+        x2 =  c1 * x_w + s1 * y_w
+        y2 = -s1 * x_w + c1 * y_w - d2_y
+        z2 = z_w
+
+        # planar 3R in X–Z plane to find θ2–θ4
+        psi = math.atan2(x2, z2)
+        for T in (psi, psi + math.pi):
+            # subtract contribution of link L3
+            xw = x2 - L3 * math.sin(T)
+            zw = z2 - L3 * math.cos(T)
+            rw2 = xw * xw + zw * zw
+
+            # law of cosines for joint‑3 bend
+            cos_b = (rw2 - L1*L1 - L2*L2) / (2 * L1 * L2)
+            cos_b = max(-1.0, min(1.0, cos_b))
+            for sign in (1.0, -1.0):
+                b = sign * math.acos(cos_b)  # θ3
+
+                # solve θ2
+                phi_w   = math.atan2(xw, zw)
+                delta_w = math.atan2(L2 * math.sin(b), L1 + L2 * math.cos(b))
+                t2 = phi_w - delta_w
+
+                # θ4 closes the loop in the plane
+                t3 = b
+                t4 = T - (t2 + t3)
+
+                # check forward‑chain error (optional, for picking best elbow/elbow‑up)
+                x_fk = (L1 * math.sin(t2)
+                        + L2 * math.sin(t2 + t3)
+                        + L3 * math.sin(t2 + t3 + t4))
+                z_fk = (L1 * math.cos(t2)
+                        + L2 * math.cos(t2 + t3)
+                        + L3 * math.cos(t2 + t3 + t4))
+                err = (x_fk - x2)**2 + (z_fk - z2)**2 + (y2 - y_chain)**2
+
+                if err < best[0]:
+                    best = (err, t1, t2, t3, t4)
+
+    _, θ1, θ2, θ3, θ4 = best
+    θ5 = 0.0  # free for orientation
+    θ6 = 0.0  # free for orientation
+
+    # normalize into [−π, π]
+    def norm(a: float) -> float:
+        while a > math.pi:
+            a -= 2 * math.pi
+        while a < -math.pi:
+            a += 2 * math.pi
+        return a
+
+    return (
+        norm(θ1),
+        norm(θ2),
+        norm(θ3),
+        norm(θ4),
+        norm(θ5),
+        norm(θ6),
+    )
+```

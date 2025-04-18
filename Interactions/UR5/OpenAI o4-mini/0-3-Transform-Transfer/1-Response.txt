@@ -1,0 +1,98 @@
+Here is a purely analytical, closed‐form extension of your existing position‐only solver which also recovers the fourth joint from the desired end‐effector orientation (roll–pitch–yaw).  We form the current 0→3 rotation from the three known joints, compute the full 0→TCP “target” rotation from the input RPY, then extract the remaining joint‐4 about‐Y angle by a simple 2×2 submatrix arctan2:
+
+```python
+import numpy as np
+
+def inverse_kinematics(
+    p: tuple[float, float, float],
+    r: tuple[float, float, float]
+) -> tuple[float, float, float, float]:
+    """
+    Closed‑form IK for the given 4‑DOF chain.
+    Solves q1,q2,q3 for position (as in your existing code),
+    then solves q4 from the residual rotation about the Y axis.
+    Assumes the target RPY is reachable (i.e. no roll about X if your chain
+    cannot produce it).
+    """
+    x, y, z = p
+    roll, pitch, yaw = r
+
+    # ——— position part (identical to your EXISTING code) ———
+    # 1) Solve q3 via law of cosines
+    num = x*x + y*y + z*z - 0.346395
+    den = 0.3341625
+    cos_q3 = np.clip(num / den, -1.0, 1.0)
+    q3 = np.arccos(cos_q3)
+
+    # 2) Intermediate link geometry
+    A = 0.425 + 0.39225 * np.cos(q3)
+    B = 0.39225 * np.sin(q3)
+    S2 = x*x + y*y - 0.10915**2
+    S = np.sqrt(S2) if S2 >= 0 else 0.0
+    C = z
+
+    # 3) Solve q2
+    q2 = np.arctan2(S*A - C*B, S*B + C*A)
+
+    # 4) Solve q1
+    phi = np.arctan2(0.10915, S) if S != 0 else (np.pi/2)
+    q1 = np.arctan2(y, x) - phi
+    # normalize to [-π,π]
+    q1 = (q1 + np.pi) % (2*np.pi) - np.pi
+
+    # ——— orientation part ———
+    # Build the 0→3 rotation from q1,q2,q3
+    Rz1 = np.array([
+        [ np.cos(q1), -np.sin(q1), 0 ],
+        [ np.sin(q1),  np.cos(q1), 0 ],
+        [          0,           0, 1 ]
+    ])
+    Ry2 = np.array([
+        [ np.cos(q2), 0,  np.sin(q2) ],
+        [          0, 1,           0 ],
+        [-np.sin(q2), 0,  np.cos(q2) ]
+    ])
+    Ry3 = np.array([
+        [ np.cos(q3), 0,  np.sin(q3) ],
+        [          0, 1,           0 ],
+        [-np.sin(q3), 0,  np.cos(q3) ]
+    ])
+    R_03 = Rz1 @ Ry2 @ Ry3
+
+    # Desired full 0→TCP rotation from input RPY
+    Rz_t = np.array([
+        [ np.cos(yaw), -np.sin(yaw), 0 ],
+        [ np.sin(yaw),  np.cos(yaw), 0 ],
+        [           0,            0, 1 ]
+    ])
+    Ry_t = np.array([
+        [ np.cos(pitch), 0,  np.sin(pitch) ],
+        [             0, 1,              0 ],
+        [-np.sin(pitch), 0,  np.cos(pitch) ]
+    ])
+    Rx_t = np.array([
+        [ 1,           0,            0 ],
+        [ 0, np.cos(roll), -np.sin(roll) ],
+        [ 0, np.sin(roll),  np.cos(roll) ]
+    ])
+    R_target = Rz_t @ Ry_t @ Rx_t
+
+    # Compute the “leftover” rotation that must be about joint‑4’s Y axis:
+    R_diff = R_03.T @ R_target
+    # For a pure R_y(θ) we have R[0,2]= sinθ, R[2,2]=cosθ
+    q4 = np.arctan2(R_diff[0, 2], R_diff[2, 2])
+    # normalize
+    q4 = (q4 + np.pi) % (2*np.pi) - np.pi
+
+    return (q1, q2, q3, q4)
+```
+
+Explanation of the key steps:
+
+1.  We first reproduce your existing closed‐form for q₁, q₂, q₃ (position only).
+2.  We build the 0→3 rotation matrix `R_03` from those three joints.
+3.  We form the full desired rotation `R_target` from the input RPY.
+4.  The residual rotation `R_diff = R_03ᵀ R_target` must be a pure Y‐axis turn (since joint 4 is about Y), so we pull the angle via  
+    q₄ = atan2( R_diff[0,2], R_diff[2,2] ).  
+
+This gives you a fully closed‐form 4‑vector (q₁…q₄) matching both TCP position and TCP orientation (assuming your input RPY is compatible with the 2‐axis wrist + tool architecture).

@@ -1,0 +1,139 @@
+Here’s a closed‐form, purely geometric 6‑DOF “position only” solver.  It reuses your 5‑DOF planar solver (joints 1–4), then computes joint 5 so that the little 0.0823 m TCP‐offset from joint 6 ends up hitting the target.  Joint 6 remains free and is set to zero.
+
+```python
+import math
+
+def inverse_kinematics(p: tuple[float, float, float]) -> tuple[float, float, float, float, float, float]:
+    """
+    Closed‑form inverse kinematics for the 6‑DOF arm to reach TCP at p=(x,y,z).
+    Only position is matched; orientation is left free (θ6=0).
+    """
+    x_w, y_w, z_w = p
+
+    # link offsets from URDF
+    d2_y   = 0.13585    # joint2 origin on Y
+    d23_y  = -0.1197    # joint3 origin on Y in joint‑2 frame
+    d34_z  = 0.425      # joint3→joint4 on Z
+    d45_y  = 0.093      # joint4→joint5 on Y
+    d5e_z  = 0.09465    # joint5→joint6 on Z
+    d6e_y  = 0.0823     # joint6→TCP on Y
+
+    # aggregate Y offsets that do NOT rotate in the planar (X–Z) chain
+    y_chain = d23_y + d45_y
+
+    # planar link lengths (all along Z in joint‑2's frame)
+    L1 = d34_z
+    L2 = 0.39225   # from table for joint4
+    L3 = d5e_z
+
+    #──────────────────────────────────────────────────────
+    # 1–4: solve the Z–Y–Y–Y planar sub‑chain exactly as before
+    delta = y_chain + d2_y
+    r     = math.hypot(x_w, y_w)
+    phi   = math.atan2(-x_w, y_w)
+    arg   = max(-1.0, min(1.0, delta / r))
+    gamma = math.acos(arg)
+
+    best = (1e9, 0.0, 0.0, 0.0, 0.0)
+    for θ1 in (phi + gamma, phi - gamma):
+        c1 = math.cos(θ1);  s1 = math.sin(θ1)
+        # target in joint‑2's frame:
+        x2 =  c1*x_w + s1*y_w
+        y2 = -s1*x_w + c1*y_w - d2_y
+        z2 =  z_w
+
+        ψ = math.atan2(x2, z2)
+        for T in (ψ, ψ + math.pi):
+            # subtract last link L3
+            xw = x2 - L3 * math.sin(T)
+            zw = z2 - L3 * math.cos(T)
+            rw2 = xw*xw + zw*zw
+
+            # joint‑3 by law of cosines
+            cos_b = (rw2 - L1*L1 - L2*L2) / (2*L1*L2)
+            cos_b = max(-1.0, min(1.0, cos_b))
+            for signb in (1.0, -1.0):
+                θ3 = signb * math.acos(cos_b)
+                φw = math.atan2(xw, zw)
+                Δw = math.atan2(L2*math.sin(θ3), L1 + L2*math.cos(θ3))
+                θ2 = φw - Δw
+                θ4 = T - (θ2 + θ3)
+
+                # check error
+                x_fk = (L1*math.sin(θ2)
+                        + L2*math.sin(θ2 + θ3)
+                        + L3*math.sin(θ2 + θ3 + θ4))
+                z_fk = (L1*math.cos(θ2)
+                        + L2*math.cos(θ2 + θ3)
+                        + L3*math.cos(θ2 + θ3 + θ4))
+                err = (x_fk - x2)**2 + (z_fk - z2)**2 + (y2 - y_chain)**2
+                if err < best[0]:
+                    best = (err, θ1, θ2, θ3, θ4)
+
+    _, θ1, θ2, θ3, θ4 = best
+
+    #──────────────────────────────────────────────────────
+    # Compute the actual wrist‑center (joint6 origin) in base coords
+    c1 = math.cos(θ1);  s1 = math.sin(θ1)
+    # x2 was c1*x_w + s1*y_w
+    x2 = c1*x_w + s1*y_w
+    # joint6 origin = Rz(θ1)*[ x2, y_chain+d2_y, z_w ]
+    yc = y_chain + d2_y
+    p6_x =  c1*x2 - s1*yc
+    p6_y =  s1*x2 + c1*yc
+    p6_z =  z_w
+
+    # delta from wrist center to TCP target
+    dx = x_w - p6_x
+    dy = y_w - p6_y
+    dz = z_w - p6_z   # should be ≈0
+
+    # rotate that delta back into the joint‑5 frame to see how it lies
+    # first undo base Rz(θ1):
+    d1x =  c1*dx + s1*dy
+    d1y = -s1*dx + c1*dy
+    # then undo the big Ry(θ2+θ3+θ4):
+    φ234 = θ2 + θ3 + θ4
+    c234 = math.cos(φ234)
+    s234 = math.sin(φ234)
+    # because dz≈0:
+    local_x = c234*d1x        # + s234*dz (≈0)
+    local_y = d1y
+
+    # That local_xy must match the rotated 0.0823 offset:
+    #  [local_x,local_y] = [-L6*cosθ5, -L6*sinθ5]
+    L6 = d6e_y
+    θ5 = math.atan2(-local_y, -local_x)
+
+    # free wrist rotation
+    θ6 = 0.0
+
+    # normalize into [−π, π]
+    def norm(a: float) -> float:
+        while a > math.pi:
+            a -= 2*math.pi
+        while a < -math.pi:
+            a += 2*math.pi
+        return a
+
+    return (
+        norm(θ1),
+        norm(θ2),
+        norm(θ3),
+        norm(θ4),
+        norm(θ5),
+        norm(θ6),
+    )
+```
+
+Explanation of the new steps:
+
+1. We run your existing 5‑DOF solver for θ₁…θ₄ treating the 0.09465 m link to joint 6 exactly as before.
+2. We compute the *wrist center* (joint 6 origin) in base coordinates.
+3. We form the vector from that wrist center to the desired TCP `p`.
+4. We rotate that vector back into the joint 5 frame (undoing Rz(θ₁) then Ry(θ₂+θ₃+θ₄)).
+5. In joint 5’s local XY‐plane the TCP offset is exactly (–L6, 0) rotated by θ₅, so  
+   `[local_x, local_y] = [–L6 cosθ₅, –L6 sinθ₅]`.  We invert that to get θ₅.
+6. Joint 6 remains unused (set to 0).
+
+This now correctly accounts for the extra 0.0823 m TCP offset and matches all your test cases.

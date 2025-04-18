@@ -1,0 +1,101 @@
+Here’s a straight‐forward closed‐form implementation that picks one of the two mirror (“elbow up/down”) solutions (the “elbow‐down” case with θ₃ ≥ 0) and one of the two yaw‐mirror solutions.  It uses no optimization routines—only basic trig, `atan2`, `acos` and the usual 2‐link planar‐arm formulas:
+
+```python
+import math
+from typing import Tuple
+
+def inverse_kinematics(p: Tuple[float, float, float],
+                       r: Tuple[float, float, float]
+                      ) -> Tuple[float, float, float, float]:
+    """
+    Closed‑form inverse kinematics for a 4‑DOF yaw‑pitch‑pitch‑pitch arm.
+    p = (px, py, pz) is the desired TCP position in base coords.
+    r = (roll, pitch, yaw) is the desired TCP orientation in base coords,
+        expressed as R = Rz(yaw)*Ry(pitch)*Rx(roll).  Only roll=0
+        is reachable; we assume inputs are reachable.
+    Returns (theta1, theta2, theta3, theta4) in radians.
+    """
+
+    # Unpack inputs
+    px, py, pz = p
+    roll, pitch, yaw = r
+
+    # 1) Compute theta1 (yaw around Z) from the XY projection,
+    #    taking into account the constant Y‑offset of the chain:
+    #      -p_x*sinθ1 + p_y*cosθ1 = C0
+    #
+    #    C0 = +0.13585 (link2.Y)
+    #         -0.11970 (link3.Y)
+    #         +0.09300 (TCP.Y)
+    C0 = 0.13585 - 0.11970 + 0.09300
+
+    rho = math.hypot(px, py)
+    if rho < 1e-9:
+        raise ValueError("Singular or unreachable: px,py too small")
+
+    # δ = atan2(px, py)
+    delta = math.atan2(px, py)
+    # two solutions of cos(θ1 + δ) = C0 / rho
+    arg = C0 / rho
+    # clamp for numerical safety
+    arg = max(min(arg, 1.0), -1.0)
+    psi = math.acos(arg)
+
+    # pick one yaw solution: θ1 = -δ + ψ
+    theta1 = -delta + psi
+
+    # 2) Recover the planar (x–z) “wrist” target in the frame
+    #    after undoing the yaw:
+    ux =  px*math.cos(theta1) + py*math.sin(theta1)
+    uz =  pz
+
+    # 3) Solve the 2R planar arm in the X–Z plane:
+    #    L2 = 0.425, L3 = 0.39225
+    L2 = 0.42500
+    L3 = 0.39225
+
+    # law‐of‐cosines for θ3
+    D = (ux*ux + uz*uz - L2*L2 - L3*L3) / (2 * L2 * L3)
+    D = max(min(D, 1.0), -1.0)
+    # elbow‐down => positive sqrt
+    theta3 = math.atan2(math.sqrt(1 - D*D), D)
+
+    # then θ2 from standard 2R formula
+    phi = math.atan2(uz, ux)
+    psi2 = math.atan2(L3 * math.sin(theta3),
+                      L2 + L3 * math.cos(theta3))
+    theta2 = phi - psi2
+
+    # 4) Finally θ4 is used to match the desired pitch
+    #    pitch = θ2 + θ3 + θ4  => θ4 = pitch − (θ2+θ3)
+    theta4 = pitch - (theta2 + theta3)
+
+    # Optionally wrap angles into [-π, π]
+    def wrap(a):
+        return (a + math.pi) % (2*math.pi) - math.pi
+
+    return (wrap(theta1),
+            wrap(theta2),
+            wrap(theta3),
+            wrap(theta4))
+```
+
+Explanation of the main steps:
+
+1. **Yaw (θ₁)**  
+   We have a constant Y‐offset of  
+     C₀ = 0.13585 – 0.11970 + 0.09300 = 0.10915  
+   so the XY projection must satisfy  
+     –px·sin θ₁ + py·cos θ₁ = C₀.  
+   Solve that for θ₁ in closed form via an `acos`.
+
+2. **Project back to a 2R planar problem**  
+   Undo the yaw to get a target (uₓ, u_z) in the X–Z plane,  
+   then solve the two pitch joints θ₂, θ₃ for link lengths 0.425 and 0.39225.
+
+3. **Roll/Pitch of the chain**  
+   Since this arm only ever produces an overall rotation  
+   R = Rz(θ₁)·Ry(θ₂)·Ry(θ₃)·Ry(θ₄), the final TCP pitch is  
+   θ₂+θ₃+θ₄.  We set θ₄ = desired_pitch – (θ₂+θ₃).
+
+Under the assumption that the user only requests reachable (px,py,pz,roll,pitch,yaw) this handles everything analytically.

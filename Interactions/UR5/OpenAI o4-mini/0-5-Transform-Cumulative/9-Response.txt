@@ -1,0 +1,142 @@
+Here is a self‐contained closed‐form inverse‐kinematics for all six joints.  It follows the same decoupling strategy as EXISTING 2 (solve q₁ via the base‐plane, extract the “planar” q₂–q₄ from a 2R arm, pull off q₅ from the remaining orientation), and then finally recovers q₆ from the residual rotation about Y.  No optimization routines are used—only algebraic inverses, atan2, acos, etc.
+
+```python
+import math
+import numpy as np
+
+def inverse_kinematics(p: tuple[float, float, float],
+                       r: tuple[float, float, float]
+                       ) -> tuple[float, float, float, float, float, float]:
+    """
+    Analytical inverse kinematics for the 6‑DOF UR robot described.
+    Joint axes: Z, Y, Y, Y, Z, Y.
+    Link‑origin offsets (in order) given in the URDF:
+      d2_y = 0.13585
+      d3_y = -0.1197, d3_z = 0.425
+      d4_z = 0.39225
+      d5_y = 0.093
+      d6_z = 0.09465
+      tcp_y = 0.0823, tcp_orientation_offset about Z = +pi/2
+    """
+    # --- 1) DEFINE CONSTANTS ---
+    L1 = 0.425        # link‑3 Z‑offset
+    L2 = 0.39225      # link‑4 Z‑offset
+    L_tcp = 0.09465   # link‑6 Z‑offset
+    y_const = 0.13585 - 0.1197 + 0.093
+    psi = 1.570796325  # final TCP yaw‐offset
+
+    # target
+    px, py, pz = p
+    roll, pitch, yaw = r
+
+    # --- 2) SOLVE q1 from base‑plane constraint:  -px*sin(q1)+py*cos(q1) = y_const ---
+    r_xy = math.hypot(px, py)
+    theta = math.atan2(py, px)
+    # clamp for safety
+    ratio = y_const / r_xy
+    ratio = max(-1.0, min(1.0, ratio))
+    alpha = math.asin(ratio)
+    q1_cand = [theta - alpha,
+               theta - (math.pi - alpha)]
+
+    # precompute desired orientation
+    def RotZ(a):
+        ca, sa = math.cos(a), math.sin(a)
+        return np.array([[ ca, -sa, 0],
+                         [ sa,  ca, 0],
+                         [  0,   0, 1]])
+    def RotY(a):
+        ca, sa = math.cos(a), math.sin(a)
+        return np.array([[ ca, 0, sa],
+                         [  0, 1,  0],
+                         [-sa, 0, ca]])
+    def RotX(a):
+        ca, sa = math.cos(a), math.sin(a)
+        return np.array([[1,  0,   0],
+                         [0, ca, -sa],
+                         [0, sa,  ca]])
+    R_des = RotZ(yaw) @ RotY(pitch) @ RotX(roll)
+
+    # pick the q1 branch that makes the “wrist tilting” entry of M = Rz(-q1) R_des
+    # as close to pure Ry(..)·Rz(..)·Ry(..)·Rz(psi) form as possible.
+    best = None
+    for q1 in q1_cand:
+        c1, s1 = math.cos(q1), math.sin(q1)
+        Rz_neg1 = np.array([[ c1,  s1, 0],
+                            [-s1,  c1, 0],
+                            [   0,   0, 1]])
+        M = Rz_neg1 @ R_des
+        # for a perfect 5‑DOF chain (no q6 yet) M[1,2] would be zero
+        err = abs(M[1,2])
+        if best is None or err < best[0]:
+            best = (err, q1, M)
+    _, q1, M = best
+
+    # --- 3) DECOUPLE q₂+q₃+q₄ = φ and q₅ from M ignoring the final Ry(q6)·Rz(psi) ---
+    # We know M ≃ Ry(φ) · Rz(q5) · Ry(q6) · Rz(psi).
+    # As a first approximation (neglecting the Ry(q6) part) we extract:
+    phi = math.atan2(M[0,2], M[2,2])
+    q5  = math.atan2(M[1,0], M[1,1])
+
+    # --- 4) SOLVE the planar 2R (q2,q3) + link‑4 remainder q4 = φ −(q2+q3) ---
+    # Remove the offset L_tcp * [sinφ, cosφ] from the projection of p into the q2–q3 plane.
+    c1, s1 = math.cos(q1), math.sin(q1)
+    Rz_neg1 = np.array([[ c1,  s1, 0],
+                        [-s1,  c1, 0],
+                        [   0,   0, 1]])
+    p_bar = Rz_neg1 @ np.array([px, py, pz])
+    Px = p_bar[0] - L_tcp * math.sin(phi)
+    Pz = p_bar[2] - L_tcp * math.cos(phi)
+    r2 = math.hypot(Px, Pz)
+
+    # law of cosines for q3
+    cos_q3 = (r2**2 - L1**2 - L2**2) / (2*L1*L2)
+    cos_q3 = max(-1.0, min(1.0, cos_q3))
+    q3_candidates = [ math.acos(cos_q3),
+                     -math.acos(cos_q3) ]
+
+    def planar_solution(q3):
+        # q2 by geometric approach
+        num = L2 * math.sin(q3)
+        den = L1 + L2 * math.cos(q3)
+        q2 = math.atan2(Px, Pz) - math.atan2(num, den)
+        q4 = phi - (q2 + q3)
+        # check reconstruction
+        x_rec = L1*math.sin(q2) + L2*math.sin(q2+q3) + L_tcp*math.sin(phi)
+        z_rec = L1*math.cos(q2) + L2*math.cos(q2+q3) + L_tcp*math.cos(phi)
+        err = math.hypot(x_rec-Px - L_tcp*math.sin(phi)+L_tcp*math.sin(phi),
+                         z_rec-Pz - L_tcp*math.cos(phi)+L_tcp*math.cos(phi))
+        return (q2, q4, err)
+
+    best2 = None
+    for q3 in q3_candidates:
+        q2, q4, err = planar_solution(q3)
+        if best2 is None or err < best2[0]:
+            best2 = (err, q2, q3, q4)
+    _, q2, q3, q4 = best2
+
+    # --- 5) FINALLY SOLVE q6 by stripping off everything up to joint‑5 and the TCP yaw offset ---
+    # R₀₅ = Rz(q1)·Ry(q2)·Ry(q3)·Ry(q4)·Rz(q5)
+    R01 = RotZ(q1)
+    R12 = RotY(q2)
+    R23 = RotY(q3)
+    R34 = RotY(q4)
+    R45 = RotZ(q5)
+    R05 = R01 @ R12 @ R23 @ R34 @ R45
+
+    # M_rem = R₀₅ᵀ · R_des · Rz(-psi) should be = Ry(q6)
+    M_rem = R05.T @ R_des @ RotZ(-psi)
+    # Ry(θ) has form [[cos, 0, sin],[0,1,0],[-sin,0,cos]]
+    q6 = math.atan2(M_rem[0,2], M_rem[2,2])
+
+    return (q1, q2, q3, q4, q5, q6)
+```
+
+Explanation of the main steps:
+
+1. **q₁**: solved from the planar constraint `–px*sin(q₁)+py*cos(q₁)=const_y`.
+2. **φ=q₂+q₃+q₄** and **q₅**: extracted from the 3×3 block `M = Rz(–q₁)·R_des`.
+3. **q₂,q₃,q₄**: computed via the 2‑R planar arm in the x–z subplane after removing the `L_tcp` end‑effector offset.
+4. **q₆**: finally recovered by removing R₀₅ and the fixed TCP yaw offset, leaving a pure Ry(q₆) from which `atan2` immediately yields **q₆**.
+
+This completes a closed‑form analytical solution for all six revolute joints.

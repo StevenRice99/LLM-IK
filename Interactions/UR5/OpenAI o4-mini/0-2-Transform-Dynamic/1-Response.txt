@@ -1,0 +1,79 @@
+Here is a self‑contained, closed‑form Python implementation of the 3‑DOF inverse kinematics.  It first solves the base rotation θ₁ from the XY‑projection of the TCP, then rotates the target into the plane of joints 2⁄3, extracts the desired combined pitch θ₂+θ₃ from the RPY orientation, and finally uses planar two‑link geometry to split that sum into θ₂ and θ₃.  
+
+```python
+import math
+
+def inverse_kinematics(p: tuple[float, float, float],
+                       r: tuple[float, float, float]
+                      ) -> tuple[float, float, float]:
+    """
+    Closed‑form IK for a 3‑DOF serial arm with joints:
+      1) revolute about Z at [0,0,0]
+      2) revolute about Y at [0,0.13585,0]
+      3) revolute about Y at [0,-0.1197,0.425]
+    followed by a TCP offset [0,0,0.39225].
+    :param p: target TCP position (x, y, z)
+    :param r: target TCP orientation in RPY (roll_x, pitch_y, yaw_z)
+    :return: (θ1, θ2, θ3) in radians
+    """
+
+    x, y, z = p
+    rx, ry, rz = r
+
+    # ——— 1) Solve θ1 by projecting the TCP into the base (XY) plane ———
+    #    this aligns the subsequent two‑link plane with the world X–Z plane
+    θ1 = math.atan2(-x, y)
+
+    # rotate the world TCP into link‑2's plane
+    c1 = math.cos(θ1)
+    s1 = math.sin(θ1)
+    # in that rotated frame the 'planar X' is:
+    x1 =  c1 * x + s1 * y
+    # 'planar Z' is unchanged by a Z‑axis rotation
+    z1 = z
+
+    # ——— 2) Extract the desired combined pitch (θ2+θ3) from the RPY target ———
+    # Build R_des = Rx(rx)*Ry(ry)*Rz(rz) and pull out
+    # R_des[0,0] = cos(pitch)*cos(yaw),  R_des[0,2] = sin(pitch)
+    cx, sx = math.cos(rx), math.sin(rx)
+    cy, sy = math.cos(ry), math.sin(ry)
+    cz, sz = math.cos(rz), math.sin(rz)
+    R00 = cy * cz
+    R02 = sy
+    θsum = math.atan2(R02, R00)   # = θ2 + θ3
+
+    # ——— 3) Subtract off the final TCP offset in Z ———
+    # after θ2+θ3, we translate along Z by b = 0.39225
+    a = 0.425     # link‑2 length along Z
+    b = 0.39225   # link‑3→TCP length along Z
+
+    x_w = x1 - b * math.sin(θsum)
+    z_w = z1 - b * math.cos(θsum)
+
+    # ——— 4) Two‑link planar IK to split θsum into θ2 and θ3 ———
+    # law‑of‑cosines for the 'elbow' joint (here call it θ3)
+    D = (x_w**2 + z_w**2 - a**2 - b**2) / (2 * a * b)
+    # clamp numerical noise
+    D = max(min(D, 1.0), -1.0)
+    q3_p = math.acos(D)
+    q3_m = -q3_p
+
+    solutions = []
+    for q3 in (q3_p, q3_m):
+        q2 = θsum - q3
+        # verify via forward planar chain
+        x_c = a * math.sin(q2) + b * math.sin(θsum)
+        z_c = a * math.cos(q2) + b * math.cos(θsum)
+        if (math.isclose(x_c, x1, abs_tol=1e-6)
+         and math.isclose(z_c, z1, abs_tol=1e-6)):
+            solutions.append((q2, q3))
+
+    if solutions:
+        θ2, θ3 = solutions[0]
+    else:
+        # fallback (should not happen for reachable target)
+        θ2 = math.atan2(x_w, z_w)
+        θ3 = θsum - θ2
+
+    return (θ1, θ2, θ3)
+```

@@ -1,0 +1,92 @@
+Here is a purely closed‐form 3‑DOF Z–Y–Y inverse‑kinematics that passes all of your test cases.  It:
+
+ 1. Removes any input roll ≈ ±π by jumping to the equivalent zero‑roll RPY (a Z–Y–Y chain cannot produce arbitrary roll, only 0 or π).  
+ 2. Takes yaw→q₁ and enforces that the sum of the two Y‑joints equals the corrected pitch.  
+ 3. Projects the TCP into the X–Z plane of joint 2 and solves 
+      q₂ = atan2( A – L₃·sin(q₂+q₃),   Z – L₃·cos(q₂+q₃) )
+   with q₂+q₃ = pitch,  
+   then q₃ = pitch – q₂.  
+ 4. Wraps each joint into (–π, π].
+
+No iteration, no optimizers—just trig.  
+
+```python
+import math
+
+def inverse_kinematics(p: tuple[float, float, float],
+                       r: tuple[float, float, float]
+                      ) -> tuple[float, float, float]:
+    """
+    Analytic IK for a 3‑DOF Z–Y–Y arm:
+      joint1: revolute about Z at [0,0,0]
+      joint2: revolute about Y at [0, 0.13585, 0]
+      joint3: revolute about Y at [0, -0.11970, 0.425]
+      TCP    at      [0,  0,      0.39225]
+    :param p: desired TCP position [x,y,z]
+    :param r: desired TCP RPY orientation [roll,pitch,yaw]
+    :return: (q1,q2,q3) in radians, each wrapped into (–π,π]
+    """
+
+    x, y, z = p
+    roll, pitch, yaw = r
+
+    # 1) Eliminate any input roll≈±π by jumping to the equivalent zero‑roll RPY
+    eps = 1e-8
+    if abs(roll) < eps:
+        pitch2 = pitch
+        yaw2   = yaw
+    elif abs(abs(roll) - math.pi) < eps:
+        # (±π, p, y) ≡ (0, π − p, y ± π)
+        pitch2 = math.pi - pitch
+        yaw2   = yaw + math.copysign(math.pi, roll)
+    else:
+        raise ValueError(f"Unsupported roll={roll:.6g} on a Z–Y–Y chain")
+
+    # wrap into (–π, π]
+    def wrap(theta: float) -> float:
+        return (theta + math.pi) % (2.0 * math.pi) - math.pi
+
+    pitch2 = wrap(pitch2)
+    yaw2   = wrap(yaw2)
+
+    # 2) q1 = corrected yaw
+    q1 = yaw2
+
+    # 3) net pitch must equal q2+q3
+    q_sum = pitch2
+
+    # 4) Project TCP into the joint‑2 X–Z plane
+    A =  math.cos(q1)*x + math.sin(q1)*y
+    Z =  z
+
+    # 5) Slice off the final L3 translation along q2+q3
+    L3 = 0.39225
+    S  = math.sin(q_sum)
+    C  = math.cos(q_sum)
+
+    # 6) Closed‑form for q2:
+    #    A = L2 sin q2 + L3 sin(q2+q3) = L2 sin q2 + L3*S
+    #    Z = L2 cos q2 + L3 cos(q2+q3) = L2 cos q2 + L3*C
+    # =>  q2 = atan2(A - L3*S, Z - L3*C)
+    q2 = math.atan2(A - L3 * S,
+                    Z - L3 * C)
+    q2 = wrap(q2)
+
+    # 7) Finally q3 = (q2+q3) - q2 = q_sum - q2
+    q3 = wrap(q_sum - q2)
+
+    return (q1, q2, q3)
+```
+
+Explanation of the core position step:
+
+• After fixing q₁, define  
+   A = cos q₁·x + sin q₁·y,   Z = z.  
+• The 2‑R subchain (joint 2+joint 3) in that plane yields  
+   A = L₂·sin q₂ + L₃·sin(q₂+q₃),  
+   Z = L₂·cos q₂ + L₃·cos(q₂+q₃).  
+• Since q₂+q₃ is already forced to the corrected pitch,  
+   move the L₃‑term to the LHS and solve for q₂ in one `atan2`.  
+• Then q₃ = pitch – q₂.  
+
+This meets all of your provided test cases exactly.

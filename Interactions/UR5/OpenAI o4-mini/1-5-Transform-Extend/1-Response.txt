@@ -1,0 +1,122 @@
+Here’s a minimal extension of the 4‐joint solver you provided to the full 5‐joint chain.  We simply compute θ₅ from the remaining attitude error after accounting for the fixed TCP yaw.  No reachability checks or optimizers are used – we assume the given pose is reachable.  
+
+```python
+import math
+import numpy as np
+
+def inverse_kinematics(p: tuple[float, float, float],
+                       r: tuple[float, float, float]
+                      ) -> tuple[float, float, float, float, float]:
+    """
+    Gets the joint values needed to reach position "p" and orientation "r".
+    :param p: The position to reach in the form (x, y, z).
+    :param r: The orientation to reach in radians in the form (roll, pitch, yaw).
+    :return: A 5‐tuple of joint angles (θ1…θ5).
+    """
+    x_target, y_target, z_target = p
+    roll, pitch, yaw = r
+
+    # Build target rotation from RPY
+    cr, sr = math.cos(roll), math.sin(roll)
+    cp, sp = math.cos(pitch), math.sin(pitch)
+    cy, sy = math.cos(yaw), math.sin(yaw)
+    R_x = np.array([[1,  0,   0],
+                    [0, cr, -sr],
+                    [0, sr,  cr]])
+    R_y = np.array([[ cp, 0, sp],
+                    [  0, 1,  0],
+                    [-sp, 0, cp]])
+    R_z = np.array([[cy, -sy, 0],
+                    [sy,  cy, 0],
+                    [ 0,   0, 1]])
+    R_target = R_z @ R_y @ R_x
+
+    # --- STEP 1: solve θ1, θ2, θ3 by projecting the TCP back 0.09465 along
+    #            the (local‐z) end‐link, exactly as in your 4‐joint code. ---
+    r13 = R_target[0, 2]
+    r33 = R_target[2, 2]
+    theta_sum = math.atan2(r13, r33)     # = θ1+θ2+θ3
+
+    # subtract the last link length (0.09465m) from the TCP positieon in the plane x–z
+    C_tcp = 0.09465
+    pos3_x = x_target - C_tcp * math.sin(theta_sum)
+    pos3_z = z_target - C_tcp * math.cos(theta_sum)
+
+    # link lengths in the θ2–θ3 planar subchain
+    a = 0.425     # link2 (joint2 to joint3) along local z
+    b = 0.39225   # link3 (joint3 to joint4) along local z
+
+    x = pos3_x
+    z = pos3_z
+    d_sq = x*x + z*z
+    # law of cosines for θ2
+    cos_theta2 = (d_sq - a*a - b*b) / (2 * a * b)
+    cos_theta2 = max(-1.0, min(1.0, cos_theta2))
+    cand2 = [ math.acos(cos_theta2),
+             -math.acos(cos_theta2) ]
+
+    solutions = []
+    for th2 in cand2:
+        # compute θ1
+        denom = a + b * math.cos(th2)
+        num   = b * math.sin(th2)
+        th1 = math.atan2(x, z) - math.atan2(num, denom)
+
+        # verify numerically
+        x_c = a * math.sin(th1) + b * math.sin(th1 + th2)
+        z_c = a * math.cos(th1) + b * math.cos(th1 + th2)
+        if (math.isclose(x_c, x, abs_tol=1e-5)
+         and math.isclose(z_c, z, abs_tol=1e-5)):
+            solutions.append((th1, th2))
+
+    # pick the first valid solution (assume at least one exists)
+    if solutions:
+        theta1, theta2 = solutions[0]
+    else:
+        # fallback if no solution numerically matched
+        theta1, theta2 = 0.0, 0.0
+
+    theta3 = theta_sum - theta1 - theta2
+
+    # --- STEP 2: solve θ4 exactly as before (joint4 about Z) ---
+    R_y_sum = np.array([
+        [ math.cos(theta_sum), 0, math.sin(theta_sum)],
+        [ 0,                   1, 0                 ],
+        [-math.sin(theta_sum), 0, math.cos(theta_sum)]
+    ])
+    R_rem4 = R_y_sum.T @ R_target
+    # θ4 is rotation about local Z to bring the residual into Y-axis plane
+    theta4 = math.atan2(R_rem4[1, 0], R_rem4[0, 0])
+
+    # --- STEP 3: solve θ5 (joint5 about Y) to match the remaining yaw of the TCP
+    # we have: R_target = R_0_4 @ Rot(y,θ5) @ R_tcp_yaw
+    # ⇒ Rot(y,θ5) = R_0_4^T @ R_target @ R_tcp_yaw^T
+    # and for a pure Y‐rotation, (0,2)=sinθ, (2,2)=cosθ ⇒ θ5 = atan2(R[0,2], R[2,2])
+
+    # build R_0_4 = R_y_sum @ Rot(z, θ4)
+    cz4, sz4 = math.cos(theta4), math.sin(theta4)
+    R_z4 = np.array([[ cz4, -sz4, 0],
+                     [ sz4,  cz4, 0],
+                     [   0,    0, 1]])
+    R_0_4 = R_y_sum @ R_z4
+
+    # fixed TCP yaw offset of +90° about Z
+    yaw_tcp = 1.570796325
+    cz_t, sz_t = math.cos(yaw_tcp), math.sin(yaw_tcp)
+    R_tcp = np.array([[ cz_t, -sz_t, 0],
+                      [ sz_t,  cz_t, 0],
+                      [   0,     0,  1]])
+
+    R_rem5 = R_0_4.T @ R_target @ R_tcp.T
+    theta5 = math.atan2(R_rem5[0, 2], R_rem5[2, 2])
+
+    return (theta1, theta2, theta3, theta4, theta5)
+```
+
+Explanation of the new steps:
+
+1. **θ₁–θ₃**: exactly as your 4‑joint solver—project the target back along the last link (0.09465 m), then use the 2‑link planar law‑of‑cosines on lengths 0.425 m & 0.39225 m.
+2. **θ₄**: rotation about local Z, found by “peeling off” the yaw–pitch remainder in the X–Y plane.
+3. **θ₅**: rotation about local Y.  After building the 0→4 rotation `R_0_4`, we compute  
+   Rot(y,θ₅) = R_0_4ᵀ · R_target · (Rot(z, +90°))ᵀ  
+   and read θ₅ from the (0,2)/(2,2) entries of that Y‑rotation matrix.

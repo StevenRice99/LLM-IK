@@ -1,0 +1,110 @@
+Here’s a single‐pass, closed‐form Python implementation of the full 6‑joint position‐only inverse kinematics.  We follow the same decoupling strategy as in the existing 5‑DOF solver, treat joint 6 as our redundant DOF (and simply set it to zero), and normalize all final angles:
+
+```python
+import math
+
+def inverse_kinematics(p: tuple[float, float, float]) -> tuple[float, float, float, float, float, float]:
+    """
+    Closed-form IK for the 6‑DOF chain, solving only the TCP position.
+    Joint6 is redundant for position and held at zero.
+    :param p: target (x, y, z)
+    :return: (q1,q2,q3,q4,q5,q6) in radians
+    """
+    x_target, y_target, z_target = p
+
+    # 1) Joint1 (Z-axis) decoupling: solve q1 from the x,y coordinates
+    q1 = math.atan2(-x_target, y_target)
+
+    # 2) Rotate the TCP point back by -q1 about Z,
+    #    then shift down by link2’s y‑offset (0.13585) to put origin at Joint2.
+    c1 = math.cos(q1)
+    s1 = math.sin(q1)
+    x2 =  c1 * x_target + s1 * y_target
+    y2 = -s1 * x_target + c1 * y_target
+    z2 =  z_target
+    y2 -= 0.13585
+
+    # 3) Now solve the remaining 5‑DOF chain (Joints 2–6) for position.
+    #    We identify Joint5 (Z–axis) as the one that controls the y offset to TCP:
+    L1 = 0.425      # link3→link2 z‑offset
+    L2 = 0.39225    # link4→link3 z‑offset
+    L3 = 0.09465    # link6→link5 z‑offset
+    y_offset = -0.1197 + 0.093   # cumulative y from link3 and link5
+    tcp_y   =  0.0823            # final y→TCP
+
+    def normalize(theta):
+        while theta > math.pi:
+            theta -= 2*math.pi
+        while theta < -math.pi:
+            theta += 2*math.pi
+        return theta
+
+    # solve Joint5 (Z‑axis) from vertical equation y2 = y_offset + tcp_y*cos(q5)
+    C = (y2 - y_offset) / tcp_y
+    C = max(min(C, 1.0), -1.0)
+    q5_cands = [math.acos(C), -math.acos(C)]
+
+    psi = math.atan2(x2, z2)  # horizontal bearing of the TCP in the subchain frame
+
+    best = None
+    for q5 in q5_cands:
+        # horizontal effective reach due to that y‑rotation
+        d     = tcp_y * math.sin(q5)
+        L_eff = math.hypot(L3, d)
+        phi   = math.atan2(d, L3)
+
+        for T in (psi, psi + math.pi):
+            # S = sum of the three Y–axis joints 2,3,4
+            S = T + phi
+
+            # wrist center in the x–z plane
+            W_x = x2 - L_eff * math.sin(T)
+            W_z = z2 - L_eff * math.cos(T)
+            r_w = math.hypot(W_x, W_z)
+            if r_w < abs(L1 - L2) or r_w > (L1 + L2):
+                continue
+
+            # standard 2‑R solution in the x–z plane for Joints 2 and 3 (both about Y)
+            cos_q3 = (r_w*r_w - L1*L1 - L2*L2) / (2 * L1 * L2)
+            cos_q3 = max(min(cos_q3, 1.0), -1.0)
+            for sign in (+1, -1):
+                q3 = sign * math.acos(cos_q3)
+                # angle from link2 to wrist center
+                delta = math.atan2(L2*math.sin(q3), L1 + L2*math.cos(q3))
+                theta_w = math.atan2(W_x, W_z)
+                q2 = theta_w - delta
+
+                # the third Y‑axis joint (URDF Joint4) makes up the remainder of the total S
+                q4 = S - (q2 + q3)
+
+                # we treat Joint6 as redundant and set it to zero
+                q6 = 0.0
+
+                # normalize and store
+                sol = (
+                    normalize(q1),
+                    normalize(q2),
+                    normalize(q3),
+                    normalize(q4),
+                    normalize(q5),
+                    normalize(q6),
+                )
+                best = sol
+                break
+            if best:
+                break
+        if best:
+            break
+
+    if best is None:
+        raise ValueError("No IK solution found for position {}".format(p))
+    return best
+```
+
+Explanation of the steps:
+1. Solve q1 as `atan2(-x, y)` for the Z‐axis base joint.
+2. Rotate the target by `-q1` and subtract the fixed y‑offset (0.13585 m) to get into the subchain frame at Joint 2.
+3. Treat Joint 5 (the only Z‑axis in the wrist) as the vertical DOF, solving `cos(q5) = (y_sub − y_offset)/tcp_y`.
+4. Reduce to a planar 2R horizontal problem for Joints 2 and 3 (both about Y) plus a third Y‑axis (URDF Joint 4) to match the total angle `S`.
+5. Set the final wrist joint (Joint 6) to zero, since it does not affect the TCP position.
+6. Normalize all angles into (−π, π].

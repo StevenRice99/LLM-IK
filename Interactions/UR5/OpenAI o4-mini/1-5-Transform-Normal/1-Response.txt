@@ -1,0 +1,101 @@
+Here is a closed‐form, analytic inverse‐kinematics implementation in pure Python/NumPy.  It performs an Euler “Y−Z−Y” decomposition of the 5th‐link orientation to extract the three wrist angles S=q1+q2+q3, q4, q5, then subtracts off the two fixed TCP and link‑5 translations to expose a simple 2R planar subproblem in the X–Z plane for q1 and q2; finally q3=S−q1−q2.
+
+```python
+import numpy as np
+
+def inverse_kinematics(p: tuple[float, float, float],
+                       r: tuple[float, float, float]
+                      ) -> tuple[float, float, float, float, float]:
+    """
+    Gets the joint values needed to reach position "p" and orientation "r".
+    :param p: The position to reach [x, y, z].
+    :param r: The orientation to reach in RPY radians [roll, pitch, yaw].
+    :return: (q1, q2, q3, q4, q5) in radians.
+    """
+    # shorthand
+    px, py, pz = p
+    roll, pitch, yaw = r
+
+    # link offsets (meters)
+    L1 = 0.425       # from joint1 to joint2 along parent z
+    L2 = 0.39225     # from joint2 to joint3 along parent z
+    d4 = 0.09465     # from joint4-origin to joint5-origin along parent z
+    d5 = 0.0823      # TCP translation along link‐5 y
+
+    # -- rotation helpers ---------------------------------------------
+    def rotx(a):
+        ca, sa = np.cos(a), np.sin(a)
+        return np.array([[1,   0,    0],
+                         [0,  ca,  -sa],
+                         [0,  sa,   ca]])
+    def roty(a):
+        ca, sa = np.cos(a), np.sin(a)
+        return np.array([[ ca, 0, sa],
+                         [  0, 1,  0],
+                         [-sa, 0, ca]])
+    def rotz(a):
+        ca, sa = np.cos(a), np.sin(a)
+        return np.array([[ ca, -sa, 0],
+                         [ sa,  ca, 0],
+                         [  0,   0, 1]])
+
+    # -- desired TCP orientation as R_des (RPY extrinsic: roll->X, pitch->Y, yaw->Z)
+    R_des = rotz(yaw) @ roty(pitch) @ rotx(roll)
+
+    # peel off the fixed TCP yaw of +90° about Z (URDF: last link has rpy = [0,0,π/2])
+    # so R0_5 * Rz(π/2) = R_des  ==>  R0_5 = R_des * Rz(-π/2)
+    R0_5 = R_des @ rotz(-0.5*np.pi)
+
+    # We know R0_5 = RY(S) * RZ(q4) * RY(q5).  Do a Y-Z-Y Euler decomposition:
+    M = R0_5
+    # M[1,1] = cos(q4)
+    q4 = np.arccos(np.clip(M[1,1], -1.0, 1.0))
+    # S = q1+q2+q3 = atan2( M[2,1], -M[0,1] )
+    S  = np.arctan2(M[2,1], -M[0,1])
+    # q5 = atan2( M[1,2], M[1,0] )
+    q5 = np.arctan2(M[1,2], M[1,0])
+
+    # Build R0_4 = RY(S)*RZ(q4) so we can back out link‑5 and TCP translations
+    R0_4 = roty(S) @ rotz(q4)
+
+    # Remove the TCP offset d5 along link‑5's local y:
+    # p0_5 is the wrist‐center (origin of joint5)
+    p_des = np.array([px, py, pz])
+    p0_5 = p_des - R0_5 @ np.array([0.0, d5, 0.0])
+
+    # Remove the link‑5 offset d4 along frame‑4's local z to get
+    # p0_4 = origin of joint4
+    p0_4 = p0_5 - R0_4 @ np.array([0.0, 0.0, d4])
+
+    # Now p0_4 must lie in the plane swept by the first two
+    # rotations about Y (j1,q2).  In that X–Z plane:
+    x4 = p0_4[0]
+    z4 = p0_4[2]
+
+    # Solve the 2R subproblem for q1, q2:
+    #   z4 = L1*cos(q1) + L2*cos(q1+q2)
+    #   x4 = L1*sin(q1) + L2*sin(q1+q2)
+    D = (x4*x4 + z4*z4 - L1*L1 - L2*L2) / (2.0*L1*L2)
+    q2 = np.arccos(np.clip(D, -1.0, 1.0))
+
+    # angle from base‐z axis to the wrist‐center vector in X–Z plane
+    phi = np.arctan2(x4, z4)
+    # elbow‐offset angle
+    psi = np.arctan2(L2*np.sin(q2), L1 + L2*np.cos(q2))
+
+    # finally q1 and then q3 to absorb the remainder S = q1+q2+q3
+    q1 = phi - psi
+    q3 = S - q1 - q2
+
+    return (q1, q2, q3, q4, q5)
+```
+
+Explanation of the main steps:
+
+1. Convert the desired RPY (`roll,pitch,yaw`) into a 3×3 rotation `R_des`.  
+2. “Peel off” the fixed TCP yaw of +90° (URDF `<origin rpy="0 0 π/2">`) by computing `R0_5 = R_des·Rz(−π/2)`.  
+3. Recognize that `R0_5` factors as `RY(S)·RZ(q4)·RY(q5)`, so perform a Y–Z–Y Euler decomposition to extract `S=q1+q2+q3`, `q4`, and `q5`.  
+4. Subtract the two known link translations along link‑5’s z and TCP’s y (rotated into world via `R0_4` and `R0_5`) to find the wrist‑center `p0_4` (origin of joint 4).  
+5. The remaining 2‑R subproblem in the X–Z plane yields `q1` & `q2`.  Finally `q3 = S − q1 − q2`.  
+
+This closed‐form solution assumes the target `(p,r)` is in the manipulator’s reachable workspace and returns one of the two possible elbow‐up/elbow‐down solutions (the principal `arccos` branch).

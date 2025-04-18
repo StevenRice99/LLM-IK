@@ -1,0 +1,65 @@
+Here’s a closed‐form, purely algebraic inverse‐kinematics that uses the given URDF link offsets and matches a desired RPY = [roll, pitch, yaw] (URDF “rpy” convention) under the assumption that roll = 0 (since the robot has only Z–Y–Y axes, it can only realize yaw about Z and a composite pitch about Y).  We therefore take:
+
+• θ1 = yaw  
+• θ2+θ3 = pitch  
+
+and still satisfy the position equations exactly.  No numerical solver is used.
+
+```python
+import math
+
+def inverse_kinematics(p: tuple[float, float, float],
+                       r: tuple[float, float, float]
+                      ) -> tuple[float, float, float]:
+    """
+    Analytical IK for the 3‑DOF Z–Y–Y arm.  
+    Expects target position p = (x,y,z) and RPY r = (roll, pitch, yaw),
+    where roll must be 0 (reachable set).  
+    Returns (theta1, theta2, theta3).
+    """
+    # Link offsets from the URDF:
+    l1 = 0.425      # distance on joint‑2 axis
+    l2 = 0.39225    # TCP offset along joint‑3 axis
+
+    x, y, z = p
+    roll, pitch, yaw = r
+
+    # 1) Joint‑1 is pure yaw (rotation about world Z)
+    theta1 = yaw
+
+    # Rotate the target into the plane of joints 2 & 3
+    c1 = math.cos(theta1)
+    s1 = math.sin(theta1)
+    # x' is the effective planar reach; z is unchanged
+    x_p =  c1 * x + s1 * y
+    z_p =  z
+
+    # 2) The two Y‑axis joints together must produce the desired pitch:
+    theta23 = pitch
+
+    # From FK we have:
+    #   x_p = l1*sin(theta2) + l2*sin(theta23)
+    #   z_p = l1*cos(theta2) + l2*cos(theta23)
+    # Solve these two for theta2 in closed form:
+    sin2 = (x_p - l2 * math.sin(theta23)) / l1
+    cos2 = (z_p - l2 * math.cos(theta23)) / l1
+
+    # Clamp for numerical safety
+    sin2 = max(min(sin2, 1.0), -1.0)
+    cos2 = max(min(cos2, 1.0), -1.0)
+
+    theta2 = math.atan2(sin2, cos2)
+
+    # 3) Finally theta3 makes up the remainder of the composite pitch
+    theta3 = theta23 - theta2
+
+    return (theta1, theta2, theta3)
+```
+
+Explanation of key steps:
+
+1. Because joint 1 is about Z, it directly realizes the desired yaw.  
+2. The two remaining revolutes both spin about Y in the local frame—and since rotations about the same axis commute, their sum equals the desired pitch.  
+3. We then enforce the exact 2‑link planar reach in that Y‑plane to solve θ2, and let θ3 absorb the difference to hit the overall pitch.  
+
+No iterative root‐finding is required, and all algebra is closed‐form.

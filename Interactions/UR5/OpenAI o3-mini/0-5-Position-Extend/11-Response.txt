@@ -1,0 +1,164 @@
+```python
+import math
+import numpy as np
+
+def inverse_kinematics(p: tuple[float, float, float]) -> tuple[float, float, float, float, float, float]:
+    """
+    Analytical inverse kinematics for a 6‑DOF serial manipulator.
+    
+    Robot geometry (all dimensions in meters, angles in radians):
+      • Joint 1: origin [0, 0, 0], axis Z.
+      • Joint 2: origin [0, 0.13585, 0], axis Y.
+      • Joint 3: origin [0, -0.1197, 0.425], axis Y.
+      • Joint 4: origin [0, 0, 0.39225], axis Y.
+      • Joint 5: origin [0, 0.093, 0], axis Z.
+      • Joint 6: origin [0, 0, 0.09465], axis Y.
+      • TCP: offset [0, 0.0823, 0] (in Joint 6’s frame).
+
+    To decouple the wrist, we “back out” the TCP offset. In our model,
+      wrist offset (expressed in the frame at the end of Joint4) is:
+         offset_x = -a5*sin(q5)
+         offset_y = a5*cos(q5) + tcp_y_offset
+         offset_z = L3
+      where:
+         a5        = 0.093         (translation along Y from Joint4 to Joint5)
+         tcp_y_offset = 0.0823     (TCP additional offset along Y)
+         L3        = 0.09465       (translation from Joint5 to Joint6, along Z)
+    
+    Then the “arm target” for the 5‑DOF sub–chain (Joints 1–4) becomes:
+         p_arm = p - [offset_x, offset_y, offset_z].
+         
+    In the EXISTING 5‑DOF IK solution, once p_arm is given in the base frame,
+      Joint 2’s frame is forced to have y-coordinate
+          y_chain_target = (-0.1197 + 0.093) = -0.0267.
+      The offset from base to Joint2 is d2_y = 0.13585.
+      And the “link lengths” are:
+          L1 = 0.425    (from Joint2 to Joint3 along Z)
+          L2 = 0.39225  (from Joint3 to Joint4 along Z)
+
+    In our solution we perform a grid–search over candidate wrist angles (q5)
+    (with Joint6 set to 0), and for each candidate solve the 5‑DOF sub–chain
+    (for joints q1, q2, q3, q4) following the EXISTING solution idea.
+    The candidate joint values that produce the TCP (via our approximate forward
+    kinematics) closest to p are returned.
+    
+    :param p: Desired TCP position [x, y, z].
+    :return: Tuple (q1, q2, q3, q4, q5, q6) in radians.
+    """
+    # ----- Known constant parameters -----
+    d2_y = 0.13585                     # Translation along Y to Joint2.
+    y_chain_target = -0.1197 + 0.093     # = -0.0267: In Joint2's frame.
+    L1 = 0.425       # Link length from Joint2 to Joint3 (Z direction).
+    L2 = 0.39225     # Link length from Joint3 to Joint4 (Z direction).
+    L3 = 0.09465     # Link length from Joint5 (wrist) base to Joint6.
+    
+    # Wrist (Joint5) offset parameters (in Joint4 frame)
+    a5 = 0.093         # Translation along Y from Joint4 to Joint5.
+    tcp_y_offset = 0.0823  # Additional TCP offset along Y.
+    
+    best_solution = None
+    best_err = float("inf")
+    
+    # Grid search over candidate wrist angles q5 in [-pi, pi).
+    q5_candidates = np.linspace(-math.pi, math.pi, 20, endpoint=False)
+    
+    for q5 in q5_candidates:
+        # Compute wrist offset in the frame of Joint4.
+        offset_x = -a5 * math.sin(q5)
+        offset_y = a5 * math.cos(q5) + tcp_y_offset
+        offset_z = L3   # Translation along Z
+        
+        # Compute the corresponding arm target (at end of Joint4) in the base frame.
+        p_arm = (p[0] - offset_x, p[1] - offset_y, p[2] - offset_z)
+        
+        # ----- Solve the 5‑DOF sub–problem (Joints 1–4) using the EXISTING strategy -----
+        # In the EXISTING method the rotated target (in Joint2's frame) is forced to have y = y_chain_target.
+        # Let p_arm = (x_w, y_w, z_w).
+        x_w, y_w, z_w = p_arm
+        r_xy = math.hypot(x_w, y_w)
+        
+        # Determine candidate q1's from the equation:
+        #    cos(q1)*y_w - sin(q1)*x_w = y_chain_target + d2_y (= delta).
+        delta = y_chain_target + d2_y
+        if r_xy < 1e-9:
+            q1_list = [0.0]
+        else:
+            # Write equation as A*cos(q1) + B*sin(q1) = delta, with A = y_w, B = -x_w.
+            base_angle = math.atan2(-x_w, y_w)
+            arg = delta / r_xy
+            arg = max(-1.0, min(1.0, arg))
+            angle_offset = math.acos(arg)
+            q1_list = [base_angle + angle_offset, base_angle - angle_offset]
+        
+        for q1 in q1_list:
+            c1 = math.cos(q1)
+            s1 = math.sin(q1)
+            # Rotate p_arm into Joint2's frame.
+            # In Joint2's frame:
+            #   x2 = cos(q1)*x_w + sin(q1)*y_w
+            #   y2 = -sin(q1)*x_w + cos(q1)*y_w - d2_y   (and we want y2 ~ y_chain_target)
+            #   z2 = z_w
+            x2 = c1 * x_w + s1 * y_w
+            y2 = -s1 * x_w + c1 * y_w - d2_y
+            z2 = z_w
+            
+            # Solve the planar 3‑R sub–chain in the x–z plane.
+            psi = math.atan2(x2, z2)
+            for T in [psi, psi + math.pi]:
+                # Remove the effect of the final link of length L3.
+                xw_val = x2 - L3 * math.sin(T)
+                zw_val = z2 - L3 * math.cos(T)
+                rw2 = xw_val * xw_val + zw_val * zw_val
+                # Apply law of cosines for q3.
+                cos_q3 = (rw2 - L1**2 - L2**2) / (2 * L1 * L2)
+                cos_q3 = max(-1.0, min(1.0, cos_q3))
+                for sign in [1.0, -1.0]:
+                    try:
+                        q3 = sign * math.acos(cos_q3)
+                    except ValueError:
+                        continue
+                    phi_w = math.atan2(xw_val, zw_val)
+                    delta_w = math.atan2(L2 * math.sin(q3), L1 + L2 * math.cos(q3))
+                    q2 = phi_w - delta_w
+                    q4 = T - (q2 + q3)
+                    
+                    # Reconstruct the arm (sub–chain) forward kinematics.
+                    # In Joint2's frame, the subchain should map:
+                    #   x_fk = L1*sin(q2) + L2*sin(q2+q3) + L3*sin(q2+q3+q4)
+                    #   z_fk = L1*cos(q2) + L2*cos(q2+q3) + L3*cos(q2+q3+q4)
+                    x_fk = L1 * math.sin(q2) + L2 * math.sin(q2 + q3) + L3 * math.sin(q2 + q3 + q4)
+                    z_fk = L1 * math.cos(q2) + L2 * math.cos(q2 + q3) + L3 * math.cos(q2 + q3 + q4)
+                    
+                    # Instead of gating by a threshold on the planar error, compute the full TCP error.
+                    # First, reconstruct the arm position in the base frame.
+                    # The inverse rotation (from Joint2's frame back to base) is given by:
+                    #   p_arm_candidate = [ cos(q1)*x2' - sin(q1)*(y_chain_target + d2_y),
+                    #                        sin(q1)*x2' + cos(q1)*(y_chain_target + d2_y),
+                    #                        z2 ]
+                    p_arm_candidate_x = c1 * x2 - s1 * (y_chain_target + d2_y)
+                    p_arm_candidate_y = s1 * x2 + c1 * (y_chain_target + d2_y)
+                    p_arm_candidate_z = z2
+                    # Now add back the wrist offset (in base frame, assumed same as computed earlier)
+                    p_fk_x = p_arm_candidate_x + offset_x
+                    p_fk_y = p_arm_candidate_y + offset_y
+                    p_fk_z = p_arm_candidate_z + offset_z
+                    err_full = (p_fk_x - p[0])**2 + (p_fk_y - p[1])**2 + (p_fk_z - p[2])**2
+                    
+                    if err_full < best_err:
+                        best_err = err_full
+                        best_solution = (q1, q2, q3, q4, q5, 0.0)
+    
+    if best_solution is None:
+        raise ValueError("No IK solution found for the target position.")
+    
+    # Normalize angles to the range [-pi, pi].
+    def normalize(angle):
+        while angle > math.pi:
+            angle -= 2 * math.pi
+        while angle < -math.pi:
+            angle += 2 * math.pi
+        return angle
+
+    q_sol = tuple(normalize(a) for a in best_solution)
+    return q_sol
+```

@@ -1,0 +1,183 @@
+Here is a self‐contained implementation of `inverse_kinematics(p, r)` that first solves the 3R+1R subchain for position exactly as in the existing 5‐DOF solution, and then computes the fifth joint angle analytically to match the desired end‑effector orientation.  No external calls or optimizers are used—everything is closed‑form:
+
+```python
+import math
+
+def inverse_kinematics(p: tuple[float, float, float],
+                       r: tuple[float, float, float]
+                      ) -> tuple[float, float, float, float, float]:
+    """
+    Closed-form inverse kinematics for the 5-DOF serial arm:
+      J1, J2, J3 about Y; J4 about Z; J5 about Y; then TCP offset about Z=+pi/2.
+
+    :param p: target position (x, y, z)
+    :param r: target orientation as RPY (roll, pitch, yaw)
+    :return: joint angles (q1, q2, q3, q4, q5) in radians
+    """
+    # link lengths and offsets
+    L1 = 0.425
+    L2 = 0.39225
+    L3 = 0.09465
+    y_offset = -0.1197 + 0.093
+    tcp_y_offset = 0.0823
+
+    x_t, y_t, z_t = p
+    roll, pitch, yaw = r
+
+    # helpers
+    def normalize(theta: float) -> float:
+        """Wrap to [-pi, pi]."""
+        while theta > math.pi:
+            theta -= 2*math.pi
+        while theta < -math.pi:
+            theta += 2*math.pi
+        return theta
+
+    def clamp(v: float, lo: float = -1.0, hi: float = 1.0) -> float:
+        return hi if v > hi else (lo if v < lo else v)
+
+    # Rotation matrices (extrinsic Z-Y-X: R = Rz(yaw)*Ry(pitch)*Rx(roll))
+    def Rx(a: float):
+        ca, sa = math.cos(a), math.sin(a)
+        return [
+            [1,   0,   0],
+            [0,  ca, -sa],
+            [0,  sa,  ca],
+        ]
+
+    def Ry(a: float):
+        ca, sa = math.cos(a), math.sin(a)
+        return [
+            [ ca, 0, sa],
+            [  0, 1,  0],
+            [-sa, 0, ca],
+        ]
+
+    def Rz(a: float):
+        ca, sa = math.cos(a), math.sin(a)
+        return [
+            [ ca, -sa, 0],
+            [ sa,  ca, 0],
+            [  0,   0, 1],
+        ]
+
+    def mat_mult(A, B):
+        """3x3 matrix multiply."""
+        return [
+            [
+                A[i][0]*B[0][j] +
+                A[i][1]*B[1][j] +
+                A[i][2]*B[2][j]
+                for j in range(3)
+            ]
+            for i in range(3)
+        ]
+
+    # build target rotation matrix
+    R_target = mat_mult(Rz(yaw), mat_mult(Ry(pitch), Rx(roll)))
+    # inverse of TCP's fixed Z‐offset (rpy=[0,0,pi/2])
+    R_tcp_inv = Rz(-math.pi/2)
+
+    # position‐only IK (3R + q4) as in the existing solution
+    # step 1: solve q4 from y
+    C = (y_t - y_offset) / tcp_y_offset
+    C = clamp(C)
+    q4_cands = [math.acos(C), -math.acos(C)]
+
+    # step 2: horizontal plane angle
+    psi = math.atan2(x_t, z_t)
+
+    best_error = 1e9
+    best_sol = None
+
+    for q4 in q4_cands:
+        # effective link from joint3 to wrist center
+        d = tcp_y_offset * math.sin(q4)
+        L_eff = math.hypot(L3, d)
+        phi = math.atan2(d, L3)
+
+        for T in (psi, psi + math.pi):
+            S = T + phi  # q1+q2+q3
+
+            # wrist‐center in xz-plane
+            W_x = x_t - L_eff * math.sin(T)
+            W_z = z_t - L_eff * math.cos(T)
+            r_w = math.hypot(W_x, W_z)
+            # check reach of 2R subchain
+            if r_w > (L1 + L2) or r_w < abs(L1 - L2):
+                continue
+
+            # law of cosines for q2
+            cos_q2 = clamp((r_w**2 - L1**2 - L2**2) / (2 * L1 * L2))
+            for sign in (+1, -1):
+                q2 = sign * math.acos(cos_q2)
+                # compute q1
+                delta = math.atan2(L2 * math.sin(q2),
+                                   L1 + L2 * math.cos(q2))
+                theta_w = math.atan2(W_x, W_z)
+                q1 = theta_w - delta
+                # then q3
+                q3 = S - (q1 + q2)
+
+                # compute forward‐position error
+                x_fk = (L1*math.sin(q1)
+                        + L2*math.sin(q1+q2)
+                        + L3*math.sin(q1+q2+q3)
+                        - d*math.cos(q1+q2+q3))
+                z_fk = (L1*math.cos(q1)
+                        + L2*math.cos(q1+q2)
+                        + L3*math.cos(q1+q2+q3)
+                        + d*math.sin(q1+q2+q3))
+                y_fk = y_offset + tcp_y_offset * math.cos(q4)
+                err = math.hypot(x_fk - x_t,
+                                 y_fk - y_t,
+                                 z_fk - z_t)
+
+                if err >= best_error:
+                    continue
+
+                # now solve orientation: we have R_total = Ry(q1+q2+q3)
+                #   * Rz(q4) * Ry(q5) * Rz(pi/2).  Hence
+                #   Ry(q5) = Ry(-S) * Rz(-q4) * R_target * Rz(-pi/2).
+                S_tot = q1 + q2 + q3
+
+                # build R45 = Ry(-S_tot) * Rz(-q4) * R_target * Rz(-pi/2)
+                tmp1 = mat_mult(R_target, R_tcp_inv)
+                tmp2 = mat_mult(Rz(-q4), tmp1)
+                R45  = mat_mult(Ry(-S_tot), tmp2)
+
+                # extract q5 from R45 = rotation about Y
+                # R45 = [ [ c, 0, s],
+                #         [ 0, 1, 0],
+                #         [-s, 0, c] ]
+                # so s=R45[0][2], c=R45[2][2]
+                q5 = math.atan2(R45[0][2], R45[2][2])
+                q5 = normalize(q5)
+
+                # accept this full pose solution
+                best_error = err
+                best_sol = (q1, q2, q3, q4, q5)
+
+    if best_sol is None:
+        raise ValueError("No valid IK solution found for pose")
+
+    # normalize all
+    q1, q2, q3, q4, q5 = (normalize(a) for a in best_sol)
+    return (q1, q2, q3, q4, q5)
+```
+
+Explanation of the key steps:
+
+1. **Position IK**  
+   - Same decomposition as the 5‐DOF position‐only case: solve `q4` from the y–equation, reduce to an equivalent 2R problem for joints 1–2, set `q3 = (q1+q2+q3) – (q1+q2)`, and pick the branch with minimum position error.
+
+2. **Orientation IK**  
+   - The overall rotation can be shown to factor as  
+       R_total = Ry(q1+q2+q3) · Rz(q4) · Ry(q5) · Rz(π/2).  
+   - Rearranging gives  
+       Ry(q5) = Ry(–(q1+q2+q3)) · Rz(–q4) · R_target · Rz(–π/2).  
+   - Since `Ry(q5)` has the simple form  
+       [[cos,0,sin],[0,1,0],[-sin,0,cos]],  
+     we read off `sin(q5) = R45[0][2]`, `cos(q5) = R45[2][2]` and do `atan2`.
+
+This meets the requirement of a closed‐form analytical solution, handles both position and orientation, and only uses plain Python + `math`.

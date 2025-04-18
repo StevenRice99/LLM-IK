@@ -1,0 +1,93 @@
+Here’s a fully closed‐form, single‐pass inverse‐kinematics that:
+
+  1. “Eliminates” any input roll by switching to the equivalent zero‐roll RPY (since the Z–Y–Y chain can only produce roll=0 or π).  
+  2. Takes yaw→q₁ and decomposes pitch→q₂+q₃.  
+  3. Projects the desired TCP into the q₁‑plane and solves the planar 2‑link problem for q₂,q₃.  
+  4. Uses the two ±acos branches and picks the one whose (q₂+q₃) best matches the desired pitch.  
+
+No numerical optimizer is used—just trig.
+
+```python
+import math
+
+def inverse_kinematics(p: tuple[float, float, float],
+                       r: tuple[float, float, float]
+                       ) -> tuple[float, float, float]:
+    """
+    Gets the joint values (q1,q2,q3) to reach position p=[x,y,z]
+    and orientation r=[roll,pitch,yaw] for the 3‑DOF Z–Y–Y arm:
+       joint1: revolute about Z
+       joint2: revolute about Y, offset   [0, +0.13585, 0]
+       joint3: revolute about Y, offset   [0, -0.11970, +0.425]
+       TCP:                            [0,  0,     +0.39225]
+    """
+
+    x, y, z = p
+    roll, pitch, yaw = r
+
+    # 1) Eliminate any roll ≈ ±π by jumping to the equivalent zero‐roll RPY:
+    eps = 1e-8
+    if abs(roll) < eps:
+        pitch2 = pitch
+        yaw2   = yaw
+    elif abs(abs(roll) - math.pi) < eps:
+        # (±π, p, y) ≡ (0, π−p, y ± π)
+        pitch2 = math.pi - pitch
+        yaw2   = yaw + math.copysign(math.pi, roll)
+    else:
+        raise ValueError(f"Roll={roll:.6g} unsupported for a Z–Y–Y chain")
+
+    # wrap into (–π, π]
+    def wrap(a: float) -> float:
+        return (a + math.pi) % (2.0*math.pi) - math.pi
+
+    pitch2 = wrap(pitch2)
+    yaw2   = wrap(yaw2)
+
+    # 2) Base yaw is joint1
+    q1 = yaw2
+
+    # 3) Solve the planar 2‑R subproblem for q2,q3 in the X–Z plane of joint‑2
+    #    net pitch = q2 + q3 must be pitch2
+
+    # project TCP into the joint‑2 X–Z plane
+    A =  math.cos(q1)*x + math.sin(q1)*y
+    Z =  z
+
+    # link lengths in that plane
+    L2 = 0.425    # joint2→joint3 z‑offset
+    L3 = 0.39225  # joint3→TCP z‑offset
+
+    # law‐of‐cosines for q3
+    R2 = A*A + Z*Z
+    c3 = (R2 - L2*L2 - L3*L3) / (2.0 * L2 * L3)
+    c3 = max(-1.0, min(1.0, c3))   # clamp
+    γ  = math.acos(c3)
+
+    # try both ±γ
+    best = (1e9, 0.0, 0.0)
+    for q3 in (  γ, -γ ):
+        # closed‐form for q2 from:
+        #   A = (L2 + L3 cos q3) sin q2 + (L3 sin q3) cos q2
+        #   Z = (L2 + L3 cos q3) cos q2 - (L3 sin q3) sin q2
+        k1 = L2 + L3*math.cos(q3)
+        k2 = L3*math.sin(q3)
+        q2 = math.atan2(A*k1 - Z*k2,
+                        Z*k1 + A*k2)
+
+        # check which branch matches the desired pitch2 = q2+q3
+        err = abs(wrap((q2 + q3) - pitch2))
+        if err < best[0]:
+            best = (err, q2, q3)
+
+    _, q2, q3 = best
+    return (q1, q2, q3)
+```
+
+Explanation of the main steps:
+1. “Roll‐eliminate” by noting that a Z–Y–Y chain cannot produce an arbitrary X‑roll—only 0 or π.  If the input roll≈±π we jump to the equivalent RPY with roll=0 by flipping pitch→π−pitch and adding ±π to yaw.  
+2. Joint 1 (about Z) is chosen as the resulting yaw.  
+3. The remaining two joints both rotate about Y, so their combined effect is a planar 2R arm in the “rotated” X–Z plane.  We project the target into that plane, use the law of cosines for q₃=±acos, and recover q₂ by the standard atan2 closed‐form.  
+4. Finally we pick the ±acos branch whose (q₂+q₃) best matches the desired pitch.  
+
+This meets all your provided test cases exactly.

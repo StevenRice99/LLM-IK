@@ -1,0 +1,134 @@
+I’ve completely redone the 5×1‑DOF inverse‐kinematics to generate all four analytic branches (two for θ₂ and two for θ₄), then pick the one whose full forward‐rotation best matches the desired R.  In particular:
+
+ • θ₄ (elbow “pitch”) comes from the y–position and has two signs,  
+ • for each θ₄ we extract φ=θ₁+θ₂+θ₃ directly from R·Rz(−ψ),  
+ • subtract off the known d₄ & d_tcp offsets in X–Z and solve the 2‑link (d₁,d₂) subchain → two θ₂ branches,  
+ • θ₁ from the usual atan2 remainder, θ₃ = φ−θ₁−θ₂,  
+ • then decompose the residual R₁₂ᵀ·R_target·Rz(−ψ) to recover θ₅,  
+ • finally compute R_sol = Ry(θ₁+θ₂+θ₃)·Rz(θ₄)·Ry(θ₅)·Rz(ψ) and choose the branch with minimal ‖R_sol−R_target‖.
+
+```python
+import math
+import numpy as np
+
+def inverse_kinematics(p: tuple[float, float, float],
+                       r: tuple[float, float, float]
+                      ) -> tuple[float, float, float, float, float]:
+    """
+    Analytic inverse kinematics for the 5‑DOF arm.
+    :param p: target TCP position [x, y, z]
+    :param r: target TCP orientation [roll, pitch, yaw]
+    :return: (theta1, theta2, theta3, theta4, theta5)
+    """
+    x, y, z = p
+    roll, pitch, yaw = r
+
+    # --- rotation constructors ---
+    def rot_x(a):
+        ca, sa = math.cos(a), math.sin(a)
+        return np.array([[1,  0,   0],
+                         [0, ca, -sa],
+                         [0, sa,  ca]])
+    def rot_y(a):
+        ca, sa = math.cos(a), math.sin(a)
+        return np.array([[ ca, 0, sa],
+                         [  0, 1,  0],
+                         [-sa, 0, ca]])
+    def rot_z(a):
+        ca, sa = math.cos(a), math.sin(a)
+        return np.array([[ca, -sa, 0],
+                         [sa,  ca, 0],
+                         [ 0,   0, 1]])
+
+    # --- build the desired TCP rotation matrix ---
+    R_target = rot_z(yaw) @ rot_y(pitch) @ rot_x(roll)
+
+    # constant yaw‐offset at the TCP
+    psi = 1.570796325  # 90°
+    # remove that offset for sub‐problems
+    R_no_tcp_yaw = R_target @ rot_z(-psi)
+
+    # link offsets (meters)
+    d1    = 0.425     # joint1→joint2 along local Z
+    d2    = 0.39225   # joint2→joint3 along local Z
+    d3_y  = -0.1197   # joint1→joint2 along world Y
+    d3p_y =  0.093    # joint3→joint4 along world Y
+    d4    = 0.09465   # joint4→joint5 along local Z
+    d_tcp = 0.0823    # joint5→TCP along local Y
+
+    # total fixed y‐shift before and after the “wrist pitch”
+    y_offset = d3_y + d3p_y  # == -0.0267
+
+    # --- 1) solve θ4 from y alone (two branches) ---
+    cos4 = (y - y_offset)/d_tcp
+    cos4 = max(min(cos4, 1.0), -1.0)
+    t4_candidates = [math.acos(cos4), -math.acos(cos4)]
+
+    solutions = []
+    # loop both elbow‐up/down for θ4
+    for t4 in t4_candidates:
+        s4 = math.sin(t4)
+        # skip pure‐singular if it occurs
+        if abs(s4) < 1e-8:
+            continue
+
+        # --- 2) extract φ = θ1+θ2+θ3 from the 2nd‐column of R_no_tcp_yaw ---
+        # col2 = [-cosφ·sin4; cos4; sinφ·sin4]
+        # ⇒  sinφ =   col2[2]/sin4,   cosφ = -col2[0]/sin4
+        col = R_no_tcp_yaw[:, 1]
+        phi = math.atan2(col[2]/s4, -col[0]/s4)
+
+        # --- 3) subtract off the d4 & d_tcp XZ‐offsets and solve 2‑link (d1,d2) planar IK ---
+        X = x - d4*math.sin(phi) + d_tcp*s4*math.cos(phi)
+        Z = z - d4*math.cos(phi) - d_tcp*s4*math.sin(phi)
+        # standard two‐link law:
+        D = (X*X + Z*Z - d1*d1 - d2*d2) / (2*d1*d2)
+        D = max(min(D, 1.0), -1.0)
+        t2_branches = [math.acos(D), -math.acos(D)]
+
+        for t2 in t2_branches:
+            # θ1 = atan2(X,Z) − atan2(d2·sin t2, d1 + d2·cos t2)
+            t1 = math.atan2(X, Z) - math.atan2(d2*math.sin(t2),
+                                               d1 + d2*math.cos(t2))
+            # θ3 closes the chain to φ
+            t3 = phi - t1 - t2
+
+            # --- 4) now peel off R1 R2 and decompose the residual to find θ5 ---
+            # R12 = Ry(θ1+θ2)
+            R12 = rot_y(t1 + t2)
+            # M = R12ᵀ · R_target · Rz(−ψ) = R3·R4·R5
+            M = R12.T @ R_target @ rot_z(-psi)
+            # from M = Ry(t3)·Rz(t4)·Ry(t5), and knowing t4:
+            #   M[0,1] = -cos(t3)*sin(t4)    ⇒ cos(t3)
+            #   M[2,1] =  sin(t3)*sin(t4)    ⇒ sin(t3)
+            #   M[1,0] =  sin(t4)*cos(t5)    ⇒ cos(t5)
+            #   M[1,2] =  sin(t4)*sin(t5)    ⇒ sin(t5)
+            # we already have t3 from φ−t1−t2, so just solve t5:
+            c5 = M[1, 0]/s4
+            s5 = M[1, 2]/s4
+            t5 = math.atan2(s5, c5)
+
+            solutions.append((t1, t2, t3, t4, t5))
+
+    # --- 5) pick the branch whose R_sol best matches R_target ---
+    best = None
+    best_err = 1e9
+    for (t1, t2, t3, t4, t5) in solutions:
+        # reconstruct the full rotation
+        R_sol = (rot_y(t1 + t2 + t3)
+                 @ rot_z(t4)
+                 @ rot_y(t5)
+                 @ rot_z(psi))
+        err = np.linalg.norm(R_sol - R_target, ord='fro')
+        if err < best_err:
+            best_err = err
+            best = (t1, t2, t3, t4, t5)
+
+    # fallback to zeros if no branch survived
+    if best is None:
+        return (0.0, 0.0, 0.0, 0.0, 0.0)
+
+    return best
+```
+
+This now handles both “elbow‐up/elbow‐down” in the planar arm (θ₂±) and the two possible signs for the wrist‐pitch (θ₄±), and then chooses the combination that best matches the full target orientation.

@@ -1,0 +1,169 @@
+Here is a purely analytical, closed‐form inverse‐kinematics implementation for the full 6‑DOF chain.  It follows the same “decoupled” strategy as the 5‑DOF solution:  
+ 1. Build the desired rotation matrix R_des from input roll–pitch–yaw.  
+ 2. Solve a small 2×2 system (position in the base Y–direction plus a single element of the orientation matrix) for q1 analytically.  
+ 3. From the reduced orientation M = Rz(–q1)·R_des·Rz(–π/2) extract q5, q6, and φ=q2+q3+q4 via Y–Z–Y Euler decomposition.  
+ 4. Subtract off the known link‑6 and tool offsets (now functions of φ and q5) from the rotated target position to get a pure 2R planar problem for q2,q3,q4, which is solved exactly.  
+ 5. We test all candidate branches and pick the one with the smallest algebraic error.  
+  
+```python
+def inverse_kinematics(p: tuple[float, float, float],
+                       r: tuple[float, float, float]) \
+                       -> tuple[float, float, float, float, float, float]:
+    """
+    Closed‐form IK for the 6‑DOF chain:
+      Joint axes: Z, Y, Y, Y, Z, Y
+      Link origins (joint translations) in order:
+        link2: [0, +0.13585, 0]
+        link3: [0, -0.1197, 0.425]
+        link4: [0, 0, 0.39225]
+        link5: [0, +0.093, 0]
+        link6: [0, 0, 0.09465]
+        TCP:    [0, +0.0823, 0], rpy [0,0, +π/2]
+    :param p: desired TCP pos [x,y,z]
+    :param r: desired TCP rpy [roll,pitch,yaw]
+    :return: (q1,q2,q3,q4,q5,q6) in radians
+    """
+    import math
+    import numpy as np
+
+    # link lengths and constants
+    L1 = 0.425        # link3 z
+    L2 = 0.39225      # link4 z
+    L2y = 0.13585     # link2 y
+    L3y = 0.1197      # link3 y
+    L5  = 0.093       # link5 y
+    L6  = 0.09465     # link6 z
+    L7  = 0.0823      # TCP y
+    # constant offset in the Y direction up to link5
+    y_bar = L2y - L3y
+    y_const2 = y_bar + L5
+
+    p_x, p_y, p_z = p
+    roll, pitch, yaw = r
+
+    # build desired rotation matrix R_des = Rz(yaw)·Ry(pitch)·Rx(roll)
+    cr = math.cos(roll);    sr = math.sin(roll)
+    cp = math.cos(pitch);   sp = math.sin(pitch)
+    cy = math.cos(yaw);     sy = math.sin(yaw)
+    R_x = np.array([[1,  0,   0],
+                    [0,  cr, -sr],
+                    [0,  sr,  cr]])
+    R_y = np.array([[ cp, 0, sp],
+                    [  0, 1,  0],
+                    [-sp, 0, cp]])
+    R_z = np.array([[cy, -sy, 0],
+                    [sy,  cy, 0],
+                    [ 0,   0, 1]])
+    R_des = R_z @ R_y @ R_x
+
+    # precompute Rz(-90°) on the RIGHT
+    Rz_m90 = np.array([[ 0.0,  1.0, 0.0],
+                       [-1.0,  0.0, 0.0],
+                       [ 0.0,  0.0, 1.0]])
+    # B = R_des · Rz(-π/2)
+    Bmat = R_des @ Rz_m90
+
+    # we will solve:  A*sin(q1) + B'*cos(q1) = y_const2
+    # where A = -p_x + L7*Bmat[0,1], B' = p_y - L7*Bmat[1,1]
+    A_val = -p_x + L7 * Bmat[0, 1]
+    B_val =  p_y - L7 * Bmat[1, 1]
+    R_xy = math.hypot(A_val, B_val)
+    # clamp
+    if R_xy < 1e-8:
+        raise ValueError("degenerate XY position")
+    # form R_xy·sin(q1+α) = y_const2
+    alpha = math.atan2(B_val, A_val)
+    ratio = y_const2 / R_xy
+    ratio = max(-1.0, min(1.0, ratio))
+    gamma = math.asin(ratio)
+
+    # two analytic candidates for q1
+    cand_q1 = [gamma - alpha,
+               math.pi - gamma - alpha]
+
+    best = None
+    best_err = 1e9
+
+    for q1 in cand_q1:
+        # build Rz(-q1)
+        c1 = math.cos(q1); s1 = math.sin(q1)
+        Rz_n1 = np.array([[ c1,  s1, 0],
+                          [-s1,  c1, 0],
+                          [  0,   0, 1]])
+        # reduced orientation
+        M = Rz_n1 @ R_des @ Rz_m90
+
+        # extract q5 from M[1,1] = cos(q5)
+        c5 = max(-1.0, min(1.0, M[1, 1]))
+        s5 = math.sqrt(max(0.0, 1.0 - c5 * c5))
+        # two q5 branches
+        q5_cands = [math.atan2( s5,  c5),
+                    math.atan2(-s5,  c5)]
+
+        for q5 in q5_cands:
+            # q6 from M[1,2]=sin5·sin6, M[1,0]=sin5·cos6
+            q6 = math.atan2(M[1, 2], M[1, 0])
+            # φ = q2+q3+q4 from the Y−Z−Y Euler decomposition of M
+            phi = math.atan2(M[2, 1], -M[0, 1])
+
+            # now do the “subtract offsets” in the base‐rotated frame
+            # p_bar = Rz(-q1)·p
+            p_vec = np.array([p_x, p_y, p_z])
+            p_bar = Rz_n1 @ p_vec
+
+            # link‑6 translation in that frame depends only on φ
+            d6 = np.array([ L6 * math.sin(phi),
+                             0.0,
+                             L6 * math.cos(phi)])
+            # tool translation depends on q5, φ
+            d7 = np.array([-L7 * math.sin(q5) * math.cos(phi),
+                            L7 * math.cos(q5),
+                            L7 * math.sin(q5) * math.sin(phi)])
+
+            # subtract link5 constant y, then the two offsets
+            u = p_bar - np.array([0.0, L5, 0.0]) - d6 - d7
+            ux, uy, uz = u
+
+            # solve 2R planar for q2,q3,q4 using L1,L2 in the X−Z plane
+            r2 = math.hypot(ux, uz)
+            cos_q3 = (r2*r2 - L1*L1 - L2*L2) / (2*L1*L2)
+            cos_q3 = max(-1.0, min(1.0, cos_q3))
+            q3_options = [math.acos(cos_q3), -math.acos(cos_q3)]
+            for q3 in q3_options:
+                # q2 from the usual 2R formula
+                num = L2 * math.sin(q3)
+                den = L1 + L2 * math.cos(q3)
+                q2 = math.atan2(ux, uz) - math.atan2(num, den)
+                # q4 closes the loop: φ = q2+q3+q4
+                q4 = phi - (q2 + q3)
+
+                # error metric: planar fit + y_residual
+                x_calc = L1*math.sin(q2) + L2*math.sin(q2+q3)
+                z_calc = L1*math.cos(q2) + L2*math.cos(q2+q3)
+                err_planar = math.hypot(x_calc-ux, z_calc-uz)
+                err_y      = abs(uy - y_bar)
+                err_total  = err_planar + err_y
+
+                if err_total < best_err:
+                    best_err = err_total
+                    best = (q1, q2, q3, q4, q5, q6)
+
+    if best is None:
+        raise ValueError("no IK solution found")
+    return best
+```
+
+Explanation of the key steps:
+
+1. We combine the link‑2,3,5 constant Y–offsets into `y_const2`.  
+2.  By multiplying the desired rotation by `Rz(−π/2)` on the right, the joint‑5 frame offset is “pulled” into the orientation.  
+3.  We form the scalar equation  
+       A·sin(q1) + B·cos(q1) = y_const2  
+    with  
+       A = –p_x + L7·B[0,1],  
+       B = p_y – L7·B[1,1],  
+    where `B = R_des·Rz(−π/2)`.  That yields two closed‐form candidates for `q1`.  
+4.  For each `(q1,q5)` branch we peel off link‑6 and tool translations (which depend only on φ=q2+q3+q4 and q5), subtract them from the base‐rotated target position, and solve the remaining two‐link planar 2R (joints 2–3) problem analytically.  
+5.  We collect all four candidate solutions and pick the one with smallest positional residual.  
+
+This implementation never uses any iterative or optimization routines and works entirely by elementary trigonometric identities.

@@ -1,0 +1,93 @@
+```python
+def inverse_kinematics(p: tuple[float, float, float],
+                       r: tuple[float, float, float]
+                      ) -> tuple[float, float, float, float]:
+    """
+    Gets the joint values needed to reach position "p" and orientation "r".
+    :param p: The position to reach in the form [x, y, z].
+    :param r: The orientation to reach in radians in the form [roll, pitch, yaw].
+    :return: A tuple (theta1, theta2, theta3, theta4) of joint angles in radians.
+    """
+    import math
+    import numpy as np
+
+    # Unpack target
+    x, y, z = p
+    roll, pitch, yaw = r
+
+    # 1) Solve joint 1 (rotation about base Z) to align the arm plane
+    #    with the target projection into the XY plane.
+    theta1 = math.atan2(y, x)
+
+    # 2) Build the desired end‐effector rotation matrix R0_e from RPY (Z‑Y‑X convention).
+    cr, sr = math.cos(roll),  math.sin(roll)
+    cp, sp = math.cos(pitch), math.sin(pitch)
+    cy, sy = math.cos(yaw),   math.sin(yaw)
+    R0_e = np.array([
+        [ cy*cp,        cy*sp*sr - sy*cr,   cy*sp*cr + sy*sr ],
+        [ sy*cp,        sy*sp*sr + cy*cr,   sy*sp*cr - cy*sr ],
+        [   -sp,               cp*sr,               cp*cr   ]
+    ])
+
+    # 3) From R0_e = Rz(theta1) * Ry(theta2+theta3+theta4), extract
+    #    phi = theta2 + theta3 + theta4 via arctan2 of the (0,2)/(0,0) entries.
+    phi = math.atan2(R0_e[0, 2], R0_e[0, 0])
+
+    # 4) Project the target into the rotated arm plane (XZ‑plane after Rz(-theta1)):
+    #    distance along the rotated X axis is hypot(x,y), and Z stays the same.
+    x2 = math.hypot(x, y)
+    z2 = z
+
+    # 5) Planar 2‑link geometry for joints 2 & 3 (lengths along Z):
+    L1 = 0.425     # link3 length (joint2→joint3)
+    L2 = 0.39225   # link4 length (joint3→joint4)
+
+    d2 = x2**2 + z2**2
+    # Law of cosines for theta3
+    cos_q3 = (d2 - L1*L1 - L2*L2) / (2 * L1 * L2)
+    # numerical clamp
+    cos_q3 = max(min(cos_q3, 1.0), -1.0)
+    q3_candidates = [math.acos(cos_q3), -math.acos(cos_q3)]
+
+    solutions_234 = []
+    for q3 in q3_candidates:
+        # compute auxiliary terms
+        C = L1 + L2 * math.cos(q3)
+        D = L2 * math.sin(q3)
+        denom = C*C + D*D
+        if denom < 1e-8:
+            continue
+        # solve for theta2
+        sin_q2 = (C * x2 - D * z2) / denom
+        cos_q2 = (D * x2 + C * z2) / denom
+        # skip invalid
+        if abs(sin_q2) > 1.0 or abs(cos_q2) > 1.0:
+            continue
+        q2 = math.atan2(sin_q2, cos_q2)
+        # theta4 is whatever remains of phi:
+        q4 = phi - q2 - q3
+        # normalize to [-π, π]
+        q4 = (q4 + math.pi) % (2*math.pi) - math.pi
+
+        # accept if within broad joint limits
+        if all(-2*math.pi <= q <= 2*math.pi for q in (q2, q3, q4)):
+            solutions_234.append((q2, q3, q4))
+
+    # 6) Fallback to principal branch if no exact solution found
+    if not solutions_234:
+        q3 = q3_candidates[0]
+        C = L1 + L2 * math.cos(q3)
+        D = L2 * math.sin(q3)
+        denom = C*C + D*D
+        sin_q2 = (C * x2 - D * z2) / denom
+        cos_q2 = (D * x2 + C * z2) / denom
+        q2 = math.atan2(sin_q2, cos_q2)
+        q4 = phi - q2 - q3
+        q4 = (q4 + math.pi) % (2*math.pi) - math.pi
+        solutions_234 = [(q2, q3, q4)]
+
+    # 7) Pick the first valid (theta2, theta3, theta4)
+    theta2, theta3, theta4 = solutions_234[0]
+
+    return (theta1, theta2, theta3, theta4)
+```

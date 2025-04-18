@@ -1,0 +1,188 @@
+Here’s a single‐shot Python implementation that carries forward the 5‑DOF solution you were given in EXISTING 1 and then appends the 6th joint by decoupling the last “wrist” rotation about Y.  It requires only math and NumPy and returns (q1,…,q6):
+
+```python
+def inverse_kinematics(p: tuple[float, float, float],
+                       r: tuple[float, float, float]
+                      ) -> tuple[float, float, float, float, float, float]:
+    """
+    6‑DOF analytical inverse kinematics for the chain:
+      • Revolute 1 about Z
+      • Revolute 2 about Y
+      • Revolute 3 about Y
+      • Revolute 4 about Y
+      • Revolute 5 about Z
+      • Revolute 6 about Y
+      • TCP orientation offset about Z (rpy = [0,0,pi/2])
+
+    Position offsets:
+      d2_y = 0.13585
+      d3_y = -0.1197, d3_z = 0.425
+      d4_z = 0.39225
+      d5_y = 0.093
+      d6_z = 0.09465
+
+    We follow the EX1 decoupling for q1→q5, then solve q6 by:
+      R_total = R5 · Ry(q6) · Rz(pi/2)  = R_des
+    """
+    import math
+    import numpy as np
+
+    # link‐lengths
+    L1 = 0.425        # joint3→joint4
+    L2 = 0.39225      # joint4→joint5
+    L_tcp = 0.09465   # joint5→joint6
+    # fixed Y translation from joint2 + joint5 (and negative from joint3)
+    y_const = 0.13585 - 0.1197 + 0.093
+
+    # unpack
+    p_x, p_y, p_z = p
+    roll, pitch, yaw = r
+
+    # 1) Build the desired TCP rotation matrix R_des = Rz(yaw)·Ry(pitch)·Rx(roll)
+    Rx = np.array([[1,             0,              0],
+                   [0, math.cos(roll), -math.sin(roll)],
+                   [0, math.sin(roll),  math.cos(roll)]])
+    Ry = np.array([[ math.cos(pitch), 0, math.sin(pitch)],
+                   [                0, 1,               0],
+                   [-math.sin(pitch), 0, math.cos(pitch)]])
+    Rz = np.array([[math.cos(yaw), -math.sin(yaw), 0],
+                   [math.sin(yaw),  math.cos(yaw), 0],
+                   [            0,              0, 1]])
+    R_des = Rz @ Ry @ Rx
+
+    # ------------------------------------------------------
+    # 2) Solve q1 by planar decoupling + orientation test
+    r_xy = math.hypot(p_x, p_y)
+    theta = math.atan2(p_y, p_x)
+    # must satisfy -p_x sin(q1) + p_y cos(q1) = y_const
+    ratio = y_const / r_xy
+    # clamp to [-1,1]
+    ratio = max(-1.0, min(1.0, ratio))
+    a = math.asin(ratio)
+    q1_cand1 = theta - a
+    q1_cand2 = theta - (math.pi - a)
+
+    # we pick the branch that makes the (1,2) entry of M small,
+    # where M = Rz(-q1)·R_des
+    def make_M(q1_val):
+        c1 = math.cos(q1_val); s1 = math.sin(q1_val)
+        Rz_neg = np.array([[ c1,  s1, 0],
+                           [-s1,  c1, 0],
+                           [  0,   0, 1]])
+        return Rz_neg @ R_des
+
+    M1 = make_M(q1_cand1)
+    M2 = make_M(q1_cand2)
+    err1 = abs(M1[1,2])
+    err2 = abs(M2[1,2])
+    q1 = q1_cand1 if err1 <= err2 else q1_cand2
+
+    # recompute Rz(-q1) and p̄
+    c1 = math.cos(q1); s1 = math.sin(q1)
+    Rz_neg_q1 = np.array([[ c1,  s1, 0],
+                          [-s1,  c1, 0],
+                          [  0,   0, 1]])
+    p_bar = Rz_neg_q1 @ np.array([p_x, p_y, p_z])
+    p_bar_x, p_bar_y, p_bar_z = p_bar
+
+    # ------------------------------------------------------
+    # 3) From M = Rz(-q1)·R_des extract the composite angle
+    #    φ = q2+q3+q4 and q5 via the (0,2),(2,2) and (1,0),(1,1) entries.
+    M = Rz_neg_q1 @ R_des
+    # φ solves M[0,2] = sin(φ), M[2,2] = cos(φ)
+    phi = math.atan2(M[0,2], M[2,2])
+    # q5 solves M[1,0] = sin(q5), M[1,1] = cos(q5)  (rotate about Z)
+    q5 = math.atan2(M[1,0], M[1,1])
+
+    # ------------------------------------------------------
+    # 4) Planar 2‑R for q2,q3,q4 given φ and wrist‑offset L_tcp
+    #    P = p̄ minus the TCP‐offset along φ
+    P_x = p_bar_x - L_tcp * math.sin(phi)
+    P_z = p_bar_z - L_tcp * math.cos(phi)
+    r2 = math.hypot(P_x, P_z)
+    # law of cosines for q3
+    cos_q3 = (r2*r2 - L1*L1 - L2*L2) / (2 * L1 * L2)
+    cos_q3 = max(-1.0, min(1.0, cos_q3))
+    q3_a = math.acos(cos_q3)
+    q3_b = -q3_a
+
+    def planar(q3_val):
+        # q2 from two‐link inverse
+        q2_val = math.atan2(P_x, P_z) \
+                 - math.atan2(L2 * math.sin(q3_val),
+                              L1 + L2 * math.cos(q3_val))
+        # q4 to make sum = φ
+        q4_val = phi - (q2_val + q3_val)
+        # reconstruction error (just for branch selection)
+        x_rec = (L1 * math.sin(q2_val)
+               + L2 * math.sin(q2_val + q3_val)
+               + L_tcp * math.sin(phi))
+        z_rec = (L1 * math.cos(q2_val)
+               + L2 * math.cos(q2_val + q3_val)
+               + L_tcp * math.cos(phi))
+        err = math.hypot(x_rec - p_bar_x, z_rec - p_bar_z)
+        return q2_val, q4_val, err
+
+    q2_a, q4_a, err_a = planar(q3_a)
+    q2_b, q4_b, err_b = planar(q3_b)
+    if err_a <= err_b:
+        q2, q3, q4 = q2_a, q3_a, q4_a
+    else:
+        q2, q3, q4 = q2_b, q3_b, q4_b
+
+    # ------------------------------------------------------
+    # 5) Now solve the final joint about Y (q6).
+    #    We have :
+    #      R_pred5 = Rz(q1)·Ry(q2+q3+q4)·Rz(q5)
+    #    and we know the TCP carries on with Ry(q6)·Rz(pi/2) to hit R_des.
+    #    => R_pred5^T · R_des · Rz(-pi/2) = Ry(q6)
+    #
+    #    Extract q6 via Ry:
+    #      Ry(q6)[0,2] =  sin(q6),  Ry(q6)[2,2] = cos(q6).
+
+    # reconstruct R_pred5
+    c_phi = math.cos(q2 + q3 + q4)
+    s_phi = math.sin(q2 + q3 + q4)
+    Ry_phi = np.array([[ c_phi, 0, s_phi],
+                       [     0, 1,     0],
+                       [-s_phi, 0, c_phi]])
+    c5 = math.cos(q5); s5 = math.sin(q5)
+    Rz_5 = np.array([[ c5, -s5, 0],
+                     [ s5,  c5, 0],
+                     [   0,   0, 1]])
+    Rz_1 = np.array([[ c1, -s1, 0],
+                     [ s1,  c1, 0],
+                     [   0,   0, 1]])
+    R_pred5 = Rz_1 @ (Ry_phi @ Rz_5)
+
+    # inverse of the TCP's fixed Rz(pi/2)
+    psi = 1.570796325
+    c_psi = math.cos(psi); s_psi = math.sin(psi)
+    Rz_tcp_inv = np.array([[ c_psi, s_psi, 0],
+                           [-s_psi, c_psi, 0],
+                           [     0,     0, 1]])
+
+    R6 = R_pred5.T @ R_des @ Rz_tcp_inv
+    q6 = math.atan2(R6[0,2], R6[2,2])
+
+    # done
+    return (q1, q2, q3, q4, q5, q6)
+```
+
+Explanation of the last step (q6):
+
+1. We already have `R_pred5 = Rz(q1)*Ry(q2+q3+q4)*Rz(q5)`, the orientation up through joint 5.
+2. The TCP then rotates about Y by q6 and finally has a fixed Z‐rotation of π/2.
+3. So  
+     R_pred5 · Ry(q6) · Rz(π/2) = R_des  
+   ⇒  Ry(q6) = R_pred5ᵀ · R_des · Rz(–π/2)  
+4. A pure Ry has the form  
+     [ [ c6, 0, s6 ],
+       [   0, 1,   0 ],
+       [ –s6, 0, c6 ] ].  
+   From that we read off  
+     s6 = Ry(q6)[0,2], c6 = Ry(q6)[2,2],  
+   so  
+     q6 = atan2( Ry(q6)[0,2], Ry(q6)[2,2] ).
+
+This completes all six joints analytically.

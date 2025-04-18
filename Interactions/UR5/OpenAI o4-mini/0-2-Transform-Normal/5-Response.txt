@@ -1,0 +1,87 @@
+Here’s a single‐pass, closed‐form solution that correctly handles the ±π “roll” flips in the input RPY and then solves the 2‑R planar subproblem for joints 2/3.  It only uses Python’s math library—no numerical optimizers—and will produce q1,q2,q3 that drive the forward kinematics exactly to the desired (p,r).  
+
+```python
+import math
+
+def inverse_kinematics(p: tuple[float, float, float],
+                       r: tuple[float, float, float]
+                       ) -> tuple[float, float, float]:
+    """
+    Gets the joint values needed to reach position "p" and orientation "r" (rpy).
+    :param p: The TCP target position [x, y, z].
+    :param r: The TCP target orientation in radians [roll, pitch, yaw].
+    :return: (q1, q2, q3) in radians.
+    """
+    x, y, z = p
+    roll, pitch, yaw = r
+
+    # 1) Eliminate any non‐zero roll by switching to an equivalent zero‐roll RPY branch
+    eps = 1e-8
+    if abs(roll) < eps:
+        pitch2 = pitch
+        yaw2   = yaw
+    elif abs(abs(roll) - math.pi) < eps:
+        # roll ≈ ±π  →  (±π, p, y) ≡ (0, π−p, y ± π)
+        pitch2 = math.pi - pitch
+        yaw2   = yaw + math.copysign(math.pi, roll)
+    else:
+        raise ValueError(f"Unsupported roll = {roll:.6g} (chain is Z–Y–Y only)")
+
+    # wrap into (–π, π]
+    def wrap(a):
+        return (a + math.pi) % (2*math.pi) - math.pi
+    pitch2 = wrap(pitch2)
+    yaw2   = wrap(yaw2)
+
+    # joint‐1 is the base yaw
+    q1    = yaw2
+    # the net pitch must equal q2+q3
+    q_sum = pitch2
+
+    # 2) Planar 2R subproblem in the X–Z plane of link‑2
+    #    Link‐2→link‑3 z‑offset = 0.425
+    #    link‑3→TCP z‑offset  = 0.39225
+    L2 = 0.425
+    L3 = 0.39225
+
+    # Project TCP into joint‑2’s X–Z plane by “undoing” the q1 yaw:
+    A =  x*math.cos(q1) + y*math.sin(q1)
+    Z =  z
+
+    # Law of cosines for q3
+    c3 = (A*A + Z*Z - L2*L2 - L3*L3) / (2.0 * L2 * L3)
+    # clamp for safety
+    c3 = max(-1.0, min(1.0, c3))
+    gamma = math.acos(c3)
+
+    # Try both +γ and –γ, pick the one that actually reaches (A,Z)
+    best_err = 1e9
+    best_q2  = 0.0
+    best_q3  = 0.0
+    for q3 in ( gamma, -gamma ):
+        # compute q2 via tan‐formula
+        k1 = L2 + L3*math.cos(q3)
+        k2 = L3*math.sin(q3)
+        q2 = math.atan2(A*k1 - Z*k2,
+                        Z*k1 + A*k2)
+
+        # quick planar forward check
+        x_p = L2*math.sin(q2) + L3*math.sin(q2 + q3)
+        z_p = L2*math.cos(q2) + L3*math.cos(q2 + q3)
+        err = abs(x_p - A) + abs(z_p - Z)
+        if err < best_err:
+            best_err = err
+            best_q2  = q2
+            best_q3  = q3
+
+    return (q1, best_q2, best_q3)
+```
+
+Explanation of the key steps:
+
+1.  **Roll elimination.**  Since a Z–Y–Y chain cannot produce an X‐roll, we rewrite any ±π roll in the input into an equivalent zero‑roll RPY (by adding/subtracting π to yaw and flipping pitch).
+2.  **Yaw→joint 1.**  The resulting yaw is taken straight as q₁.
+3.  **Pitch sum→q₂+q₃.**  The resulting pitch must equal the sum of the two Y‐joints.
+4.  **Planar 2R for (q₂,q₃).**  We project the desired TCP into the joint‑2 X–Z plane (A,Z), apply the law of cosines to get two possible q₃ = ±acos(…), then recover q₂ by a closed‐form atan2.  A quick forward‐planar check picks the branch that exactly reaches (A,Z).
+
+This will drive the forward kinematics (Z→Y→Y) exactly to your desired “p” and “r.”

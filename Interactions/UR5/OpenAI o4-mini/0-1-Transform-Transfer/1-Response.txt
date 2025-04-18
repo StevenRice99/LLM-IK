@@ -1,0 +1,68 @@
+```python
+import math
+
+def inverse_kinematics(p: tuple[float, float, float],
+                       r: tuple[float, float, float]) -> tuple[float, float]:
+    """
+    Computes the two joint angles (theta1, theta2) required to reach the
+    desired TCP position p = (x, y, z) and RPY‐orientation r = (roll, pitch, yaw)
+    for the 2‐DOF serial chain:
+    
+      Joint1: revolute about Z at the base
+      Link1 offset: [0, 0.13585, 0]
+      Joint2: revolute about Y
+      TCP offset:   [0, -0.1197, 0.425]
+    
+    Assumes all targets (p, r) are reachable.  Uses only closed‐form trigonometry.
+    """
+    x_d, y_d, z_d = p
+    roll, pitch, yaw = r
+
+    # Net y‐offset in the rotated plane from joint1 to TCP
+    B = 0.13585 - 0.1197  # = 0.01615
+
+    # --- 1) find candidate theta2 from z‐coordinate ---
+    #    z_d = 0.425 * cos(theta2)
+    cos_t2 = z_d / 0.425
+    # clamp to [-1, 1] to guard against numerical drift
+    cos_t2 = max(-1.0, min(1.0, cos_t2))
+    t2_candidates = [math.acos(cos_t2),
+                     -math.acos(cos_t2)]
+
+    tol = 1e-6
+    theta1 = None
+    theta2 = None
+
+    # Try both branches of acos and pick the one consistent with the desired RPY
+    for t2 in t2_candidates:
+        # Projected link‐length in the x–y plane
+        A = 0.425 * math.sin(t2)
+        denom = A*A + B*B
+
+        # Solve for theta1 from x_d, y_d:
+        #   [x_d]   [ cosθ1  -sinθ1 ] [ A ]
+        #   [y_d] = [ sinθ1   cosθ1 ] [ B ]
+        C = (A*x_d + B*y_d) / denom
+        S = (-B*x_d + A*y_d) / denom
+        t1 = math.atan2(S, C)
+
+        # Check consistency with desired yaw (rotation about Z) and pitch (t2)
+        Δyaw   = ((t1 - yaw + math.pi) % (2*math.pi)) - math.pi
+        Δpitch = ((t2 - pitch + math.pi) % (2*math.pi)) - math.pi
+
+        if abs(Δyaw) < tol and abs(Δpitch) < tol:
+            theta1 = t1
+            theta2 = t2
+            break
+
+    # Fallback to the principal solution if neither candidate matched exactly
+    if theta1 is None:
+        theta2 = t2_candidates[0]
+        A = 0.425 * math.sin(theta2)
+        denom = A*A + B*B
+        C = (A*x_d + B*y_d) / denom
+        S = (-B*x_d + A*y_d) / denom
+        theta1 = math.atan2(S, C)
+
+    return (theta1, theta2)
+```

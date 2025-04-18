@@ -1,0 +1,77 @@
+Here is a purely analytical, closed‐form inverse–kinematics implementation.  It uses only Python’s built‑ins (math), assumes the user’s requested orientation r is consistent (i.e. r[1] is the desired joint‑2 pitch, r[2] the desired joint‑1 yaw), and returns the principal solution for θ₁, θ₂.
+
+```python
+import math
+
+def inverse_kinematics(p: tuple[float, float, float],
+                       r: tuple[float, float, float]) -> tuple[float, float]:
+    """
+    Gets the joint values needed to reach position "p" and orientation "r".
+    :param p: The position to reach in the form [x, y, z].
+    :param r: The orientation to reach in radians in the form [x, y, z].
+               Here we assume r = [roll, pitch, yaw] = [0, θ2, θ1].
+    :return: (θ1, θ2) in radians.
+    """
+    x, y, z = p
+    _, pitch_desired, yaw_desired = r
+
+    # Robot constants from URDF:
+    #   Revolute‑1 at origin, axis Z
+    #   Revolute‑2 offset 0.13585 in +Y, axis Y
+    #   TCP offset from joint‑2 frame: [0, –0.1197, 0.425]
+    a2 = 0.13585
+    a3y = -0.1197
+    d3  =  0.425
+
+    # 1) Solve θ2 from the z–coordinate:
+    #    p_z = d3 * cos(θ2)  ==>  cos(θ2) = p_z / d3
+    cos_th2 = z / d3
+    # clamp for numerical safety
+    cos_th2 = max(min(cos_th2, 1.0), -1.0)
+
+    # two algebraic solutions: ±arccos
+    th2_pos = math.acos(cos_th2)
+    th2_neg = -th2_pos
+
+    # pick the branch whose sign matches the desired pitch r[1]
+    if abs(th2_pos - pitch_desired) <= abs(th2_neg - pitch_desired):
+        theta2 = th2_pos
+    else:
+        theta2 = th2_neg
+
+    # 2) Solve θ1 from the projection into the XY plane.
+    #    Let v = a2·ŷ + R_y(θ2)·[0,a3y,0] = [ d3·sin(θ2), a2 + a3y ]
+    vx = d3 * math.sin(theta2)
+    vy = a2 + a3y   # = 0.13585 - 0.1197 = 0.01615
+
+    # The base rotation θ1 must align v to the planar projection of p:
+    #    RotZ(θ1)·[vx, vy] = [px, py]
+    # ⇒ ϕ_v = atan2(vy, vx), ϕ_p = atan2(py, px)
+    # ⇒ θ1 = ϕ_p - ϕ_v
+    phi_v = math.atan2(vy, vx)
+    phi_p = math.atan2(y,   x)
+    theta1 = phi_p - phi_v
+
+    # 3) (Optional) normalize into [−π, π]
+    theta1 = math.atan2(math.sin(theta1), math.cos(theta1))
+    theta2 = math.atan2(math.sin(theta2), math.cos(theta2))
+
+    return theta1, theta2
+```
+
+Explanation of the steps:
+
+1.  **θ₂ from z**  
+    The only joint that moves the TCP in z is the revolute‑2 pitch about Y.  
+    p_z = 0.425·cos θ₂ ⇒ θ₂ = ±arccos(p_z/0.425).  
+    We pick the +/– branch closest to the desired pitch r[1].
+
+2.  **θ₁ from x,y**  
+    After setting θ₂, the remaining planar link vector  
+       v = [0, 0.13585, 0] + R_y(θ₂)·[0, –0.1197, 0.425]  
+      simplifies to  
+       v = [0.425·sin θ₂, 0.01615].  
+    Rotating that by θ₁ about Z must land at the desired (x,y).  
+    Hence θ₁ = atan2(y,x) – atan2(v_y, v_x).
+
+3.  **Return** the two joint angles (θ₁, θ₂).

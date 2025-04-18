@@ -1,0 +1,116 @@
+Here’s a revised, wrist‑center–based closed‐form IK that correctly handles the 5‑DOF Y–Y–Y–Z–Y chain.  It first computes the wrist center, solves the 2‑link planar problem for q2/q3, then extracts q4/q5 from the remaining orientation.  It picks the branch (elbow‑up/down) that best matches the target rotation.
+
+```python
+import numpy as np
+import math
+
+def inverse_kinematics(p: tuple[float, float, float],
+                       r: tuple[float, float, float]
+                      ) -> tuple[float, float, float, float, float]:
+    """
+    Analytical IK for 5‑DOF Y–Y–Y–Z–Y arm:
+      Joint1: Y at [0,0,0]
+      Joint2: Y at [0,-0.1197,0.425]
+      Joint3: Y at [0,0,0.39225]
+      Joint4: Z at [0,0.093,0]
+      Joint5: Y at [0,0,0.09465]
+      TCP   at [0,0.0823,0] + yaw offset +90° about Z
+    :param p:  target TCP position (x,y,z)
+    :param r:  target TCP rpy (roll,pitch,yaw)
+    :return: (q1,q2,q3,q4,q5) in radians
+    """
+    # link‐lengths / offsets
+    link2_off = np.array([0.0, -0.1197, 0.425])
+    d2 = 0.39225   # joint3 origin
+    d3 = 0.093     # joint4 origin (only affects Y)
+    d4 = 0.09465   # joint5 origin (along Z)
+    d_tcp = 0.0823 # TCP shift along local Y
+    psi   = 1.570796325  # +90° yaw at TCP
+
+    # basic rotations
+    def rot_x(a):
+        ca, sa = math.cos(a), math.sin(a)
+        return np.array([[1,0,0],[0,ca,-sa],[0,sa,ca]])
+    def rot_y(a):
+        ca, sa = math.cos(a), math.sin(a)
+        return np.array([[ ca,0, sa],[ 0,1, 0],[-sa,0, ca]])
+    def rot_z(a):
+        ca, sa = math.cos(a), math.sin(a)
+        return np.array([[ ca,-sa,0],[ sa, ca,0],[ 0,  0,1]])
+
+    # build R_target from rpy
+    roll, pitch, yaw = r
+    R_target = rot_z(yaw) @ rot_y(pitch) @ rot_x(roll)
+
+    # 1) Compute wrist center (before the final d_tcp translation):
+    P = np.array(p)
+    # TCP shift is along the local Y axis of the end‐effector:
+    wrist_world = P - d_tcp * (R_target[:,1])
+
+    # 2) Solve q1 by projecting wrist onto X–Z plane of base:
+    wx, wy, wz = wrist_world
+    q1 = math.atan2(wx, wz)
+
+    # 3) Express wrist in joint‐2 frame:
+    R1_inv = rot_y(-q1)
+    wrist_1 = R1_inv @ wrist_world
+    # subtract the static link2 offset:
+    wrist_2 = wrist_1 - link2_off
+    x2, y2, z2 = wrist_2
+
+    # 4) Solve planar 2‐link subchain for q2,q3 (links d2,d4):
+    a1 = d2
+    a2 = d4
+    r_planar = math.hypot(x2, z2)
+    # law‐of‐cosines for q3
+    cos_q3 = (r_planar**2 - a1**2 - a2**2) / (2 * a1 * a2)
+    cos_q3 = max(-1.0, min(1.0, cos_q3))
+    q3_candidates = [math.acos(cos_q3), -math.acos(cos_q3)]
+    # prepare for best‐fit search
+    best_err = 1e9
+    best_sol = (0.0,0.0,0.0,0.0,0.0)
+
+    # precompute rotated‐back target for orientation extraction
+    R2_target = R1_inv @ R_target
+
+    for q3 in q3_candidates:
+        # compute q2 from standard 2‐link IK:
+        gamma = math.atan2(a2 * math.sin(q3), a1 + a2 * math.cos(q3))
+        q2 = math.atan2(x2, z2) - gamma
+
+        # 5) Extract q4,q5 from the remaining orientation:
+        #   R2_5 = R2_target * R_z(-psi) = R12*R23*R34*R45
+        R2_5 = R2_target @ rot_z(-psi)
+        # R_pre = R12*R23 = Rot_y(q2+q3)
+        R_pre = rot_y(q2) @ rot_y(q3)
+        # isolate the Z–Y block: Rot_z(q4)*Rot_y(q5)
+        R34_45 = R_pre.T @ R2_5
+
+        # from: R34_45 = [[ c4·c5, –s4, c4·s5 ],
+        #                [ s4·c5,  c4, s4·s5 ],
+        #                [ –s5,     0,  c5   ]]
+        # q4 = atan2(m10, m00) ; q5 = atan2(m02, m00)
+        m00 = R34_45[0,0]; m10 = R34_45[1,0]; m02 = R34_45[0,2]
+        # robust making sure we don't divide by zero
+        q4 = math.atan2(m10, m00)
+        q5 = math.atan2(m02, m00)
+
+        # 6) pick branch by checking final orientation error:
+        Rf = (rot_y(q1) @ rot_y(q2) @ rot_y(q3)
+              @ rot_z(q4) @ rot_y(q5) @ rot_z(psi))
+        err = np.linalg.norm(Rf - R_target, ord='fro')
+
+        if err < best_err:
+            best_err  = err
+            best_sol = (q1, q2, q3, q4, q5)
+
+    return best_sol
+```
+
+Explanation of the main steps:
+1. Compute the “wrist‐center” by subtracting the final TCP offset along the local Y of the end frame.  
+2. Solve `q1` from the projection of that wrist center into the base’s X–Z plane.  
+3. Move into the joint‑2 frame (undo `q1`, subtract the static link2 offset).  
+4. Treat the remaining chain as a 2‑link planar manipulator (links `d2`,`d4`) in the X–Z plane to get `q2,q3`.  
+5. Extract `q4,q5` by isolating the 2‑axis wrist (`Z` then `Y`) from the residual orientation.  
+6. Because there are two elbow solutions (`±q3`), we compute both and pick the one with smallest orientation error.

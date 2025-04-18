@@ -1,0 +1,128 @@
+Below is one acceptable analytic solution. In our approach the 5‑DOF “geometry” (already solved in the EXISTING code) is modified to “see” an extra constant offset in the Y direction. (Recall that in the URDF the y‐offsets come from the origin of link 3 (–0.1197) plus the offset at link 5 (0.093) and now the TCP adds an additional 0.0823 in y.) In effect, we set
+
+  y_chain = (–0.1197 + 0.093 + 0.0823).
+
+Then the same procedure is used to solve for joints 1–4 and the extra “wrist” joints (joints 5 and 6) are “redundant” for positioning so we pick θ5 = θ6 = 0. (Any choice that gives the desired position is acceptable.) One acceptable solution is as follows:
+
+------------------------------------------------------------
+def inverse_kinematics(p: tuple[float, float, float]) -> tuple[float, float, float, float, float, float]:
+    """
+    Computes a closed‐form inverse kinematics solution for a 6‑DOF arm 
+    whose URDF is given by:
+      • Revolute 1: position [0,0,0] with z–axis
+      • Revolute 2: position [0, 0.13585, 0] with y–axis
+      • Revolute 3: position [0, –0.1197, 0.425] with y–axis
+      • Revolute 4: position [0, 0, 0.39225] with y–axis
+      • Revolute 5: position [0, 0.093, 0] with z–axis
+      • Revolute 6: position [0, 0, 0.09465] with y–axis
+      • TCP: position [0, 0.0823, 0] (relative to link 6)
+      
+    The provided EXISTING solution solved the 5-DOF variant by “absorbing”
+    the constant offsets:
+      d₂[1] = 0.13585, and y_chain = (–0.1197 + 0.093).
+    Here we must add the TCP’s extra 0.0823 in y (in joint‑2’s frame) so that 
+    y_chain becomes –0.1197+0.093+0.0823.
+    (The link “lengths” along the z–axis remain L1 = 0.425, L2 = 0.39225, and 
+    L3 = 0.09465 from the d23, d34, d56 segments.)
+    
+    Since we are only constraining the TCP “position”, the extra wrist rotation
+    about joint 6 does not affect the solution. Here we choose the extra joints 
+    redundantly as 0.
+    
+    :param p: The desired TCP position (x,y,z).
+    :return: A 6–tuple (θ1, θ2, θ3, θ4, θ5, θ6) in radians.
+    """
+    import math
+    # Unpack the desired TCP position.
+    x_w, y_w, z_w = p
+    # Offsets:
+    d2_y = 0.13585
+    # In the existing chain the constant y was y_chain = –0.1197+0.093.
+    # Now add the TCP offset of 0.0823 (the TCP row); note that all are expressed
+    # in joint–2’s coordinates.
+    y_chain = -0.1197 + 0.093 + 0.0823  # = 0.0556 (approximately)
+    
+    # The distances along z from the subchain (d23 and d34) remain unchanged.
+    L1 = 0.425
+    L2 = 0.39225
+    # L3 is taken from the link corresponding to d56 (0.09465).
+    L3 = 0.09465
+
+    # The trick used is to pick θ1 so that the rotated target (in joint-2's frame)
+    # has a y–coordinate exactly equal to y_chain.
+    delta = y_chain + d2_y   # constant, here delta = 0.0556 + 0.13585
+    r = math.hypot(x_w, y_w)
+    phi = math.atan2(-x_w, y_w)
+    arg = delta / r
+    # Clamp the argument to avoid numerical issues.
+    arg = max(-1.0, min(1.0, arg))
+    gamma = math.acos(arg)
+    t1_cands = [phi + gamma, phi - gamma]
+    
+    best = (1e9, 0, 0, 0, 0)  # best candidate (error, t1, t2, t3, t4)
+    for t1 in t1_cands:
+        c1 = math.cos(t1)
+        s1 = math.sin(t1)
+        # Rotate target into joint-2's frame.
+        x2 = c1 * x_w + s1 * y_w
+        y2 = -s1 * x_w + c1 * y_w - d2_y
+        z2 = z_w
+        psi = math.atan2(x2, z2)
+        for T in (psi, psi + math.pi):
+            # Subtract the final offset L3 along the appropriate direction.
+            xw = x2 - L3 * math.sin(T)
+            zw = z2 - L3 * math.cos(T)
+            rw2 = xw * xw + zw * zw
+            # Solve the planar 3R (for joints 2,3,4): use the law of cosines.
+            cosb = (rw2 - L1 * L1 - L2 * L2) / (2 * L1 * L2)
+            cosb = max(-1.0, min(1.0, cosb))
+            for sign in (1.0, -1.0):
+                b = sign * math.acos(cosb)
+                phi_w = math.atan2(xw, zw)
+                delta_w = math.atan2(L2 * math.sin(b), L1 + L2 * math.cos(b))
+                t2 = phi_w - delta_w
+                t3 = b
+                t4 = T - (t2 + t3)
+                # Compute the forward position (in x2-z2 plane with fixed y offset) 
+                # for verification.
+                x_fk = L1 * math.sin(t2) + L2 * math.sin(t2 + t3) + L3 * math.sin(t2 + t3 + t4)
+                z_fk = L1 * math.cos(t2) + L2 * math.cos(t2 + t3) + L3 * math.cos(t2 + t3 + t4)
+                err2 = (x_fk - x2) ** 2 + (z_fk - z2) ** 2 + (y2 - y_chain) ** 2
+                if err2 < best[0]:
+                    best = (err2, t1, t2, t3, t4)
+                    
+    _, θ1, θ2, θ3, θ4 = best
+    # For positioning there is redundancy. One valid solution is to choose:
+    θ5 = 0.0  
+    θ6 = 0.0  
+
+    # Normalize angles to the range [-pi, pi]
+    def norm(a):
+        while a > math.pi:
+            a -= 2 * math.pi
+        while a < -math.pi:
+            a += 2 * math.pi
+        return a
+
+    return (norm(θ1), norm(θ2), norm(θ3), norm(θ4), norm(θ5), norm(θ6))
+
+------------------------------------------------------------
+
+Explanation:
+
+1. We first “rotate” the input target into joint‑2’s coordinate system. In that frame the y–coordinate must equal the constant value 
+  y_chain = –0.1197 (from d23) + 0.093 (from d45) + 0.0823 (TCP offset) 
+                  ≈ 0.0556.
+  This forces a unique solution for the first joint (θ1).
+
+2. Next a 3‑R planar chain is solved (for joints 2, 3 and 4) using the law of cosines. The link lengths L1, L2 and the offset L3 (from joint 5’s connection, here taken from d56) remain unchanged.
+
+3. Finally, joints 5 and 6 (which do not affect the position of the TCP) are set to 0.
+
+Because p only constrains the TCP position (and not its complete orientation), this is a valid closed‑form inverse kinematics solution.
+
+Any solution that yields joint angles such that
+
+  FK(θ1,θ2,θ3,θ4,θ5,θ6) = TCP position
+
+(in tandem with a chosen TCP orientation) is acceptable.

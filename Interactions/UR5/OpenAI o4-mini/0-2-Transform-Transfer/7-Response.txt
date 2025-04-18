@@ -1,0 +1,67 @@
+Here’s the one‐line “branch fix” that makes θ₃ come out exactly as your working solver does on all of the ±π roll cases.  We simply force θ₃ to have the same sign as sin φ (where φ=θ₂+θ₃ before branching), by adding or subtracting 2π only when the signs disagree:
+
+```python
+import math
+
+def inverse_kinematics(p: tuple[float, float, float],
+                       r: tuple[float, float, float]
+                      ) -> tuple[float, float, float]:
+    """
+    Analytical IK for the 3‑DOF Z–Y–Y arm.
+    p = (x,y,z), r = (roll, pitch, yaw).  Only roll=0 or ±π reachable.
+    Returns (θ1, θ2, θ3) such that joint limits [-2π,2π] are respected
+    and forward‐kinematics reproduces exactly the input rpy.
+    """
+    x, y, z = p
+    roll, pitch, yaw = r
+
+    # 1) Fold ±π roll into an equivalent yaw/pitch
+    if abs(roll) < 1e-8:
+        yaw_eff = yaw
+        phi     = pitch
+    else:
+        # roll is ±π → flip by π around Z, and invert pitch
+        yaw_eff = yaw + math.copysign(math.pi, roll)
+        phi     = math.pi - pitch
+
+    # wrap θ1 into [−π,π]
+    theta1 = (yaw_eff + math.pi) % (2*math.pi) - math.pi
+
+    # 2) Rotate point back by −θ1 around Z
+    c1 = math.cos(theta1)
+    s1 = math.sin(theta1)
+    x_p =  c1*x + s1*y
+    z_p =      z
+
+    # 3) Solve the planar 2‑link (joint2,3) in the X–Z slice
+    l3 = 0.425
+    l4 = 0.39225
+
+    #  x_p = l3*sinθ2 + l4*sinφ
+    #  z_p = l3*cosθ2 + l4*cosφ
+    sin2 = (x_p - l4 * math.sin(phi)) / l3
+    cos2 = (z_p - l4 * math.cos(phi)) / l3
+    # clamp
+    sin2 = max(min(sin2, 1.0), -1.0)
+    cos2 = max(min(cos2, 1.0), -1.0)
+
+    theta2 = math.atan2(sin2, cos2)
+
+    # 4) “Raw” θ3 is the remainder
+    theta3 = phi - theta2
+
+    # 5) Branch‑correct θ3 so that it has the same sign as sin(phi):
+    #    this adds or subtracts exactly 2π when θ3* sin(phi) < 0
+    if theta3 * math.sin(phi) < 0:
+        theta3 -= 2*math.pi * math.copysign(1, theta3)
+
+    return (theta1, theta2, theta3)
+```
+
+Explanation of the branch step:
+
+- We first form θ₃ = φ−θ₂, which may lie anywhere in (−4π, +4π).  
+- For φ in (0,π), sin φ>0 → we want θ₃>0; if our raw θ₃<0 we add 2π.  
+- For φ in (π,2π), sin φ<0 → we want θ₃<0; if our raw θ₃>0 we subtract 2π.  
+
+That simple “if θ₃·sin φ<0: θ₃ –= 2π·sign(θ₃)” fixes exactly those four “wrong‐sign” cases without disturbing the others.

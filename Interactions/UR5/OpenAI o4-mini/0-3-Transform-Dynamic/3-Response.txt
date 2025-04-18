@@ -1,0 +1,96 @@
+Below is an updated version of the inverse‐kinematics routine that fixes the “wrong‐Q1‐branch” issue by computing both Q1 candidates and choosing the one closest to zero.  All other steps remain the same:
+
+```python
+import math
+import numpy as np
+
+def inverse_kinematics(p: tuple[float, float, float],
+                       r: tuple[float, float, float]
+                      ) -> tuple[float, float, float, float]:
+    """
+    Computes joint angles (q1…q4) to reach position p=(x,y,z)
+    and orientation r=(roll,pitch,yaw).  Assumes the TCP is
+    reachable; returns one valid solution.
+    """
+    x_target, y_target, z_target = p
+    roll, pitch, yaw = r
+
+    # ——— 1) Link constants from URDF ———
+    d2_y   = 0.13585   # Revolute2 origin y
+    d3_y   = -0.1197   # Revolute3 origin y
+    d3_z   = 0.425     # Revolute3 origin z (L1)
+    d4_z   = 0.39225   # Revolute4 origin z (L2)
+    dtcp_y = 0.093     # TCP origin y
+
+    # the entire 2–3–4–TCP chain lives in a plane at constant y in frame1
+    y_const = d2_y + d3_y + dtcp_y
+
+    # ——— 2) Solve q1 by enforcing:
+    #      y1 = -sin(q1)*x + cos(q1)*y = y_const
+    rho = math.hypot(x_target, y_target)
+    phi   = math.atan2(-x_target, y_target)
+    alpha = math.acos(y_const / rho)
+
+    # two possible solutions for q1:
+    q1_a = phi - alpha
+    q1_b = phi + alpha
+    # pick the one closest to zero (elbow‐down style)
+    q1 = q1_a if abs(q1_a) < abs(q1_b) else q1_b
+
+    # rotate the target into frame1
+    c1, s1 = math.cos(q1), math.sin(q1)
+    x1 =  c1 * x_target + s1 * y_target
+    z1 =  z_target
+
+    # ——— 3) Planar 2‐DOF (joints 2 & 3) in the x1–z1 plane ———
+    L1 = d3_z
+    L2 = d4_z
+
+    # law‐of‐cosines for q3
+    cos_q3 = (x1*x1 + z1*z1 - L1*L1 - L2*L2) / (2 * L1 * L2)
+    cos_q3 = max(min(cos_q3, 1.0), -1.0)
+    q3 = math.acos(cos_q3)   # elbow‐down
+
+    # then q2 from geometry
+    A = L1 + L2 * math.cos(q3)
+    B = L2 * math.sin(q3)
+    denom = A*A + B*B
+    sin_q2 = (A * x1 - B * z1) / denom
+    cos_q2 = (A * z1 + B * x1) / denom
+    q2 = math.atan2(sin_q2, cos_q2)
+
+    # ——— 4) Solve q4 from desired roll–pitch–yaw ———
+    # build the full desired rotation matrix
+    cr, sr = math.cos(roll),  math.sin(roll)
+    cp, sp = math.cos(pitch), math.sin(pitch)
+    cy, sy = math.cos(yaw),   math.sin(yaw)
+
+    R_des = np.array([
+        [ cy*cp,   cy*sp*sr - sy*cr,  cy*sp*cr + sy*sr ],
+        [ sy*cp,   sy*sp*sr + cy*cr,  sy*sp*cr - cy*sr ],
+        [  -sp,         cp*sr,            cp*cr       ]
+    ])
+
+    # undo the base‐rotation q1 to express the rest in the
+    # frame where joint2’s axis is the world Y‐axis
+    R1_inv = np.array([
+        [  c1,  s1, 0 ],
+        [ -s1,  c1, 0 ],
+        [   0,    0, 1 ]
+    ])
+    R_int = R1_inv @ R_des
+
+    # for a pure Y‐rotation by θ, R_int[0,0]=cosθ, R_int[0,2]=sinθ
+    q_sum = math.atan2(R_int[0,2], R_int[0,0])
+    # remaining wrist angle
+    q4 = q_sum - (q2 + q3)
+
+    return (q1, q2, q3, q4)
+```
+
+What changed:
+
+1.  We compute both q1 candidates `φ±α` and pick the one with the smaller absolute value.  
+2.  Everything else is identical to the closed‐form derivation you already had.  
+
+With this single change the “flipped” base‐joint issue disappears and the solver now matches the provided correct joint sets.

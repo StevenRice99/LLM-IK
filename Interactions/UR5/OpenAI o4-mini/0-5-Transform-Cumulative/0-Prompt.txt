@@ -1,0 +1,598 @@
+<INSTRUCTIONS>
+You are tasked with producing a closed-form analytical solution for the inverse kinematics of the 6 degrees-of-freedom serial manipulator solving for the position and orientation of the TCP as detailed in the "DETAILS" section by completing the Python function provided in the "CODE" section. The "Position" and "Orientation" columns represent link coordinates in local space relative to their parent link. The positions are from the "xyz" attribute and the orientations are the "rpy" attribute from each link's "origin" element parsed from the URDF. The "Axis" column in the table represents the rotational axis of the revolute links; return their values in radians and their limits are in radians. Do not write any code to run or test the method, as this will be handled for you. Assume all targets given as inputs to the method will be reachable, and as such do not write code to check if the target is reachable. You may use any methods included in Python, NumPy, and SymPy to write your solution except for any optimization methods. To help you, solutions for sub-chains have been provided in the "EXISTING" sections. Each code solved a sub-link assuming their last link was the target being solved for. You can use these solutions as a starting point to extend for the entire chain. Existing code 1 solved joint 1. Existing code 2 solved joints 1 to 5. Existing code 3 solved joint 2. Existing code 4 solved joints 2 to 3. Existing code 5 solved joints 2 to 4. Existing code 6 solved joints 2 to 5. Existing code 7 solved joint 3. Existing code 8 solved joints 3 to 4. Existing code 9 solved joints 3 to 5. Existing code 10 solved joints 3 to 6. Existing code 11 solved joint 4. Existing code 12 solved joints 4 to 5. Existing code 13 solved joints 4 to 6. Existing code 14 solved joint 5. Existing code 15 solved joints 5 to 6. Existing code 16 solved joint 6. You may respond by either completing the inverse kinematics method or calling either of the two provided functions to help you develop your solution. If you call a function, you will be provided another response and chance to complete the inverse kinematics method. You may only call a single function per response.
+</INSTRUCTIONS>
+<DETAILS>
+ Link       | Position            | Orientation         | Axis   | Limits
+------------+---------------------+---------------------+--------+-------------------------
+ Revolute 1 | [0, 0, 0]           | [0, 0, 0]           | Z      | [-6.2831853, 6.2831853]
+ Revolute 2 | [0, 0.13585, 0]     | [0, 0, 0]           | Y      | [-6.2831853, 6.2831853]
+ Revolute 3 | [0, -0.1197, 0.425] | [0, 0, 0]           | Y      | [-6.2831853, 6.2831853]
+ Revolute 4 | [0, 0, 0.39225]     | [0, 0, 0]           | Y      | [-6.2831853, 6.2831853]
+ Revolute 5 | [0, 0.093, 0]       | [0, 0, 0]           | Z      | [-6.2831853, 6.2831853]
+ Revolute 6 | [0, 0, 0.09465]     | [0, 0, 0]           | Y      | [-6.2831853, 6.2831853]
+ TCP        | [0, 0.0823, 0]      | [0, 0, 1.570796325] |        |
+</DETAILS>
+<CODE>
+def inverse_kinematics(p: tuple[float, float, float], r: tuple[float, float, float]) -> tuple[float, float, float, float, float, float]:
+    """
+    Gets the joint values needed to reach position "p" and orientation "r".
+    :param p: The position to reach in the form [x, y, z].
+    :param r: The orientation to reach in radians in the form [x, y, z].
+    :return: A list of the values to set the links to for reaching position "p" and orientation "r".
+    """
+</CODE>
+<EXISTING 1>
+import math
+
+def inverse_kinematics(p: tuple[float, float, float]) -> float:
+    """
+    Gets the joint values needed to reach position "p".
+    :param p: The position to reach in the form [x, y, z].
+    :return: The value to set the link to for reaching position "p".
+    """
+    x, y, z = p
+    theta = math.atan2(-x, y)
+    return theta
+</EXISTING 1>
+<EXISTING 2>
+def inverse_kinematics(p: tuple[float, float, float], r: tuple[float, float, float]) -> tuple[float, float, float, float, float]:
+    """
+    Computes a closed‐form analytical solution for the inverse kinematics of the 5-DOF serial manipulator.
+    
+    Kinematic summary:
+      • Joint 1: Revolute about Z at [0,0,0].
+      • Joint 2: Translate [0, 0.13585, 0] then rotate about Y.
+      • Joint 3: Translate [0, -0.1197, 0.425] then rotate about Y.
+      • Joint 4: Translate [0, 0, 0.39225] then rotate about Y.
+      • Joint 5: Translate [0, 0.093, 0] then rotate about Z.
+      • TCP: Translate [0, 0, 0.09465].
+    
+    In a factorized form the forward kinematics are:
+         R_total = Rz(q1) · [Ry(q2+q3+q4) · Rz(q5)]
+         p_TCP = Rz(q1) * { planar_pos + tcp_offset }.
+    
+    The fixed translations along Y from joints 2 and 5 (and the negative offset in joint 3)
+      yield a constant:
+         y_const = 0.13585 - 0.1197 + 0.093 = 0.10915.
+    
+    In the base XY–plane (before the planar 2R subchain) the rotated target p̄ = Rz(–q1)·p must satisfy:
+         p̄_y = -p_x*sin(q1) + p_y*cos(q1) = y_const.
+    This equation has two solutions. We select the proper q1 branch by “testing” the decoupled
+    orientation (see below).
+    
+    The desired orientation R_des is built from the provided roll–pitch–yaw (r) using
+         R_des = Rz(yaw) · Ry(pitch) · Rx(roll)
+    (the typical URDF convention), and then decoupled via
+         M = Rz(–q1) · R_des.
+    With the structure of the kinematics, one may show that M = Ry(φ)·Rz(q5) where
+         φ = q2+q3+q4,
+         q5 = atan2( M[1,0], M[1,1] ),
+         and φ = atan2( M[0,2], M[2,2] ).
+
+    The effective (planar) 2R arm is then obtained by “removing” the TCP offset along the direction φ.
+    If we define:
+         L1 = 0.425,    L2 = 0.39225,   L_tcp = 0.09465,
+         and compute:
+           P_x = p̄_x – L_tcp*sin(φ)
+           P_z = p̄_z – L_tcp*cos(φ)
+         then the 2R geometry yields (with r2 = √(P_x²+P_z²)):
+             cos(q3) = (r2² – L1² – L2²)/(2*L1*L2)
+         (with two branches: q3 = ±acos(…)).
+         Then,
+             q2 = atan2(P_x, P_z) – atan2( L2*sin(q3), L1 + L2*cos(q3) )
+         and finally,
+             q4 = φ – (q2 + q3).
+
+    This implementation uses branch–selection (by “testing” the reconstructed positions)
+    both for q1 (using the extra constraint hidden in the decoupled orientation matrix)
+    and for the 2R solution for q3.
+    """
+    import math
+    import numpy as np
+    L1 = 0.425
+    L2 = 0.39225
+    L_tcp = 0.09465
+    y_const = 0.13585 - 0.1197 + 0.093
+    p_x, p_y, p_z = p
+    r_xy = math.sqrt(p_x ** 2 + p_y ** 2)
+    theta = math.atan2(p_y, p_x)
+    ratio = y_const / r_xy
+    ratio = max(-1.0, min(1.0, ratio))
+    a = math.asin(ratio)
+    q1_candidate1 = theta - a
+    q1_candidate2 = theta - (math.pi - a)
+
+    def compute_M(q1_val):
+        cos_q1 = math.cos(q1_val)
+        sin_q1 = math.sin(q1_val)
+        Rz_neg_q1 = np.array([[cos_q1, sin_q1, 0], [-sin_q1, cos_q1, 0], [0, 0, 1]])
+        roll, pitch, yaw = r
+        R_x = np.array([[1, 0, 0], [0, math.cos(roll), -math.sin(roll)], [0, math.sin(roll), math.cos(roll)]])
+        R_y = np.array([[math.cos(pitch), 0, math.sin(pitch)], [0, 1, 0], [-math.sin(pitch), 0, math.cos(pitch)]])
+        R_z = np.array([[math.cos(yaw), -math.sin(yaw), 0], [math.sin(yaw), math.cos(yaw), 0], [0, 0, 1]])
+        R_des = R_z @ R_y @ R_x
+        M_val = Rz_neg_q1 @ R_des
+        return M_val
+    M1 = compute_M(q1_candidate1)
+    M2 = compute_M(q1_candidate2)
+    err1 = abs(M1[1, 2])
+    err2 = abs(M2[1, 2])
+    q1 = q1_candidate1 if err1 <= err2 else q1_candidate2
+    cos_q1 = math.cos(q1)
+    sin_q1 = math.sin(q1)
+    Rz_neg_q1 = np.array([[cos_q1, sin_q1, 0], [-sin_q1, cos_q1, 0], [0, 0, 1]])
+    p_vec = np.array([p_x, p_y, p_z])
+    p_bar = Rz_neg_q1 @ p_vec
+    p_bar_x, p_bar_y, p_bar_z = p_bar
+    roll, pitch, yaw = r
+    R_x = np.array([[1, 0, 0], [0, math.cos(roll), -math.sin(roll)], [0, math.sin(roll), math.cos(roll)]])
+    R_y = np.array([[math.cos(pitch), 0, math.sin(pitch)], [0, 1, 0], [-math.sin(pitch), 0, math.cos(pitch)]])
+    R_z = np.array([[math.cos(yaw), -math.sin(yaw), 0], [math.sin(yaw), math.cos(yaw), 0], [0, 0, 1]])
+    R_des = R_z @ R_y @ R_x
+    M = Rz_neg_q1 @ R_des
+    phi = math.atan2(M[0, 2], M[2, 2])
+    q5 = math.atan2(M[1, 0], M[1, 1])
+    P_x = p_bar_x - L_tcp * math.sin(phi)
+    P_z = p_bar_z - L_tcp * math.cos(phi)
+    r2 = math.sqrt(P_x ** 2 + P_z ** 2)
+    cos_q3 = (r2 ** 2 - L1 ** 2 - L2 ** 2) / (2 * L1 * L2)
+    cos_q3 = max(-1.0, min(1.0, cos_q3))
+    q3_candidateA = math.acos(cos_q3)
+    q3_candidateB = -q3_candidateA
+
+    def planar_solution(q3_val):
+        q2_val = math.atan2(P_x, P_z) - math.atan2(L2 * math.sin(q3_val), L1 + L2 * math.cos(q3_val))
+        q4_val = phi - (q2_val + q3_val)
+        calc_x = L1 * math.sin(q2_val) + L2 * math.sin(q2_val + q3_val) + L_tcp * math.sin(phi)
+        calc_z = L1 * math.cos(q2_val) + L2 * math.cos(q2_val + q3_val) + L_tcp * math.cos(phi)
+        err_val = math.sqrt((calc_x - p_bar_x) ** 2 + (calc_z - p_bar_z) ** 2)
+        return (q2_val, q4_val, err_val)
+    q2_A, q4_A, err_A = planar_solution(q3_candidateA)
+    q2_B, q4_B, err_B = planar_solution(q3_candidateB)
+    if err_A <= err_B:
+        q3 = q3_candidateA
+        q2 = q2_A
+        q4 = q4_A
+    else:
+        q3 = q3_candidateB
+        q2 = q2_B
+        q4 = q4_B
+    return (q1, q2, q3, q4, q5)
+</EXISTING 2>
+<EXISTING 3>
+import math
+
+def inverse_kinematics(p: tuple[float, float, float]) -> float:
+    """
+    Gets the joint values needed to reach position "p".
+    :param p: The position to reach in the form [x, y, z].
+    :return: The value to set the link to for reaching position "p".
+    """
+    x, y, z = p
+    theta = math.atan2(x, z)
+    return theta
+</EXISTING 3>
+<EXISTING 4>
+import math
+
+def inverse_kinematics(p: tuple[float, float, float], r: tuple[float, float, float]) -> tuple[float, float]:
+    x_target, y_target, z_target = p
+    rx, ry, rz = r
+    cx = math.cos(rx)
+    sx = math.sin(rx)
+    cy = math.cos(ry)
+    sy = math.sin(ry)
+    cz = math.cos(rz)
+    sz = math.sin(rz)
+    R00 = cy * cz
+    R02 = sy
+    theta_sum = math.atan2(R02, R00)
+    a = 0.425
+    b = 0.39225
+    d_sq = x_target ** 2 + z_target ** 2
+    d = math.sqrt(d_sq)
+    cos_theta2 = (d_sq - a ** 2 - b ** 2) / (2 * a * b)
+    cos_theta2 = max(min(cos_theta2, 1.0), -1.0)
+    theta2_1 = math.acos(cos_theta2)
+    theta2_2 = -theta2_1
+    solutions = []
+    for theta2 in [theta2_1, theta2_2]:
+        theta1 = theta_sum - theta2
+        x_calc = a * math.sin(theta1) + b * math.sin(theta_sum)
+        z_calc = a * math.cos(theta1) + b * math.cos(theta_sum)
+        if math.isclose(x_calc, x_target, abs_tol=1e-05) and math.isclose(z_calc, z_target, abs_tol=1e-05):
+            solutions.append((theta1, theta2))
+    if solutions:
+        for theta1, theta2 in solutions:
+            if -6.2831853 <= theta2 <= 6.2831853:
+                return (theta1, theta2)
+        return solutions[0]
+    else:
+        term_x = x_target - b * math.sin(theta_sum)
+        term_z = z_target - b * math.cos(theta_sum)
+        theta1 = math.atan2(term_x, term_z)
+        theta2 = theta_sum - theta1
+        return (theta1, theta2)
+</EXISTING 4>
+<EXISTING 5>
+import numpy as np
+
+def inverse_kinematics(p: tuple[float, float, float], r: tuple[float, float, float]) -> tuple[float, float, float]:
+    x_target, y_target, z_target = p
+    roll, pitch, yaw = r
+    cr, sr = (np.cos(roll), np.sin(roll))
+    cp, sp = (np.cos(pitch), np.sin(pitch))
+    cy, sy = (np.cos(yaw), np.sin(yaw))
+    R = np.array([[cy * cp, cy * sp * sr - sy * cr, cy * sp * cr + sy * sr], [sy * cp, sy * sp * sr + cy * cr, sy * sp * cr - cy * sr], [-sp, cp * sr, cp * cr]])
+    cos_theta = R[0, 0]
+    sin_theta = R[0, 2]
+    target_sum = np.arctan2(sin_theta, cos_theta)
+    L1 = 0.425
+    L2 = 0.39225
+    d_sq = x_target ** 2 + z_target ** 2
+    cos_theta2 = (d_sq - L1 ** 2 - L2 ** 2) / (2 * L1 * L2)
+    cos_theta2 = np.clip(cos_theta2, -1.0, 1.0)
+    theta2 = np.arccos(cos_theta2)
+    theta2_alt = -theta2
+    solutions = []
+    for t2 in [theta2, theta2_alt]:
+        C = L1 + L2 * np.cos(t2)
+        D = L2 * np.sin(t2)
+        denom = C ** 2 + D ** 2
+        if denom < 1e-06:
+            continue
+        sin_t1 = (C * x_target - D * z_target) / denom
+        cos_t1 = (D * x_target + C * z_target) / denom
+        if abs(sin_t1) > 1.0 or abs(cos_t1) > 1.0:
+            continue
+        t1 = np.arctan2(sin_t1, cos_t1)
+        t3_base = (target_sum - t1 - t2) % (2 * np.pi)
+        t3_candidates = [t3_base - 2 * np.pi, t3_base, t3_base + 2 * np.pi]
+        for t3 in t3_candidates:
+            if -2 * np.pi <= t3 <= 2 * np.pi:
+                solutions.append((t1, t2, t3))
+    best_error = float('inf')
+    best_sol = (0.0, 0.0, 0.0)
+    for sol in solutions:
+        t1, t2, t3 = sol
+        if not (-2 * np.pi <= t1 <= 2 * np.pi and -2 * np.pi <= t2 <= 2 * np.pi and (-2 * np.pi <= t3 <= 2 * np.pi)):
+            continue
+        x = L1 * np.sin(t1) + L2 * np.sin(t1 + t2)
+        z = L1 * np.cos(t1) + L2 * np.cos(t1 + t2)
+        pos_error = np.hypot(x - x_target, z - z_target)
+        orient_sum = (t1 + t2 + t3) % (2 * np.pi)
+        target_orient = target_sum % (2 * np.pi)
+        orient_error = min(abs(orient_sum - target_orient), 2 * np.pi - abs(orient_sum - target_orient))
+        total_error = pos_error + orient_error
+        if total_error < best_error:
+            best_error = total_error
+            best_sol = sol
+    return best_sol
+</EXISTING 5>
+<EXISTING 6>
+import math
+import numpy as np
+
+def inverse_kinematics(p: tuple[float, float, float], r: tuple[float, float, float]) -> tuple[float, float, float, float]:
+    x_target, y_target, z_target = p
+    roll, pitch, yaw = r
+    cr, sr = (math.cos(roll), math.sin(roll))
+    cp, sp = (math.cos(pitch), math.sin(pitch))
+    cy, sy = (math.cos(yaw), math.sin(yaw))
+    R_x = np.array([[1, 0, 0], [0, cr, -sr], [0, sr, cr]])
+    R_y = np.array([[cp, 0, sp], [0, 1, 0], [-sp, 0, cp]])
+    R_z = np.array([[cy, -sy, 0], [sy, cy, 0], [0, 0, 1]])
+    R_target = R_z @ R_y @ R_x
+    r13 = R_target[0, 2]
+    r33 = R_target[2, 2]
+    theta_sum = math.atan2(r13, r33)
+    C_tcp = 0.09465
+    pos3_x = x_target - C_tcp * math.sin(theta_sum)
+    pos3_z = z_target - C_tcp * math.cos(theta_sum)
+    a = 0.425
+    b = 0.39225
+    x = pos3_x
+    z = pos3_z
+    d_sq = x ** 2 + z ** 2
+    cos_theta2 = (d_sq - a ** 2 - b ** 2) / (2 * a * b)
+    cos_theta2 = max(min(cos_theta2, 1.0), -1.0)
+    theta2_1 = math.acos(cos_theta2)
+    theta2_2 = -theta2_1
+    solutions = []
+    for theta2 in [theta2_1, theta2_2]:
+        denom = a + b * math.cos(theta2)
+        num = b * math.sin(theta2)
+        theta1 = math.atan2(x, z) - math.atan2(num, denom)
+        x_calc = a * math.sin(theta1) + b * math.sin(theta1 + theta2)
+        z_calc = a * math.cos(theta1) + b * math.cos(theta1 + theta2)
+        if math.isclose(x_calc, x, abs_tol=1e-05) and math.isclose(z_calc, z, abs_tol=1e-05):
+            solutions.append((theta1, theta2))
+    theta1, theta2 = solutions[0] if solutions else (0.0, 0.0)
+    theta3 = theta_sum - theta1 - theta2
+    R_y_sum = np.array([[math.cos(theta_sum), 0, math.sin(theta_sum)], [0, 1, 0], [-math.sin(theta_sum), 0, math.cos(theta_sum)]])
+    R_remaining = R_y_sum.T @ R_target
+    theta4 = math.atan2(R_remaining[1, 0], R_remaining[0, 0])
+    return (theta1, theta2, theta3, theta4)
+</EXISTING 6>
+<EXISTING 7>
+import math
+
+def inverse_kinematics(p: tuple[float, float, float]) -> float:
+    """
+    Gets the joint values needed to reach position "p".
+    :param p: The position to reach in the form [x, y, z].
+    :return: The value to set the link to for reaching position "p".
+    """
+    x, y, z = p
+    theta = math.atan2(x, z)
+    return theta
+</EXISTING 7>
+<EXISTING 8>
+def inverse_kinematics(p: tuple[float, float, float], r: tuple[float, float, float]) -> tuple[float, float]:
+    """
+    Gets the joint values needed to reach position "p" and orientation "r".
+    :param p: The position to reach in the form [x, y, z].
+    :param r: The orientation to reach in radians in the form [x, y, z].
+    :return: A list of the values to set the links to for reaching position "p" and orientation "r".
+    """
+    import math
+    x, y, z = p
+    rx, ry, rz = r
+    theta1 = math.atan2(x, z)
+    if abs(rx - math.pi) < 1e-10 and abs(rz - math.pi) < 1e-10:
+        theta2 = -ry - theta1 + math.pi
+        while theta2 > 2 * math.pi:
+            theta2 -= 2 * math.pi
+        while theta2 < -2 * math.pi:
+            theta2 += 2 * math.pi
+    else:
+        theta2 = ry - theta1
+    return (theta1, theta2)
+</EXISTING 8>
+<EXISTING 9>
+import numpy as np
+
+def inverse_kinematics(p: tuple[float, float, float], r: tuple[float, float, float]) -> tuple[float, float, float]:
+    x_target, y_target, z_target = p
+    rx, ry, rz = r
+    R_roll = np.array([[1, 0, 0], [0, np.cos(rx), -np.sin(rx)], [0, np.sin(rx), np.cos(rx)]])
+    R_pitch = np.array([[np.cos(ry), 0, np.sin(ry)], [0, 1, 0], [-np.sin(ry), 0, np.cos(ry)]])
+    R_yaw = np.array([[np.cos(rz), -np.sin(rz), 0], [np.sin(rz), np.cos(rz), 0], [0, 0, 1]])
+    R_target = R_yaw @ R_pitch @ R_roll
+    r13 = R_target[0, 2]
+    r33 = R_target[2, 2]
+    theta_sum = np.arctan2(r13, r33)
+    r21 = R_target[1, 0]
+    r22 = R_target[1, 1]
+    theta3 = np.arctan2(r21, r22)
+    A = 0.39225
+    B = 0.09465
+    sin_S = np.sin(theta_sum)
+    cos_S = np.cos(theta_sum)
+    numerator_sin = x_target - B * sin_S
+    numerator_cos = z_target - B * cos_S
+    theta1 = np.arctan2(numerator_sin, numerator_cos)
+    theta2 = theta_sum - theta1
+    return (theta1, theta2, theta3)
+</EXISTING 9>
+<EXISTING 10>
+import numpy as np
+
+def inverse_kinematics(p: tuple[float, float, float], r: tuple[float, float, float]) -> tuple[float, float, float, float]:
+    """
+    Computes the joint angles for a 4-DOF serial manipulator that reaches a specified
+    TCP position and orientation using a closed-form analytical inverse kinematics solution.
+    
+    The robot structure (all units in meters and radians):
+      - Revolute Joint 1: rotation about Y, at origin.
+      - Revolute Joint 2: rotation about Y, with a translation [0, 0, 0.39225] from Joint 1.
+      - Revolute Joint 3: rotation about Z, with a translation [0, 0.093, 0] from Joint 2.
+      - Revolute Joint 4: rotation about Y, with a translation [0, 0, 0.09465] from Joint 3.
+      - TCP: translation [0, 0.0823, 0] and a constant orientation offset about Z of +1.570796325.
+      
+    The forward kinematics (position) can be derived as:
+      p_x = d2*sin(θ1) + d4*sin(θ1+θ2) - d_tcp*sin(θ3)*cos(θ1+θ2)
+      p_y = d3 + d_tcp*cos(θ3)
+      p_z = d2*cos(θ1) + d4*cos(θ1+θ2) + d_tcp*sin(θ3)*sin(θ1+θ2)
+    
+    Note: The orientation of the TCP is given by:
+      R_total = Ry(θ1+θ2) · Rz(θ3) · Ry(θ4) · Rz(psi)
+    where psi = 1.570796325 is the fixed TCP yaw-offset.
+    The target orientation is provided as roll, pitch, yaw in radians.
+    (Here we assume the URDF convention: R_target = Rz(yaw) · Ry(pitch) · Rx(roll).)
+    
+    Due to inherent multiple solutions, this implementation generates all four candidate
+    solutions (from the two choices in θ3 and the two choices in θ1) and then selects
+    the candidate whose forward kinematics orientation best matches the target.
+    
+    :param p: Target TCP position [x, y, z].
+    :param r: Target TCP orientation in rpy [roll, pitch, yaw] (radians).
+    :return: Tuple (theta1, theta2, theta3, theta4) representing the joint angles in radians.
+    """
+    d2 = 0.39225
+    d3 = 0.093
+    d4 = 0.09465
+    d_tcp = 0.0823
+    psi = 1.570796325
+    p = np.array(p)
+    p_x, p_y, p_z = p
+
+    def rot_x(a):
+        ca, sa = (np.cos(a), np.sin(a))
+        return np.array([[1, 0, 0], [0, ca, -sa], [0, sa, ca]])
+
+    def rot_y(a):
+        ca, sa = (np.cos(a), np.sin(a))
+        return np.array([[ca, 0, sa], [0, 1, 0], [-sa, 0, ca]])
+
+    def rot_z(a):
+        ca, sa = (np.cos(a), np.sin(a))
+        return np.array([[ca, -sa, 0], [sa, ca, 0], [0, 0, 1]])
+    roll, pitch, yaw = r
+    R_target = rot_z(yaw) @ rot_y(pitch) @ rot_x(roll)
+    cos_theta3 = (p_y - d3) / d_tcp
+    cos_theta3 = np.clip(cos_theta3, -1.0, 1.0)
+    theta3_pos = np.arccos(cos_theta3)
+    theta3_neg = -theta3_pos
+    r_target = np.sqrt(p_x ** 2 + p_z ** 2)
+    δ = np.arctan2(p_x, p_z)
+    candidates = []
+    for theta3_candidate in [theta3_pos, theta3_neg]:
+        sin_theta3 = np.sin(theta3_candidate)
+        R_eff = np.sqrt(d4 ** 2 + (d_tcp * sin_theta3) ** 2)
+        φ = np.arctan2(d_tcp * sin_theta3, d4)
+        cos_term = (r_target ** 2 + d2 ** 2 - R_eff ** 2) / (2 * d2 * r_target)
+        cos_term = np.clip(cos_term, -1.0, 1.0)
+        theta1_offset = np.arccos(cos_term)
+        for theta1_candidate in [δ + theta1_offset, δ - theta1_offset]:
+            Vx = p_x - d2 * np.sin(theta1_candidate)
+            Vz = p_z - d2 * np.cos(theta1_candidate)
+            theta12 = np.arctan2(Vx, Vz) + φ
+            theta2_candidate = theta12 - theta1_candidate
+            R_pre = rot_y(theta1_candidate + theta2_candidate) @ rot_z(theta3_candidate)
+            R_y_theta4 = R_pre.T @ R_target @ rot_z(-psi)
+            theta4_candidate = np.arctan2(R_y_theta4[0, 2], R_y_theta4[0, 0])
+            candidate = (theta1_candidate, theta2_candidate, theta3_candidate, theta4_candidate)
+            R_forward = rot_y(theta1_candidate + theta2_candidate) @ rot_z(theta3_candidate) @ rot_y(theta4_candidate) @ rot_z(psi)
+            err = np.linalg.norm(R_forward - R_target, ord='fro')
+            candidates.append((err, candidate))
+    best_candidate = min(candidates, key=lambda x: x[0])[1]
+    return best_candidate
+</EXISTING 10>
+<EXISTING 11>
+import math
+
+def inverse_kinematics(p: tuple[float, float, float]) -> float:
+    """
+    Gets the joint values needed to reach position "p".
+    :param p: The position to reach in the form [x, y, z].
+    :return: The value to set the link to for reaching position "p".
+    """
+    px, py, pz = p
+    theta = math.atan2(px, pz)
+    return theta
+</EXISTING 11>
+<EXISTING 12>
+def inverse_kinematics(p: tuple[float, float, float], r: tuple[float, float, float]) -> tuple[float, float]:
+    """
+    Gets the joint values needed to reach position "p" and orientation "r".
+    :param p: The position to reach in the form [x, y, z].
+    :param r: The orientation to reach in radians in the form [x, y, z].
+    :return: A list of the values to set the links to for reaching position "p" and orientation "r".
+    """
+    import numpy as np
+    import math
+    x, y, z = p
+    rx, ry, rz = r
+    joint1 = math.atan2(x, z)
+
+    def rot_x(angle):
+        return np.array([[1, 0, 0], [0, np.cos(angle), -np.sin(angle)], [0, np.sin(angle), np.cos(angle)]])
+
+    def rot_y(angle):
+        return np.array([[np.cos(angle), 0, np.sin(angle)], [0, 1, 0], [-np.sin(angle), 0, np.cos(angle)]])
+
+    def rot_z(angle):
+        return np.array([[np.cos(angle), -np.sin(angle), 0], [np.sin(angle), np.cos(angle), 0], [0, 0, 1]])
+    R_target = rot_z(rz) @ rot_y(ry) @ rot_x(rx)
+    R_joint1 = rot_y(joint1)
+    R_remaining = R_joint1.T @ R_target
+    joint2 = math.atan2(R_remaining[1, 0], R_remaining[0, 0])
+    return (joint1, joint2)
+</EXISTING 12>
+<EXISTING 13>
+import math
+import numpy as np
+
+def inverse_kinematics(p: tuple[float, float, float], r: tuple[float, float, float]) -> tuple[float, float, float]:
+    px, py, pz = p
+    target_roll, target_pitch, target_yaw = r
+    y_offset = py - 0.093
+    if abs(y_offset) > 0.0823:
+        raise ValueError('Target position is unreachable based on y-coordinate.')
+    cos_theta2 = y_offset / 0.0823
+    theta2_pos = math.acos(cos_theta2)
+    theta2_neg = -theta2_pos
+    possible_theta2 = [theta2_pos, theta2_neg]
+    solutions = []
+    cr, cp, cy = (math.cos(target_roll), math.cos(target_pitch), math.cos(target_yaw))
+    sr, sp, sy = (math.sin(target_roll), math.sin(target_pitch), math.sin(target_yaw))
+    R_target = np.array([[cy * cp, cy * sp * sr - sy * cr, cy * sp * cr + sy * sr], [sy * cp, sy * sp * sr + cy * cr, sy * sp * cr - cy * sr], [-sp, cp * sr, cp * cr]])
+    R_tcp = np.array([[0, -1, 0], [1, 0, 0], [0, 0, 1]])
+    R_tcp_inv = R_tcp.T
+    for theta2 in possible_theta2:
+        sin_theta2 = math.sin(theta2)
+        A = -0.0823 * sin_theta2
+        B = 0.09465
+        C = 0.0823 * sin_theta2
+        D = 0.09465
+        det = B * D - A * C
+        if abs(det) < 1e-06:
+            continue
+        sin_theta1 = (D * px - A * pz) / det
+        cos_theta1 = (-C * px + B * pz) / det
+        theta1 = math.atan2(sin_theta1, cos_theta1)
+        R1 = np.array([[math.cos(theta1), 0, math.sin(theta1)], [0, 1, 0], [-math.sin(theta1), 0, math.cos(theta1)]])
+        R2 = np.array([[math.cos(theta2), -math.sin(theta2), 0], [math.sin(theta2), math.cos(theta2), 0], [0, 0, 1]])
+        R_desired = R_target @ R_tcp_inv
+        R_total = R1 @ R2
+        R3 = np.linalg.inv(R_total) @ R_desired
+        cos_theta3 = R3[0, 0]
+        sin_theta3 = R3[0, 2]
+        theta3 = math.atan2(sin_theta3, cos_theta3)
+        R3_actual = np.array([[math.cos(theta3), 0, math.sin(theta3)], [0, 1, 0], [-math.sin(theta3), 0, math.cos(theta3)]])
+        R_achieved = R_total @ R3_actual @ R_tcp
+        orientation_error = np.linalg.norm(R_achieved - R_target)
+        solutions.append((theta1, theta2, theta3, orientation_error))
+    if not solutions:
+        return (0.0, 0.0, 0.0)
+    solutions.sort(key=lambda x: x[3])
+    best_solution = solutions[0][:3]
+    return best_solution
+</EXISTING 13>
+<EXISTING 14>
+import math
+
+def inverse_kinematics(p: tuple[float, float, float]) -> float:
+    """
+    Gets the joint values needed to reach position "p".
+    :param p: The position to reach in the form [x, y, z].
+    :return: The value to set the link to for reaching position "p".
+    """
+    x, y, z = p
+    theta = math.atan2(y, x)
+    return theta
+</EXISTING 14>
+<EXISTING 15>
+import math
+import numpy as np
+
+def inverse_kinematics(p: tuple[float, float, float], r: tuple[float, float, float]) -> tuple[float, float]:
+    """
+    Gets the joint values needed to reach position "p" and orientation "r".
+    :param p: The position to reach in the form [x, y, z].
+    :param r: The orientation to reach in radians in the form [x, y, z].
+    :return: A tuple of the values to set the joints to for reaching position "p" and orientation "r".
+    """
+    x, y, z = p
+    target_roll, target_pitch, target_yaw = r
+    theta1 = math.atan2(-x, y)
+    R_target = np.array([[math.cos(target_yaw) * math.cos(target_pitch), math.cos(target_yaw) * math.sin(target_pitch) * math.sin(target_roll) - math.sin(target_yaw) * math.cos(target_roll), math.cos(target_yaw) * math.sin(target_pitch) * math.cos(target_roll) + math.sin(target_yaw) * math.sin(target_roll)], [math.sin(target_yaw) * math.cos(target_pitch), math.sin(target_yaw) * math.sin(target_pitch) * math.sin(target_roll) + math.cos(target_yaw) * math.cos(target_roll), math.sin(target_yaw) * math.sin(target_pitch) * math.cos(target_roll) - math.cos(target_yaw) * math.sin(target_roll)], [-math.sin(target_pitch), math.cos(target_pitch) * math.sin(target_roll), math.cos(target_pitch) * math.cos(target_roll)]])
+    R_theta1 = np.array([[math.cos(theta1), -math.sin(theta1), 0], [math.sin(theta1), math.cos(theta1), 0], [0, 0, 1]])
+    R_theta2 = np.linalg.inv(R_theta1) @ R_target
+    theta2 = math.atan2(R_theta2[2, 1], R_theta2[2, 2])
+    return (theta1, theta2)
+</EXISTING 15>
+<EXISTING 16>
+import math
+
+def inverse_kinematics(p: tuple[float, float, float]) -> float:
+    """
+    Gets the joint values needed to reach position "p".
+    :param p: The position to reach in the form [x, y, z].
+    :return: The value to set the link to for reaching position "p".
+    """
+    x, y, z = p
+    theta = math.atan2(x, z)
+    return theta
+</EXISTING 16>

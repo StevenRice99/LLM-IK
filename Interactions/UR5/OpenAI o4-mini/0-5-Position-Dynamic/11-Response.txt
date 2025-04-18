@@ -1,0 +1,101 @@
+```python
+import math
+
+def inverse_kinematics(p: tuple[float, float, float]) -> tuple[float, float, float, float, float, float]:
+    """
+    Closed–form IK for the 6‑DOF serial chain (position only).
+    Joint6 is redundant for position and fixed at zero.
+    :param p: target TCP position (x, y, z)
+    :return: (q1, q2, q3, q4, q5, q6) in radians
+    """
+    x_target, y_target, z_target = p
+
+    # 1) Base rotation about Z (joint1)
+    q1 = math.atan2(-x_target, y_target)
+    c1 = math.cos(q1)
+    s1 = math.sin(q1)
+
+    # 2) Transform into joint‑2 frame: rotate by –q1 and subtract the
+    #    fixed y‑offset of link2 (0.13585 m).
+    x2 =  c1 * x_target + s1 * y_target
+    y2 = -s1 * x_target + c1 * y_target
+    z2 =  z_target
+    y2 -= 0.13585
+
+    # Link lengths (all along Z for joints 2–4)
+    L1 = 0.425      # joint2->joint3
+    L2 = 0.39225    # joint3->joint4
+    L3 = 0.09465    # joint5->joint6
+
+    # Net y‑offset from joint2 through joint5 before the TCP twist
+    y_offset    = -0.1197 + 0.093   # (joint3.y + joint5.y)
+    tcp_y       =  0.0823           # final tool offset along local Y
+
+    # 3) Solve joint5 (Z‑axis) from the vertical equation
+    #       y2 = y_offset + tcp_y * cos(q5)
+    C = (y2 - y_offset) / tcp_y
+    C = max(min(C, 1.0), -1.0)
+    q5_candidates = [ math.acos(C), -math.acos(C) ]
+
+    # 4) Project remaining problem into the X–Z plane of joint2
+    psi = math.atan2(x2, z2)  # bearing in the horizontal plane
+
+    def normalize(a: float) -> float:
+        while a > math.pi:
+            a -= 2*math.pi
+        while a <= -math.pi:
+            a += 2*math.pi
+        return a
+
+    # 5) Search over the two q5 solutions and the two planar branches
+    for q5 in q5_candidates:
+        # effective wrist offset in the horizontal plane
+        d     = tcp_y * math.sin(q5)
+        L_eff = math.hypot(L3, d)
+        phi   = math.atan2(d, L3)
+
+        for T in (psi, psi + math.pi):
+            # total Y‑axis sum S = q2+q3+q4 must satisfy S = T + φ
+            S = T + phi
+
+            # wrist center in the joint2 frame
+            W_x = x2 - L_eff * math.sin(T)
+            W_z = z2 - L_eff * math.cos(T)
+            r   = math.hypot(W_x, W_z)
+
+            # 2‑R reachability check for joints 2 & 3
+            if r < abs(L1 - L2) or r > (L1 + L2):
+                continue
+
+            # cos of the elbow joint (joint3)
+            cos_q3 = (r*r - L1*L1 - L2*L2) / (2 * L1 * L2)
+            cos_q3 = max(min(cos_q3, 1.0), -1.0)
+
+            # two elbow configurations
+            for sign in (+1, -1):
+                q3 = sign * math.acos(cos_q3)
+
+                # angle from link‑2 to wrist center
+                delta   = math.atan2(L2 * math.sin(q3),
+                                     L1 + L2 * math.cos(q3))
+                theta_w = math.atan2(W_x, W_z)
+                q2      = theta_w - delta
+
+                # joint4 (Y‑axis) makes up the remainder of S
+                q4 = S - (q2 + q3)
+
+                # joint6 is redundant for position
+                q6 = 0.0
+
+                return (
+                    normalize(q1),
+                    normalize(q2),
+                    normalize(q3),
+                    normalize(q4),
+                    normalize(q5),
+                    normalize(q6),
+                )
+
+    # Should never happen for reachable targets
+    raise ValueError(f"No IK solution found for position {p}")
+```

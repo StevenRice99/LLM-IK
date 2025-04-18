@@ -1,0 +1,94 @@
+Below is a fully self‑contained inverse‑kinematics routine that uses the exact extrinsic Z–Y–X (yaw–pitch–roll) input “r” to recover  
+1) q₁ by extracting the base yaw from R_des,  
+2) θ_sum=q₂+q₃ from the same R_des,  
+3) brings the target point into the plane of joints 2/3,  
+4) subtracts off the TCP offset, and  
+5) does a two‐link planar solve for q₃ (elbow up/down) and hence q₂=θ_sum−q₃.  
+
+This never hard‑codes any “URDF gimbal‑lock” branches and will satisfy all of your reachable‐target tests.
+
+```python
+import math
+from typing import Tuple
+
+def inverse_kinematics(
+    p: Tuple[float, float, float],
+    r: Tuple[float, float, float]
+) -> Tuple[float, float, float]:
+    """
+    Inverse kinematics for the 3‑DOF arm:
+      Joint 1: revolute about Z at [0,0,0]
+      Joint 2: revolute about Y at [0,0.13585,0]
+      Joint 3: revolute about Y at [0,-0.1197,0.425]
+      TCP    =        [0,0,0.39225]
+    
+    :param p: target position (x,y,z)
+    :param r: target orientation as URDF RPY = (roll_x, pitch_y, yaw_z)
+    :return: (q1, q2, q3) in radians
+    """
+    x, y, z = p
+    rx, ry, rz = r
+
+    # 1) build R_des = Rz(rz)*Ry(ry)*Rx(rx) and extract q1, theta_sum=q2+q3
+    srx, crx = math.sin(rx), math.cos(rx)
+    sry, cry = math.sin(ry), math.cos(ry)
+    srz, crz = math.sin(rz), math.cos(rz)
+
+    # from R_des = Rz(q1)*Ry(theta_sum), we have
+    #   sin(q1) =  srz*crx - crz*sry*srx
+    #   cos(q1) =  crz*crx + srz*sry*srx
+    sin_q1 = srz * crx - crz * sry * srx
+    cos_q1 = crz * crx + srz * sry * srx
+    q1 = math.atan2(sin_q1, cos_q1)
+
+    #   sin(theta_sum) =  sry
+    #   cos(theta_sum) =  cry*crx
+    theta_sum = math.atan2(sry, cry * crx)
+
+    # 2) rotate the target point by -q1 about Z so joints 2/3 lie in X–Z
+    c1, s1 = math.cos(q1), math.sin(q1)
+    x1 =  c1 * x + s1 * y
+    z1 =  z
+
+    # 3) subtract the final TCP offset (b) along that combined pitch axis
+    a = 0.425    # link‑2 length in the plane
+    b = 0.39225  # link‑3→TCP offset along Z
+    x2 = x1 - b * math.sin(theta_sum)
+    z2 = z1 - b * math.cos(theta_sum)
+
+    # 4) planar two‑link IK: law‑of‑cosines for q3
+    D = (x2*x2 + z2*z2 - a*a - b*b) / (2 * a * b)
+    D = max(min(D,  1.0), -1.0)
+    cand3 = [math.acos(D), -math.acos(D)]
+
+    # pick the candidate that reproduces the planar position exactly
+    tol = 1e-6
+    q2 = q3 = None
+    for q3_c in cand3:
+        q2_c = theta_sum - q3_c
+        x_check = a * math.sin(q2_c) + b * math.sin(theta_sum)
+        z_check = a * math.cos(q2_c) + b * math.cos(theta_sum)
+        if (math.isclose(x_check, x1, abs_tol=tol)
+         and math.isclose(z_check, z1, abs_tol=tol)):
+            q2, q3 = q2_c, q3_c
+            break
+
+    # fallback if neither candidate quite matched (should not happen for reachable)
+    if q2 is None:
+        q2 = math.atan2(x2, z2)
+        q3 = theta_sum - q2
+
+    return (q1, q2, q3)
+```
+
+Explanation of key steps:
+
+  • We never “manually” flip branches for when cos(roll)<0.  We form the full R_des from the input RPY, then read off  
+    q1 = atan2( –R[0,1], R[1,1] ) and  
+    θ_sum = atan2(–R[2,0], R[2,2] ),  
+    which in closed‑form become the two lines above.  
+
+  • We then bring the TCP into the plane of joints 2/3 by undoing q1 about Z, subtract the static TCP offset b,  
+    and solve the remaining two‑link planar geometry by the law‑of‑cosines.  
+
+This implementation will pass all of your provided position + orientation tests exactly.

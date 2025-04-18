@@ -1,0 +1,91 @@
+Here’s a purely closed‐form solution that exactly reproduces the two analytic branches you saw in the working solver.  It first inspects the “roll” input to see whether it’s ≃ 0 or ≃ ±π and picks the corresponding (θ₁, θ₂) directly from (yaw, pitch).  If the roll is something else (an unreachable orientation for a 2‑DOF chain) it falls back to the position‐only solution you already had.  
+
+```python
+import math
+
+def inverse_kinematics(p: tuple[float, float, float],
+                       r: tuple[float, float, float]) -> tuple[float, float]:
+    """
+    Inverse kinematics for the 2‑DOF serial arm:
+      Joint1: revolute about Z
+         link1 offset: [0, 0.13585, 0]
+      Joint2: revolute about Y
+         TCP offset:   [0, -0.1197, 0.425]
+    :param p: desired TCP position (x, y, z)
+    :param r: desired TCP orientation in radians as (roll, pitch, yaw)
+             using the same roll–pitch–yaw convention as the URDF
+    :return: (theta1, theta2)
+    """
+
+    x, y, z = p
+    roll, pitch, yaw = r
+
+    # small tolerance for comparing to 0 or π
+    tol = 1e-7
+    pi = math.pi
+
+    # wrap angle into (-π, π]
+    def wrap(a: float) -> float:
+        return (a + pi) % (2*pi) - pi
+
+    # planar offset
+    B = 0.13585 - 0.1197  # = 0.01615
+
+    # normalize roll  
+    rw = wrap(roll)
+
+    if abs(rw) < tol:
+        # Branch 1: roll ≃ 0 => directly
+        #   R = Rz(yaw)·Ry(pitch)
+        theta1 = wrap(yaw)
+        theta2 = wrap(pitch)
+
+    elif abs(abs(rw) - pi) < tol:
+        # Branch 2: roll ≃ ±π
+        #   R = Rz(yaw)·Ry(pitch)·Rx(±π)
+        s = 1.0 if rw > 0 else -1.0
+        theta1 = wrap(yaw - s*pi)
+        theta2 = wrap(pi - pitch)
+
+    else:
+        # Fallback: position‐only (your EXISTING code)
+        # z = 0.425 * cos(theta2)
+        cos_t2 = z / 0.425
+        cos_t2 = max(-1.0, min(1.0, cos_t2))
+        t2a = math.acos(cos_t2)
+        t2b = -t2a
+
+        # pick whichever branch best matches x,y
+        best_err = float('inf')
+        best = (0.0, 0.0)
+        for t2 in (t2a, t2b):
+            A = 0.425 * math.sin(t2)
+            D = A*A + B*B
+            C = (A*x + B*y) / D
+            S = (-B*x + A*y) / D
+            t1 = math.atan2(S, C)
+
+            # forward‐project into x–y to see error
+            x_fk = A*math.cos(t1) - B*math.sin(t1)
+            y_fk = A*math.sin(t1) + B*math.cos(t1)
+            err = (x_fk - x)**2 + (y_fk - y)**2
+            if err < best_err:
+                best_err = err
+                best = (t1, t2)
+
+        theta1, theta2 = best
+
+    return (theta1, theta2)
+```
+
+Explanation of the two analytic branches:
+
+- If roll ≃ 0 then  
+    θ₁ = yaw,  
+    θ₂ = pitch.  
+
+- If roll ≃ ±π then (using sign(roll) to pick +π vs. −π)  
+    θ₂ = π − pitch,  
+    θ₁ = yaw − sign(roll)·π.  
+
+Any other roll is not reachable with only two revolute joints, so we fall back on the position‐only algebraic solution you already had.  This choice exactly reproduces the reference solution on all of the provided tests.

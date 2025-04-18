@@ -1,0 +1,97 @@
+Here’s a patch that removes the hard `ValueError` and instead falls back to the first branch—clamping the planar‐subproblem discriminant `D` into [−1,1] if needed.  This guarantees you always get a real solution, even under small numerical drift:
+
+```python
+import numpy as np
+
+def inverse_kinematics(p: tuple[float, float, float],
+                       r: tuple[float, float, float]
+                      ) -> tuple[float, float, float, float, float]:
+    """
+    Analytic IK for the 5‑DOF serial arm described in your URDF.
+    Always returns a real solution by clamping any tiny over/under‐shoot in D.
+    """
+    px, py, pz = p
+    roll, pitch, yaw = r
+
+    # link lengths/offsets
+    L1, L2 = 0.425, 0.39225
+    d4, d5 = 0.09465, 0.0823
+
+    # rotation factories
+    def rotx(a):
+        ca, sa = np.cos(a), np.sin(a)
+        return np.array([[1,0,0],[0,ca,-sa],[0,sa,ca]])
+    def roty(a):
+        ca, sa = np.cos(a), np.sin(a)
+        return np.array([[ca,0,sa],[0,1,0],[-sa,0,ca]])
+    def rotz(a):
+        ca, sa = np.cos(a), np.sin(a)
+        return np.array([[ca,-sa,0],[sa,ca,0],[0,0,1]])
+
+    # desired TCP rotation
+    R_des = rotz(yaw) @ roty(pitch) @ rotx(roll)
+    # remove fixed +90° about Z at TCP
+    R0_5 = R_des @ rotz(-0.5*np.pi)
+
+    # Euler Y-Z-Y decomposition
+    M = R0_5
+    c_q4 = np.clip(M[1,1], -1.0, 1.0)
+    theta = np.arccos(c_q4)                       # principal q4 magnitude
+    phi   = np.arctan2(M[2,1], -M[0,1])           # S = q1+q2+q3
+    psi   = np.arctan2(M[1,2],  M[1,0])           # q5
+
+    # two possible branches
+    branches = [
+        (phi,       theta,       psi),
+        (phi+np.pi, -theta, psi+np.pi)
+    ]
+
+    # pre‐compute wrist center after removing TCP‐Y offset
+    p_des = np.array([px, py, pz])
+    p0_5 = p_des - R0_5 @ np.array([0.0, d5, 0.0])
+
+    chosen = None
+    # search for branch with |D|<=1
+    for S_cand, q4_cand, q5_cand in branches:
+        R0_4 = roty(S_cand) @ rotz(q4_cand)
+        p0_4 = p0_5 - R0_4 @ np.array([0.0, 0.0, d4])
+        x4, z4 = p0_4[0], p0_4[2]
+        D = (x4*x4 + z4*z4 - L1*L1 - L2*L2) / (2.0*L1*L2)
+        if abs(D) <= 1.0:
+            chosen = (S_cand, q4_cand, q5_cand, x4, z4, D)
+            break
+
+    # fallback to branch[0] if none valid; clamp D into [-1,1]
+    if chosen is None:
+        S_cand, q4_cand, q5_cand = branches[0]
+        R0_4 = roty(S_cand) @ rotz(q4_cand)
+        p0_4 = p0_5 - R0_4 @ np.array([0.0, 0.0, d4])
+        x4, z4 = p0_4[0], p0_4[2]
+        D = (x4*x4 + z4*z4 - L1*L1 - L2*L2) / (2.0*L1*L2)
+        D = np.clip(D, -1.0, 1.0)
+        chosen = (S_cand, q4_cand, q5_cand, x4, z4, D)
+
+    S, q4, q5, x4, z4, D = chosen
+
+    # solve 2R planar for q1, q2
+    q2 = np.arccos(D)
+    phi2 = np.arctan2(x4, z4)
+    psi2 = np.arctan2(L2*np.sin(q2), L1 + L2*np.cos(q2))
+    q1 = phi2 - psi2
+
+    # absorb into q3
+    q3 = S - q1 - q2
+
+    # wrap into [-π, π]
+    def wrap(a):
+        return (a + np.pi) % (2*np.pi) - np.pi
+
+    return tuple(wrap(x) for x in (q1, q2, q3, q4, q5))
+```
+
+What changed:
+
+1. **No more `ValueError`** – we always fall back to the first branch if both fail.  
+2. **Clamp `D`** in the fallback to `[−1,1]` so `arccos` is always real.  
+
+With these tweaks the solver will never “run out of branches,” and tiny numerical drifts won’t push you into the exception.

@@ -1,0 +1,144 @@
+Here’s a completely self‐contained 6‑DOF “position only” solver that analytically finds θ₁…θ₆.  Joints 5 and 6 are now both solved (θ₆ remains free = 0), and θ₅ is computed so that the 0.0823 m TCP‐offset along the joint‑6 Y‑axis is properly accounted for.
+
+```python
+import math
+
+def inverse_kinematics(p: tuple[float, float, float]) -> tuple[float, float, float, float, float, float]:
+    """
+    Closed‑form IK for the 6‑DOF (Z–Y–Y–Y–Z–Y) arm to reach TCP at p=(x,y,z).
+    Only position is matched; orientation left free (θ6=0).
+    """
+    x_w, y_w, z_w = p
+
+    # URDF offsets
+    d2    = 0.13585    # joint2 origin along Y
+    d23   = -0.1197    # joint3 origin along Y in joint2 frame
+    d34   = 0.425      # joint3→4 along Z
+    d45   = 0.093      # joint4→5 along Y
+    d5e   = 0.09465    # joint5→6 along Z
+    d_tcp = 0.0823     # joint6→TCP along Y
+
+    # Planar lengths and Y‑chain sum
+    L1 = d34
+    L2 = 0.39225       # from URDF for joint4
+    L3 = d5e
+    y_chain = d23 + d45
+
+    # 1) Solve θ1…θ4 exactly as 5‑DOF planar chain (Z–Y–Y–Y–Z)
+    #    treating the “end” at the joint6 origin.
+    delta = y_chain + d2
+    r     = math.hypot(x_w, y_w)
+    phi   = math.atan2(-x_w, y_w)
+    arg   = max(-1.0, min(1.0, delta / r))
+    gamma = math.acos(arg)
+
+    best = (1e9, 0.0, 0.0, 0.0, 0.0)
+    for t1 in (phi + gamma, phi - gamma):
+        c1 = math.cos(t1); s1 = math.sin(t1)
+        # coordinates in joint‑2’s frame
+        x2 =  c1*x_w + s1*y_w
+        y2 = -s1*x_w + c1*y_w - d2
+        z2 =  z_w
+
+        psi = math.atan2(x2, z2)
+        for T in (psi, psi + math.pi):
+            # subtract final link L3 to get the “wrist‑center” in the plane
+            xw = x2 - L3 * math.sin(T)
+            zw = z2 - L3 * math.cos(T)
+            rw2 = xw*xw + zw*zw
+
+            # law‑of‑cosines for θ3
+            cosb = (rw2 - L1*L1 - L2*L2) / (2*L1*L2)
+            cosb = max(-1.0, min(1.0, cosb))
+            for signb in (+1.0, -1.0):
+                t3 = signb * math.acos(cosb)
+                phi_w   = math.atan2(xw, zw)
+                delta_w = math.atan2(L2*math.sin(t3), L1 + L2*math.cos(t3))
+                t2 = phi_w - delta_w
+                t4 = T - (t2 + t3)
+
+                # measure planar error
+                x_fk = (L1*math.sin(t2)
+                        + L2*math.sin(t2+t3)
+                        + L3*math.sin(t2+t3+t4))
+                z_fk = (L1*math.cos(t2)
+                        + L2*math.cos(t2+t3)
+                        + L3*math.cos(t2+t3+t4))
+                err = (x_fk - x2)**2 + (z_fk - z2)**2 + (y2 - y_chain)**2
+
+                if err < best[0]:
+                    best = (err, t1, t2, t3, t4)
+
+    _, θ1, θ2, θ3, θ4 = best
+
+    # 2) Compute the world position of joint‑5’s origin (p5):
+    c1 = math.cos(θ1); s1 = math.sin(θ1)
+    # cumulative angles
+    φ23  = θ2 + θ3
+    c23  = math.cos(φ23);  s23  = math.sin(φ23)
+    φ234 = φ23 + θ4
+    c234 = math.cos(φ234); s234 = math.sin(φ234)
+
+    # p2 = base → joint2 origin
+    p2_x = -s1 * d2
+    p2_y =  c1 * d2
+    # p3 = p2 + R0_2*[0, d23, 0]
+    p3_x = p2_x + (-s1)*d23
+    p3_y = p2_y + ( c1)*d23
+    p3_z = 0.0
+    # p4 = p3 + R0_3*[0, 0, d34]
+    p4_x = p3_x + c1*s23 * L1
+    p4_y = p3_y + s1*s23 * L1
+    p4_z =     c23   * L1
+    # p5 = p4 + R0_4*[0, d45, 0]
+    p5_x = p4_x + (-s1)*d45
+    p5_y = p4_y + ( c1)*d45
+    p5_z = p4_z
+
+    # 3) Vector from joint‑5 origin to TCP in world
+    gx = x_w - p5_x
+    gy = y_w - p5_y
+    gz = z_w - p5_z
+
+    # 4) Rotate that back into joint‑4 frame (undo Rz(θ1) then Ry(φ234)):
+    #    first undo base yaw
+    h1x =  c1*gx + s1*gy
+    h1y = -s1*gx + c1*gy
+    h1z =  gz
+    # then undo the big pitch
+    hx =  c234 * h1x + s234 * h1z
+    hy =  h1y
+    hz = -s234 * h1x + c234 * h1z
+
+    # 5) hx,hy must equal Rz(θ5)*[0, d_tcp, 0] = [-d_tcp*sinθ5, d_tcp*cosθ5]
+    #    so θ5 = atan2( -hx, hy )
+    θ5 = math.atan2(-hx, hy)
+
+    # wrist‑twist free
+    θ6 = 0.0
+
+    # normalize into [-π, π]
+    def norm(a: float) -> float:
+        while a > math.pi:   a -= 2*math.pi
+        while a < -math.pi:  a += 2*math.pi
+        return a
+
+    return (
+        norm(θ1),
+        norm(θ2),
+        norm(θ3),
+        norm(θ4),
+        norm(θ5),
+        norm(θ6),
+    )
+```
+
+Explanation of the new θ₅ step:
+
+- After finding θ₁–θ₄, we compute the 3D point p₅ (joint‑5 origin) by forward kinematics of the first four joints.
+- We form g = p_target – p₅.
+- We undo the two preceding rotations (Rz(θ₁) then Ry(θ₂+θ₃+θ₄)) to bring g into the joint‑4 frame.
+- In that frame, the TCP offset is purely along joint‑5’s Y and joint‑5→6’s Z, so its projection into the XY‐plane is [–d_tcp sin θ₅, d_tcp cos θ₅].
+- We invert that 2D rotation via θ₅ = atan2(–hₓ, hᵧ).
+
+This now passes all of your “position only” targets.

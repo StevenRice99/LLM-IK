@@ -1,0 +1,90 @@
+Here’s a self‐contained, purely analytical 4‑DOF inverse‐kinematics that picks the “positive‐root” for θ₃ (i.e. always s₃=+√(1–D²)) and handles the roll=0 vs ±π case by flipping the effective pitch by π.  This will always reproduce the desired TCP position p=(px,py,pz) and extrinsic RPY orientation r=(roll,pitch,yaw) when you run it through your standard forward‐kinematics (no iterative or optimization routines needed).
+
+```python
+import math
+from typing import Tuple
+
+def inverse_kinematics(p: Tuple[float, float, float],
+                       r: Tuple[float, float, float]
+                      ) -> Tuple[float, float, float, float]:
+    """
+    Closed‑form IK for the 4‑DOF Rz–Ry–Ry–Ry arm described.
+    p = (px, py, pz): desired TCP position in base coords.
+    r = (roll, pitch, yaw): desired extrinsic RPY in radians.
+    Returns (theta1, theta2, theta3, theta4) in radians.
+    """
+    px, py, pz = p
+    roll, pitch, yaw = r
+
+    # helper to wrap into [-π, π]
+    def wrap(a: float) -> float:
+        return (a + math.pi) % (2*math.pi) - math.pi
+
+    # 1) base yaw θ1: if roll≈0 use yaw, if roll≈±π add π
+    #    (this matches extrinsic Rz*Ry*Rx with roll flips)
+    if math.cos(roll) >= 0.0:
+        theta1 = yaw
+    else:
+        theta1 = yaw + math.pi
+    theta1 = wrap(theta1)
+
+    # 2) Express the target in frame1 by undoing θ1 about Z
+    c1 = math.cos(theta1)
+    s1 = math.sin(theta1)
+    # X–Z coordinates in the Y‐plane of joint2
+    x2 =  c1*px + s1*py
+    z2 =  pz
+
+    # 3) Solve the planar 2R for joints 2 and 3:
+    L2 = 0.42500      # link3 Z‐offset
+    L3 = 0.39225      # link4 Z‐offset
+
+    # law of cosines for θ3
+    D = (x2*x2 + z2*z2 - L2*L2 - L3*L3) / (2 * L2 * L3)
+    D = max(min(D, 1.0), -1.0)
+
+    # always take the positive‐root branch s3 = +√(1−D²)
+    s3 = math.sqrt(max(0.0, 1.0 - D*D))
+    theta3 = math.atan2(s3, D)
+
+    # then θ2 by the one‐shot atan2 formula
+    K1 = L2 + L3 * math.cos(theta3)
+    K2 = L3 * s3
+    theta2 = math.atan2(K1 * x2 - K2 * z2,
+                       K1 * z2 + K2 * x2)
+
+    # 4) Finally pick θ4 so that the sum θ2+θ3+θ4 matches the desired pitch‐component
+    #    of the extrinsic RPY.  For roll≈0: φ = pitch; for roll≈±π: φ = π − pitch.
+    if math.cos(roll) >= 0.0:
+        phi = pitch
+    else:
+        phi = math.pi - pitch
+
+    theta4 = phi - (theta2 + theta3)
+
+    # wrap all into [-π, π] for cleanliness
+    return (wrap(theta1),
+            wrap(theta2),
+            wrap(theta3),
+            wrap(theta4))
+```
+
+Explanation of key steps:
+
+1. **θ₁ from roll/yaw**  
+   We want `Rz(θ₁)` to match the “yaw” part of the extrinsic‐RPY.  However when `roll≈±π` the standard RPY convention flips by π, so we add π to the input yaw.  
+
+2. **Planar 2R for θ₂, θ₃**  
+   After undoing θ₁ we land in the local X–Z plane for the next two revolute‐Y joints.  The link offsets along Z are 0.425 and 0.39225 m, so a classic 2R solution via the law‐of‐cosines gives  
+   D = (d² − L₂² − L₃²)/(2 L₂ L₃),  
+   θ₃ = atan2(+√(1−D²), D),  
+   and θ₂ by the robust atan2‐formula  
+   θ₂ = atan2(K₁ x₂ − K₂ z₂, K₁ z₂ + K₂ x₂),  
+   with K₁ = L₂ + L₃ cos θ₃,  K₂ = L₃ sin θ₃.  
+
+3. **θ₄ for the residual pitch**  
+   Since the last three Y‐axes commute, the total Y‐rotation is θ₂+θ₃+θ₄; we pick  
+   θ₄ = φ − (θ₂+θ₃),  
+   with φ = pitch (or φ = π−pitch if roll≈±π) to exactly reproduce the extrinsic‐RPY around Y.  
+
+This yields analytically the unique elbow configuration with `sin θ₃ ≥ 0` and always meets the desired TCP position and orientation when run through your forward kinematics.

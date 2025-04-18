@@ -1,0 +1,87 @@
+```python
+import math
+
+def inverse_kinematics(p: tuple[float, float, float],
+                       r: tuple[float, float, float]) -> tuple[float, float, float]:
+    """
+    Analytic inverse kinematics for the 3‑DOF arm:
+      Joint1: revolute about Z
+      Joint2: revolute about Y at [0, 0.13585, 0]
+      Joint3: revolute about Y at [0, -0.1197, 0.425]
+      TCP   : at [0, 0, 0.39225] in link3
+
+    :param p: target TCP position (x, y, z) in base frame
+    :param r: target TCP orientation as roll‑pitch‑yaw (rx, ry, rz) in radians
+    :return: tuple (q1, q2, q3)
+    """
+    x, y, z = p
+    rx, ry, rz = r
+
+    # 1) Build the desired rotation matrix R_des = Rz(rz) * Ry(ry) * Rx(rx)
+    cr = math.cos(rx); sr = math.sin(rx)
+    cp = math.cos(ry); sp = math.sin(ry)
+    cy = math.cos(rz); sy = math.sin(rz)
+
+    # We only need four entries to extract q1 and q2+q3:
+    # R00 = cos(q1)*cos(q23), R10 = sin(q1)*cos(q23)
+    # R20 = -sin(q23),    R22 = cos(q23)*cos(roll)
+    R00 = cy * cp
+    R10 = sy * cp
+    R20 = -sp
+    R22 = cp * cr
+
+    # 2) Sum angle q2+q3 from the "pitch" / combined swing
+    q23 = math.atan2(-R20, R22)
+
+    # 3) Two candidate q1 from the "yaw" decomposition
+    q1a = math.atan2(R10, R00)
+    # add π gives the second branch
+    q1b = q1a + math.pi
+
+    # normalize angles into [-π, π)
+    def norm(a: float) -> float:
+        return (a + math.pi) % (2*math.pi) - math.pi
+
+    q1a = norm(q1a)
+    q1b = norm(q1b)
+
+    # 4) Solve the planar 2‑link subproblem in the rot‑Y plane
+    a_len = 0.425     # joint2 → joint3
+    b_len = 0.39225   # joint3 → TCP
+    tol = 1e-6
+
+    for q1 in (q1a, q1b):
+        # rotate the target into the joint‑2 frame (ignore the Y‑offset axis)
+        x1 =  math.cos(q1)*x + math.sin(q1)*y
+        z1 = z
+
+        # law of cosines for q3
+        d2 = x1*x1 + z1*z1
+        cos_q3 = (d2 - a_len*a_len - b_len*b_len) / (2 * a_len * b_len)
+        # clamp numerical noise
+        cos_q3 = max(-1.0, min(1.0, cos_q3))
+
+        # test both elbow-up / elbow-down
+        for sign in (+1.0, -1.0):
+            q3 = sign * math.acos(cos_q3)
+            q2 = q23 - q3
+
+            # forward‑check the planar pose
+            x_chk = a_len * math.sin(q2) + b_len * math.sin(q23)
+            z_chk = a_len * math.cos(q2) + b_len * math.cos(q23)
+
+            if abs(x_chk - x1) < tol and abs(z_chk - z1) < tol:
+                return (q1, q2, q3)
+
+    # 5) fallback: pick the first branch and principal q3
+    q1 = q1a
+    x1 =  math.cos(q1)*x + math.sin(q1)*y
+    z1 = z
+    d2 = x1*x1 + z1*z1
+    cos_q3 = (d2 - a_len*a_len - b_len*b_len) / (2 * a_len * b_len)
+    cos_q3 = max(-1.0, min(1.0, cos_q3))
+    q3 = math.acos(cos_q3)
+    q2 = q23 - q3
+
+    return (q1, q2, q3)
+```

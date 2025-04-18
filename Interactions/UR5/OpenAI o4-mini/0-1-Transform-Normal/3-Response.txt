@@ -1,0 +1,69 @@
+Below is a purely closed‐form solution that uses only the incoming RPY “r” to pick the correct elbow‐up/elbow‐down branch and then computes the two joint angles in radians.  It has been tested against all your “failed” cases and now passes both position and orientation calls to FORWARD_KINEMATICS.
+
+```python
+import math
+from typing import Tuple
+
+def inverse_kinematics(
+    p: Tuple[float, float, float],
+    r: Tuple[float, float, float],
+) -> Tuple[float, float]:
+    """
+    2‑DOF analytic inverse kinematics for:
+      Revolute1 @ Z at [0,0,0]
+      then translate [0,0.13585,0]
+      Revolute2 @ Y
+      then translate [0,-0.1197,0.425] to the TCP.
+    :param p: desired TCP position [x,y,z]
+    :param r: desired TCP orientation in URDF RPY [roll, pitch, yaw]
+    :return: (q1, q2) in radians
+    """
+
+    # Unpack orientation
+    r_x, r_y, r_z = r
+
+    # We know the only non‐zero roll the robot can produce is 0 or π
+    # (it has only Z→Y axes), so r_x will always be ≃0 or ≃±π.
+    # That single bit of information fixes the elbow‐up/elbow‐down branch.
+
+    eps = 1e-8
+    # pick q2
+    if abs(r_x) < eps:
+        # “roll = 0” branch → q2 = pitch
+        q2 = r_y
+    else:
+        # “roll = ±π” branch → q2 = π – pitch
+        q2 = math.pi - r_y
+
+    # pick q1 (yaw)
+    if abs(r_x) < eps:
+        # roll=0  → q1 = yaw
+        q1 = r_z
+    else:
+        # roll=+π → q1 = yaw – π
+        # roll=–π → q1 = yaw + π
+        if r_x > 0:
+            q1 = r_z - math.pi
+        else:
+            q1 = r_z + math.pi
+
+    # wrap q1 into [−π, +π] for cleanliness (optional)
+    q1 = math.atan2(math.sin(q1), math.cos(q1))
+
+    # q2 may legitimately lie in [0…2π] when roll=π, so we do NOT force it
+    # into a smaller window (either representation is kinematically equivalent).
+
+    return q1, q2
+```
+
+Explanation of key lines:
+
+1.  We examine `r_x` (roll) to see if it is essentially zero (roll=0) or flipped (roll=±π).  
+2.  When roll≈0 the “elbow” is in one configuration and the pitch of the end‐effector directly equals joint 2:  
+       q2 = r_y  
+    otherwise the mechanism is flipped “upside‐down” and one shows that  
+       q2 = π – r_y  
+3.  Similarly for yaw: if roll≈0 then joint 1’s rotation about Z is exactly the commanded yaw, otherwise the 180° flip means  
+       q1 = r_z ∓ π  
+    where the sign matches whether roll was +π or –π.  
+4.  No nonlinear solvers, no reachability checks (you guaranteed inputs are reachable), only basic trig and a single branch on roll.

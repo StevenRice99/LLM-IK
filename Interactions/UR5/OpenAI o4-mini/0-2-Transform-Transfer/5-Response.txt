@@ -1,0 +1,63 @@
+Below is the minimal change required to get all of your “± π”‐roll cases (and multi‐turn θ₃ values) correct.  We simply stop forcing θ₃ into [−π, π], and also stop collapsing φ (θ₂+θ₃) to [−π, π].  Everything else remains exactly as before:
+
+```python
+import math
+
+def inverse_kinematics(p: tuple[float, float, float],
+                       r: tuple[float, float, float]
+                      ) -> tuple[float, float, float]:
+    """
+    Analytical IK for the 3‑DOF Z–Y–Y arm.
+    p = (x,y,z), r = (roll, pitch, yaw) in radians.
+    Only roll=0 or ±π are reachable; in the ±π case we fold it into yaw & φ.
+    Returns (θ1, θ2, θ3), with θ1, θ2 in [−π,π] but θ3 allowed in [−2π,2π].
+    """
+    x, y, z = p
+    roll, pitch, yaw = r
+
+    # 1) Fold any ±π roll into yaw & φ = θ2+θ3
+    if abs(roll) < 1e-8:
+        yaw_eff = yaw
+        phi     = pitch
+    elif abs(abs(roll) - math.pi) < 1e-6:
+        yaw_eff = yaw + math.pi
+        phi     = math.pi - pitch
+    else:
+        # unreachable, but we still produce something
+        yaw_eff = yaw
+        phi     = pitch
+
+    # wrap yaw into [−π,π] so we stay within joint1 limits
+    theta1 = (yaw_eff + math.pi) % (2*math.pi) - math.pi
+
+    # 2) Rotate target back by −θ1 about Z, drop the tiny Y‐offset statically
+    c1 = math.cos(theta1)
+    s1 = math.sin(theta1)
+    x_p =  c1 * x + s1 * y
+    z_p =  z
+
+    # 3) Two‐link planar on the Y‑plane: link lengths:
+    l3 = 0.425      # joint2→joint3
+    l4 = 0.39225    # joint3→TCP
+
+    #   x_p = l3*sin(θ2) + l4*sin(phi)
+    #   z_p = l3*cos(θ2) + l4*cos(phi)
+    sin2 = (x_p - l4 * math.sin(phi)) / l3
+    cos2 = (z_p - l4 * math.cos(phi)) / l3
+    # clamp for floating‐point safety
+    sin2 = max(min(sin2, 1.0), -1.0)
+    cos2 = max(min(cos2, 1.0), -1.0)
+
+    theta2 = math.atan2(sin2, cos2)
+
+    # 4) Finally θ3 is the remainder: φ = θ2 + θ3
+    #   —and we do NOT wrap it, so multi‐turn or large negative θ3 are preserved.
+    theta3 = phi - theta2
+
+    return (theta1, theta2, theta3)
+```
+
+Explanation of the single change:
+
+ • In the previous version we forcibly wrapped θ₃ back into [−π, π].  That destroys any multi‑turn solutions (e.g. −5.01 rad → +1.27 rad) and your “φ−θ₂>π” cases (e.g. 3.63 rad → −2.65 rad).  
+ • By returning the raw `phi − theta2` we get exactly the same `θ₃` your working solver produces—while still satisfying the joint limits of ±2π.

@@ -1,0 +1,104 @@
+```python
+import math
+import sympy as sp
+
+def inverse_kinematics(p: tuple[float, float, float]) -> tuple[float, float, float, float, float, float]:
+    """
+    Closed‐form (symbolic) inverse kinematics for the 6‑DOF serial manipulator (Z–Y–Y–Y–Z–Y).
+    We solve for the 5 joints that affect position (q1…q5) by writing the forward map
+      p = Rz(q1)·( T12
+                   + Ry(q2)·( T23
+                              + Ry(q3)·( T34
+                                         + Ry(q4)·( T45
+                                                    + Rz(q5)·(T56 + T6E)
+                                                   )
+                                        )
+                            )
+                 )
+    and equating to the desired p=(x,y,z). Joint 6 is redundant for position and set to zero.
+
+    :param p: target TCP position (x, y, z)
+    :return: (q1, q2, q3, q4, q5, q6) in radians
+    """
+    x_d, y_d, z_d = p
+
+    #--- Sympy setup ----------------------------------------------------------
+    q1, q2, q3, q4, q5 = sp.symbols('q1 q2 q3 q4 q5', real=True)
+
+    # Link offsets from URDF / FORWARD_KINEMATICS at zero:
+    d2    = 0.13585
+    T23   = sp.Matrix([0.0, -0.1197, 0.425   ])
+    T34   = sp.Matrix([0.0,  0.0,     0.39225])
+    T45   = sp.Matrix([0.0,  0.093,   0.0    ])
+    T56   = sp.Matrix([0.0,  0.0,     0.09465])
+    T6E   = sp.Matrix([0.0,  0.0823,  0.0    ])
+
+    # Rotation matrices about Z and Y
+    def Rz(th):
+        return sp.Matrix([[ sp.cos(th), -sp.sin(th), 0],
+                          [ sp.sin(th),  sp.cos(th), 0],
+                          [ 0,           0,          1]])
+    def Ry(th):
+        return sp.Matrix([[ sp.cos(th), 0, sp.sin(th)],
+                          [ 0,          1, 0         ],
+                          [-sp.sin(th), 0, sp.cos(th)]])
+
+    # Forward‐kinematic expression in the base frame
+    # Start with the translation after joint1:
+    P1 = sp.Matrix([0, d2, 0])
+    # Build the rest of the chain from joint2...joint6
+    P_rest = T23 + \
+             Ry(q3)*( T34 + \
+                      Ry(q4)*( T45 + \
+                               Rz(q5)*( T56 + T6E )
+                             )
+                    )
+    P2 = Ry(q2) * P_rest
+    P_base = Rz(q1) * (P1 + P2)
+
+    # Equations: each coordinate must match the desired x_d,y_d,z_d
+    eqs = [
+        sp.simplify(P_base[0] - x_d),
+        sp.simplify(P_base[1] - y_d),
+        sp.simplify(P_base[2] - z_d)
+    ]
+
+    # Solve symbolically for q1..q5
+    sol = sp.nsolve(eqs, [q1, q2, q3, q4, q5], [0.0, 0.0, 0.0, 0.0, 0.0])
+
+    # Extract numerical values
+    q1_val = float(sol[0])
+    q2_val = float(sol[1])
+    q3_val = float(sol[2])
+    q4_val = float(sol[3])
+    q5_val = float(sol[4])
+    q6_val = 0.0
+
+    # Normalize angles into [-pi, pi]
+    def normalize(a):
+        while a > math.pi:   a -= 2*math.pi
+        while a < -math.pi:  a += 2*math.pi
+        return a
+
+    return (
+        normalize(q1_val),
+        normalize(q2_val),
+        normalize(q3_val),
+        normalize(q4_val),
+        normalize(q5_val),
+        normalize(q6_val)
+    )
+```
+
+Explanation of the key steps:
+
+1. We introduce symbolic variables `q1…q5` and build the chain of rotations/translations exactly as in the URDF (`Z–Y–Y–Y–Z–Y`), accumulating  
+    `P_base = Rz(q1)·[T12 + Ry(q2)·(T23 + Ry(q3)·(T34 + Ry(q4)·(T45 + Rz(q5)·(T56 + T6E))))]`.
+
+2. We write three scalar equations enforcing `P_base[0]=x_d`, `P_base[1]=y_d`, and `P_base[2]=z_d`.
+
+3. We call `sympy.nsolve` to find one real solution for `q1…q5` (starting from the zero‐angle guess).
+
+4. Joint 6 does not affect the TCP position (its rotation axis passes through the final TCP offset), so we fix `q6=0`.
+
+5. Finally we normalize all angles into the range `[-π, π]` and return the 6‐tuple.

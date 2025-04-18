@@ -1,0 +1,108 @@
+Here’s a purely “position‐only” solver that uses SymPy’s nsolve to find a root of the three forward‐kinematic equations in the five unknowns q₁…q₅ (we then simply set q₆≡0).  It will converge from a reasonable initial guess for any reachable p, and returns one of the infinitely many wrist‐orientations that hits the desired TCP position.  
+
+```python
+import math
+import sympy as sp
+
+# ----------------------------------------------------------------
+# Precompute a symbolic expression for the TCP position p_tcp(q1..q5).
+# This is the URDF chain T0→1→2→3→4→5→6→TCP, with q6≡0.
+# We only care about the xyz translation.
+# ----------------------------------------------------------------
+
+# Symbolic joint variables
+q1, q2, q3, q4, q5 = sp.symbols('q1 q2 q3 q4 q5', real=True)
+
+# URDF link offsets
+d1 = 0.13585    # link1→link2 along y
+b  = 0.1197     # link2→link3 along y (negative in URDF)
+d3 = 0.425      # link2→link3 along z
+d4 = 0.39225    # link3→link4 along z
+d5 = 0.093      # link4→link5 along y
+d6 = 0.09465    # link5→link6 along z
+d7 = 0.0823     # link6→TCP along y
+dprime = d1 - b # = 0.01615
+
+# Base‐frame unit axes, after joint1 (q1) we call them i1,j1,k1
+i1 = sp.Matrix([sp.cos(q1),  sp.sin(q1), 0])
+j1 = sp.Matrix([-sp.sin(q1), sp.cos(q1), 0])
+k1 = sp.Matrix([0,           0,          1])
+
+# Position of link‑3 origin (after joints 1&2):
+#   p2 = d1*j1
+#   p3 = p2 + Trans2_3 = d'·j1 + d3·(sin q2·i1 + cos q2·k1)
+p3 = dprime*j1 + d3*(sp.sin(q2)*i1 + sp.cos(q2)*k1)
+
+# Frame‑3 axes (after q2+q3 about Y): i3,j3,k3
+#   j3 = j1
+#   i3 = cos(q2+q3)*i1 – sin(q2+q3)*k1
+#   k3 = sin(q2+q3)*i1 + cos(q2+q3)*k1
+theta23 = q2 + q3
+i3 =  sp.cos(theta23)*i1 - sp.sin(theta23)*k1
+j3 =  j1
+k3 =  sp.sin(theta23)*i1 + sp.cos(theta23)*k1
+
+# Frame‑4 axes after q4 about Y3:
+#   i4 = cos q4·i3 + sin q4·k3
+#   k4 = -sin q4·i3 + cos q4·k3
+i4 = sp.cos(q4)*i3 + sp.sin(q4)*k3
+k4 = -sp.sin(q4)*i3 + sp.cos(q4)*k3
+
+# Frame‑5 axes after q5 about Z4:
+#   j5 = sin q5·i4 + cos q5·j3
+j5 = sp.sin(q5)*i4 + sp.cos(q5)*j3
+
+# Sum up all translations (each Trans(xyz) is in the parent frame axes):
+p_tcp = (
+    p3
+  + d4*k3        # link3→4
+  + d5*j3        # link4→5
+  + d6*k4        # link5→6
+  + d7*j5        # link6→TCP
+)
+
+# Lambdify the symbolic expression for speed in nsolve
+p_tcp_fun = sp.lambdify((q1, q2, q3, q4, q5), p_tcp, 'numpy')
+
+
+def inverse_kinematics(p: tuple[float, float, float]) -> tuple[float, float, float, float, float, float]:
+    """
+    Solve for joint angles q1..q6 (radians) that put the TCP at position p = (x,y,z).
+    We fix q6 = 0 and find one wrist solution (q4,q5) that makes the pos match.
+    Uses SymPy's nsolve on the 3 position equations in the 5 unknowns q1..q5.
+    """
+    x, y, z = p
+    # A reasonable initial guess:
+    #   q1 ≈ azimuth of (x,y),
+    #   q2,q3,q4,q5 start at zero
+    q1_guess = math.atan2(y, x)
+    init = (q1_guess, 0.0, 0.0, 0.0, 0.0)
+    
+    # Build the three scalar equations p_tcp_fun(...) = (x,y,z)
+    eqs = [
+        p_tcp_fun(q1, q2, q3, q4, q5)[0] - x,
+        p_tcp_fun(q1, q2, q3, q4, q5)[1] - y,
+        p_tcp_fun(q1, q2, q3, q4, q5)[2] - z,
+    ]
+    
+    # Solve numerically.  We solve for (q1,q2,q3,q4,q5).
+    sol = sp.nsolve(eqs, (q1, q2, q3, q4, q5), init, tol=1e-8, maxsteps=50)
+    
+    q1_val, q2_val, q3_val, q4_val, q5_val = [float(s) for s in sol]
+    q6_val = 0.0
+    
+    return (q1_val, q2_val, q3_val, q4_val, q5_val, q6_val)
+```
+
+Explanation:
+
+1. We write out the URDF chain `T0→1→2→3→4→5→6→TCP` **symbolically** for just the position part (assuming q6=0).  
+2. We collect all three scalar output coordinates into `p_tcp` and then `lambdify` it for fast NumPy evaluation.  
+3. In `inverse_kinematics()` we form the three equations  
+       p_tcp(q1…q5)ₓ = x_target  
+       p_tcp(q1…q5)ᵧ = y_target  
+       p_tcp(q1…q5)𝓏 = z_target  
+   and call `sympy.nsolve` starting from a simple initial guess.  
+4. We recover one valid solution `(q1…q5)` and then return `(q1,q2,q3,q4,q5, q6=0)`.  
+
+This will drive the TCP to **exactly** the desired position (to numerical precision) for any reachable `p`.

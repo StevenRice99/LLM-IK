@@ -1,0 +1,64 @@
+Here’s a purely closed‐form, two‐line‐per‐joint solution.  It picks the “+” or “–” branch of θ₂ by matching the sign of the desired pitch r[1], then finds θ₁ by aligning the planar link vector to (x,y).  No optimization or extra testing is used.
+
+```python
+import math
+
+def inverse_kinematics(p: tuple[float, float, float],
+                       r: tuple[float, float, float]) -> tuple[float, float]:
+    """
+    Gets the joint values needed to reach position "p" and orientation "r".
+    :param p: The TCP target in the form (x, y, z).
+    :param r: The desired tool orientation as RPY = (roll, pitch, yaw).
+              Because this manipulator only has 2 DOF, roll must be 0 or ±π;
+              we pick the branch of θ2 whose pitch matches r[1].
+    :return: (θ1, θ2) in radians.
+    """
+    x, y, z = p
+    roll_desired, pitch_desired, yaw_desired = r
+
+    # URDF link offsets:
+    a2  = 0.13585     # Revolute‑2 offset along +Y
+    a3y = -0.1197     # TCP offset along –Y in link‑2 frame
+    d3  = 0.425       # TCP offset along +Z in link‑2 frame
+
+    # 1) θ2 from the z–axis constraint:  z = d3 * cos(θ2)
+    cos_t2 = z / d3
+    # clamp for safety
+    cos_t2 = max(-1.0, min(1.0, cos_t2))
+    t2_pos = math.acos(cos_t2)
+    t2_neg = -t2_pos
+
+    # pick branch so that the sign of sin(θ2) matches sign of desired pitch
+    # (sin(t2_pos)>0 gives positive pitch, sin(t2_neg)<0 gives negative pitch)
+    θ2 = t2_pos if pitch_desired >= 0.0 else t2_neg
+
+    # 2) θ1 from the XY‐plane projection:
+    #    link vector in revolute‑2 frame = [ d3·sin(θ2), a2 + a3y, … ]
+    vx = d3 * math.sin(θ2)
+    vy = a2 + a3y
+
+    # rotating [vx,vy] by θ1 about Z must line up with [x,y]
+    phi_v = math.atan2(vy,   vx)
+    phi_p = math.atan2(y,    x)
+    θ1    = phi_p - phi_v
+
+    # normalize both into (–π, +π]
+    θ1 = math.atan2(math.sin(θ1), math.cos(θ1))
+    θ2 = math.atan2(math.sin(θ2), math.cos(θ2))
+
+    return θ1, θ2
+```
+
+Explanation of the key steps:
+
+1)  Solve for θ₂ via  
+       z = d₃·cos θ₂  
+    ⇒ θ₂ = ±acos(z/d₃).  
+    We pick the “+” branch when the requested pitch r[1] ≥ 0, otherwise the “–” branch.
+
+2)  In the plane, after setting θ₂ the remaining vector from joint‑1 to the TCP is  
+       v = [d₃ sin θ₂, a₂ + a₃ᵧ]ᵀ.  
+    A rotation about Z by θ₁ must carry v onto the target (x,y).  
+    Hence θ₁ = atan2(y,x) – atan2(vᵧ,vₓ).
+
+3)  We finally wrap both angles into (–π,+π], and return them.

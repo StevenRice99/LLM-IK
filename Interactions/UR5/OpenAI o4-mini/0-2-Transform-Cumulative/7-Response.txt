@@ -1,0 +1,77 @@
+```python
+import math
+
+def inverse_kinematics(p: tuple[float, float, float],
+                       r: tuple[float, float, float]) -> tuple[float, float, float]:
+    """
+    Analytic IK for the 3‑DOF arm:
+      Joint 1: revolute about Z at the base
+      Joint 2: revolute about Y with a +0.13585 m Y‑offset
+      Joint 3: revolute about Y with a +0.425 m Z‑offset, then TCP at +0.39225 m Z
+
+    :param p: target TCP position [x, y, z] in base frame
+    :param r: target TCP orientation [roll, pitch, yaw] in radians (extrinsic Rz*Ry*Rx)
+    :return: (q1, q2, q3) in radians
+    """
+    x, y, z = p
+    rx, ry, rz = r
+
+    # helper: wrap into (–π, +π]
+    def wrap(a: float) -> float:
+        return math.atan2(math.sin(a), math.cos(a))
+
+    # link lengths in the joint‑2 plane
+    a_len = 0.425      # joint2 → joint3 (along Z before rotation)
+    b_len = 0.39225    # joint3 → TCP  (along Z before rotation)
+    tol   = 1e-6
+
+    # 1) Extract the two controllable orientation DOF (yaw and pitch)
+    #    The chain can only produce R = Rz(q1)*Ry(q2+q3), so any desired roll
+    #    is a representation‑singularity.  If |roll|≈π, we must switch branches.
+    if abs(abs(rx) - math.pi) < tol:
+        # singular branch: flip yaw by π, invert pitch
+        q1  = wrap(rz + math.pi)
+        q23 = math.pi - ry
+    else:
+        # normal
+        q1  = wrap(rz)
+        q23 = ry
+
+    # 2) Compute the target in joint‑2's X–Z plane
+    c1 = math.cos(q1)
+    s1 = math.sin(q1)
+
+    # rotate the world point back by q1 about Z
+    xp =  c1 * x + s1 * y
+    yp = -s1 * x + c1 * y
+    zp = z
+
+    # subtract the fixed Y‑offset of joint 2
+    yp -= 0.13585
+
+    # now the 2‑link problem lives in the X–Z coordinates (xp, zp)
+    x1 = xp
+    z1 = zp
+
+    # 3) law of cosines for q3
+    d2     = x1*x1 + z1*z1
+    cos_q3 = (d2 - a_len*a_len - b_len*b_len) / (2 * a_len * b_len)
+    # clamp numerical noise
+    cos_q3 = max(-1.0, min(1.0, cos_q3))
+
+    # 4) try elbow‑up and elbow‑down
+    for sign in ( 1.0, -1.0 ):
+        q3 = sign * math.acos(cos_q3)
+        q2 = q23 - q3
+
+        # forward‑check the planar position
+        x_chk = a_len * math.sin(q2) + b_len * math.sin(q23)
+        z_chk = a_len * math.cos(q2) + b_len * math.cos(q23)
+        if abs(x_chk - x1) < tol and abs(z_chk - z1) < tol:
+            return ( wrap(q1), wrap(q2), wrap(q3) )
+
+    # 5) fallback to the principal branch (elbow‑down)
+    q3 = math.acos(cos_q3)
+    q2 = q23 - q3
+    return ( wrap(q1), wrap(q2), wrap(q3) )
+```

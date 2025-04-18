@@ -1,0 +1,68 @@
+```python
+import math
+
+def inverse_kinematics(p: tuple[float, float, float],
+                       r: tuple[float, float, float]) -> tuple[float, float, float]:
+    """
+    Gets the joint values needed to reach position "p" and orientation "r".
+    :param p: The position to reach in the form [x, y, z].
+    :param r: The orientation to reach in radians in the form [roll, pitch, yaw].
+    :return: A tuple of the three joint angles (q1, q2, q3).
+    """
+    # Unpack
+    x, y, z = p
+    rx, ry, rz = r
+
+    # 1) Solve q1 (rotation about Z) so that the arm plane aligns with the target
+    #    (existing solution uses atan2(-x, y))
+    q1 = math.atan2(-x, y)
+
+    # 2) Rotate the target into the joint‐2 (plane) frame by rotating by -q1 about Z
+    #    RotZ(-q1) = [[cos q1,  sin q1, 0],
+    #                 [-sin q1, cos q1, 0],
+    #                 [   0    ,    0   , 1]]
+    x1 =  math.cos(q1)*x + math.sin(q1)*y
+    z1 = z  # Z is unchanged by a pure Z‐rotation
+
+    # 3) From the desired end‐effector orientation (roll=r_x, pitch=r_y, yaw=r_z),
+    #    extract the sum q2 + q3.  The chain has no roll about X, only yaw then pitch:
+    #      R = Rz(rz) * Ry(ry) * Rx(rx)
+    #    We know in our robot R0_ee = Rz(q1) * Ry(q2+q3).  Thus pitch = q2+q3.
+    cx, sx = math.cos(rx), math.sin(rx)
+    cy, sy = math.cos(ry), math.sin(ry)
+    cz, sz = math.cos(rz), math.sin(rz)
+    R00 = cy * cz  # (0,0) entry of Rz*Ry
+    R02 = sy       # (0,2) entry of Rz*Ry
+    q23 = math.atan2(R02, R00)
+
+    # 4) Now solve the planar 2‐link subproblem in the X–Z plane:
+    #    link lengths a (joint2→joint3) and b (joint3→TCP)
+    a = 0.425
+    b = 0.39225
+
+    d2 = x1*x1 + z1*z1
+    cos_q3 = (d2 - a*a - b*b) / (2*a*b)
+    # clamp to [-1,1]
+    cos_q3 = max(min(cos_q3, 1.0), -1.0)
+
+    # two possible q3 solutions
+    q3_cand = [ math.acos(cos_q3), -math.acos(cos_q3) ]
+    solutions = []
+    for q3 in q3_cand:
+        q2 = q23 - q3
+        # forward‐check the planar position
+        x_chk = a * math.sin(q2) + b * math.sin(q23)
+        z_chk = a * math.cos(q2) + b * math.cos(q23)
+        if abs(x_chk - x1) < 1e-6 and abs(z_chk - z1) < 1e-6:
+            solutions.append((q2, q3))
+
+    if solutions:
+        q2, q3 = solutions[0]
+    else:
+        # fallback analytic solution if the exact check fails
+        q2 = math.atan2(x1 - b*math.sin(q23),
+                        z1 - b*math.cos(q23))
+        q3 = q23 - q2
+
+    return (q1, q2, q3)
+```

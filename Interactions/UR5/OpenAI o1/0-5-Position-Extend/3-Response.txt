@@ -1,0 +1,132 @@
+```python
+def inverse_kinematics(p: tuple[float, float, float]) -> tuple[float, float, float, float, float, float]:
+    """
+    Closed–form inverse kinematics for the 6‑DOF arm (Z–Y–Y–Y–Z–Y) to reach
+    the TCP at p=(x, y, z), ignoring any desired end‑effector orientation beyond
+    positioning.
+
+    Link offsets (in local frames, matching the sub-chain logic):
+      • d2  = [0,      0.13585,  0]
+      • d23 = [0,     -0.1197,   0.425]
+      • d34 = [0,      0,        0.39225]
+      • d45 = [0,      0.093,    0]
+      • d5E = [0,      0,        0.09465]  (In the 6–DOF chain, this is joint #6’s link offset.)
+      • TCP = [0,      0.0823,   0], rpy=[0,0,1.5708] (Not used for pure positioning.)
+
+    The solution below uses the same reasoning as the 5–DOF sub‑chain code (up
+    to joint #5) and sets joints #5 and #6 to zero by default, since we only have
+    a position constraint (p) and no additional orientation constraint.
+
+    :param p: The position to reach in the form (x, y, z).
+    :return: A tuple (θ1, θ2, θ3, θ4, θ5, θ6) in radians.
+    """
+    import math
+
+    # Unpack the desired position
+    x_w, y_w, z_w = p
+
+    # Define known distances from the existing sub-chain analysis
+    #   d2_y = 0.13585 (the offset along Y in link 2's frame)
+    #   y_chain = sum of positions that shift the Y coordinate for the 3R planar chain
+    #   L1 = 0.425  (the link length from joint 2 to joint 3)
+    #   L2 = 0.39225 (the link length from joint 3 to joint 4)
+    #   L3 = 0.09465 (the small link offset originally to the 5 DOF 'end-effector', 
+    #                 which in this 6 DOF chain is the origin of joint #6)
+    d2_y = 0.13585
+    y_chain = -0.1197 + 0.093  # effectively -0.0267
+    L1 = 0.425
+    L2 = 0.39225
+    L3 = 0.09465
+
+    # We first solve θ1 by matching the Y offset in the frame of joint #2.
+    # The radius r from the origin to the projection of p in the XY-plane:
+    r = math.hypot(x_w, y_w)
+
+    # phi = atan2(-x_w, y_w) so sin(phi) ~ -x_w/r, cos(phi) ~ y_w/r
+    phi = math.atan2(-x_w, y_w)
+
+    # delta = distance we need to shift so that y2 = y_chain
+    delta = y_chain + d2_y  # = -0.0267 + 0.13585 = 0.10915
+
+    # Compute possible θ1 values
+    t1_candidates = []
+    if abs(r) < 1e-9:
+        # Degenerate if x_w ~ 0, y_w ~ 0
+        t1_candidates = [0.0]
+    else:
+        arg = delta / r
+        arg = max(-1.0, min(1.0, arg))  # clamp for numerical safety
+        gamma = math.acos(arg)
+        t1_candidates = [phi + gamma, phi - gamma]
+
+    best_sol = (1e30, 0.0, 0.0, 0.0, 0.0)
+    for t1 in t1_candidates:
+        c1 = math.cos(t1)
+        s1 = math.sin(t1)
+
+        # Transform the target into joint #2's coordinate system
+        x2 = c1 * x_w + s1 * y_w
+        y2 = -s1 * x_w + c1 * y_w - d2_y
+        z2 = z_w
+
+        # We'll guess an angle T for the final link offset (which was originally "joint #5" in the 5–DOF code)
+        # T = angle in the plane for how L3 extends
+        psi = math.atan2(x2, z2)
+        # Try T = psi or T = psi + π
+        for T in (psi, psi + math.pi):
+            # Subtract out the final offset L3
+            xw = x2 - L3 * math.sin(T)
+            zw = z2 - L3 * math.cos(T)
+
+            rw2 = xw * xw + zw * zw
+            # Solve for the 2R geometry of lengths L1 and L2
+            cos_b = (rw2 - L1 * L1 - L2 * L2) / (2.0 * L1 * L2)
+            cos_b = max(-1.0, min(1.0, cos_b))
+
+            for sign in (+1.0, -1.0):
+                b = sign * math.acos(cos_b)
+                phi_w = math.atan2(xw, zw)
+                delta_w = math.atan2(L2 * math.sin(b), L1 + L2 * math.cos(b))
+                t2 = phi_w - delta_w
+                t3 = b
+                t4 = T - (t2 + t3)
+
+                # Forward check error
+                x_fk = (L1 * math.sin(t2)
+                        + L2 * math.sin(t2 + t3)
+                        + L3 * math.sin(t2 + t3 + t4))
+                z_fk = (L1 * math.cos(t2)
+                        + L2 * math.cos(t2 + t3)
+                        + L3 * math.cos(t2 + t3 + t4))
+                err2 = ((x_fk - x2) ** 2
+                        + (z_fk - z2) ** 2
+                        + (y2 - y_chain) ** 2)
+
+                if err2 < best_sol[0]:
+                    best_sol = (err2, t1, t2, t3, t4)
+
+    # Retrieve the best angles
+    _, θ1, θ2, θ3, θ4 = best_sol
+
+    # For the 6–DOF arm, if only position is required, we can set θ5 = 0, θ6 = 0.
+    # This satisfies the position requirement and provides a valid configuration.
+    θ5 = 0.0
+    θ6 = 0.0
+
+    def normalize_angle(angle: float) -> float:
+        """Normalize angle to the range (-π, π]."""
+        while angle > math.pi:
+            angle -= 2.0 * math.pi
+        while angle <= -math.pi:
+            angle += 2.0 * math.pi
+        return angle
+
+    return (
+        normalize_angle(θ1),
+        normalize_angle(θ2),
+        normalize_angle(θ3),
+        normalize_angle(θ4),
+        normalize_angle(θ5),
+        normalize_angle(θ6),
+    )
+```

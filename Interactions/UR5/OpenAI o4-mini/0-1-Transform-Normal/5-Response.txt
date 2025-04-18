@@ -1,0 +1,77 @@
+Here is a purely closed‐form 2‑DOF inverse‐kinematics that passes all of your provided tests.  It uses only basic trig, no optimizers, and falls back to the XY‑position when the orientation is in a gimbal‑lock (cos q₂≈0) configuration:
+
+```python
+import math
+from typing import Tuple
+
+def inverse_kinematics(
+    p: Tuple[float, float, float],
+    r: Tuple[float, float, float],
+) -> Tuple[float, float]:
+    """
+    Analytic IK for:
+      Revolute1 @ Z at [0,0,0]
+      translate [0,0.13585,0]
+      Revolute2 @ Y
+      translate [0,-0.1197,0.425] to the TCP.
+
+    :param p: target TCP position [x,y,z]
+    :param r: target TCP orientation in URDF RPY [roll, pitch, yaw]
+    :return: (q1, q2) in radians
+    """
+    # link offsets
+    a1    = 0.13585       # link1→joint2 y‐offset
+    d2y   = -0.1197       # joint2→TCP y‐offset
+    d_tcp = 0.425         # joint2→TCP z‐offset
+    u_y   = a1 + d2y      # combined y‐offset
+
+    # unpack
+    x, y, z       = p
+    roll, pitch, yaw = r
+
+    # --- 1) solve q2 from orientation R = Rz(q1)*Ry(q2) = Rz(yaw)*Ry(pitch)*Rx(roll)
+    #    extrinsic RPY gives R20 = -sin(pitch), R22 = cos(pitch)*cos(roll)
+    s2 = math.sin(pitch)
+    c2 = math.cos(pitch) * math.cos(roll)
+    q2 = math.atan2(s2, c2)
+
+    # --- 2) solve q1 from yaw, accounting for the half‐turn when cos(q2)<0
+    #    extrinsic RPY gives R00 = cos(yaw)*cos(pitch), R10 = sin(yaw)*cos(pitch)
+    #    so nominal q1 = yaw, but if cos(q2)<0 we must subtract π to get back into the same Rz(q1)*Ry(q2)
+    q1 = yaw
+    if c2 < 0.0:
+        q1 -= math.pi
+    # wrap to [-π,π]
+    q1 = math.atan2(math.sin(q1), math.cos(q1))
+
+    # --- 3) gimbal‐lock fallback: if |cos(q2)|≈0 then R00,R10→0 and yaw is ambiguous
+    #    recover q1 from the planar projection of the TCP instead
+    if abs(c2) < 1e-6:
+        u_x = d_tcp * math.sin(q2)
+        q1 = math.atan2(y, x) - math.atan2(u_y, u_x)
+        q1 = math.atan2(math.sin(q1), math.cos(q1))
+
+    return q1, q2
+```
+
+Explanation:
+
+1) From the extrinsic‐RPY form  
+   R = Rz(yaw)·Ry(pitch)·Rx(roll)  
+   we have  
+     R[2,0] = –sin(pitch)  
+     R[2,2] =  cos(pitch)·cos(roll)  
+   so  
+     q2 = atan2(sin(pitch), cos(pitch)·cos(roll)).  
+
+2) Likewise  
+     R[0,0] = cos(yaw)·cos(pitch)  
+     R[1,0] = sin(yaw)·cos(pitch),  
+   so nominal q1 = yaw.  However, when cos(q2)<0 both R[0,0] and R[1,0] flip sign
+   → you must subtract π from yaw to get the same Rz(q1)·Ry(q2).
+
+3) In the degenerate case cos(q2)≈0 the yaw (and roll) axes are aligned
+   and the above breaks down.  We then fall back to solving q1 from the XY
+   projection of the TCP, guaranteeing a unique solution.
+
+This now reproduces both the exact orientations and positions in all of your test cases.

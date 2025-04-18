@@ -1,0 +1,109 @@
+<INSTRUCTIONS>
+You are tasked with producing a closed-form analytical solution for the inverse kinematics of the 6 degrees-of-freedom serial manipulator solving for the position of the TCP as detailed in the "DETAILS" section by completing the Python function provided in the "CODE" section. The "Position" and "Orientation" columns represent link coordinates in local space relative to their parent link. The positions are from the "xyz" attribute and the orientations are the "rpy" attribute from each link's "origin" element parsed from the URDF. The "Axis" column in the table represents the rotational axis of the revolute links; return their values in radians and their limits are in radians. Do not write any code to run or test the method, as this will be handled for you. Assume all targets given as inputs to the method will be reachable, and as such do not write code to check if the target is reachable. You may use any methods included in Python, NumPy, and SymPy to write your solution except for any optimization methods. To help you, a solution for solving the sub-chain of the first 5 links is provided in the "EXISTING" section. This code solved the sub-chain assuming link 6 was the position being solved for. You can use this solution as a starting point to extend for the entire chain. You may respond by either completing the inverse kinematics method or calling either of the two provided functions in the "FUNCTIONS" section to help you develop your solution. If you call a function, you will be provided another response and chance to complete the inverse kinematics method. You may only call a single function per response.
+</INSTRUCTIONS>
+<DETAILS>
+ Link       | Position            | Orientation         | Axis   | Limits
+------------+---------------------+---------------------+--------+-------------------------
+ Revolute 1 | [0, 0, 0]           | [0, 0, 0]           | Z      | [-6.2831853, 6.2831853]
+ Revolute 2 | [0, 0.13585, 0]     | [0, 0, 0]           | Y      | [-6.2831853, 6.2831853]
+ Revolute 3 | [0, -0.1197, 0.425] | [0, 0, 0]           | Y      | [-6.2831853, 6.2831853]
+ Revolute 4 | [0, 0, 0.39225]     | [0, 0, 0]           | Y      | [-6.2831853, 6.2831853]
+ Revolute 5 | [0, 0.093, 0]       | [0, 0, 0]           | Z      | [-6.2831853, 6.2831853]
+ Revolute 6 | [0, 0, 0.09465]     | [0, 0, 0]           | Y      | [-6.2831853, 6.2831853]
+ TCP        | [0, 0.0823, 0]      | [0, 0, 1.570796325] |        |
+</DETAILS>
+<CODE>
+def inverse_kinematics(p: tuple[float, float, float]) -> tuple[float, float, float, float, float, float]:
+    """
+    Gets the joint values needed to reach position "p".
+    :param p: The position to reach in the form [x, y, z].
+    :return: A list of the values to set the links to for reaching position "p".
+    """
+</CODE>
+<EXISTING>
+import math
+
+def inverse_kinematics(p: tuple[float, float, float]) -> tuple[float, float, float, float, float]:
+    """
+    Closed–form inverse kinematics for the 5‑DOF arm (Z–Y–Y–Y–Z) to reach TCP at p=(x,y,z).
+    Link offsets (in local frames):
+      • d2 = [0,   0.13585, 0]
+      • d23= [0,  −0.1197,  0.425]
+      • d34= [0,   0,       0.39225]
+      • d45= [0,   0.093,   0]
+      • d5E= [0,   0,       0.09465]  (E = end‑effector)
+    We first pick θ1 so that in joint‑2’s frame the Y–coordinate of the target
+    exactly matches the constant offset y₂ = −0.1197+0.093=−0.0267.
+    Then we solve joints 2–4 as a 3R planar chain in that frame.
+    """
+    x_w, y_w, z_w = p
+    d2_y = 0.13585
+    y_chain = -0.1197 + 0.093
+    L1 = 0.425
+    L2 = 0.39225
+    L3 = 0.09465
+    delta = y_chain + d2_y
+    r = math.hypot(x_w, y_w)
+    phi = math.atan2(-x_w, y_w)
+    arg = delta / r
+    arg = max(-1.0, min(1.0, arg))
+    gamma = math.acos(arg)
+    t1_cands = [phi + gamma, phi - gamma]
+    best = (1000000000.0, 0, 0, 0, 0)
+    for t1 in t1_cands:
+        c1 = math.cos(t1)
+        s1 = math.sin(t1)
+        x2 = c1 * x_w + s1 * y_w
+        y2 = -s1 * x_w + c1 * y_w - d2_y
+        z2 = z_w
+        psi = math.atan2(x2, z2)
+        for T in (psi, psi + math.pi):
+            xw = x2 - L3 * math.sin(T)
+            zw = z2 - L3 * math.cos(T)
+            rw2 = xw * xw + zw * zw
+            cosb = (rw2 - L1 * L1 - L2 * L2) / (2 * L1 * L2)
+            cosb = max(-1.0, min(1.0, cosb))
+            for sign in (+1.0, -1.0):
+                b = sign * math.acos(cosb)
+                phi_w = math.atan2(xw, zw)
+                delta_w = math.atan2(L2 * math.sin(b), L1 + L2 * math.cos(b))
+                t2 = phi_w - delta_w
+                t3 = b
+                t4 = T - (t2 + t3)
+                x_fk = L1 * math.sin(t2) + L2 * math.sin(t2 + t3) + L3 * math.sin(t2 + t3 + t4)
+                z_fk = L1 * math.cos(t2) + L2 * math.cos(t2 + t3) + L3 * math.cos(t2 + t3 + t4)
+                err2 = (x_fk - x2) ** 2 + (z_fk - z2) ** 2 + (y2 - y_chain) ** 2
+                if err2 < best[0]:
+                    best = (err2, t1, t2, t3, t4)
+    _, θ1, θ2, θ3, θ4 = best
+    θ5 = 0.0
+
+    def norm(a):
+        while a > math.pi:
+            a -= 2 * math.pi
+        while a < -math.pi:
+            a += 2 * math.pi
+        return a
+    return (norm(θ1), norm(θ2), norm(θ3), norm(θ4), norm(θ5))
+</EXISTING>
+<FUNCTIONS>
+	<USAGE>
+	To use a function, response with the format denoted in the "FORMAT" section of the function.
+	</USAGE>
+	<FORWARD_KINEMATICS>
+		<FORMAT>
+		FORWARD_KINEMATICS joint1 joint2 joint3 joint4 joint5 joint6
+		</FORMAT>
+		<DESCRIPTION>
+		Test the forward kinematics of the robot, returning the position and orientation of all links in world space after setting the joint values where "joint1", "joint2", "joint3", "joint4", "joint5", and "joint5" are the joint values as floats.
+		</DESCRIPTION>
+	</FORWARD_KINEMATICS>
+	<TEST_SOLUTION>
+		<FORMAT>
+		TEST_SOLUTION positionX positionY positionZ
+		</FORMAT>
+		<DESCRIPTION>
+		Returns the position and orientation of all links in world space after testing your current inverse kinematics solution code where "positionX", "positionY", and "positionZ" are the target position.
+		</DESCRIPTION>
+	</TEST_SOLUTION>
+</FUNCTIONS>

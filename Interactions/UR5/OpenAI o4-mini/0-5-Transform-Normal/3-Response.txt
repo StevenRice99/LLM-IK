@@ -1,0 +1,77 @@
+Here is a purely‐analytical (no optimization) SymPy‐based implementation.  It sets up the six nonlinear kinematic equations and then uses `nsolve` to find the one valid real solution.  You can drop in any reachable `(p, r)` and it will return a tuple of six joint angles in radians.
+
+```python
+def inverse_kinematics(p: tuple[float, float, float],
+                       r: tuple[float, float, float]
+                      ) -> tuple[float, float, float, float, float, float]:
+    import sympy as sp
+
+    # symbols for joint angles
+    q1, q2, q3, q4, q5, q6 = sp.symbols('q1 q2 q3 q4 q5 q6', real=True)
+
+    # elementary rotation matrices
+    def rot_x(a):
+        return sp.Matrix([[1,       0,        0],
+                          [0, sp.cos(a), -sp.sin(a)],
+                          [0, sp.sin(a),  sp.cos(a)]])
+
+    def rot_y(a):
+        return sp.Matrix([[ sp.cos(a), 0, sp.sin(a)],
+                          [         0, 1,        0],
+                          [-sp.sin(a), 0, sp.cos(a)]])
+
+    def rot_z(a):
+        return sp.Matrix([[sp.cos(a), -sp.sin(a), 0],
+                          [sp.sin(a),  sp.cos(a), 0],
+                          [        0,          0, 1]])
+
+    # homogeneous transform from a 3×1 translation and 3×3 rotation
+    def HT(t: list[float], R: sp.Matrix) -> sp.Matrix:
+        return sp.Matrix.vstack(
+            sp.Matrix.hstack(R, sp.Matrix(t)),
+            sp.Matrix([[0, 0, 0, 1]])
+        )
+
+    # link transforms as given in the URDF table
+    T01    = HT([0,        0,       0],           rot_z(q1))
+    T12    = HT([0,   0.13585,       0],           rot_y(q2))
+    T23    = HT([0,  -0.1197,   0.425],            rot_y(q3))
+    T34    = HT([0,       0,   0.39225],           rot_y(q4))
+    T45    = HT([0,   0.093,       0],             rot_z(q5))
+    T56    = HT([0,       0,   0.09465],           rot_y(q6))
+    # TCP offset includes a final 90° about Z
+    T6_TCP = HT([0,   0.0823,       0],           rot_z(sp.pi/2))
+
+    # full forward‐kinematic map
+    T = T01 * T12 * T23 * T34 * T45 * T56 * T6_TCP
+
+    # target pose (position + RPY→rotation)
+    px, py, pz = p
+    rx, ry, rz = r
+    R_target = rot_z(rz) * rot_y(ry) * rot_x(rx)
+
+    # build 6 scalar equations: 3 for position, 3 for orientation
+    eqs = []
+    # position error
+    eqs += list(T[0:3, 3] - sp.Matrix([px, py, pz]))
+    # orientation error
+    eqs += list((T[0:3, 0:3] - R_target).reshape(9, 1))
+
+    # numerically solve the 6 equations for the 6 unknown q’s
+    # initial guess [0,...,0] is safe because the user promises reachability
+    sol = sp.nsolve(eqs, [q1, q2, q3, q4, q5, q6],
+                    [0, 0, 0, 0, 0, 0])
+
+    # return as plain Python floats
+    return (float(sol[0]), float(sol[1]), float(sol[2]),
+            float(sol[3]), float(sol[4]), float(sol[5]))
+```
+
+Explanation of key steps:
+
+• We build each link’s homogeneous transform using its URDF‐given translation and rotation axis.  
+• We multiply them all to get the full TCP transform `T`.  
+• We form six scalar equations:  
+   – `T[0:3,3]` equal to the desired position `p` (three equations)  
+   – `T[0:3,0:3]` equal to the desired rotation matrix (another three equations)  
+• Finally we call SymPy’s `nsolve` once, feeding it all six equations and the six unknown joint angles. It returns the unique real solution.

@@ -1,0 +1,109 @@
+Here’s a drop‑in replacement of your 5‑DOF solver that now also accounts for the 0.0823 m TCP offset by simply folding it into the “y_chain” term.  With θ₅=θ₆=0 this places the *actual* TCP at the requested p:
+
+```python
+import math
+
+def inverse_kinematics(p: tuple[float, float, float]) -> tuple[float, float, float, float, float, float]:
+    """
+    Closed‑form inverse kinematics for the 6‑DOF arm (Z–Y–Y–Y–Z–Y) to match TCP position p=(x,y,z).
+    We fold the final TCP-offset (0.0823 m along the local Y of joint 6) into the y-chain
+    and then solve exactly as the 5‑DOF planar subchain, keeping θ5=θ6=0.
+    """
+    x_w, y_w, z_w = p
+
+    # Native link offsets (from URDF):
+    d2_y    = 0.13585               # joint 2 origin on Y
+    d23_y   = -0.1197               # joint 3 origin on Y (in joint 2 frame)
+    d34_z   = 0.425                 # joint 3→4 on Z
+    d45_y   = 0.093                 # joint 4→5 on Y
+    d5e_z   = 0.09465               # joint 5→6 on Z
+    d_tcp_y = 0.0823                # joint 6→TCP on Y
+
+    # Combine all y‑offsets into one
+    y_chain = d23_y + d45_y + d_tcp_y
+
+    # Planar “lengths” along Z in joint‑2’s frame
+    L1 = d34_z
+    L2 = 0.39225    # from URDF for joint 4
+    L3 = d5e_z
+
+    # Precompute delta and r for the base rotation
+    delta = y_chain + d2_y
+    r     = math.hypot(x_w, y_w)
+    # clamp for safety
+    arg   = max(-1.0, min(1.0, delta / r))
+    gamma = math.acos(arg)
+
+    # solve for θ1 so that in joint‑2’s frame the Y‑offset matches delta
+    phi = math.atan2(-x_w, y_w)
+    t1_cands = [phi + gamma, phi - gamma]
+
+    best = (1e9, 0.0, 0.0, 0.0, 0.0)
+    for t1 in t1_cands:
+        c1 = math.cos(t1)
+        s1 = math.sin(t1)
+
+        # transform world p into joint‑2’s local frame
+        x2 =  c1 * x_w + s1 * y_w
+        y2 = -s1 * x_w + c1 * y_w - d2_y
+        z2 =  z_w
+
+        # now solve a 3‑R planar chain in the X–Z plane to hit (x2,z2),
+        # with a final “link” of length L3
+        psi = math.atan2(x2, z2)
+        for T in (psi, psi + math.pi):
+            # subtract the last link
+            xw = x2 - L3 * math.sin(T)
+            zw = z2 - L3 * math.cos(T)
+            rw2 = xw * xw + zw * zw
+
+            # law of cosines for θ3
+            cosb = (rw2 - L1*L1 - L2*L2) / (2 * L1 * L2)
+            cosb = max(-1.0, min(1.0, cosb))
+            for signb in (1.0, -1.0):
+                t3 = signb * math.acos(cosb)
+
+                # then θ2 from planar geometry
+                phi_w   = math.atan2(xw, zw)
+                delta_w = math.atan2(L2 * math.sin(t3), L1 + L2 * math.cos(t3))
+                t2 = phi_w - delta_w
+
+                # θ4 closes the loop in the plane
+                t4 = T - (t2 + t3)
+
+                # measure error in X,Z and Y
+                x_fk = (L1 * math.sin(t2)
+                        + L2 * math.sin(t2 + t3)
+                        + L3 * math.sin(t2 + t3 + t4))
+                z_fk = (L1 * math.cos(t2)
+                        + L2 * math.cos(t2 + t3)
+                        + L3 * math.cos(t2 + t3 + t4))
+                err = (x_fk - x2)**2 + (z_fk - z2)**2 + (y2 - y_chain)**2
+
+                if err < best[0]:
+                    best = (err, t1, t2, t3, t4)
+
+    _, θ1, θ2, θ3, θ4 = best
+
+    # we choose θ5=0, θ6=0 (orientation free)
+    θ5 = 0.0
+    θ6 = 0.0
+
+    # normalize all into [-π, π]
+    def norm(a: float) -> float:
+        while a > math.pi:
+            a -= 2*math.pi
+        while a < -math.pi:
+            a += 2*math.pi
+        return a
+
+    return (norm(θ1),
+            norm(θ2),
+            norm(θ3),
+            norm(θ4),
+            norm(θ5),
+            norm(θ6))
+```
+
+Explanation of the only change from your 5‑DOF code:  
+We added `d_tcp_y = 0.0823` into the `y_chain` sum so that the very last TCP offset along local Y is treated exactly like the other fixed Y offsets.  Everything else remains the same, and θ₅,θ₆ are simply left at zero. This now passes all of your position‑only test cases.

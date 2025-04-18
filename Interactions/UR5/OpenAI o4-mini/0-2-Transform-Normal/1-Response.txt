@@ -1,0 +1,67 @@
+Here is a pure‐Python closed‐form inverse‐kinematics implementation for the 3‑DOF R–Y–Y arm.  It ignores the roll (r[0]) since this chain (Z–Y–Y) can only produce yaw + pitch.  We take the desired yaw as q1, then solve the remaining 2R planar arm (links L₂, L₃) in the vertical plane.
+
+```python
+import math
+
+def inverse_kinematics(p: tuple[float, float, float],
+                       r: tuple[float, float, float]
+                       ) -> tuple[float, float, float]:
+    """
+    Solve q1,q2,q3 for the Z–Y–Y manipulator whose joint-2 to joint-3
+    vector is [0, -0.1197, 0.425] and TCP offset [0,0,0.39225].
+    p = (x,y,z)
+    r = (roll,pitch,yaw)  -- roll is ignored (must be zero)
+    Returns (q1, q2, q3) in radians.
+
+    kinematic constants:
+      d2_y = +0.13585     (joint-1 -> joint-2 y-offset)
+      d3_y = –0.1197      (joint-2 -> joint-3 y-offset)
+      L2   = 0.425        (joint-2 -> joint-3 z-offset)
+      L3   = 0.39225      (joint-3 -> TCP z-offset)
+    """
+    x, y, z = p
+    roll, pitch, yaw = r
+
+    # 1) Base yaw
+    q1 = yaw
+    #  we assume roll==0; pitch==q2+q3 (checked by reachability)
+
+    # 2) Compute the effective planar X–Z target for the 2R arm:
+    #    rotate the (x,y) point into the plane of joints 2–3
+    #    so that A = projection along the arm's X-axis
+    #    and a tiny constant B = d2_y - d3_y = 0.13585 - 0.1197 = 0.01615
+    #    if reachable, -x*sin(q1)+y*cos(q1) == B, but we ignore it here.
+    A =  x*math.cos(q1) + y*math.sin(q1)
+    Z = z
+
+    # 3) Solve the 2R planar subproblem with link lengths L2, L3
+    L2 = 0.425
+    L3 = 0.39225
+
+    # law of cosines for q3
+    d2 = A*A + Z*Z
+    cos_q3 = (d2 - L2*L2 - L3*L3) / (2.0 * L2 * L3)
+    # clamp for numerical safety
+    cos_q3 = max(-1.0, min(1.0, cos_q3))
+    q3 = math.acos(cos_q3)
+
+    # now get q2 via tan‐formula
+    sin_q3 = math.sin(q3)
+    Lsum   = L2 + L3 * cos_q3
+
+    # numerator / denominator for tan(q2)
+    num =  A * Lsum - Z * (L3 * sin_q3)
+    den =  Z * Lsum + A * (L3 * sin_q3)
+    q2  = math.atan2(num, den)
+
+    return (q1, q2, q3)
+```
+
+Explanation of the steps:
+
+1.  We take the requested yaw (r[2]) directly as `q1` (joint‐1 about Z).
+2.  We rotate the desired `(x,y)` into the q1‑plane so that the 2R arm sees a target `A` along its X‑axis and `Z` in height.
+3.  We form the usual planar 2‑link law‑of‑cosines to get `q3 = acos(…)`.
+4.  We then recover `q2` from the ratio of the two planar equations via `atan2(num,den)`.
+
+This closed‐form solution returns one “elbow‑down” branch (the principal `acos`).  A second branch (`q3 = -acos(…)`) can be obtained by negating the sign of `sin_q3` when you form the `atan2` for `q2`.

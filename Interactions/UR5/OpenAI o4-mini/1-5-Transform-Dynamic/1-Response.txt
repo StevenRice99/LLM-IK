@@ -1,0 +1,115 @@
+Here’s a self‐contained, closed‐form analytical inverse‐kinematics for the full 5‑DOF chain.  It follows the same approach as in EXISTING 2 but adds Joint 1 and the initial link‑2 offset.  No reachability checks or optimization routines are used.
+
+```python
+import numpy as np
+import math
+
+def inverse_kinematics(p: tuple[float, float, float],
+                       r: tuple[float, float, float]
+                      ) -> tuple[float, float, float, float, float]:
+    """
+    Closed‐form IK for the 5‑DOF serial arm:
+      Joint axes: Y, Y, Y, Z, Y
+      Origins:
+        Joint1 at [0,0,0]
+        Joint2 at [0, -0.1197, 0.425]
+        Joint3 at [0, 0,      0.39225]
+        Joint4 at [0, 0.093,  0     ]
+        Joint5 at [0, 0,      0.09465]
+        TCP    at [0, 0,      0.0823] + yaw offset +90° about Z.
+    :param p: Target TCP position [x,y,z].
+    :param r: Target TCP orientation [roll, pitch, yaw].
+    :return: (q1,q2,q3,q4,q5) in radians.
+    """
+    # Fixed translations & constants
+    link2_off = np.array([0.0, -0.1197, 0.425])
+    d2     = 0.39225   # Joint3 origin to Joint4 origin
+    d3     = 0.093     # Joint4 origin to Joint5 origin (along Y)
+    d4     = 0.09465   # Joint5 origin to TCP before d_tcp (along Z)
+    d_tcp  = 0.0823    # TCP “wrist” offset
+    psi    = 1.570796325  # +90° yaw offset on TCP
+
+    # Helper: basic rotations
+    def rot_x(a):
+        ca, sa = math.cos(a), math.sin(a)
+        return np.array([[1,0,0],[0,ca,-sa],[0,sa, ca]])
+    def rot_y(a):
+        ca, sa = math.cos(a), math.sin(a)
+        return np.array([[ ca,0, sa],[ 0,1, 0],[-sa,0, ca]])
+    def rot_z(a):
+        ca, sa = math.cos(a), math.sin(a)
+        return np.array([[ ca,-sa,0],[ sa, ca,0],[ 0,  0,1]])
+
+    # 1) Build base‐frame target rotation
+    roll, pitch, yaw = r
+    R_target = rot_z(yaw) @ rot_y(pitch) @ rot_x(roll)
+
+    # 2) Solve q1 from the XY plane projection (rotation about Y)
+    P = np.array(p)
+    q1 = math.atan2(P[0], P[2])
+
+    # 3) Move into the Joint2 frame:
+    #    - rotate back by q1 about Y
+    #    - subtract the Joint2 origin offset
+    R1_inv = rot_y(-q1)
+    P2 = R1_inv @ P - link2_off
+
+    # 4) Also rotate the target orientation into Joint2 frame
+    R2_target = R1_inv @ R_target
+
+    # 5) Now solve the 4‑DOF subchain (joints 2–5) exactly as in EXISTING 2
+    px, py, pz = P2
+    # (a) solve for the Joint4 (about Z) via the Y‑axis law‐of‐cosines
+    cos_q4 = (py - d3) / d_tcp
+    cos_q4 = float(np.clip(cos_q4, -1.0, 1.0))
+    q4_cands = [ math.acos(cos_q4), -math.acos(cos_q4) ]
+
+    # planform radius & base‐angle
+    r_plane = math.hypot(px, pz)
+    delta   = math.atan2(px, pz)
+
+    best_err = 1e9
+    best_q2q3q4q5 = (0,0,0,0)
+
+    for q4 in q4_cands:
+        s4   = math.sin(q4)
+        Reff = math.hypot(d4, d_tcp * s4)
+        phi  = math.atan2(d_tcp * s4, d4)
+
+        # law‐of‐cosines for the 2‑link planar subproblem (d2 & Reff)
+        num  = r_plane**2 + d2**2 - Reff**2
+        den  = 2 * d2 * r_plane
+        cosg = float(np.clip(num/den, -1.0, 1.0))
+        gamma = math.acos(cosg)
+
+        # two candidates for q2
+        for q2 in [delta + gamma, delta - gamma]:
+            # solve q3 from the remaining triangle
+            Vx = px - d2 * math.sin(q2)
+            Vz = pz - d2 * math.cos(q2)
+            theta23 = math.atan2(Vx, Vz) + phi
+            q3 = theta23 - q2
+
+            # now solve q5 (about Y) to match remaining orientation
+            R_pre  = rot_y(q2 + q3) @ rot_z(q4)
+            R_temp = R_pre.T @ R2_target @ rot_z(-psi)
+            q5     = math.atan2(R_temp[0,2], R_temp[0,0])
+
+            # compute orientation error to pick best branch
+            R_fw = rot_y(q2+q3) @ rot_z(q4) @ rot_y(q5) @ rot_z(psi)
+            err = np.linalg.norm(R_fw - R2_target, ord='fro')
+
+            if err < best_err:
+                best_err = err
+                best_q2q3q4q5 = (q2, q3, q4, q5)
+
+    q2, q3, q4, q5 = best_q2q3q4q5
+
+    return (q1, q2, q3, q4, q5)
+```
+
+Explanation of key steps:
+- We first extract the yaw‑rotation q1 by projecting the TCP position into the X–Z plane.
+- We then “undo” that rotation and subtract the static Joint 2 link offset to get the 4‑DOF subchain target `(P2, R2_target)`.
+- The remaining 4 DOF (joints 2–5) are solved exactly as in EXISTING 2, choosing the branch that minimizes orientation error.
+- Returns a 5‑tuple of joint angles in radians.

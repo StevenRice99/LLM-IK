@@ -1,0 +1,61 @@
+Here’s a pure closed‐form, analytic inverse‐kinematics for your 2‑DOF arm.  It solves the two joint angles q1 (about Z) and q2 (about Y) directly from the target TCP position p=(x,y,z).  The resulting pose will automatically satisfy the orientation r=(roll,pitch,yaw) under the usual rpy convention (roll=0, pitch=q2, yaw=q1).  No reachability checks or numerical solvers are used.
+
+```python
+import math
+from typing import Tuple
+
+def inverse_kinematics(p: Tuple[float, float, float],
+                       r: Tuple[float, float, float]) -> Tuple[float, float]:
+    """
+    Gets the joint values needed to reach position "p" and orientation "r".
+    :param p: The position to reach [x, y, z].
+    :param r: The orientation to reach in roll-pitch-yaw [r_x, r_y, r_z].
+              (Only r_y and r_z are actuated by joint2 and joint1.)
+    :return: (q1, q2) in radians.
+    """
+
+    # Unpack target
+    x, y, z = p
+    # usables: roll=r[0], pitch=r[1], yaw=r[2]
+    # but with only 2 DOF, we recover q1 = yaw, q2 = pitch
+    # then position must satisfy p = Rz(q1)*([0, a1, 0] + Ry(q2)*[0, d2y, d_tcp_z])
+    # constants from urnf:
+    a1     = 0.13585     # link1 offset along Y
+    d2y    = -0.1197     # link2->TCP offset along Y
+    d_tcp_z = 0.425      # link2->TCP offset along Z
+
+    # 1) Solve q2 from z = d_tcp_z * cos(q2)
+    #    => cos(q2) = z / d_tcp_z
+    c2 = z / d_tcp_z
+    # clamp numeric round‐off
+    c2 = max(-1.0, min(1.0, c2))
+    # choose principal branch (elbow‑up)
+    s2 = math.sqrt(1.0 - c2*c2)
+    q2 = math.atan2(s2, c2)
+
+    # 2) Solve q1 from x,y:
+    #    Let u = [d_tcp_z*sin(q2), a1 + d2y] in the link1 XY‑plane.
+    #    Then [x,y] = Rz(q1) * u  =>  q1 = atan2(y,x) - atan2(u_y, u_x)
+    u_x = d_tcp_z * s2
+    u_y = a1 + d2y
+    q1 = math.atan2(y, x) - math.atan2(u_y, u_x)
+
+    # wrap q1 into [-pi,pi]
+    q1 = math.atan2(math.sin(q1), math.cos(q1))
+
+    return q1, q2
+```
+
+Explanation of key steps:
+
+1.  We use the fact that the second joint (about Y) only moves the TCP in Z by  
+       z = d_tcp_z · cos(q2).  
+    Hence q2 = acos(z / d_tcp_z).
+
+2.  In the XY‑plane, the projection of the TCP relative to the first joint is  
+       [x,y] = Rz(q1) · ([d_tcp_z·sin(q2), a1 + d2y]).  
+    Solving for q1 gives  
+       q1 = atan2(y,x) − atan2(a1 + d2y, d_tcp_z·sin(q2)).
+
+3.  By construction, the resulting end‑effector orientation is Rz(q1)·Ry(q2),  
+    so that yaw = q1 and pitch = q2 (roll = 0).

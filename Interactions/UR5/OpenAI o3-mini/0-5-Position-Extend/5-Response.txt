@@ -1,0 +1,106 @@
+```python
+import math
+
+def inverse_kinematics(p: tuple[float, float, float]) -> tuple[float, float, float, float, float, float]:
+    """
+    Computes a closed‐form inverse kinematics solution for a 6‐DOF arm given by:
+      • Revolute 1: position [0,0,0] with Z–axis
+      • Revolute 2: position [0, 0.13585, 0] with Y–axis
+      • Revolute 3: position [0, -0.1197, 0.425] with Y–axis
+      • Revolute 4: position [0, 0, 0.39225] with Y–axis
+      • Revolute 5: position [0, 0.093, 0] with Z–axis
+      • Revolute 6: position [0, 0, 0.09465] with Y–axis
+      • TCP: position [0, 0.0823, 0] relative to the last link
+      
+    The forward kinematics chain introduces constant offsets:
+      - A fixed y-offset at link 2: d2_y = 0.13585
+      - The constant offset in joint 2’s frame from link 3 and link 5: y_chain = -0.1197 + 0.093
+      - An additional TCP y-offset: + 0.0823
+      
+    In effect, the effective y offset (in joint 2’s frame) is:
+         y_chain = -0.1197 + 0.093 + 0.0823
+    The remaining link “lengths” along the z–direction are:
+         L1 = 0.425,   L2 = 0.39225,   L3 = 0.09465
+
+    The solution follows these steps:
+      1. Choose θ1 so that when the target is rotated into joint‑2’s frame, its y–coordinate equals y_chain.
+      2. Solve the resulting 3R planar chain (joints 2–4) using the law of cosines.
+      3. Since only position is constrained, the last two joints (5 and 6) are redundant;
+         we set θ5 = 0 and θ6 = 0.
+         
+    :param p: The desired TCP position (x,y,z).
+    :return: A 6–tuple (θ1, θ2, θ3, θ4, θ5, θ6) in radians.
+    """
+    # Unpack the desired TCP position.
+    x_w, y_w, z_w = p
+
+    # Offsets and link lengths from the URDF
+    d2_y = 0.13585
+    # Original constant from joint 2's frame (from link 3 and link 5) plus TCP y-offset.
+    y_chain = -0.1197 + 0.093 + 0.0823  # ≈ 0.0556
+    L1 = 0.425
+    L2 = 0.39225
+    L3 = 0.09465
+
+    # Pick θ1 such that the rotated target in joint-2's frame has y = y_chain.
+    delta = y_chain + d2_y
+    r = math.hypot(x_w, y_w)
+    # Handle potential division by zero; if r is 0 then set argument as 1 (acos(1)=0).
+    arg = delta / r if r != 0 else 1.0
+    arg = max(-1.0, min(1.0, arg))
+    gamma = math.acos(arg)
+    phi = math.atan2(-x_w, y_w)
+    t1_candidates = [phi + gamma, phi - gamma]
+
+    # Initialize best candidate (error, θ1, θ2, θ3, θ4)
+    best = (1e9, 0, 0, 0, 0)
+    for t1 in t1_candidates:
+        c1 = math.cos(t1)
+        s1 = math.sin(t1)
+        # Rotate target into joint-2’s coordinate frame.
+        x2 = c1 * x_w + s1 * y_w
+        y2 = -s1 * x_w + c1 * y_w - d2_y
+        z2 = z_w
+
+        # Determine auxiliary angle psi.
+        psi = math.atan2(x2, z2)
+        for T in (psi, psi + math.pi):
+            # Remove the final offset of L3 along current angle T.
+            xw = x2 - L3 * math.sin(T)
+            zw = z2 - L3 * math.cos(T)
+            rw2 = xw ** 2 + zw ** 2
+
+            # Solve for joint 3 (angle between L1 and L2) using the law of cosines.
+            cosb = (rw2 - L1**2 - L2**2) / (2 * L1 * L2)
+            cosb = max(-1.0, min(1.0, cosb))
+            for sign in (1.0, -1.0):
+                b = sign * math.acos(cosb)
+                phi_w = math.atan2(xw, zw)
+                delta_w = math.atan2(L2 * math.sin(b), L1 + L2 * math.cos(b))
+                t2 = phi_w - delta_w
+                t3 = b
+                t4 = T - (t2 + t3)
+                # Forward calculation in the planar (joint-2) frame.
+                x_fk = L1 * math.sin(t2) + L2 * math.sin(t2 + t3) + L3 * math.sin(t2 + t3 + t4)
+                z_fk = L1 * math.cos(t2) + L2 * math.cos(t2 + t3) + L3 * math.cos(t2 + t3 + t4)
+                # Error metric includes the deviation in x, z and y dimensions.
+                err2 = (x_fk - x2)**2 + (z_fk - z2)**2 + (y2 - y_chain)**2
+                if err2 < best[0]:
+                    best = (err2, t1, t2, t3, t4)
+
+    # Unpack the best candidate.
+    _, θ1, θ2, θ3, θ4 = best
+    # Since only position is constrained, we choose the redundant joints arbitrarily.
+    θ5 = 0.0
+    θ6 = 0.0
+
+    # Normalize angles to the range [-pi, pi]
+    def norm(a):
+        while a > math.pi:
+            a -= 2 * math.pi
+        while a < -math.pi:
+            a += 2 * math.pi
+        return a
+
+    return (norm(θ1), norm(θ2), norm(θ3), norm(θ4), norm(θ5), norm(θ6))
+```

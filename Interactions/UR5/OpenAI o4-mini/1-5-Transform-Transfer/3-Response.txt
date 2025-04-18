@@ -1,0 +1,145 @@
+I’ve updated the IK to  
+
+ 1. compute all 8 candidate 1–4 joint solutions exactly as before,  
+ 2. for each candidate, build the residual “wrist” rotation  
+       R45 = (Ry(q1+q2+q3)·Rz(q4))⁻¹ · R_target · R_tcp⁻¹  
+    by left‑multiplying by Rz(–q4) then Ry(–(q1+q2+q3)),  
+ 3. test which candidate actually makes R45 a pure Y‑rotation (i.e. off‑Y entries ≈ 0),  
+ 4. extract q5=atan2(R45[0,2],R45[2,2]) for that branch and return.  
+
+This guarantees you pick the correct T‑branch and q4‑branch to also satisfy orientation.  Here is the revised code:
+
+```python
+import math
+
+def inverse_kinematics(p: tuple[float, float, float],
+                       r: tuple[float, float, float]
+                      ) -> tuple[float, float, float, float, float]:
+    """
+    Closed‑form IK for the 5‑DOF arm (q1,q2,q3 about Y, q4 about Z, q5 about Y, plus a fixed Z‑90°).
+    :param p: target TCP position (x,y,z)
+    :param r: target TCP RPY orientation (roll,pitch,yaw)
+    :return: (q1,q2,q3,q4,q5) in radians
+    """
+    # link geometry
+    L1 = 0.425
+    L2 = 0.39225
+    L3 = 0.09465
+    y_offset = -0.1197 + 0.093    # up to joint‑4
+    tcp_y = 0.0823               # joint‑5 → TCP
+
+    x_t, y_t, z_t = p
+    roll, pitch, yaw = r
+
+    def clamp(v, lo=-1.0, hi=1.0):
+        return hi if v > hi else (lo if v < lo else v)
+
+    def normalize(a):
+        while a > math.pi:  a -= 2*math.pi
+        while a < -math.pi: a += 2*math.pi
+        return a
+
+    # basic rotation constructors
+    def Rx(a):
+        ca, sa = math.cos(a), math.sin(a)
+        return [[1,0,0],
+                [0,ca,-sa],
+                [0,sa, ca]]
+    def Ry(a):
+        ca, sa = math.cos(a), math.sin(a)
+        return [[ ca,0,sa],
+                [  0,1, 0],
+                [-sa,0,ca]]
+    def Rz(a):
+        ca, sa = math.cos(a), math.sin(a)
+        return [[ca,-sa,0],
+                [sa, ca,0],
+                [ 0,  0,1]]
+
+    def mat_mult(A,B):
+        """3×3 matrix multiply C = A·B."""
+        return [[A[i][0]*B[0][j] + A[i][1]*B[1][j] + A[i][2]*B[2][j]
+                 for j in range(3)] for i in range(3)]
+
+    # build target rotation matrix: Rz(yaw)*Ry(pitch)*Rx(roll)
+    R_target = mat_mult(Rz(yaw), mat_mult(Ry(pitch), Rx(roll)))
+    # inverse of fixed TCP yaw=+90° about Z
+    R_tcp_inv = Rz(-math.pi/2)
+
+    # solve q4 from the y‑equation: y = y_offset + tcp_y*cos(q4)
+    C = clamp((y_t - y_offset)/tcp_y)
+    q4_cands = [ math.acos(C), -math.acos(C) ]
+
+    # horizontal heading
+    psi = math.atan2(x_t, z_t)
+
+    # iterate all 8 branches
+    for q4 in q4_cands:
+        # effective “wrist length”
+        d = tcp_y * math.sin(q4)
+        L_eff = math.hypot(L3, d)
+        phi   = math.atan2(d, L3)
+
+        for T in (psi, psi + math.pi):
+            S = T + phi  # = q1+q2+q3
+
+            # wrist‑center in xz
+            W_x = x_t - L_eff * math.sin(T)
+            W_z = z_t - L_eff * math.cos(T)
+            r_w = math.hypot(W_x, W_z)
+            # check reach of 2R
+            if r_w > (L1+L2) or r_w < abs(L1-L2):
+                continue
+
+            # 2R IK for (q1,q2)
+            cos_q2 = clamp((r_w**2 - L1**2 - L2**2) / (2*L1*L2))
+            for sign in (1, -1):
+                q2 = sign * math.acos(cos_q2)
+                # standard 2R angle for q1
+                num = L2 * math.sin(q2)
+                den = L1 + L2 * math.cos(q2)
+                delta = math.atan2(num, den)
+                theta_w = math.atan2(W_x, W_z)
+                q1 = theta_w - delta
+                q3 = S - (q1 + q2)
+
+                # --- now test orientation ---
+                # form M = R_target * R_tcp_inv
+                M = mat_mult(R_target, R_tcp_inv)
+                # apply (q1+q2+q3)⁻¹ then q4⁻¹:
+                M1 = mat_mult(Ry(- (q1+q2+q3)), M)
+                R45 = mat_mult(Rz(-q4), M1)
+
+                # R45 should be a pure Ry:  off‑Y entries ≈0
+                off_err = (
+                    abs(R45[0][1]) + abs(R45[1][0]) +
+                    abs(R45[1][2]) + abs(R45[2][1])
+                )
+                if off_err > 1e-6:
+                    # not the correct branch for orientation
+                    continue
+
+                # extract q5 from R45 = [[c,0,s],[0,1,0],[-s,0,c]]
+                q5 = math.atan2(R45[0][2], R45[2][2])
+
+                # normalize and return
+                return (
+                    normalize(q1),
+                    normalize(q2),
+                    normalize(q3),
+                    normalize(q4),
+                    normalize(q5),
+                )
+
+    # if we get here, no branch matched
+    raise ValueError("No IK solution found for full pose")
+```
+
+Key changes vs the earlier version:
+
+ • We **swap** the order of applying the inverses when building R45:  
+      first Ry(–(q1+q2+q3)), then Rz(–q4).  
+
+ • We **screen** each candidate by checking that R45 is in fact a pure Y‐rotation (off–axis terms near zero) before extracting q5.  
+
+That ensures you pick the T–branch (and the q4‐sign) that lets you match the desired wrist orientation.

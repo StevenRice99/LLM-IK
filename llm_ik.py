@@ -2310,7 +2310,7 @@ class Solver:
                 # Use the API-specific name if one exists.
                 completion = client.chat.completions.create(
                     model=self.model if self.api_name is None else self.api_name, messages=messages, tools=tools,
-                    tool_choice=tool_choice, seed=SEED, temperature=0, n=1,
+                    tool_choice=tool_choice, seed=NOT_GIVEN, temperature=0, n=1,
                     reasoning_effort="high" if self.reasoning else NOT_GIVEN
                 )
                 elapsed = time.perf_counter() - start_time
@@ -2347,15 +2347,16 @@ class Solver:
         # See if there was an error that caused the API to stop.
         response = completion.choices[0]
         if response.finish_reason is None:
+            # If a stop reason was given, stop.
             if response.message is not None and response.message.refusal is not None:
-                reason = f": {response.message.refusal}"
-            else:
-                reason = "."
-            logging.error(f"{self.model} | {self.robot.name} | {lower + 1} to {upper + 1} | {solving} | {mode} | Run "
-                          f"API | No finish reason given in the response{reason}")
-            return False
+                logging.error(f"{self.model} | {self.robot.name} | {lower + 1} to {upper + 1} | {solving} | {mode} | "
+                              f"Run API | No finish reason given in the response: {response.message.refusal}")
+                return False
+            # Otherwise, assume normal usage.
+            finish_reason = "STOP"
+        else:
+            finish_reason = response.finish_reason.upper()
         # Check if we ran out of tokens.
-        finish_reason = response.finish_reason.upper()
         if finish_reason == "LENGTH":
             if response.message is not None and response.message.refusal is not None:
                 reason = f": {response.message.refusal}"

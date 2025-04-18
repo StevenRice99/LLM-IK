@@ -1,0 +1,111 @@
+Below is a self–contained, closed‐form inverse–kinematics routine for your 5‑DOF arm.  It uses the “elbow‑down” branch and exactly enforces the TCP position by:
+
+ 1. Solving q₁ so that the plane of the Y‑axis–joints (2–4) goes through the target (subtracting out the three fixed Y‑offsets).  
+ 2. Rotating the target back into that plane and solving q₂, q₃ by a 2‑R law‐of‐cosines (using the two combined Z‑link lengths).  
+ 3. Reconstructing the position of joint 4 (frame 3 origin) and solving q₄ so that the remaining link‑4 + TCP offset lands precisely on the target.  
+ 4. Picking q₅=0 (unused for pure position control).  
+
+```python
+import numpy as np
+
+def inverse_kinematics(p: tuple[float, float, float]) -> tuple[float, float, float, float, float]:
+    """
+    Analytic IK for the 5‑DOF serial arm (position only).
+    Returns an “elbow‑down” solution [q1..q5] in radians.
+    """
+    x, y, z = p
+
+    # ——————————————————————————————————————————————————————————————————
+    # URDF offsets (all in meters)
+    d1 = 0.13585    # link1 → link2, Y
+    d2 = -0.1197    # link2 → link3, Y
+    d3 = 0.39225    # link3 → link4, Z
+    d4 = 0.093      # link4 → link5, Y
+    d5 = 0.09465    # link5 → TCP,   Z
+
+    # For the 2‑R planar solve we combine the two Z‑translations:
+    L1 = 0.425          # link2 → link3, Z–part
+    L2 = d3 + d5        # link3→link4 (Z), plus TCP Z
+
+    # Total fixed Y offset of the “wrist plane” (joints 2–4):
+    d_total = d1 + d2 + d4
+
+    # — STEP 1:  Solve q1 from
+    #    −x·sin(q1) + y·cos(q1) = d_total
+    # =>  r·cos(q1 − φ) = d_total
+    r   = np.hypot(x, y)
+    φ   = np.arctan2(-x, y)                     # φ = atan2(-x, y)
+    arg = np.clip(d_total / r, -1.0, 1.0)
+    θ   = np.arccos(arg)                        # θ = arccos(d_total/r)
+    q1  = φ - θ                                 # elbow‐down branch
+    # wrap into [−π, π]
+    q1  = (q1 + np.pi) % (2*np.pi) - np.pi
+
+    # — STEP 2:  Rotate the target back into the plane of joints 2–4
+    c1 = np.cos(q1)
+    s1 = np.sin(q1)
+    # rotated into joint‑2 frame:
+    x1 =  c1*x + s1*y
+    # y1 = −s1*x + c1*y   (should be +d_total)
+    # we ignore y1 for the planar solve
+    z1 = z
+
+    # — STEP 3:  Solve q3 by law of cosines in that plane
+    D = (x1*x1 + z1*z1 - L1*L1 - L2*L2) / (2.0 * L1 * L2)
+    D = np.clip(D, -1.0, 1.0)
+    q3 = -np.arccos(D)        # “elbow‑down” ⇒ negative arccos()
+
+    # — STEP 4:  Solve q2 by the classic 2‑R atan2 formula
+    A = L1 + L2 * np.cos(q3)
+    B = L2 * np.sin(q3)
+    q2 = np.arctan2(x1*A - z1*B, z1*A + x1*B)
+
+    # — STEP 5:  Reconstruct the position of frame 3 (joint 4 origin)
+    def Rz(th):
+        return np.array([
+            [ np.cos(th), -np.sin(th), 0.0],
+            [ np.sin(th),  np.cos(th), 0.0],
+            [ 0.0,          0.0,        1.0]
+        ])
+    def Ry(th):
+        return np.array([
+            [ np.cos(th), 0.0, np.sin(th)],
+            [ 0.0,         1.0, 0.0       ],
+            [-np.sin(th), 0.0, np.cos(th)]
+        ])
+
+    R1 = Rz(q1)
+    R2 = R1 @ Ry(q2)
+    R3 = R2 @ Ry(q3)
+
+    # Translations in their local frames:
+    p1 = R1 @ np.array([0.0,    d1,     0.0])
+    p2 = R2 @ np.array([0.0,    d2,     L1 ])
+    p3 = R3 @ np.array([0.0,    0.0,    d3 ])
+    origin3 = p1 + p2 + p3  # world‐coords of joint 4 origin
+
+    # Express the TCP target in frame 3:
+    v3 = np.array([x, y, z]) - origin3
+    pl = R3.T @ v3
+
+    # In frame 3 we have:  pl = Ry(q4)·[0, d4, d5]
+    # =>  sin(q4) = pl_x/d5,   cos(q4) = pl_z/d5
+    q4 = np.arctan2(pl[0], pl[2])
+    # one DOF (q5) left free for pure‐position
+    q5 = 0.0
+
+    # wrap all into [−π, π]
+    def wrap(a):
+        return (a + np.pi) % (2*np.pi) - np.pi
+
+    return (wrap(q1), wrap(q2), wrap(q3), wrap(q4), wrap(q5))
+```
+
+Key points:
+
+ • We enforce the three Y–axis joint offsets as a single “d_total” when computing q₁.  
+ • We rotate the target into the q₂–q₃ plane and solve those two angles exactly by law–of–cosines.  
+ • We then rebuild the world‐frame position of joint 4, express the remaining TCP error in that frame, and pick q₄ so that the final two links (link 4’s Y‑offset and the TCP’s Z‑offset) land exactly on the target.  
+ • q₅ remains free for orientation and is simply set to zero here.  
+
+This will drive your forward‐kinematics to hit the desired TCP position (x,y,z) to within numerical precision.

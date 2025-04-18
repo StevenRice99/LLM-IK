@@ -1,0 +1,76 @@
+Here’s a purely closed‐form, position‐only IK that now fixes the sign‐conventions and correctly computes q2.  We still leave the last two joints free (here we lock q4=q5=0) and solve q1,q2,q3 so that the TCP goes to p.  
+
+```python
+import math
+from typing import Tuple
+
+def inverse_kinematics(p: Tuple[float, float, float]
+                      ) -> Tuple[float, float, float, float, float]:
+    """
+    Closed‑form IK for the 5‑DOF arm (position only).
+    We lock q4=q5=0 and solve q1,q2,q3 so that the TCP at:
+      T01(q1)·T12(q2)·T23(q3)·T34(0)·T45(0)·T5T
+    reaches p.
+    """
+    x, y, z = p
+
+    # ——— Robot geometry from the URDF ———
+    d2 = 0.13585   # link1 → link2, +Y
+    b1 = 0.1197    # link2 → link3, −Y
+    c1 = 0.425     # link2 → link3, +Z
+    d4 = 0.39225   # link3 → link4, +Z
+    b3 = 0.093     # link4 → link5, +Y
+    d6 = 0.09465   # link5 → TCP, +Z
+
+    # Lateral (Y) offset delivered by links 2,3,4
+    e = d2 - b1 + b3
+
+    # Planar‐projection into the base XY plane
+    r = math.hypot(x, y)
+    # Effective “reach” in the rotated X–Z plane
+    M = math.sqrt(max(0.0, r*r - e*e))
+
+    # Planar‐chain lengths (joint2–3 vs. joint3–4+5)
+    L1 = c1
+    L2 = d4 + d6
+
+    # Solve the 2‑link cosine law for φ = q3+q4  (we’ll set q4=0 so φ→q3)
+    num = (M*M + z*z - L1*L1 - L2*L2)
+    den = 2.0 * L1 * L2
+    cos_phi = max(-1.0, min(1.0, num/den))
+    phi34 = math.acos(cos_phi)
+
+    # Distribute the total bend into q3 and q4 (we choose q4=0)
+    q3 = phi34
+    q4 = 0.0
+
+    # Now solve q2 by enforcing:
+    #   [H_x; H_z] = RotY(q2)·[ W_x; W_z ],
+    # where [W_x,W_z] = [L2*sin(phi34); L1+L2*cos(phi34)] and
+    #       [H_x,H_z] = [M; z].
+    Wx = L2 * math.sin(phi34)
+    Wz = L1 + L2 * math.cos(phi34)
+    # one‑line atan2 solution for q2:
+    q2 = math.atan2(M*Wz - z*Wx,
+                    M*Wx + z*Wz)
+
+    # Finally solve q1 so that Rz(q1)·[M, e]^T = [x, y]^T
+    q1 = math.atan2(y, x) - math.atan2(e, M)
+
+    # No orientation constraint → fix q5=0
+    q5 = 0.0
+
+    return (q1, q2, q3, q4, q5)
+```
+
+Explanation of the key fix:
+1. We compute the combined “elbow” angle φ = q3+q4 via the law of cosines.
+2. We then form the 2‑vector W = [L2·sinφ, L1+L2·cosφ] and match it to [M, z] via a Y‑axis rotation q2.  
+   A robust one‑shot is  
+     q2 = atan2(M·Wz – z·Wx,  M·Wx + z·Wz)  
+   which enforces  
+     [M; z] = RotY(q2)·W  
+3. q1 comes from the fact that in the XY‑plane  
+     (x,y) = Rz(q1)·(M,e).  
+
+This now exactly places the TCP at the desired p.

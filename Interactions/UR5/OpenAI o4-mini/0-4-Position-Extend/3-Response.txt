@@ -1,0 +1,99 @@
+Here’s a single‐pass, closed‐form solver that recovers all five joint angles so that the FK of your chain exactly hits the given 3D TCP position (within numerical precision).  It uses the “decouple–then–wrist” approach:  
+1.  Solve q1 so that the whole wrist‐centre plane rotates into the target (subtracting out the three fixed Y‑offsets).  
+2.  Solve q2,q3 for a 2R planar link (combining the last link Z–length into the 2R law‑of‑cosines).  
+3.  Reconstruct the position of the link4 origin and solve q4 directly from the remaining small X–Z error in that frame.  
+4.  Set q5=0 (free around the final Z–axis).  
+
+```python
+import numpy as np
+
+def inverse_kinematics(p: tuple[float, float, float]) -> tuple[float, float, float, float, float]:
+    """
+    Analytic IK for the 5‑DOF serial chain (position only).
+    :param p: target TCP position (x,y,z)
+    :return: q1..q5 in radians
+    """
+    x, y, z = p
+
+    #─ Fixed link offsets from the URDF ───────────────────────────────────────────
+    d1 = 0.13585      # y–offset after joint1
+    d2 = -0.1197      # y–offset after joint2
+    d3 = 0.39225      # z–offset after joint3
+    d4 = 0.093        # y–offset after joint4
+    d5 = 0.09465      # z–offset TCP
+
+    # Total fixed Y–offset of the wrist‐centre relative to the base‐Z‐axis:
+    d_total = d1 + d2 + d4
+
+    #── STEP 1: Solve q1 by requiring the wrist‐centre (TCP minus d5,TCP and d4) lie in
+    #           a vertical plane through the base‐Z‐axis.  Plane eq: e_phi·(p - [0,d_total,0])=0
+    q1 = np.arctan2(y - d_total, x)
+
+    #── STEP 2: Solve q2,q3 as a 2R chain in that vertical plane.
+    #    Effective 2R lengths along Z after joint2:
+    L1 = 0.425            # d2_z
+    L2 = d3 + d5          # d3_z + TCP z–offset
+
+    # Projected planar coordinates (radial, vertical):
+    r = np.hypot(x, y - d_total)
+    zp = z
+
+    # Law‐of‐cosines for the “elbow” angle phi = q3 + (we will later absorb q4=0 here)
+    num = r*r + zp*zp - L1*L1 - L2*L2
+    den = 2.0 * L1 * L2
+    cos_phi = np.clip(num/den, -1.0, 1.0)
+    phi = np.arccos(cos_phi)
+    # pick the “elbow‑down” branch:
+    phi = -phi
+    q3 = phi
+
+    # Now get q2 by standard 2R atan2 trick:
+    A = L1 + L2 * np.cos(phi)
+    B = L2 * np.sin(phi)
+    q2 = np.arctan2(r*A - zp*B, r*B + zp*A)
+
+    #── STEP 3: Recover q4 so that the actual TCP (after q1,q2,q3) lands exactly on p.
+    # Build the rotation up to joint3:
+    def R_y(th):
+        return np.array([[ np.cos(th), 0.0, np.sin(th)],
+                         [ 0.0,        1.0, 0.0       ],
+                         [-np.sin(th), 0.0, np.cos(th)]])
+    def R_z(th):
+        return np.array([[ np.cos(th), -np.sin(th), 0.0],
+                         [ np.sin(th),  np.cos(th), 0.0],
+                         [ 0.0,          0.0,        1.0]])
+    R1 = R_z(q1)
+    R2 = R1 @ R_y(q2)
+    R3 = R2 @ R_y(q3)
+
+    # World‐position of the link4 origin (i.e. after d1,d2,d3):
+    d1v = np.array([0.0, d1,    0.0])
+    d2v = np.array([0.0, d2,    0.425])
+    d3v = np.array([0.0, 0.0,   d3   ])
+    p3_world = R1.dot(d1v) + R2.dot(d2v) + R3.dot(d3v)
+
+    # Express the target in frame3:
+    p_local = R3.T.dot(np.array(p) - p3_world)
+
+    # In that frame the remaining translation is v = [0,d4,d5] rotated by q4 about Y:
+    #   x_local = d5*sin(q4),   z_local = d5*cos(q4)
+    q4 = np.arctan2(p_local[0], p_local[2])
+
+    #── STEP 4: last DOF free – pick q5=0
+    q5 = 0.0
+
+    # Wrap all into [-pi,pi]
+    def wrap(a):
+        return (a + np.pi) % (2*np.pi) - np.pi
+
+    return (wrap(q1), wrap(q2), wrap(q3), wrap(q4), wrap(q5))
+```
+
+Explanation:
+- We first absorb all fixed Y‐offsets (links 2,4 and the base d1) into a single `d_total`.  
+- Joint 1 is chosen so that the plane of joints 2–4 goes through the TCP (subtract out `d_total` and force the azimuth).  
+- We then treat joints 2&3 as a simple 2R “elbow” in that vertical plane, combining the last link‐Z into one length `L2`.  
+- Finally we reconstruct the position of the link‑4 origin and solve for the small remaining twist `q4` that exactly places the TCP.  
+- Joint 5 is unused for pure position control and set to 0.  
+
+This will drive the FK to hit the desired `[x,y,z]` within numerical precision.

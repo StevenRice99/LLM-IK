@@ -1,0 +1,92 @@
+Here is a single‐pass analytical solution that stitches together the two existing sub–solutions.  It first solves joint 1 about Z, rotates the target back into the J2–base frame, then runs the 3R planar‐chain IK (joints 2–4 about Y) exactly as in EXISTING 2, and finally sets joint 5 (about Z) to zero since it does not affect position.
+
+```python
+import math
+
+def inverse_kinematics(p: tuple[float, float, float]) -> tuple[float, float, float, float, float]:
+    """
+    Closed‐form inverse kinematics for the 5‐DOF serial arm (joints Z–Y–Y–Y–Z).
+    :param p: Desired TCP position (x, y, z) in world frame.
+    :return: (θ1, θ2, θ3, θ4, θ5) in radians.
+    """
+    x_w, y_w, z_w = p
+
+    # 1) Solve joint 1 (rotation about world Z) so that the remaining chain lies in the local XZ‐plane.
+    #    Zero angle corresponds to the arm pointing along +Y in world coordinates.
+    theta1 = math.atan2(-x_w, y_w)
+
+    # 2) Rotate the target back by -θ1 around Z to bring it into the J2 base frame
+    c1 = math.cos(theta1)
+    s1 = math.sin(theta1)
+    # x_local is along the chain's local X axis; z_local is unchanged.
+    x_local =  c1 * x_w + s1 * y_w
+    z_local = z_w
+
+    # 3) Planar 3R (about Y) + final Z‐joint IK (joints 2–5):
+    #    Link lengths along the local Z direction:
+    L1 = 0.425    # from J2 → J3
+    L2 = 0.39225  # from J3 → J4
+    L3 = 0.09465  # from J4 → TCP
+
+    # We resolve the 3R redundancy by choosing T = θ2+θ3+θ4 = ψ or ψ+π,
+    # where ψ = atan2(x_local, z_local).
+    psi = math.atan2(x_local, z_local)
+    T_options = [psi, psi + math.pi]
+
+    best_err = float('inf')
+    best_solution = (0.0, 0.0, 0.0)
+
+    for T in T_options:
+        # Wrist‐center in the XZ plane:
+        x_wrist = x_local - L3 * math.sin(T)
+        z_wrist = z_local - L3 * math.cos(T)
+
+        # Law‐of‐cosines for the middle joint angle β = θ3
+        r2 = x_wrist*x_wrist + z_wrist*z_wrist
+        cos_beta = (r2 - L1*L1 - L2*L2) / (2 * L1 * L2)
+        cos_beta = max(-1.0, min(1.0, cos_beta))
+
+        for sign in (+1.0, -1.0):
+            beta = sign * math.acos(cos_beta)      # θ3 candidate
+            # Compute θ2 via the “two–link” arm to the wrist‐center
+            phi = math.atan2(x_wrist, z_wrist)
+            delta = math.atan2(L2 * math.sin(beta),
+                               L1 + L2 * math.cos(beta))
+            theta2 = phi - delta
+            theta3 = beta
+            # And θ4 so that θ2+θ3+θ4 = T
+            theta4 = T - (theta2 + theta3)
+
+            # Quick planar forward‐check in XZ to pick the best branch
+            x_fk = (L1 * math.sin(theta2)
+                    + L2 * math.sin(theta2 + theta3)
+                    + L3 * math.sin(theta2 + theta3 + theta4))
+            z_fk = (L1 * math.cos(theta2)
+                    + L2 * math.cos(theta2 + theta3)
+                    + L3 * math.cos(theta2 + theta3 + theta4))
+            err = math.hypot(x_fk - x_local, z_fk - z_local)
+
+            if err < best_err:
+                best_err = err
+                best_solution = (theta2, theta3, theta4)
+
+    theta2, theta3, theta4 = best_solution
+    # 4) Joint 5 about Z does not affect position (translation along its own Z axis), so choose zero:
+    theta5 = 0.0
+
+    # Normalize all angles into [−π, +π]
+    def normalize(a: float) -> float:
+        while a > math.pi:
+            a -= 2*math.pi
+        while a < -math.pi:
+            a += 2*math.pi
+        return a
+
+    theta1 = normalize(theta1)
+    theta2 = normalize(theta2)
+    theta3 = normalize(theta3)
+    theta4 = normalize(theta4)
+    theta5 = normalize(theta5)
+
+    return (theta1, theta2, theta3, theta4, theta5)
+```

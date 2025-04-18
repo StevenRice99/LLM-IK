@@ -1,0 +1,78 @@
+Here’s a purely closed‐form, position‐only IK.  We leave the last two joints free (here we fix q4=q5=0), and solve q1,q2,q3 in closed‐form so that the TCP ends up at p.  (All symbols in meters or radians.)  
+
+```python
+import math
+from typing import Tuple
+
+def inverse_kinematics(p: Tuple[float, float, float]
+                      ) -> Tuple[float, float, float, float, float]:
+    """
+    Closed‐form IK for the 5‐DOF arm (position only).
+    We lock q4=q5=0 and solve q1,q2,q3 so that the TCP at:
+      T01(q1)·T12(T2)·T23(T3)·T34(T4)·T45(T5)·T5T
+    reaches p.  Here we absorb the last two links into
+    an equivalent 2–link planar problem.
+    """
+    x, y, z = p
+
+    # ——— Robot geometry from the URDF ———
+    d2 = 0.13585   # link1 → link2, +Y
+    b1 = 0.1197    # link2 → link3, −Y
+    c1 = 0.425     # link2 → link3, +Z
+    d4 = 0.39225   # link3 → link4, +Z
+    b3 = 0.093     # link4 → link5, +Y
+    d6 = 0.09465   # link5 → TCP, +Z
+
+    # lateral offset in the base‐plane after q1
+    e = d2 - b1 + b3
+
+    # radial distance in XY‐plane
+    r = math.hypot(x, y)
+
+    # M is the “planar” reach of the 2‐link (c1,d4+d6) chain
+    # after removing the side‐offset e.
+    # Must have r^2 ≥ e^2  (we assume reachable).
+    M = math.sqrt(max(0.0, r*r - e*e))
+
+    # Solve q1 so that the rotated ([M,e]) lands at (x,y)
+    # [x,y] = Rz(q1)·[ M, e ].
+    alpha = math.atan2(y, x)
+    beta  = math.atan2(e, M)
+    q1 = alpha - beta
+
+    # We now solve the 2‐link planar problem in the (M,z)‐plane:
+    #   L1 = c1
+    #   L2 = d4 + d6
+    #   M = L1·sin(q2) + L2·sin(q2+q3)
+    #   z = c1·cos(q2) + (d4+d6)·cos(q2+q3)
+    L1 = c1
+    L2 = d4 + d6
+
+    # law‐of‐cosines for q3
+    D = (M*M + z*z - L1*L1 - L2*L2) / (2.0 * L1 * L2)
+    # clamp numerical drift
+    D = max(-1.0, min(1.0, D))
+    q3 = math.acos(D)
+
+    # solve q2 via the 2‐link “arm” angle‐sum trick
+    # φ = atan2( L2·sin q3, L1 + L2·cos q3 )
+    phi = math.atan2(L2 * math.sin(q3),
+                     L1 + L2 * math.cos(q3))
+    q2 = math.atan2(z, M) - phi
+
+    # we fix the last two to zero (purely position IK)
+    q4 = 0.0
+    q5 = 0.0
+
+    return (q1, q2, q3, q4, q5)
+```
+
+Explanation:
+
+1.  Combine all “side‐ways” Y‐offsets into a single constant e = d2 − b1 + b3.  
+2.  Project the TCP into the base XY‐plane, remove the offset e, and call the remainder M.  
+3.  Compute q1 so that Rz(q1)·[M, e]ᵀ = [x, y]ᵀ.  
+4.  In the plane orthogonal to joint‐1’s axis, you now have a 2–link chain of lengths L1=c1 and L2=d4+d6 reaching the point (M,z).  Solve q2,q3 in closed‐form via the law of cosines and an atan2 “offset” formula.  
+5.  Since we don’t constrain orientation, we simply set q4=q5=0.  
+
+This is fully analytical, uses only `math` calls, and will place the TCP at `p`.

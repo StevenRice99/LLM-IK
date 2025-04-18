@@ -1,0 +1,77 @@
+Here is a purely analytical 5‑joint inverse‐kinematics routine that solves for the TCP’s position only.  We arbitrarily fix the last two joints to zero (since there are 5 unknowns but only 3 positional constraints), and solve the first three joints in closed‐form.  
+
+```python
+import math
+from typing import Tuple
+
+def inverse_kinematics(p: Tuple[float, float, float]
+                      ) -> Tuple[float, float, float, float, float]:
+    """
+    Gets the joint values needed to reach position "p".
+    We ignore orientation and set q4=q5=0.  The first three joints
+    are solved via a 2D planar two‐link (q2,q3) plus a base rotation q1.
+    :param p: The target TCP position [x, y, z].
+    :return: (q1, q2, q3, q4, q5) in radians.
+    """
+    x, y, z = p
+
+    # ---- robot geometry from the URDF ----
+    d2 = 0.13585   # link1→link2 offset along y
+    b1 = 0.1197    # link2→link3 offset along -y
+    c1 = 0.425     # link2→link3 offset along +z
+    d4 = 0.39225   # link3→link4 offset along +z
+    b3 = 0.093     # link4→link5 offset along +y
+    d6 = 0.09465   # link5→TCP offset along +z
+
+    # combine the fixed lateral offsets into one scalar e
+    # derived so that in the (x,y)‐plane:
+    #   sqrt(px^2+py^2)^2 = L2^2 + e^2
+    # with L2 ≔ c1*sin(q2) + (d4+d6)*sin(q2+q3)
+    e = d2 - b1 + b3
+
+    # radial distance in the base plane
+    r = math.hypot(x, y)
+
+    # intermediate planar reach L2
+    #   L2^2 + e^2 = r^2
+    L2_sq = r*r - e*e
+    # assume reachable → L2_sq >= 0
+    L2 = math.sqrt(max(L2_sq, 0.0))
+
+    # solve q3 from the planar two‐link cosine law
+    k1 = c1
+    k2 = d4 + d6
+    cos_q3 = (L2_sq + z*z - k1*k1 - k2*k2) / (2*k1*k2)
+    # clamp for numerical safety
+    cos_q3 = max(-1.0, min(1.0, cos_q3))
+    q3 = math.acos(cos_q3)
+
+    # solve q2 via an intermediate angle
+    #   a = k1 + k2*cos(q3),  b = k2*sin(q3)
+    #   φ = atan2(b, a),  φ2 = atan2(L2, z) - φ
+    a = k1 + k2 * cos_q3
+    b = k2 * math.sin(q3)
+    phi = math.atan2(b, a)
+    q2 = math.atan2(z, L2) - phi
+
+    # solve q1 from the rotated‐vector relation in the (x,y) plane:
+    #   [x, y]^T = Rz(q1) · [L2, e]^T
+    # → q1 = atan2(y, x) - atan2(e, L2)
+    q1 = math.atan2(y, x) - math.atan2(e, L2)
+
+    # no orientation constraint → lock q4, q5 to zero
+    q4 = 0.0
+    q5 = 0.0
+
+    return (q1, q2, q3, q4, q5)
+```
+
+Explanation of the steps:
+
+1.  We group all fixed “side‐ways” translations (those along local y) into a single offset `e`.  
+2.  We observe that in the base XY‐plane the wrist‐center projection satisfies  
+       r² = (c₁ sin q₂ + (d₄+d₆) sin(q₂+q₃))² + e².  
+3.  We call the bracketed sum L₂ and solve for `q3` via the law of cosines, then for `q2` by analytic trigonometry, and finally for `q1` by an in‐plane rotation.  
+4.  The last two joints remain free for orientation, so we simply set `q4=q5=0`.  
+
+This closed‐form solution uses only standard `math` calls and assumes the position is reachable.

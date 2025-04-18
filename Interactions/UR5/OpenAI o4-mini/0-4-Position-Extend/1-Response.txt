@@ -1,0 +1,64 @@
+Here is a closed‐form “position‐only” inverse‐kinematics implementation.  We choose to satisfy the 3D TCP position by solving joints 1–3 (elbow‐down), and simply set joints 4 and 5 to zero (no orientation constraint).  We also absorb the TCP z‐offset (0.09465 m) into the effective second link length:
+
+```python
+import numpy as np
+
+def inverse_kinematics(p: tuple[float, float, float]) -> tuple[float, float, float, float, float]:
+    """
+    Closed‐form “position‐only” inverse kinematics for the 5‑DOF arm.
+    We solve q1,q2,q3 to reach the target TCP position p=(x,y,z),
+    then set q4=q5=0 (no orientation constraint).
+    """
+    x, y, z = p
+
+    # link lengths (m)
+    L3 = 0.425             # translation along Z after joint 3
+    L4 = 0.39225           # translation along Z after joint 4
+    L_tcp = 0.09465        # TCP translation along Z in link 5
+    L2_offset = 0.13585    # Y translation after joint 1
+    L3_offset = -0.1197    # Y translation before joint 3
+    L5_offset = 0.093      # Y translation before joint 5
+
+    # effective second planar link (link4 + tcp)
+    l1 = L3
+    l2 = L4 + L_tcp
+
+    # total fixed radial offset in the base‐Z‐axis frame due to the three Y‐offsets
+    d = L2_offset + L5_offset + L3_offset
+    # radial distance from joint1 axis to the planar wrist‐center
+    S2 = x*x + y*y - d*d
+    S = np.sqrt(S2) if S2 > 0 else 0.0
+
+    # law of cosines to get the “elbow” angle q3
+    #   cos(q3) = (r^2 + z^2 - (l1^2 + l2^2)) / (2*l1*l2)
+    num = x*x + y*y + z*z - (l1*l1 + l2*l2)
+    den = 2.0 * l1 * l2
+    cos_q3 = np.clip(num / den, -1.0, 1.0)
+    q3 = np.arccos(cos_q3)
+
+    # now compute q2 by projecting the wrist‐center into the Y=0 plane
+    A = l1 + l2 * cos_q3
+    B = l2 * np.sin(q3)
+    # tan(q2) = (S*A - z*B) / (S*B + z*A)
+    q2 = np.arctan2(S*A - z*B, S*B + z*A)
+
+    # finally, q1 is just the azimuth to (x,y) minus the fixed offset angle
+    phi = np.arctan2(d, S) if S != 0 else np.pi/2
+    q1 = np.arctan2(y, x) - phi
+    # wrap into [-pi, pi]
+    q1 = (q1 + np.pi) % (2*np.pi) - np.pi
+
+    # no orientation constraint => choose q4 = q5 = 0
+    q4 = 0.0
+    q5 = 0.0
+
+    return (q1, q2, q3, q4, q5)
+```
+
+Explanation of the main steps:
+
+1.  We aggregate the three fixed Y‑offsets (link 2, link 3, link 5) into a single radial offset `d`.
+2.  We absorb the TCP’s 0.09465 m Z–offset into an extended link length `l2 = L4 + L_tcp`.
+3.  We treat joints 2–3 as a planar 2R chain in the (X,Z)–plane (after removing the radial offset `d`), solve for q3 by the law of cosines, then get q2 by a simple atan2.
+4.  Joint 1 is the azimuth around Z plus a known “lean‑out” angle φ = arctan2(d, S).
+5.  With only a position target, there remain two free DOFs, so we pick q4 = q5 = 0.

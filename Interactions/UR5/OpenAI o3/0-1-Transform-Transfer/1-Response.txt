@@ -1,0 +1,120 @@
+Here is one way to obtain a closed–form inverse–kinematics solution that also takes the desired TCP orientation into account
+
+```python
+import math
+import numpy as np
+
+
+# ──────────────────────────────────────────────────────────────
+# helpers
+# ──────────────────────────────────────────────────────────────
+def _rpy_to_matrix(r: tuple[float, float, float]) -> np.ndarray:
+    """
+    Convert roll–pitch–yaw angles (XYZ convention) to a rotation matrix.
+    """
+    rx, ry, rz = r
+    cr, sr = math.cos(rx), math.sin(rx)
+    cp, sp = math.cos(ry), math.sin(ry)
+    cz, sz = math.cos(rz), math.sin(rz)
+
+    # R = Rz * Ry * Rx   (ZYX r‑p‑y order – the one used by ROS URDF)
+    Rz = np.array([[cz, -sz, 0.0],
+                   [sz,  cz, 0.0],
+                   [0.0, 0.0, 1.0]])
+    Ry = np.array([[cp,  0.0, sp],
+                   [0.0, 1.0, 0.0],
+                   [-sp, 0.0, cp]])
+    Rx = np.array([[1.0, 0.0,  0.0],
+                   [0.0,  cr, -sr],
+                   [0.0,  sr,  cr]])
+    return Rz @ Ry @ Rx
+
+
+def _rotz(q: float) -> np.ndarray:
+    cq, sq = math.cos(q), math.sin(q)
+    return np.array([[cq, -sq, 0.0],
+                     [sq,  cq, 0.0],
+                     [0.0, 0.0, 1.0]])
+
+
+def _roty(q: float) -> np.ndarray:
+    cq, sq = math.cos(q), math.sin(q)
+    return np.array([[cq, 0.0,  sq],
+                     [0.0, 1.0, 0.0],
+                     [-sq, 0.0, cq]])
+# ──────────────────────────────────────────────────────────────
+
+
+def inverse_kinematics(
+        p: tuple[float, float, float],
+        r: tuple[float, float, float]) -> tuple[float, float]:
+    """
+    Closed‑form IK for the 2‑DoF manipulator.
+    The two joints are
+        θ1 – revolute about Z (base)
+        θ2 – revolute about Y (after an offset along +Y)
+
+    Parameters
+    ----------
+    p : (x, y, z)
+        Desired TCP position in metres, expressed in the base frame.
+    r : (roll, pitch, yaw)
+        Desired TCP orientation in radians (XYZ/URDF RPY convention).
+
+    Returns
+    -------
+    (θ1, θ2) : tuple[float, float]
+        Joint positions (radians) that realise the requested pose.
+        The solution that best matches the requested orientation
+        (if two exist) is returned.
+    """
+    # ------------------------------------------------------------------
+    # constants taken from the URDF
+    # ------------------------------------------------------------------
+    d_pre  = 0.13585            # translation along +Y before joint‑2  (m)
+    t_tcp  = np.array([0.0, -0.1197, 0.425])   # TCP offset in link‑2 frame
+    B = d_pre - (-t_tcp[1])     # 0.01615  (see derivation in analysis)
+    B = 0.01615                 # keep literal value to avoid drift
+    L = t_tcp[2]                # 0.425 (length along local +Z after joint‑2)
+
+    # ------------------------------------------------------------------
+    # position part  →  gives |cos θ2|
+    # ------------------------------------------------------------------
+    x_d, y_d, z_d = p
+    # Clamp to avoid numerical noise outside [-1, 1]
+    cos_theta2 = max(-1.0, min(1.0, z_d / L))
+    theta2_candidates = (math.acos(cos_theta2), -math.acos(cos_theta2))
+
+    # ------------------------------------------------------------------
+    # desired rotation matrix from the roll‑pitch‑yaw triple
+    # ------------------------------------------------------------------
+    R_des = _rpy_to_matrix(r)
+
+    best_sol, best_err = None, float('inf')
+
+    # ------------------------------------------------------------------
+    # try both possible signs for sin θ2
+    # ------------------------------------------------------------------
+    for theta2 in theta2_candidates:
+        sin_theta2 = math.sin(theta2)
+        A = L * sin_theta2                      # 0.425 · sin θ2
+        denom = A * A + B * B                   # never zero (link lengths)
+
+        # linear solution for θ1 from the XY components
+        C = (A * x_d + B * y_d) / denom
+        S = (-B * x_d + A * y_d) / denom
+        theta1 = math.atan2(S, C)
+
+        # ------------------------------------------------------------------
+        # orientation error for this candidate
+        # ------------------------------------------------------------------
+        R_calc = _rotz(theta1) @ _roty(theta2)
+        err = np.linalg.norm(R_des - R_calc)    # Frobenius norm
+
+        if err < best_err:
+            best_err = err
+            best_sol = (theta1, theta2)
+
+    # best_sol is always found because the target is guaranteed reachable
+    return best_sol
+```

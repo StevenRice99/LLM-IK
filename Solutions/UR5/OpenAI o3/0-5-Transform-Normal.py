@@ -1,0 +1,118 @@
+import math
+from typing import Tuple
+import numpy as np
+
+def _rotx(a: float) -> np.ndarray:
+    ca, sa = (math.cos(a), math.sin(a))
+    return np.array([[1, 0, 0], [0, ca, -sa], [0, sa, ca]])
+
+def _roty(a: float) -> np.ndarray:
+    ca, sa = (math.cos(a), math.sin(a))
+    return np.array([[ca, 0, sa], [0, 1, 0], [-sa, 0, ca]])
+
+def _rotz(a: float) -> np.ndarray:
+    ca, sa = (math.cos(a), math.sin(a))
+    return np.array([[ca, -sa, 0], [sa, ca, 0], [0, 0, 1]])
+
+def _hat(v: np.ndarray) -> np.ndarray:
+    """Skew‑symmetric matrix of a 3‑vector."""
+    x, y, z = v
+    return np.array([[0, -z, y], [z, 0, -x], [-y, x, 0]])
+
+def _adjoint(R: np.ndarray, p: np.ndarray) -> np.ndarray:
+    """Adjoint matrix of a homogeneous transform with rotation R, position p."""
+    adj = np.zeros((6, 6))
+    adj[:3, :3] = R
+    adj[3:, 3:] = R
+    adj[3:, :3] = _hat(p) @ R
+    return adj
+_S_OMEGAS = np.array([[0.0, 0.0, 1.0], [0.0, 1.0, 0.0], [0.0, 1.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0], [0.0, 1.0, 0.0]])
+_QS = np.array([[0.0, 0.0, 0.0], [0.0, 0.13585, 0.0], [0.0, 0.01615, 0.425], [0.0, 0.01615, 0.81725], [0.0, 0.10915, 0.81725], [0.0, 0.10915, 0.9119]])
+_S = np.zeros((6, 6))
+_S[:, :3] = _S_OMEGAS
+_S[:, 3:] = -np.cross(_S_OMEGAS, _QS)
+_M = np.eye(4)
+_M[:3, 3] = np.array([0.0, 0.19145, 0.9119])
+_M[:3, :3] = _rotz(math.pi / 2.0)
+
+def _exp6(screw: np.ndarray, theta: float) -> np.ndarray:
+    """
+    6‑D exponential map: e^[screw]*theta  -> 4×4 homogeneous.
+    screw is a 6‑vector (omega, v).
+    """
+    omega = screw[:3]
+    v = screw[3:]
+    omega_norm = np.linalg.norm(omega)
+    if omega_norm < 1e-10:
+        R = np.eye(3)
+        p = v * theta
+    else:
+        omega_hat = _hat(omega)
+        R = np.eye(3) + math.sin(theta) * omega_hat + (1.0 - math.cos(theta)) * (omega_hat @ omega_hat)
+        p = (np.eye(3) * theta + (1.0 - math.cos(theta)) * omega_hat + (theta - math.sin(theta)) * (omega_hat @ omega_hat)) @ v
+    T = np.eye(4)
+    T[:3, :3] = R
+    T[:3, 3] = p
+    return T
+
+def _fk(q: np.ndarray) -> np.ndarray:
+    """Homogeneous transform from base to TCP for joint vector q."""
+    T = np.eye(4)
+    for i in range(6):
+        T = T @ _exp6(_S[i], q[i])
+    return T @ _M
+
+def _space_jacobian(q: np.ndarray) -> np.ndarray:
+    T = np.eye(4)
+    J = np.zeros((6, 6))
+    for i in range(6):
+        J[:, i] = _adjoint(T[:3, :3], T[:3, 3]) @ _S[i]
+        T = T @ _exp6(_S[i], q[i])
+    return J
+
+def _pose_error(T_cur: np.ndarray, T_goal: np.ndarray) -> np.ndarray:
+    R_c, p_c = (T_cur[:3, :3], T_cur[:3, 3])
+    R_g, p_g = (T_goal[:3, :3], T_goal[:3, 3])
+    R_err = R_c.T @ R_g
+    cos_ang = max(-1.0, min(1.0, (np.trace(R_err) - 1.0) * 0.5))
+    angle = math.acos(cos_ang)
+    if angle < 1e-09:
+        omega = np.zeros(3)
+    else:
+        omega = angle / (2.0 * math.sin(angle)) * np.array([R_err[2, 1] - R_err[1, 2], R_err[0, 2] - R_err[2, 0], R_err[1, 0] - R_err[0, 1]])
+    v = p_g - p_c
+    return np.hstack((omega, v))
+
+def inverse_kinematics(p: Tuple[float, float, float], r: Tuple[float, float, float]) -> Tuple[float, float, float, float, float, float]:
+    """
+    Deterministic, fast inverse kinematics (max 25 Newton steps,
+    closed‑form Jacobian).
+    Parameters
+    ----------
+    p : target TCP position (x, y, z) in metres.
+    r : target TCP orientation as intrinsic XYZ roll‑pitch‑yaw in radians.
+    Returns
+    -------
+    Tuple of six joint angles (radians), wrapped to (‑pi, pi].
+    """
+    R_goal = _rotx(r[0]) @ _roty(r[1]) @ _rotz(r[2])
+    T_goal = np.eye(4)
+    T_goal[:3, :3] = R_goal
+    T_goal[:3, 3] = np.asarray(p, dtype=float)
+    q = np.zeros(6)
+    q[0] = math.atan2(p[1], p[0])
+    damping = 0.01
+    for _ in range(25):
+        T_cur = _fk(q)
+        err = _pose_error(T_cur, T_goal)
+        if np.linalg.norm(err) < 1e-06:
+            break
+        J = _space_jacobian(q)
+        JTJ = J.T @ J + damping ** 2 * np.eye(6)
+        dq = np.linalg.solve(JTJ, J.T @ err)
+        step_norm = np.linalg.norm(dq)
+        if step_norm > 0.4:
+            dq *= 0.4 / step_norm
+        q += dq
+    q = (q + math.pi) % (2.0 * math.pi) - math.pi
+    return tuple((float(a) for a in q))

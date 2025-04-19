@@ -1,0 +1,151 @@
+def inverse_kinematics(p: tuple[float, float, float], r: tuple[float, float, float]) -> tuple[float, float, float, float, float, float]:
+    """
+    Gets the joint values needed to reach position "p" and orientation "r"
+    in closed form (symbolic) for the specified 6-DoF manipulator.
+    
+    Given:
+      p = (px, py, pz) is the desired TCP position,
+      r = (rx, ry, rz) is the desired TCP orientation in RPY (roll, pitch, yaw).
+
+    Returns:
+      (t1, t2, t3, t4, t5, t6) in radians
+    """
+    import sympy
+    from sympy import symbols, sin, cos, Matrix, pi, atan2, sqrt
+
+    # -- Define symbolic variables for each joint angle.
+    t1, t2, t3, t4, t5, t6 = symbols('t1 t2 t3 t4 t5 t6', real=True)
+
+    # -- Shortcuts to transform definitions.
+    def Tz(theta):
+        """Rotation about Z by theta."""
+        return Matrix([
+            [ cos(theta), -sin(theta),      0, 0],
+            [ sin(theta),  cos(theta),      0, 0],
+            [          0,           0,      1, 0],
+            [          0,           0,      0, 1]
+        ])
+    def Ty(theta):
+        """Rotation about Y by theta."""
+        return Matrix([
+            [ cos(theta), 0, sin(theta), 0],
+            [          0, 1,          0, 0],
+            [-sin(theta), 0, cos(theta), 0],
+            [          0, 0,          0, 1]
+        ])
+    def Tx(theta):
+        """Rotation about X by theta."""
+        return Matrix([
+            [1,          0,           0, 0],
+            [0, cos(theta), -sin(theta), 0],
+            [0, sin(theta),  cos(theta), 0],
+            [0,          0,           0, 1]
+        ])
+    def Trans(x, y, z):
+        """Pure translation along x, y, z."""
+        return Matrix([
+            [1, 0, 0, x],
+            [0, 1, 0, y],
+            [0, 0, 1, z],
+            [0, 0, 0, 1]
+        ])
+
+    # -- Build up the forward kinematics transform symbolically
+    #    (matches DETAILS & the provided forward kinematics).
+    T_base = Matrix.eye(4)
+    # 1) Revolute 1 about Z, no offset
+    T_base *= Tz(t1)
+    # 2) Translate and rotate about Y
+    T_base *= Trans(0, 0.13585, 0) * Ty(t2)
+    # 3) Translate and rotate about Y
+    T_base *= Trans(0, -0.1197, 0.425) * Ty(t3)
+    # 4) Translate and rotate about Y
+    T_base *= Trans(0, 0, 0.39225) * Ty(t4)
+    # 5) Translate and rotate about Z
+    T_base *= Trans(0, 0.093, 0) * Tz(t5)
+    # 6) Translate and rotate about Y
+    T_base *= Trans(0, 0, 0.09465) * Ty(t6)
+    # TCP offset (includes the final RPY offset of [0, 0, pi/2])
+    # The URDF states the TCP has an extra translation [0, 0.0823, 0]
+    # and orientation [0,0,1.570796325]. We incorporate that:
+    #   effectively T_tcp = Trans(0,0,0) * Rz(1.5708) preceded by
+    #   a translation of [0, 0.0823, 0].  We can place that as a final step:
+    #   T_final = T_base * Trans(0,0,0.0823) * Rz(pi/2).
+    # 
+    # However, the orientation "r" we are given is the final RPY for the TCP
+    # in the world frame. To solve for t1..t6, we want T_base == T_desired.
+    #
+    # It's easiest to incorporate this last link exactly as the forward
+    # code did: T_base * Trans(0,0.0823,0) * Rz(pi/2).
+    # Then T_base is the transform base->TCP.
+    T_base *= Trans(0, 0.0823, 0)
+    # Now we “manually” multiply by the final roll=0, pitch=0, yaw=90 deg:
+    # but in the forward code it is effectively part of the link orientation.
+    # We'll represent it as T_base_final = T_base * Rz(pi/2).
+    # So that T_base_final has the same orientation described in the table:
+    # [0,0,1.5708]. Let's keep that separate to match the final "r" exactly
+    # so that T_base is truly the transform up to the "TCP" link in the URDF.
+    # Then the final rotation from the URDF table is Rz(pi/2).
+    # We'll apply that below in "T_fk".
+
+    # -- Now define T_fk(t1..t6) = T_base * Rz(pi/2)
+    T_fk = T_base * Tz(pi/2)
+
+    # -- Next, define the desired transform T_des from the target p, r:
+    #    We interpret r as RPY = (roll, pitch, yaw).
+    rx, ry, rz = r
+    # Construct orientation from roll-pitch-yaw (intrinsic rotations X-Y-Z)
+    # i.e. final_R = Rz(rz)*Ry(ry)*Rx(rx) if we read r as [roll, pitch, yaw].
+    # Convention can vary, but a typical RPY is: R = Rz(yaw)*Ry(pitch)*Rx(roll).
+    # We'll assume r = (roll, pitch, yaw) => T_des = Trans(px, py, pz)*Rz(rz)*Ry(ry)*Rx(rx).
+    # The problem statement says "r is the orientation to reach in radians in RPY form"
+    # Typically "RPY" means (Rx(roll)*Ry(pitch)*Rz(yaw)). However, some definitions
+    # do yaw-pitch-roll. The URDF is not fully explicit. The most common approach:
+    #   R = Rz(rz) * Ry(ry) * Rx(rx)
+    # We'll adopt yaw=rz, pitch=ry, roll=rx in extrinsic order. 
+    # You may adjust if your convention is different. 
+    T_des = Trans(p[0], p[1], p[2]) \
+            * Tz(rz) \
+            * Ty(ry) \
+            * Tx(rx)
+
+    # -- We want T_fk(t1..t6) = T_des.
+    #    That is 12 equations (the 3x3 rotation + 3 translation)
+    #    So we can equate each entry in the 4x4 except the bottom row that is always [0,0,0,1].
+    eqs = []
+    for i in range(3):
+        for j in range(4):
+            eqs.append(sympy.Eq(T_fk[i, j], T_des[i, j]))
+
+    # -- Solve the system for (t1, t2, t3, t4, t5, t6).
+    #    A 6-DOF manipulator can have multiple solutions; sympy returns them.
+    #    We'll pick one valid solution (the manipulator geometry does not restrict us here
+    #    besides the typical ±2π range).
+    sol = sympy.solve(eqs, [t1, t2, t3, t4, t5, t6], dict=True)
+
+    if not sol:
+        # The problem states all targets will be reachable, so this should not happen.
+        # We'll just return zeros if no solution found.
+        return (0.0, 0.0, 0.0, 0.0, 0.0, 0.0)
+
+    # Pick the first solution in the list:
+    chosen = sol[0]
+
+    # Convert symbolic expressions to float and wrap angles to [-pi, pi]
+    def wrap_angle(val):
+        """Wrap a float angle to [-pi, pi]."""
+        w = float(val) % (2.0*3.141592653589793)
+        if w > 3.141592653589793:
+            w -= 2.0*3.141592653589793
+        return w
+
+    answer = (
+        wrap_angle(chosen[t1]),
+        wrap_angle(chosen[t2]),
+        wrap_angle(chosen[t3]),
+        wrap_angle(chosen[t4]),
+        wrap_angle(chosen[t5]),
+        wrap_angle(chosen[t6]),
+    )
+
+    return answer

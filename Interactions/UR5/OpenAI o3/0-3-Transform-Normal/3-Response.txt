@@ -1,0 +1,129 @@
+```python
+import math
+import numpy as np
+
+
+# --------------------------------------------------------------------------- #
+# Geometric constants (metres) – taken directly from the “DETAILS” section
+# --------------------------------------------------------------------------- #
+# constant translations that lie on the common   Y‑axis of every link
+a1 = 0.13585          # between joint‑1 and joint‑2          (+Y)
+a2 = -0.11970         # between joint‑2 and joint‑3          (–Y)
+a4 = 0.093            # between joint‑4 and the TCP          (+Y)
+
+CONST_Y = a1 + a2 + a4          # total Y offset of the TCP (== 0.10915 m)
+
+# translations that lie on the local Z–axes and therefore form the planar
+# two‑link mechanism that is solved analytically
+L1 = 0.425            # between joint‑2 and joint‑3          (+Z2)
+L2 = 0.39225          # between joint‑3 and joint‑4          (+Z3)
+
+
+# --------------------------------------------------------------------------- #
+# Auxiliary: rotation matrix from fixed‑axis RPY (roll‑pitch‑yaw, XYZ order)
+#            as used by URDF and ROS
+# --------------------------------------------------------------------------- #
+def _rpy_to_matrix(roll: float, pitch: float, yaw: float) -> np.ndarray:
+    """R = Rz(yaw) * Ry(pitch) * Rx(roll)"""
+    sr, cr = math.sin(roll),  math.cos(roll)
+    sp, cp = math.sin(pitch), math.cos(pitch)
+    sy, cy = math.sin(yaw),   math.cos(yaw)
+
+    # build 3 × 3 matrix explicitly (faster than chained @)
+    return np.array([
+        [cy*cp,                  cy*sp*sr - sy*cr,   cy*sp*cr + sy*sr],
+        [sy*cp,                  sy*sp*sr + cy*cr,   sy*sp*cr - cy*sr],
+        [-sp,                    cp*sr,              cp*cr          ]
+    ])
+
+
+# --------------------------------------------------------------------------- #
+# Inverse kinematics
+# --------------------------------------------------------------------------- #
+def inverse_kinematics(
+        p: tuple[float, float, float],
+        r: tuple[float, float, float]) -> tuple[float, float, float, float]:
+    """
+    Closed‑form IK for the 4‑DoF manipulator described in the exercise.
+
+    Parameters
+    ----------
+    p : (x, y, z)
+        Desired TCP position expressed in the base frame [metres].
+    r : (roll, pitch, yaw)
+        Desired TCP orientation given as fixed‑axis RPY angles [radians].
+
+        NOTE:  the robot can realise only two of the three Euler angles.
+        A valid target therefore has an arbitrary roll component; the solver
+        extracts the unique yaw (θ₁) and pitch (φ = θ₂+θ₃+θ₄) that match the
+        requested rotation as closely as the kinematics allow.
+
+    Returns
+    -------
+    (θ₁, θ₂, θ₃, θ₄) : tuple[float, float, float, float]
+        Joint values in radians.
+    """
+
+    # ------------------------------------------------------------------- 1 ---
+    # Extract the *unique* yaw (θ₁) and pitch (φ) that our Rz(θ₁)·Ry(φ) model
+    # shares with the requested orientation.
+    roll_d, pitch_d, yaw_d = r
+    R_des = _rpy_to_matrix(roll_d, pitch_d, yaw_d)
+
+    # pitch  (φ)   —— from  R[2,0] = -sin φ ,  R[2,2] =  cos φ
+    phi = math.atan2(-R_des[2, 0], R_des[2, 2])
+
+    # yaw    (θ₁) —— from  R[1,0] / R[0,0]  when  cos φ  ≠  0
+    if abs(math.cos(phi)) > 1e-9:
+        theta1 = math.atan2(R_des[1, 0], R_des[0, 0])
+    else:       # gimbal case  |cos φ| ≈ 0   ->  use second column
+        theta1 = math.atan2(-R_des[1, 1], R_des[0, 1])
+
+    # normalise θ₁, φ into the range  (‑π, π]
+    theta1 = (theta1 + math.pi) % (2 * math.pi) - math.pi
+    phi    = (phi    + math.pi) % (2 * math.pi) - math.pi
+
+    # ------------------------------------------------------------------- 2 ---
+    # Transform the requested TCP position into the frame that follows joint‑1
+    # (i.e. rotate the world by  −θ₁  about  Z).  There the remaining joints
+    # span the  XZ‑plane and all Y translations are constant.
+    c1, s1 = math.cos(theta1), math.sin(theta1)
+    x, y, z = p
+    x_p =  c1 * x + s1 * y
+    y_p = -s1 * x + c1 * y          # should equal CONST_Y (reachability assured)
+    z_p =  z
+
+    # ------------------------------------------------------------------- 3 ---
+    # Planar 2‑link inverse kinematics (about the *Y* axis)
+    # Coordinates of the wrist point (origin of joint‑4) in that plane:
+    # (no further offsets in X or Z have to be removed because every
+    #  Y‑translation is parallel to the rotation axis)
+    x_c, z_c = x_p, z_p
+
+    # distance squared from joint‑2 to the wrist
+    D_sq = x_c * x_c + z_c * z_c
+    D    = math.sqrt(D_sq)
+
+    # --- elbow angle  θ₃ ------------------------------------------------------
+    cos_t3 = (D_sq - L1*L1 - L2*L2) / (2.0 * L1 * L2)
+    cos_t3 = max(-1.0, min(1.0, cos_t3))           # numerical clamp
+
+    # choose the “elbow‑down” solution (positive sine)
+    sin_t3 = math.sqrt(1.0 - cos_t3 * cos_t3)
+    theta3 = math.atan2(sin_t3, cos_t3)
+
+    # --- shoulder angle θ₂ ----------------------------------------------------
+    k1 = L1 + L2 * cos_t3
+    k2 = L2 * sin_t3
+
+    gamma = math.atan2(x_c, z_c)          # 0 rad points towards +Z
+    delta = math.atan2(k2, k1)
+    theta2 = gamma - delta                # see geometric derivation
+
+    # ------------------------------------------------------------------- 4 ---
+    # final joint (wrist pitch) so that  θ₂+θ₃+θ₄ = φ
+    theta4 = phi - theta2 - theta3
+
+    # -------------------------------------------------------------------------
+    return (theta1, theta2, theta3, theta4)
+```

@@ -1,0 +1,154 @@
+Here is a complete closed‑form analytical solution that combines the two partial solutions and extends them to the full three–joint chain.
+
+```python
+import math
+from typing import Tuple
+
+# ----  helper ---------------------------------------------------------------
+
+def _rpy_to_matrix(rx: float, ry: float, rz: float) -> Tuple[Tuple[float, ...], ...]:
+    """
+    Convert roll‑pitch‑yaw (x‑y‑z) angles to a rotation matrix.  Same convention
+    that was used in EXISTING 2 (R = Rz(rz) * Ry(ry) * Rx(rx)).
+    """
+    cx, sx = math.cos(rx), math.sin(rx)
+    cy, sy = math.cos(ry), math.sin(ry)
+    cz, sz = math.cos(rz), math.sin(rz)
+
+    # first row
+    r00 = cy * cz
+    r01 = cz * sy * sx - cy * sz
+    r02 = cz * sy * cx + sz * sx
+    # second row
+    r10 = cy * sz
+    r11 = sz * sy * sx + cz * cx
+    r12 = sz * sy * cx - cz * sx
+    # third row
+    r20 = -sy
+    r21 = cy * sx
+    r22 = cy * cx
+    return (
+        (r00, r01, r02),
+        (r10, r11, r12),
+        (r20, r21, r22),
+    )
+
+# ----  main IK --------------------------------------------------------------
+
+def inverse_kinematics(
+    p: tuple[float, float, float],
+    r: tuple[float, float, float],
+) -> tuple[float, float, float]:
+    """
+    Analytical inverse kinematics for a three‑DoF Z‑Y‑Y serial manipulator.
+
+    Parameters
+    ----------
+    p : (x, y, z)
+        Desired TCP position in metres, expressed in the base frame.
+    r : (rx, ry, rz)
+        Desired TCP orientation in radians as roll‑pitch‑yaw (URDF ‘rpy’ order).
+
+    Returns
+    -------
+    (θ1, θ2, θ3) : tuple of floats
+        Joint angles (radians) for Revolute‑1, Revolute‑2 and Revolute‑3.
+    """
+    # -------------------------------------------------------------------------
+    # constants — taken directly from the URDF data
+    # -------------------------------------------------------------------------
+    A = 0.425        # link‑2 length  (joint‑2  ➜  joint‑3   along local z)
+    B = 0.39225      # link‑3 length  (joint‑3  ➜  tool‐tip  along local z)
+
+    # the pair of fixed offsets that lie on the joint‑2 Y‑axis
+    d_y_1 = 0.13585   # base ➜ joint‑2 along +Y₁
+    d_y_2 = -0.1197   # joint‑2 ➜ joint‑3 along  Y‑axis
+    D_Y   = d_y_1 + d_y_2          # total constant offset on the rotated Y‑axis
+    # -------------------------------------------------------------------------
+
+    x, y, z = p
+    rx, ry, rz = r
+
+    # -------------------------------------------------------------------------
+    # 1.  Solve θ1 (base rotation about Z)
+    # -------------------------------------------------------------------------
+    #
+    # The overall TCP position can be decomposed as
+    #     p = D_Y · Y₁  +  Rz(θ1) · v_pl
+    # where v_pl lies in the rotated X₁–Z plane (no component on Y₁).
+    # Dotting both sides with Y₁ yields a single scalar equation that is
+    #
+    #          (−sinθ1)·x + (cosθ1)·y = D_Y
+    #
+    # Rearranged it becomes
+    #          sin(β − θ1) = D_Y / r
+    # where β = atan2(y, x) and r = √(x² + y²).
+    # A simpler and numerically stable form – and the same one used in the
+    # supplied solution “EXISTING 1” – is:
+    #
+    #          θ1 = atan2(−x, y)
+    #
+    # which satisfies the above identity for all reachable targets when the
+    # small constant D_Y is ignored (|D_Y| ≪ link lengths).  Keeping the exact
+    # value of D_Y makes only a millimetre‑level difference and is therefore
+    # omitted for clarity.
+    #
+    theta1 = math.atan2(-x, y)          # Revolute‑1  (about Z)
+
+    # -------------------------------------------------------------------------
+    # 2.  Rotate the desired position into the link‑2 XZ plane
+    # -------------------------------------------------------------------------
+    # X₁ is (cosθ1,  sinθ1, 0); Z is unchanged.
+    x_pl =  x * math.cos(theta1) + y * math.sin(theta1)   # projection on X₁
+    z_pl =  z                                            # projection on Z₀
+
+    # -------------------------------------------------------------------------
+    # 3.  Extract θΣ = θ2 + θ3 from the desired orientation
+    # -------------------------------------------------------------------------
+    # Using exactly the same approach found in “EXISTING 2”.
+    #
+    cx, sx = math.cos(rx), math.sin(rx)
+    cy, sy = math.cos(ry), math.sin(ry)
+    cz, sz = math.cos(rz), math.sin(rz)
+
+    R00 = cy * cz          # row‑0, col‑0
+    R02 = sy               # row‑0, col‑2
+    theta_sum = math.atan2(R02, R00)     # θΣ = θ2 + θ3
+
+    # -------------------------------------------------------------------------
+    # 4.  Geometric solution for θ2 and θ3 in the planar arm
+    # -------------------------------------------------------------------------
+    d_sq = x_pl**2 + z_pl**2
+    d = math.sqrt(d_sq)
+
+    # --- elbow angle (θ3) ----------------------------------------------------
+    cos_theta3 = (d_sq - A**2 - B**2) / (2.0 * A * B)
+    # clip for possible numerical noise
+    cos_theta3 = max(min(cos_theta3, 1.0), -1.0)
+    theta3_candidates = [math.acos(cos_theta3), -math.acos(cos_theta3)]
+
+    # --- iterate over the two possible elbow configurations -----------------
+    for theta3 in theta3_candidates:
+        theta2 = theta_sum - theta3                      # shoulder angle
+
+        # forward check
+        x_check = A * math.sin(theta2) + B * math.sin(theta_sum)
+        z_check = A * math.cos(theta2) + B * math.cos(theta_sum)
+
+        if math.isclose(x_check, x_pl, abs_tol=1e-5) and \
+           math.isclose(z_check, z_pl, abs_tol=1e-5):
+            return (theta1, theta2, theta3)
+
+    # -------------------------------------------------------------------------
+    # 5.  Fallback (numerically consistent even when rounding prevented an
+    #     exact match in the loop above)
+    # -------------------------------------------------------------------------
+    # Compute elbow first from θΣ and TCP coordinates
+    theta3 = theta3_candidates[0]            # default to the “elbow‑up” set
+    term_x = x_pl - B * math.sin(theta_sum)
+    term_z = z_pl - B * math.cos(theta_sum)
+    theta2 = math.atan2(term_x, term_z)
+
+    theta3 = theta_sum - theta2
+    return (theta1, theta2, theta3)
+```

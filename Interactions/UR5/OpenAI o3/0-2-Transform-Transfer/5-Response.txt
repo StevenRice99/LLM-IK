@@ -1,0 +1,177 @@
+```python
+import math
+from typing import Tuple, List
+
+
+# ---------------------------------------------------------------------
+# helpers
+# ---------------------------------------------------------------------
+def _rotz(t: float) -> Tuple[Tuple[float, float, float],   # 3 × 3 rotation matrix
+                             Tuple[float, float, float],
+                             Tuple[float, float, float]]:
+    ct, st = math.cos(t), math.sin(t)
+    return ((ct, -st, 0.0),
+            (st,  ct, 0.0),
+            (0.0, 0.0, 1.0))
+
+
+def _roty(t: float) -> Tuple[Tuple[float, float, float],
+                             Tuple[float, float, float],
+                             Tuple[float, float, float]]:
+    ct, st = math.cos(t), math.sin(t)
+    return (( ct, 0.0, st),
+            (0.0, 1.0, 0.0),
+            (-st, 0.0, ct))
+
+
+def _mat_mul(a, b):                                    # 3 × 3 · 3 × 3
+    return tuple(tuple(sum(a[i][k] * b[k][j] for k in range(3))
+                       for j in range(3))
+                 for i in range(3))
+
+
+def _trace(m) -> float:
+    return m[0][0] + m[1][1] + m[2][2]
+
+
+def _rotation_error(a, b) -> float:                     # angle between two R
+    """
+    geodesic distance (angle, 0 ≤ err ≤ π)
+    """
+    c = _mat_mul(tuple(zip(*a)), b)                     # c = aᵀ b
+    val = (_trace(c) - 1.0) * 0.5
+    val = max(min(val, 1.0), -1.0)                      # numeric safety
+    return math.acos(val)
+
+
+def _wrap(a: float) -> float:
+    """
+    wrap to (‑π, π]
+    """
+    while a <= -math.pi:
+        a += 2.0 * math.pi
+    while a > math.pi:
+        a -= 2.0 * math.pi
+    return a
+
+
+# ---------------------------------------------------------------------
+# core analytic geometry (position)
+# ---------------------------------------------------------------------
+def _solve_position(x: float, y: float, z: float) -> List[Tuple[float, float, float]]:
+    """
+    Return *all* (θ1, θ2, θ3) sets that solve the POSITION of the TCP.
+    Two independent binary decisions exist:
+         – elbow‑up / elbow‑down    (sign of θ3)
+         – mirrored solution        (sign of ‘A’ in the derivation)
+    so at most four distinct sets are returned.
+    """
+    # geometric constants extracted from the URDF
+    k = 0.01615                     # in‑plane Y‑offset
+    a2 = 0.425                      # link‑2 length  (projected)
+    a3 = 0.39225                    # link‑3 length
+    k_sq = k * k
+
+    # ---------- θ3 from law of cosines --------------------------------
+    num = x * x + y * y + z * z - (a2 * a2 + a3 * a3 + k_sq)
+    den = 2.0 * a2 * a3
+    c3 = num / den
+    c3 = max(min(c3, 1.0), -1.0)    # clamp for safety
+
+    theta3_roots = [math.acos(c3), -math.acos(c3)]      # ± acos
+
+    # ---------- all remaining combinations ----------------------------
+    solutions: List[Tuple[float, float, float]] = []
+
+    for th3 in theta3_roots:
+        C = a2 + a3 * math.cos(th3)
+        D = a3 * math.sin(th3)
+
+        A_sq = x * x + y * y - k_sq
+        if A_sq < 0.0:                             # numerical fringe – treat as 0
+            A_sq = 0.0
+        A_abs = math.sqrt(A_sq)
+
+        for sign in (+1.0, -1.0):                 # mirror branch  (A ↔ −A)
+            A = sign * A_abs
+
+            denom = C * C + D * D
+            sin_t2 = (C * A - D * z) / denom
+            cos_t2 = (C * z + D * A) / denom
+            th2 = math.atan2(sin_t2, cos_t2)
+
+            # θ1
+            if x == 0.0 and y == 0.0:
+                th1 = 0.0
+            else:
+                cos_t1_num = A * x + k * y
+                sin_t1_num = A * y - k * x
+                th1 = math.atan2(sin_t1_num, cos_t1_num)
+
+            solutions.append((_wrap(th1), _wrap(th2), _wrap(th3)))
+
+    return solutions
+
+
+# ---------------------------------------------------------------------
+# public API
+# ---------------------------------------------------------------------
+def inverse_kinematics(
+    p: Tuple[float, float, float],
+    r: Tuple[float, float, float],
+) -> Tuple[float, float, float]:
+    """
+    Closed‑form inverse kinematics for the 3‑DoF serial chain
+
+          Revolute‑Z  →  Revolute‑Y  →  Revolute‑Y  →  TCP
+
+    Parameters
+    ----------
+    p : (x, y, z) – metres
+        Desired TCP position relative to the base frame.
+    r : (roll, pitch, yaw) – radians
+        Desired TCP orientation expressed as fixed‑axis XYZ (roll‑pitch‑yaw).
+
+    Returns
+    -------
+    (θ1, θ2, θ3) : all in radians
+        Joint values (wrapped to (‑π, π]) that realise the requested pose.
+    """
+    x, y, z = p
+    roll_d, pitch_d, yaw_d = r
+
+    # desired rotation matrix
+    Rz_d = _rotz(yaw_d)
+    Ry_d = _roty(pitch_d)
+    Rx_d = _roty(0.0)   # dummy placeholder
+    Rx_d = ((1.0, 0.0, 0.0),
+            (0.0,  math.cos(roll_d), -math.sin(roll_d)),
+            (0.0,  math.sin(roll_d),  math.cos(roll_d)))
+    R_des = _mat_mul(_mat_mul(Rz_d, Ry_d), Rx_d)
+
+    # -----------------------------------------------------------------
+    # enumerate all analytic position solutions, keep the one whose
+    # orientation matches best (minimises geodesic distance on SO(3))
+    # -----------------------------------------------------------------
+    best_set = None
+    best_err = float("inf")
+
+    for th1, th2, th3 in _solve_position(x, y, z):
+        # orientation produced by this joint triple
+        R = _mat_mul(_rotz(th1), _roty(th2 + th3))   # because both Y‑rotations
+                                                     # share the same physical axis
+        err = _rotation_error(R, R_des)
+
+        if err < best_err:
+            best_err = err
+            best_set = (th1, th2, th3)
+
+            # an exact match (very small numerical residue) – we can quit early
+            if err < 1e-10:
+                break
+
+    # the problem statement guarantees that at least one solution exists
+    assert best_set is not None, "IK solver – no feasible solution found."
+
+    return best_set
+```

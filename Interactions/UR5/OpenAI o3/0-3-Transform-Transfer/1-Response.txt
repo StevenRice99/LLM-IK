@@ -1,0 +1,107 @@
+```python
+import numpy as np
+
+# ---------------------------------------------------------------------
+# Helper :  roll / pitch / yaw  (URDF convention  :  R = Rz(yaw) Ry(p) Rx(r) )
+# ---------------------------------------------------------------------
+def rpy_to_matrix(roll: float, pitch: float, yaw: float) -> np.ndarray:
+    """Converts URDF style r‑p‑y angles to a 3×3 rotation matrix."""
+    sr, cr = np.sin(roll),  np.cos(roll)
+    sp, cp = np.sin(pitch), np.cos(pitch)
+    sy, cy = np.sin(yaw),   np.cos(yaw)
+
+    Rz = np.array([[cy, -sy, 0.0],
+                   [sy,  cy, 0.0],
+                   [0.0, 0.0, 1.0]])
+
+    Ry = np.array([[cp, 0.0,  sp],
+                   [0.0, 1.0, 0.0],
+                   [-sp, 0.0,  cp]])
+
+    Rx = np.array([[1.0, 0.0, 0.0],
+                   [0.0,  cr, -sr],
+                   [0.0,  sr,  cr]])
+    return Rz @ Ry @ Rx
+
+
+# ---------------------------------------------------------------------
+# Main inverse kinematics routine
+# ---------------------------------------------------------------------
+def inverse_kinematics(p: tuple[float, float, float],
+                       r: tuple[float, float, float]) -> tuple[float, float, float, float]:
+    """
+    Analytical inverse kinematics for the 4‑D.O.F. manipulator described in the task.
+    Parameters
+    ----------
+    p : (x, y, z)
+        Desired TCP position expressed in the base frame [metres].
+    r : (roll, pitch, yaw)
+        Desired TCP orientation given as URDF‑style fixed‑axis RPY angles [rad].
+        (yaw about Z, pitch about Y, roll about X)
+    Returns
+    -------
+    (q1, q2, q3, q4) : tuple of float
+        Joint values in radians, wrapped to the interval (‑π , π].
+    """
+
+    # -------------------------------------------------------------
+    # 1.  Position sub‑problem  →  q2 and q3   (and provisional q1)
+    # -------------------------------------------------------------
+    x, y, z = p
+
+    # Joint‑3 angle from a cosine law
+    #    ||p||² = a² + b² + d² + 2ab cos(q3)
+    #    a = 0.425      (link 3)
+    #    b = 0.39225    (link 4)
+    #    d = 0.10915    (fixed in‑plane offset originating from links 2 & 3)
+    num = x * x + y * y + z * z - 0.346395     # 0.346395 = a² + b² + d²
+    den = 0.3341625                            # 0.3341625 ≈ 2ab
+    cos_q3 = np.clip(num / den, -1.0, 1.0)
+    q3 = np.arccos(cos_q3)
+
+    # Auxiliary lengths used for q2
+    a = 0.425
+    b = 0.39225
+    A = a + b * np.cos(q3)
+    B = b * np.sin(q3)
+
+    d = 0.10915
+    S_sq = x * x + y * y - d * d
+    S = np.sqrt(S_sq) if S_sq > 0.0 else 0.0
+    C = z
+
+    # Angle of the virtual 2‑link arm in the sagittal plane
+    q2 = np.arctan2(S * A - C * B, S * B + C * A)
+
+    # Base rotation that places the arm’s sagittal plane through the target
+    phi = np.arctan2(d, S) if S != 0.0 else np.pi / 2.0
+    q1 = np.arctan2(y, x) - phi
+
+    # -------------------------------------------------------------
+    # 2.  Orientation sub‑problem  →  q4
+    # -------------------------------------------------------------
+    # Desired rotation matrix
+    R_d = rpy_to_matrix(*r)
+
+    # For this kinematic chain the overall orientation is
+    #       R = Rz(q1) · Ry(q2 + q3 + q4)
+    #
+    # so the total rotation about the Y axis that must be realised is
+    #       θ = q2 + q3 + q4
+    #
+    # Extract θ directly from the desired matrix (independent of q1):
+    sin_theta = -R_d[2, 0]
+    cos_theta =  R_d[2, 2]
+    theta = np.arctan2(sin_theta, cos_theta)
+
+    # Remaining degree of freedom delivers q4
+    q4 = theta - q2 - q3
+
+    # -------------------------------------------------------------
+    # 3.  Wrap all angles to (‑π , π] and return
+    # -------------------------------------------------------------
+    def wrap(angle: float) -> float:
+        return (angle + np.pi) % (2.0 * np.pi) - np.pi
+
+    return tuple(map(wrap, (q1, q2, q3, q4)))
+```

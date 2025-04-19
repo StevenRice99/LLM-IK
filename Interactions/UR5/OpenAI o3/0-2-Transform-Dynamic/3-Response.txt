@@ -1,0 +1,131 @@
+```python
+import math
+from typing import Tuple
+
+# --------------------------------------------------------------------------- #
+#  fixed geometric parameters  (metres)                                       #
+# --------------------------------------------------------------------------- #
+D_Y  = 0.13585                 # base   ➜ joint‑2   translation on +Y
+OFFY = -0.1197                 # joint‑2 ➜ joint‑3  translation on  Y
+L1   = 0.425                   # joint‑2 ➜ joint‑3  translation on  Z
+L2   = 0.39225                 # joint‑3 ➜  TCP     translation on  Z
+Y_DES = D_Y + OFFY             # constant Y value in the {1} frame
+# --------------------------------------------------------------------------- #
+
+
+# --- roll‑pitch‑yaw to rotation matrix (URDF convention) ------------------- #
+def _rpy_to_matrix(rx: float, ry: float, rz: float) -> Tuple[Tuple[float, ...], ...]:
+    cx, sx = math.cos(rx), math.sin(rx)
+    cy, sy = math.cos(ry), math.sin(ry)
+    cz, sz = math.cos(rz), math.sin(rz)
+
+    # R = Rz * Ry * Rx
+    r00 = cy * cz
+    r01 = cz * sy * sx - sz * cx
+    r02 = cz * sy * cx + sz * sx
+
+    r10 = cy * sz
+    r11 = sz * sy * sx + cz * cx
+    r12 = sz * sy * cx - cz * sx
+
+    r20 = -sy
+    r21 = cy * sx
+    r22 = cy * cx
+
+    return (
+        (r00, r01, r02),
+        (r10, r11, r12),
+        (r20, r21, r22),
+    )
+
+
+def _normalise(angle: float) -> float:
+    """wrap angle to (‑π, π]"""
+    return (angle + math.pi) % (2.0 * math.pi) - math.pi
+
+
+# --------------------------------------------------------------------------- #
+#                     closed–form inverse kinematics                           #
+# --------------------------------------------------------------------------- #
+def inverse_kinematics(
+    p: tuple[float, float, float],
+    r: tuple[float, float, float],
+) -> tuple[float, float, float]:
+    """
+    Closed‑form IK for a 3‑DoF Z‑Y‑Y serial arm.
+
+    Parameters
+    ----------
+    p : (x, y, z) target TCP position in metres, base frame.
+    r : (rx, ry, rz) target TCP orientation as roll‑pitch‑yaw in radians.
+
+    Returns
+    -------
+    (θ1, θ2, θ3) : joint angles in radians.
+    """
+
+    xt, yt, zt = p
+    rx, ry, rz = r
+
+    # --------------------------------------------------------------------- #
+    # 1.  extract θ23 ( = θ2 + θ3 ) directly from the desired orientation   #
+    # --------------------------------------------------------------------- #
+    R = _rpy_to_matrix(rx, ry, rz)
+    theta23 = math.atan2(-R[2][0], R[2][2])     #  θ23 ∈ (‑π, π]
+
+    # --------------------------------------------------------------------- #
+    # 2.  solve the base angle θ1 from the Y–offset constraint              #
+    #     −xt·sinθ1 + yt·cosθ1  =  Y_DES                                    #
+    # --------------------------------------------------------------------- #
+    A, B = -xt, yt
+    Rxy  = math.hypot(A, B)                     # distance in the XY‑plane
+    # assumption of reachability ⇒ |Y_DES| ≤ Rxy
+    delta = max(min(Y_DES / Rxy, 1.0), -1.0)
+    phi   = math.atan2(B, A)                    # atan2(y, −x)
+
+    theta1_candidates = (
+        math.asin(delta) - phi,                 # solution 1
+        math.pi - math.asin(delta) - phi,       # solution 2
+    )
+
+    # --------------------------------------------------------------------- #
+    # 3.  for each θ1 candidate, compute the planar (θ2, θ3) and pick the   #
+    #     first self‑consistent solution                                    #
+    # --------------------------------------------------------------------- #
+    for theta1 in theta1_candidates:
+        # rotate the target position into the {1} frame
+        c1, s1 = math.cos(theta1), math.sin(theta1)
+        x1 =  xt * c1 + yt * s1
+        y1 = -xt * s1 + yt * c1
+        z1 =  zt
+
+        # Y‑component must be ≈ Y_DES (numerical noise only)
+        if not math.isclose(y1, Y_DES, abs_tol=1e-6):
+            continue
+
+        # ---------------------------------------------------------------- #
+        # remove the contribution of the last link to obtain a pure        #
+        # 1‑link geometry for θ2                                           #
+        # ---------------------------------------------------------------- #
+        x_plan = x1 - L2 * math.sin(theta23)
+        z_plan = z1 - L2 * math.cos(theta23)
+
+        # check reachability of the planar step
+        sin_theta2 = x_plan / L1
+        cos_theta2 = z_plan / L1
+        if abs(sin_theta2) > 1.0 or abs(cos_theta2) > 1.0:
+            continue
+
+        theta2 = math.atan2(sin_theta2, cos_theta2)
+        theta3 = theta23 - theta2
+
+        # ---------------------------------------------------------------- #
+        # return the first consistent triplet found                        #
+        # ---------------------------------------------------------------- #
+        return (_normalise(theta1), _normalise(theta2), _normalise(theta3))
+
+    # If we land here something is inconsistent with the reachability
+    # assumption stated in the task description; we return zeros as a
+    # graceful fallback.
+    return (0.0, 0.0, 0.0)
+```

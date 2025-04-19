@@ -1,0 +1,161 @@
+```python
+import numpy as np
+
+# ------------------------------------------------------------------------
+# Elementary rotations ---------------------------------------------------
+# ------------------------------------------------------------------------
+def _rotx(a: float) -> np.ndarray:
+    ca, sa = np.cos(a), np.sin(a)
+    return np.array([[1, 0, 0],
+                     [0, ca, -sa],
+                     [0, sa,  ca]])
+
+def _roty(a: float) -> np.ndarray:
+    ca, sa = np.cos(a), np.sin(a)
+    return np.array([[ ca, 0,  sa],
+                     [  0, 1,   0],
+                     [-sa, 0,  ca]])
+
+def _rotz(a: float) -> np.ndarray:
+    ca, sa = np.cos(a), np.sin(a)
+    return np.array([[ca, -sa, 0],
+                     [sa,  ca, 0],
+                     [ 0,   0, 1]])
+
+
+# ------------------------------------------------------------------------
+# Inverse kinematics -----------------------------------------------------
+# ------------------------------------------------------------------------
+def inverse_kinematics(
+        p: tuple[float, float, float],
+        r: tuple[float, float, float]) -> tuple[float, float, float]:
+    """
+    Closed‑form inverse kinematics for the 3‑DOF serial arm described in
+    the DETAILS section (axes Z‑Y‑Y).
+
+    Parameters
+    ----------
+    p : (x, y, z)
+        Desired TCP position expressed in the base frame [m].
+    r : (roll, pitch, yaw)
+        Desired TCP orientation given as intrinsic X‑Y‑Z Euler angles
+        (roll–pitch–yaw) [rad].
+
+    Returns
+    -------
+    (θ1, θ2, θ3) :
+        Joint values for Revolute‑1, ‑2 and ‑3 [rad].
+    """
+
+    # --------------------------------------------------------------------
+    # Robot geometry (constants) -----------------------------------------
+    # --------------------------------------------------------------------
+    d1 = np.array([0.0,  0.13585, 0.0])      # base  → joint‑2
+    d2 = np.array([0.0, -0.11970, 0.42500])  # joint‑2 → joint‑3
+    d3 = np.array([0.0,  0.0,     0.39225])  # joint‑3 → TCP
+
+    a = d3[2]           # 0.39225  (link‑3 length  along Z₃)
+    b = d2[2]           # 0.425    (link‑2 length  along Z₂)
+    const_y = d2[1]     # −0.1197  (fixed offset along local Y)
+    # --------------------------------------------------------------------
+
+    # --------------------------------------------------------------------
+    # Desired rotation matrix --------------------------------------------
+    # --------------------------------------------------------------------
+    roll, pitch, yaw = r
+    R_d = _rotz(yaw) @ _roty(pitch) @ _rotx(roll)
+
+    # Composite pitch (θ₂+θ₃) derivable from orientation -----------------
+    theta23_des = np.arctan2(-R_d[2, 0], R_d[2, 2])
+    # --------------------------------------------------------------------
+
+    # --------------------------------------------------------------------
+    # First joint θ₁ from orientation (only depends on rotation about Z) -
+    # --------------------------------------------------------------------
+    theta1 = np.arctan2(-R_d[0, 1], R_d[1, 1])  # robust even at singularities
+    # --------------------------------------------------------------------
+
+    # --------------------------------------------------------------------
+    # Position of TCP in joint‑2 frame -----------------------------------
+    # --------------------------------------------------------------------
+    p = np.asarray(p, dtype=float)
+    p1 = _rotz(-theta1) @ p - d1               # expressed in frame {1}
+
+    # Components in the X–Z plane used for planar solution
+    px, py, pz = p1
+    # The arm’s kinematics guarantees py ≈ const_y for reachable targets;
+    # numerical noise is ignored.
+    # --------------------------------------------------------------------
+
+    # --------------------------------------------------------------------
+    # Distance from joint‑2 to TCP projected onto the XZ‑plane -----------
+    # --------------------------------------------------------------------
+    r2 = px * px + pz * pz
+    r  = np.sqrt(r2)
+
+    # Law of cosines for θ₃  (two possible elbow configurations) ---------
+    cos_t3 = (r2 - (a * a + b * b)) / (2.0 * a * b)
+    cos_t3 = np.clip(cos_t3, -1.0, 1.0)        # guard numerical issues
+    theta3_candidates = np.array([np.arccos(cos_t3), -np.arccos(cos_t3)])
+    # --------------------------------------------------------------------
+
+    # --------------------------------------------------------------------
+    # Helper: forward kinematics *from joint‑2* (speedy internal use) ----
+    # --------------------------------------------------------------------
+    def _pos_from_2(th2: float, th3: float) -> np.ndarray:
+        """
+        Fast evaluation of the vector joint‑2 → TCP in frame {1}.
+        """
+        c2, s2 = np.cos(th2), np.sin(th2)
+        c3, s3 = np.cos(th3), np.sin(th3)
+
+        # Vector in frame {2} before θ₂ rotation
+        k1 = b + a * c3                       # along local Z
+        k2 =      a * s3                      # along local X
+        vec_x =  c2 * k2 + s2 * k1
+        vec_z = -s2 * k2 + c2 * k1
+        return np.array([vec_x, const_y, vec_z])
+
+    # --------------------------------------------------------------------
+    # Evaluate both candidates -------------------------------------------
+    # --------------------------------------------------------------------
+    best_err = np.inf
+    best_sol = (0.0, 0.0, 0.0)
+
+    alpha = np.arctan2(px, pz)                # angle of target in XZ‑plane
+
+    for th3 in theta3_candidates:
+        s3 = np.sin(th3)
+        c3 = np.cos(th3)
+        # γ = atan2(k₂, k₁)
+        gamma = np.arctan2(a * s3, b + a * c3)
+        th2 = alpha - gamma                   # derived analytical formula
+
+        # Position error
+        pred = _pos_from_2(th2, th3)
+        pos_err = np.linalg.norm(pred - p1)
+
+        # Orientation (θ₂+θ₃) agreement with desired composite pitch
+        ori_err = abs(((th2 + th3) - theta23_des + np.pi) %
+                      (2 * np.pi) - np.pi)    # wrapped difference
+
+        total_err = pos_err + ori_err         # simple combined metric
+
+        if total_err < best_err:
+            best_err = total_err
+            best_sol = (th2, th3)
+
+    theta2, theta3 = best_sol
+    # --------------------------------------------------------------------
+
+    # --------------------------------------------------------------------
+    # Wrap angles into (−π, π] for neatness ------------------------------
+    # --------------------------------------------------------------------
+    wrap = lambda a: (a + np.pi) % (2.0 * np.pi) - np.pi
+    theta1 = wrap(theta1)
+    theta2 = wrap(theta2)
+    theta3 = wrap(theta3)
+    # --------------------------------------------------------------------
+
+    return float(theta1), float(theta2), float(theta3)
+```

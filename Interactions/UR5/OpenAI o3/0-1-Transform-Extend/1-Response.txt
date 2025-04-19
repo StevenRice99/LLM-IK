@@ -1,0 +1,110 @@
+Here is a closed‑form, purely analytical solution for the two–revolute chain.  
+The implementation follows directly from the derivation reproduced in the
+doc‑string.
+
+```python
+import math
+from typing import Tuple
+
+# ---------------------------------------------------------------------------
+# Inverse kinematics for the 2‑DOF serial manipulator
+# ---------------------------------------------------------------------------
+def inverse_kinematics(p: Tuple[float, float, float],
+                       r: Tuple[float, float, float]) -> Tuple[float, float]:
+    """
+    Computes the joint values (θ1, θ2) that place the tool‑centre‑point (TCP)
+    at Cartesian position `p` and orientation `r` (roll–pitch–yaw, rad).
+
+    Kinematic chain
+        T = Rz(θ1) · Ty( 0.13585 ) · Ry(θ2) · T( 0 , −0.1197 , 0.425 )
+
+    Closed–form position equations (derived once in analysis):
+
+        x =  l·sinθ2·cosθ1 − d·sinθ1
+        y =  l·sinθ2·sinθ1 + d·cosθ1
+        z =  l·cosθ2
+
+    where
+        l = 0.425       (TCP offset along link‑2 z–axis)
+        d = 0.13585 − 0.1197 = 0.01615  (net y‑offset between the two joints)
+
+    Roll is identically zero for this mechanism, while
+        pitch = θ2 ,  yaw = θ1 .
+    Hence a self–consistency check with the supplied orientation allows the
+    correct of the two mathematical branches for θ2 to be selected.
+
+    Parameters
+    ----------
+    p : (x, y, z)  – desired Cartesian position of the TCP expressed in the
+                     base frame.
+    r : (rx, ry, rz) – desired roll–pitch–yaw orientation of the TCP.
+
+    Returns
+    -------
+    (θ1, θ2)  – joint variables in radians.
+    """
+
+    x, y, z = p
+    roll_d, pitch_d, yaw_d = r          # desired orientation (rad)
+
+    # -----------------------------------------------------------------------
+    # 1.  Solve θ2 from the z‑equation.
+    # -----------------------------------------------------------------------
+    L = 0.425
+    D = 0.01615
+
+    # Numerical safety: clamp to valid range of acos.
+    c2 = max(-1.0, min(1.0, z / L))
+    theta2_pos =  math.acos(c2)         #  0 ≤ acos ≤ π
+    theta2_neg = -math.acos(c2)         # -π ≤ value ≤ 0
+    candidates = [theta2_pos, theta2_neg]
+
+    # -----------------------------------------------------------------------
+    # 2.  For each θ2 branch compute the corresponding θ1 from (x,y).
+    # -----------------------------------------------------------------------
+    solutions = []
+    for theta2 in candidates:
+        s2 = math.sin(theta2)
+        r_xy = L * s2                   # abbreviation from derivation
+
+        if abs(r_xy) < 1e-10:           # degeneracy : sinθ2 ≃ 0
+            theta1 = math.atan2(-x, y)  # reduces to simple planar case
+        else:
+            theta1 = math.atan2(y, x) - math.atan2(D, r_xy)
+
+        solutions.append((theta1, theta2))
+
+    # -----------------------------------------------------------------------
+    # 3.  Choose the solution whose orientation matches the request best.
+    # -----------------------------------------------------------------------
+    def angle_err(a: float, b: float) -> float:
+        """smallest absolute difference between two angles"""
+        diff = (a - b + math.pi) % (2 * math.pi) - math.pi
+        return abs(diff)
+
+    best = solutions[0]
+    best_err = float('inf')
+
+    for theta1, theta2 in solutions:
+        err = angle_err(theta2, pitch_d) + angle_err(theta1, yaw_d) \
+              + abs(roll_d)               # roll should be ~0
+        if err < best_err:
+            best_err = err
+            best = (theta1, theta2)
+
+    # Normalise the returned angles to the interval [‑π, π] for neatness.
+    theta1, theta2 = best
+    theta1 = (theta1 + math.pi) % (2 * math.pi) - math.pi
+    theta2 = (theta2 + math.pi) % (2 * math.pi) - math.pi
+
+    return theta1, theta2
+```
+
+Explanation of the key steps
+1.  The z‑coordinate depends only on θ2, giving `cosθ2 = z / 0.425`.
+2.  The planar (x,y) equations are linear in `sinθ2` and `θ1`; they are solved
+    with a two‑argument arctangent to keep the correct quadrant.
+3.  Both mathematical branches of `acos` are checked and the one whose
+    resulting orientation (yaw, pitch) matches the requested orientation best
+    is selected.
+4.  Returned values are wrapped to the conventional interval [−π, π].

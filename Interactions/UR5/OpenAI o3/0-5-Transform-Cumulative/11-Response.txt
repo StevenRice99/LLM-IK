@@ -1,0 +1,211 @@
+```python
+import math
+import numpy as np
+
+
+# ---------------------------------------------------------------------
+# Small helpers
+# ---------------------------------------------------------------------
+def _rot_x(a: float) -> np.ndarray:
+    ca, sa = math.cos(a), math.sin(a)
+    return np.array([[1, 0, 0],
+                     [0, ca, -sa],
+                     [0, sa,  ca]])
+
+
+def _rot_y(a: float) -> np.ndarray:
+    ca, sa = math.cos(a), math.sin(a)
+    return np.array([[ ca, 0, sa],
+                     [  0, 1,  0],
+                     [-sa, 0, ca]])
+
+
+def _rot_z(a: float) -> np.ndarray:
+    ca, sa = math.cos(a), math.sin(a)
+    return np.array([[ca, -sa, 0],
+                     [sa,  ca, 0],
+                     [ 0,   0, 1]])
+
+
+def _forward_kinematics(q: tuple[float, ...]) -> tuple[np.ndarray, np.ndarray]:
+    """
+    Minimal forward kinematics used only internally to evaluate candidate
+    solutions.  Returns (p, R) where p is a 3‑vector and R a 3×3 matrix.
+    """
+    q1, q2, q3, q4, q5, q6 = q
+    # constant geometry
+    t2  = np.array([0.0,   0.13585, 0.0])
+    t3  = np.array([0.0,  -0.1197,  0.425])
+    t4  = np.array([0.0,   0.0,     0.39225])
+    t5  = np.array([0.0,   0.093,   0.0])
+    t6  = np.array([0.0,   0.0,     0.09465])
+    tEE = np.array([0.0,   0.0823,  0.0])
+    R_const = _rot_z(math.pi / 2.0)
+
+    R = np.eye(3)
+    p = np.zeros(3)
+
+    def _step(R_local: np.ndarray, t_local: np.ndarray):
+        nonlocal R, p
+        p = p + R @ t_local
+        R = R @ R_local
+
+    _step(_rot_z(q1), np.zeros(3))
+    _step(np.eye(3),  t2)
+    _step(_rot_y(q2), np.zeros(3))
+    _step(np.eye(3),  t3)
+    _step(_rot_y(q3), np.zeros(3))
+    _step(np.eye(3),  t4)
+    _step(_rot_y(q4), np.zeros(3))
+    _step(np.eye(3),  t5)
+    _step(_rot_z(q5), np.zeros(3))
+    _step(np.eye(3),  t6)
+    _step(_rot_y(q6), np.zeros(3))
+    _step(np.eye(3),  tEE)
+    R = R @ R_const
+    return p, R
+
+
+# ---------------------------------------------------------------------
+# Main analytic IK routine
+# ---------------------------------------------------------------------
+def inverse_kinematics(
+        p_target: tuple[float, float, float],
+        r_target: tuple[float, float, float]
+) -> tuple[float, float, float, float, float, float]:
+    """
+    Closed‑form analytical inverse kinematics for the 6‑DOF manipulator
+    described in the prompt.
+
+    Parameters
+    ----------
+    p_target : (x, y, z)
+        Desired TCP position in metres.
+    r_target : (roll, pitch, yaw)
+        Desired TCP orientation (intrinsic XYZ – URDF convention) in radians.
+
+    Returns
+    -------
+    (q1 … q6) : tuple of six joint values (radians).
+    """
+
+    # -----------------------------------------------------------------
+    # Constant geometry
+    # -----------------------------------------------------------------
+    L1   = 0.425          # joint‑2 → joint‑3 (along Z after –Y offset)
+    L2   = 0.39225        # joint‑3 → joint‑4 (along Z)
+    Y12  = 0.13585
+    Y23  = -0.1197
+    Y45  = 0.093
+    L6   = 0.09465
+    Ytcp = 0.0823
+    Y_CONST = Y12 + Y23                    # = 0.01615   (independent of joints)
+    R_CONST = _rot_z(math.pi / 2.0)
+
+    # -----------------------------------------------------------------
+    # Target rotation matrix
+    # -----------------------------------------------------------------
+    roll, pitch, yaw = r_target
+    R_des = _rot_z(yaw) @ _rot_y(pitch) @ _rot_x(roll)
+
+    # Remove the constant TCP orientation offset
+    R_hat = R_des @ R_CONST.T
+
+    # -----------------------------------------------------------------
+    # Enumerate the finite closed‑form solution set
+    # -----------------------------------------------------------------
+    p_vec = np.asarray(p_target)
+    best_err   = float('inf')
+    best_q     = (0.0,) * 6
+
+    # Two possible q1 values come from positioning the (planar) arm
+    # such that its (fixed) Y‑offset Y_CONST matches the target.
+    p_x, p_y, _ = p_target
+    r_xy = math.hypot(p_x, p_y)
+    if r_xy < 1.0e-10:
+        # purely on Z‑axis – place q1 arbitrarily at zero
+        q1_candidates = (0.0,)
+    else:
+        ang  = math.atan2(p_y, p_x)
+        delta = math.acos(max(-1.0, min(1.0, Y_CONST / r_xy)))
+        q1_candidates = (ang + delta, ang - delta)
+
+    for q1 in q1_candidates:
+        # Orientation part without the first Z rotation ----------------
+        R1 = _rot_z(-q1) @ R_hat
+
+        # Extract q5 and q6 (two mirror solutions for q5 sign)
+        s5_sq = R1[1, 0] ** 2 + R1[1, 2] ** 2        # (= sin(q5)^2)
+        s5_mag = math.sqrt(s5_sq)
+        if s5_mag < 1.0e-9:                           # q5 ≈ 0 (or π)
+            q5_candidates = (0.0,) if R1[1, 1] > 0 else (math.pi,)
+        else:
+            q5_pos =  math.atan2( s5_mag,  R1[1, 1])
+            q5_neg =  math.atan2(-s5_mag,  R1[1, 1])
+            q5_candidates = (q5_pos, q5_neg)
+
+        # q6 is independent of q5‑sign (see derivation)
+        q6 = math.atan2(R1[1, 2], R1[1, 0])
+
+        # φ (= q2+q3+q4) – independent of q5‑sign as well
+        if abs(s5_mag) < 1.0e-9:
+            # If sin(q5) ≈ 0 we use another element pair
+            phi = math.atan2(-R1[0, 2], R1[0, 0])
+        else:
+            phi = math.atan2(-R1[2, 1], -R1[0, 1])    # = atan2(sinφ, cosφ)
+
+        # Shared rotation R04 (depends on q1 and φ)
+        R04_base = _rot_z(q1) @ _rot_y(phi)
+
+        # Work‑space position of joint‑4 origin for the later planar solve
+        for q5 in q5_candidates:
+
+            # Vector from joint‑4 to TCP in the joint‑4 frame
+            offset_4 = (
+                np.array([0.0, Y45, 0.0]) +
+                _rot_z(q5) @ (
+                    np.array([0.0, 0.0, L6]) +
+                    _rot_y(q6) @ np.array([0.0, Ytcp, 0.0])
+                )
+            )
+
+            # Joint‑4 position in the base frame
+            p4 = p_vec - R04_base @ offset_4
+
+            # Express p4 in the frame that has been rotated by –q1 about Z
+            p4_bar = _rot_z(-q1) @ p4
+            px_b, py_b, pz_b = p4_bar
+
+            # The Y component (after removing q1) must equal Y_CONST
+            if abs(py_b - Y_CONST) > 1e-3:
+                # large discrepancy – discard this branch early
+                continue
+
+            # Planar 2‑R solve (for q3 – elbow‑up / elbow‑down)
+            r2 = px_b ** 2 + pz_b ** 2
+            cos_q3 = (r2 - L1 ** 2 - L2 ** 2) / (2 * L1 * L2)
+            if abs(cos_q3) > 1.0:
+                continue  # no real solution
+            q3_a =  math.acos(cos_q3)
+            q3_b = -q3_a
+
+            for q3 in (q3_a, q3_b):
+                k1 = L1 + L2 * math.cos(q3)
+                k2 =        L2 * math.sin(q3)
+                q2 = math.atan2(px_b, pz_b) - math.atan2(k2, k1)
+                q4 = phi - q2 - q3
+
+                q_set = (q1, q2, q3, q4, q5, q6)
+
+                # Quick forward check & scoring
+                p_check, R_check = _forward_kinematics(q_set)
+                pos_err = np.linalg.norm(p_check - p_vec)
+                ori_err = np.linalg.norm(R_check - R_des, ord='fro')
+                total_err = pos_err + 0.1 * ori_err     # small weight on orientation
+
+                if total_err < best_err:
+                    best_err = total_err
+                    best_q = q_set
+
+    return best_q
+```

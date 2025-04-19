@@ -1,0 +1,143 @@
+Here is a closed‑form analytical solution that combines the single–joint solution from “EXISTING 1” with the planar 3‑R solution technique used in “EXISTING 2”.
+
+```python
+import math
+import numpy as np
+
+
+def _rotation_from_rpy(roll: float, pitch: float, yaw: float) -> np.ndarray:
+    """
+    Build a rotation matrix from roll‑pitch‑yaw angles (X‑Y‑Z intrinsic order).
+    """
+    cr, sr = math.cos(roll), math.sin(roll)
+    cp, sp = math.cos(pitch), math.sin(pitch)
+    cy, sy = math.cos(yaw), math.sin(yaw)
+
+    return np.array(
+        [
+            [cy * cp, cy * sp * sr - sy * cr, cy * sp * cr + sy * sr],
+            [sy * cp, sy * sp * sr + cy * cr, sy * sp * cr - cy * sr],
+            [-sp, cp * sr, cp * cr],
+        ]
+    )
+
+
+def _wrap_to_pi(angle: float) -> float:
+    """
+    Constrain an angle to the interval (‑π, π].
+    """
+    return math.atan2(math.sin(angle), math.cos(angle))
+
+
+def inverse_kinematics(
+    p: tuple[float, float, float], r: tuple[float, float, float]
+) -> tuple[float, float, float, float]:
+    """
+    Closed‑form inverse kinematics for the 4‑DOF arm described in the problem
+    statement.
+
+    Parameters
+    ----------
+    p : (x, y, z)
+        Desired TCP position in the base frame.
+    r : (roll, pitch, yaw)
+        Desired TCP orientation (intrinsic X‑Y‑Z roll‑pitch‑yaw) in radians.
+
+    Returns
+    -------
+    (q1, q2, q3, q4) :
+        Joint angles (radians) that realise the requested pose.
+    """
+    # ------------------------------------------------------------------
+    # 1.  Solve joint‑1 (rotation about the base Z axis)
+    # ------------------------------------------------------------------
+    x_world, y_world, z_world = p
+    q1 = math.atan2(-x_world, y_world)  # identical to EXISTING 1
+
+    # ------------------------------------------------------------------
+    # 2.  Express the goal in the frame that follows joint‑1
+    # ------------------------------------------------------------------
+    #   – rotation part
+    R_goal_world = _rotation_from_rpy(*r)
+    cos_q1, sin_q1 = math.cos(q1), math.sin(q1)
+    Rz_minus_q1 = np.array([[cos_q1, sin_q1, 0.0],
+                            [-sin_q1, cos_q1, 0.0],
+                            [0.0, 0.0, 1.0]])
+    R_goal_1 = Rz_minus_q1 @ R_goal_world
+
+    #   – translation part
+    P_world = np.array([x_world, y_world, z_world])
+    P_1 = Rz_minus_q1 @ P_world         # still measured from the base origin
+
+    # ------------------------------------------------------------------
+    # 3.  Planar 3‑R inverse kinematics for joints 2–4
+    # ------------------------------------------------------------------
+    # Link parameters that affect motion in the X‑Z plane
+    L1 = 0.425        # translation before joint‑3   (Revolute 3 row)
+    L2 = 0.39225      # translation before joint‑4   (Revolute 4 row)
+
+    # Target coordinates in the plane (joint‑2 origin is still at (0, 0, 0)
+    # for the X‑Z analysis; all Y–offsets lie on the rotation axis and
+    # therefore do not influence the planar geometry).
+    x_t = float(P_1[0])
+    z_t = float(P_1[2])
+
+    # Orientation requirement:  q2 + q3 + q4 must reproduce the global
+    # rotation about the common Y axis present in R_goal_1.
+    cos_sum = float(R_goal_1[0, 0])
+    sin_sum = float(R_goal_1[0, 2])
+    target_sum = math.atan2(sin_sum, cos_sum)
+
+    # --- elbow solutions ------------------------------------------------
+    d_sq = x_t * x_t + z_t * z_t
+    cos_q3 = (d_sq - L1 * L1 - L2 * L2) / (2.0 * L1 * L2)
+    cos_q3 = max(-1.0, min(1.0, cos_q3))             # numerical safety
+    q3_candidates = [math.acos(cos_q3), -math.acos(cos_q3)]
+
+    best_error = float("inf")
+    best_triplet: tuple[float, float, float] | None = None
+
+    for q3 in q3_candidates:
+        C = L1 + L2 * math.cos(q3)
+        D = L2 * math.sin(q3)
+        denom = C * C + D * D
+        if denom < 1e-9:
+            continue
+
+        sin_q2 = (C * x_t - D * z_t) / denom
+        cos_q2 = (D * x_t + C * z_t) / denom
+        if abs(sin_q2) > 1.0 or abs(cos_q2) > 1.0:
+            continue
+
+        q2 = math.atan2(sin_q2, cos_q2)
+        q4 = _wrap_to_pi(target_sum - q2 - q3)
+
+        # ----------------------------------------------------------------
+        # Check this candidate briefly (planar position + orientation sum)
+        # ----------------------------------------------------------------
+        x_chk = L1 * math.sin(q2) + L2 * math.sin(q2 + q3)
+        z_chk = L1 * math.cos(q2) + L2 * math.cos(q2 + q3)
+        pos_err = math.hypot(x_chk - x_t, z_chk - z_t)
+
+        orient_err = abs(_wrap_to_pi(q2 + q3 + q4 - target_sum))
+        total_err = pos_err + orient_err
+
+        if total_err < best_error:
+            best_error = total_err
+            best_triplet = (q2, q3, q4)
+
+    # Fallback (should never trigger for reachable poses)
+    if best_triplet is None:
+        best_triplet = (0.0, 0.0, 0.0)
+
+    q2, q3, q4 = best_triplet
+    return q1, q2, q3, q4
+```
+
+Explanation of the main steps
+1. Joint 1 (q₁) is identical to the solution in “EXISTING 1”; it simply orients the arm’s Y‑Z working plane toward the target’s projection in the X‑Y plane.
+2. The desired pose is expressed in the coordinate frame that follows joint 1.  This removes the influence of q₁ and leaves the remaining 3‑R (all‑Y‑axis) sub‑chain problem in a single X‑Z plane.
+3. Joints 2‑4 form a planar manipulator whose forward kinematics reduce to simple sine‑cosine relations.  Closed‑form elbow‑up/elbow‑down solutions for q₂ and q₃ are obtained by the cosine law; q₄ is then fixed by the required total rotation about the common Y axis.
+4. The candidate with the smallest combined position‑and‑orientation error is returned.  Because the problem statement guarantees reachability, at least one candidate will always exist.
+
+The function returns joint angles in radians and respects the unlimited (±2π) joint ranges given.

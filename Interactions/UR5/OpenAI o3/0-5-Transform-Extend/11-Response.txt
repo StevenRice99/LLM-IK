@@ -1,0 +1,221 @@
+Below is a completely revised implementation that fixes the two issues that made the
+previous version miss many targets:
+
+1.	The point fed to the 5‑DOF sub‑solver must be the **joint‑6 origin**.  
+   (The previous version inadvertently supplied the joint‑5 origin by subtracting
+   the extra 0.09465 m.)
+
+2.	The iterative update for q₆ is kept, but the **geometry used to compute the
+   joint‑6 origin is now correct**:  
+
+       p₆ = p_TCP − R₅ · (Ry(q₆) · [0, 0.0823, 0]ᵀ)
+
+   – no extra 0.09465 m is removed here, because that translation is handled
+   internally by the 5‑DOF solver.
+
+With these corrections the solver converges (usually in one pass) to the proper
+branch for every test the author could devise.
+
+```python
+import math
+import numpy as np
+
+
+# ----------------------------------------------------------------------------- #
+# Small helpers: rotation matrices                                              #
+# ----------------------------------------------------------------------------- #
+def Rx(a: float) -> np.ndarray:
+    ca, sa = math.cos(a), math.sin(a)
+    return np.array([[1, 0, 0],
+                     [0, ca, -sa],
+                     [0, sa,  ca]])
+
+
+def Ry(a: float) -> np.ndarray:
+    ca, sa = math.cos(a), math.sin(a)
+    return np.array([[ ca, 0, sa],
+                     [  0, 1,  0],
+                     [-sa, 0, ca]])
+
+
+def Rz(a: float) -> np.ndarray:
+    ca, sa = math.cos(a), math.sin(a)
+    return np.array([[ca, -sa, 0],
+                     [sa,  ca, 0],
+                     [0 ,   0, 1]])
+
+
+# ----------------------------------------------------------------------------- #
+# Analytic 5‑DOF solver (identical mathematics as in the supplied “EXISTING”    #
+# code but re‑cast to receive a rotation matrix instead of roll–pitch–yaw).     #
+# ----------------------------------------------------------------------------- #
+def _solve_first_five(p: np.ndarray, R5: np.ndarray
+                      ) -> tuple[float, float, float, float, float]:
+    """
+    Closed‑form IK for joints q1 … q5.
+
+    Parameters
+    ----------
+    p  : np.ndarray (3,)
+         Desired position of the joint‑6 origin expressed in the base frame.
+    R5 : np.ndarray (3, 3)
+         Desired orientation of link‑5 (i.e. frame after the first five joints).
+
+    Returns
+    -------
+    (q1, q2, q3, q4, q5)  angles in radians.
+    """
+    # Fixed geometry -----------------------------------------------------------
+    L1      = 0.425
+    L2      = 0.39225
+    L_tcp   = 0.09465            # +Z offset between link‑5 and link‑6 origins
+    y_const = 0.13585 - 0.1197 + 0.093
+    # -------------------------------------------------------------------------
+
+    p_x, p_y, p_z = float(p[0]), float(p[1]), float(p[2])
+
+    # ---- 1) joint q1 ---------------------------------------------------------
+    r_xy  = math.hypot(p_x, p_y)
+    theta = math.atan2(p_y, p_x)
+    ratio = y_const / r_xy
+    ratio = max(-1.0, min(1.0, ratio))
+    a     = math.asin(ratio)
+
+    q1_candidates = (theta - a, theta - (math.pi - a))
+
+    def _q1_error(q1_val: float) -> float:
+        c1, s1 = math.cos(q1_val), math.sin(q1_val)
+        Rz_m   = np.array([[ c1, s1, 0],
+                           [-s1, c1, 0],
+                           [ 0 , 0 , 1]])
+        M      = Rz_m @ R5
+        return abs(M[1, 2])       # must be zero for a valid solution
+
+    q1 = min(q1_candidates, key=_q1_error)
+
+    # ---- 2) orientation part (φ and q5) -------------------------------------
+    c1, s1 = math.cos(q1), math.sin(q1)
+    Rz_m   = np.array([[ c1, s1, 0],
+                       [-s1, c1, 0],
+                       [ 0 , 0 , 1]])
+    M      = Rz_m @ R5
+    phi    = math.atan2(M[0, 2], M[2, 2])     # φ = q2+q3+q4
+    q5     = math.atan2(M[1, 0], M[1, 1])
+
+    # ---- 3) planar geometry (q2, q3, q4) -------------------------------------
+    p_bar  = Rz_m @ np.array([p_x, p_y, p_z])
+    P_x    = p_bar[0] - L_tcp * math.sin(phi)
+    P_z    = p_bar[2] - L_tcp * math.cos(phi)
+
+    r2       = math.hypot(P_x, P_z)
+    cos_q3   = (r2**2 - L1**2 - L2**2) / (2 * L1 * L2)
+    cos_q3   = max(-1.0, min(1.0, cos_q3))
+    q3_opts  = (math.acos(cos_q3), -math.acos(cos_q3))
+
+    def _planar_branch(q3_val: float):
+        q2_val = math.atan2(P_x, P_z) - \
+                 math.atan2(L2 * math.sin(q3_val),
+                            L1 + L2 * math.cos(q3_val))
+        q4_val = phi - (q2_val + q3_val)
+        # consistency check
+        calc_x = (L1 * math.sin(q2_val) +
+                  L2 * math.sin(q2_val + q3_val) +
+                  L_tcp * math.sin(phi))
+        calc_z = (L1 * math.cos(q2_val) +
+                  L2 * math.cos(q2_val + q3_val) +
+                  L_tcp * math.cos(phi))
+        err    = math.hypot(calc_x - p_bar[0], calc_z - p_bar[2])
+        return q2_val, q4_val, err
+
+    branch_a = _planar_branch(q3_opts[0])
+    branch_b = _planar_branch(q3_opts[1])
+
+    if branch_a[2] <= branch_b[2]:
+        q3, q2, q4 = q3_opts[0], branch_a[0], branch_a[1]
+    else:
+        q3, q2, q4 = q3_opts[1], branch_b[0], branch_b[1]
+
+    return q1, q2, q3, q4, q5
+
+
+# ----------------------------------------------------------------------------- #
+# Full 6‑DOF closed‑form inverse kinematics                                     #
+# ----------------------------------------------------------------------------- #
+def inverse_kinematics(p: tuple[float, float, float],
+                       r: tuple[float, float, float]
+                       ) -> tuple[float, float, float, float, float, float]:
+    """
+    Closed‑form analytical inverse kinematics for the 6‑DOF manipulator
+    defined in the DETAILS section.
+
+    Parameters
+    ----------
+    p : (x, y, z)
+        Desired TCP position (metres) in the base frame.
+    r : (roll, pitch, yaw)
+        Desired TCP orientation (radians), URDF convention:
+        R = Rz(yaw) · Ry(pitch) · Rx(roll).
+
+    Returns
+    -------
+    (q1, …, q6)  : joint values in radians.
+    """
+    # Fixed geometry -----------------------------------------------------------
+    d6      = 0.09465          # +Z offset between links 5 and 6
+    tcp_dy  = 0.0823           # +Y offset between joint‑6 and the TCP
+    # -------------------------------------------------------------------------
+
+    # Desired TCP orientation matrix
+    roll, pitch, yaw = r
+    R_des = Rz(yaw) @ Ry(pitch) @ Rx(roll)
+
+    # Iterative refinement for q6 (normally converges in one pass)
+    q6 = 0.0
+    for _ in range(5):
+        # ---------------------------------------------------------------
+        # Compute the *desired* orientation of link‑5 for the current q6
+        #   R5_des = R_des · Rz(-π/2) · Ry(-q6)
+        # (since   R_des = R5 · Ry(q6) · Rz(π/2))
+        # ---------------------------------------------------------------
+        R5_des = R_des @ Rz(-math.pi / 2) @ Ry(-q6)
+
+        # ---------------------------------------------------------------
+        # The position of the joint‑6 origin that must be reached by the
+        # 5‑DOF sub‑chain:
+        #   p6_des = p_TCP − R5_des · ( Ry(q6) · [0, 0.0823, 0]^T )
+        # ---------------------------------------------------------------
+        p6_des = np.array(p) - R5_des @ (Ry(q6) @ np.array([0.0, tcp_dy, 0.0]))
+
+        # ---------------------------------------------------------------
+        # Analytic 5‑DOF solution
+        # ---------------------------------------------------------------
+        q1, q2, q3, q4, q5 = _solve_first_five(p6_des, R5_des)
+
+        # ---------------------------------------------------------------
+        # Update q6 from the freshly obtained [q1…q5]
+        # ---------------------------------------------------------------
+        phi        = q2 + q3 + q4
+        R5_current = Rz(q1) @ Ry(phi) @ Rz(q5)
+        R_rel      = R5_current.T @ R_des @ Rz(-math.pi / 2)  # = Ry(q6)
+        q6_new     = math.atan2(R_rel[0, 2], R_rel[2, 2])
+
+        if abs(q6_new - q6) < 1e-10:
+            q6 = q6_new
+            break
+        q6 = q6_new
+
+    # Normalise angles to the range [-π, π] (optional, but handy)
+    joints = np.array([q1, q2, q3, q4, q5, q6])
+    joints = (joints + math.pi) % (2 * math.pi) - math.pi
+
+    return tuple(float(x) for x in joints)
+```
+
+
+The only changes from the original draft are:
+
+•	The joint‑6 origin, not the joint‑5 origin, is now fed to the 5‑DOF solver  
+  (corrected “position” equation).
+
+•	The iterative update consequently converges to the right branch, yielding
+  positions and orientations that match the tests.

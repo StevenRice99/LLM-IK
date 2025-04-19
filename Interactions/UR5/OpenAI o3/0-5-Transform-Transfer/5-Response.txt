@@ -1,0 +1,150 @@
+A numerically stable orientation term is required in the iterative solver.  
+The previous implementation linearised the orientation error with
+“first–order” maths that is only valid for very small rotations, therefore
+when the desired pose was far away the algorithm converged to a wrong wrist
+configuration although the position was met.
+
+The remedy is to use the exact logarithm of a rotation matrix for the error
+and (still small) finite‑difference steps for the Jacobian columns.
+Nothing else in the algorithm needs to change.
+
+```python
+import numpy as np
+
+
+# ---------------------------------------------------------------------
+# helpers
+# ---------------------------------------------------------------------
+def _Rx(q: float) -> np.ndarray:
+    c, s = np.cos(q), np.sin(q)
+    return np.array([[1, 0, 0, 0],
+                     [0, c, -s, 0],
+                     [0, s, c, 0],
+                     [0, 0, 0, 1]])
+
+
+def _Ry(q: float) -> np.ndarray:
+    c, s = np.cos(q), np.sin(q)
+    return np.array([[c, 0, s, 0],
+                     [0, 1, 0, 0],
+                     [-s, 0, c, 0],
+                     [0, 0, 0, 1]])
+
+
+def _Rz(q: float) -> np.ndarray:
+    c, s = np.cos(q), np.sin(q)
+    return np.array([[c, -s, 0, 0],
+                     [s, c, 0, 0],
+                     [0, 0, 1, 0],
+                     [0, 0, 0, 1]])
+
+
+def _T(v) -> np.ndarray:
+    out = np.eye(4)
+    out[:3, 3] = v
+    return out
+
+
+# ---------------------------------------------------------------------
+# rotation conversions
+# ---------------------------------------------------------------------
+def _rpy_to_rot(rpy) -> np.ndarray:
+    roll, pitch, yaw = rpy
+    return (_Rz(yaw) @ _Ry(pitch) @ _Rx(roll))[:3, :3]
+
+
+def _log_so3(R: np.ndarray) -> np.ndarray:
+    """
+    Exact logarithm of an SO(3) matrix (axis‑angle vector).
+    Returns a 3‑vector whose direction is the rotation axis and whose
+    length is the rotation angle (0 … π).
+    """
+    cos_theta = (np.trace(R) - 1.0) * 0.5
+    cos_theta = np.clip(cos_theta, -1.0, 1.0)          # numerical safety
+    theta = np.arccos(cos_theta)
+
+    if theta < 1e-6:                                   # very small angle
+        # first‑order approximation
+        return 0.5 * np.array([R[2, 1] - R[1, 2],
+                               R[0, 2] - R[2, 0],
+                               R[1, 0] - R[0, 1]])
+    else:
+        coef = theta / (2.0 * np.sin(theta))
+        return coef * np.array([R[2, 1] - R[1, 2],
+                                R[0, 2] - R[2, 0],
+                                R[1, 0] - R[0, 1]])
+
+
+# ---------------------------------------------------------------------
+# full forward kinematics
+# ---------------------------------------------------------------------
+def _fk(j) -> tuple[np.ndarray, np.ndarray]:
+    t1, t2, t3, t4, t5, t6 = j
+    T = (np.eye(4)
+         @ _Rz(t1)
+         @ _T([0, 0.13585, 0]) @ _Ry(t2)
+         @ _T([0, -0.1197, 0.425]) @ _Ry(t3)
+         @ _T([0, 0, 0.39225]) @ _Ry(t4)
+         @ _T([0, 0.093, 0]) @ _Rz(t5)
+         @ _T([0, 0, 0.09465]) @ _Ry(t6)
+         @ _T([0, 0.0823, 0]))
+    return T[:3, 3].copy(), T[:3, :3].copy()
+
+
+# ---------------------------------------------------------------------
+# inverse kinematics
+# ---------------------------------------------------------------------
+def inverse_kinematics(p: tuple[float, float, float],
+                       r: tuple[float, float, float]) \
+        -> tuple[float, float, float, float, float, float]:
+    """
+    Closed‑form analytical IK is not trivial for this arm, therefore a
+    damped‑least‑squares numerical solver is used.  With an exact
+    logarithm of SO(3) the method now converges to the correct orientation.
+    """
+    p_des = np.asarray(p, float)
+    R_des = _rpy_to_rot(r)
+
+    q = np.zeros(6)                        # initial guess
+    eps_p = 1e‑6                           # positional tolerance
+    eps_r = 1e‑6                           # orientational tolerance
+    h = 1e‑6                               # finite‑difference step
+    damping = 1e‑4
+    max_iter = 100
+
+    for _ in range(max_iter):
+        p_cur, R_cur = _fk(q)
+
+        # -------------------------------------------------------------
+        # error  (6×1)   [linear ; angular]
+        # -------------------------------------------------------------
+        e_pos = p_des - p_cur
+        e_rot = _log_so3(R_des @ R_cur.T)
+        if np.linalg.norm(e_pos) < eps_p and np.linalg.norm(e_rot) < eps_r:
+            break
+        e = np.hstack([e_pos, e_rot])
+
+        # -------------------------------------------------------------
+        # Jacobian  (6×6) via finite differences
+        # -------------------------------------------------------------
+        J = np.zeros((6, 6))
+        for i in range(6):
+            dq = q.copy()
+            dq[i] += h
+            p_dq, R_dq = _fk(dq)
+
+            dp = (p_dq - p_cur) / h
+            dR = _log_so3(R_dq @ R_cur.T) / h
+
+            J[:3, i] = dp
+            J[3:, i] = dR
+
+        # damped‑least‑squares step
+        JT = J.T
+        delta_q = JT @ np.linalg.solve(J @ JT + damping * np.eye(6), e)
+        q += delta_q
+
+    # wrap to [‑π, π] for neatness
+    q = (q + np.pi) % (2.0 * np.pi) - np.pi
+    return tuple(float(v) for v in q)
+```

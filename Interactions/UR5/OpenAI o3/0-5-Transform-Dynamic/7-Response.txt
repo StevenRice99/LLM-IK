@@ -1,0 +1,166 @@
+Completed the inverse‑kinematics routine for the full 6‑DOF arm.  
+The solution keeps the exact closed‑form structure that was already implemented for joints 1‑5 and extends the analytical decomposition of the orientation to extract the remaining rotation about the final Y‑axis (joint 6) while also taking into account the additional tool‑flange offset supplied in the URDF.
+
+Key ideas introduced
+1.  The real TCP is 82.3 mm along the local +Y of the flange and is preceded by a fixed 90° yaw.  
+    Therefore  
+       R₀⁶ = R_des·Rz(−π/2) , p₆ = p_des – R_des·[0.0823,0,0]ᵀ .
+    p₆ is exactly the “pseudo‑TCP” that the former 5‑link solver already handled.
+2.  Orientation decoupling  
+       R = Rz(−q₁)·R_des·Rz(−π/2) = Ry(φ)·Rz(q₅)·Ry(q₆) ,
+    i.e. a Y–Z–Y Euler sequence.  
+    For regular (sin q₅ ≠ 0) configurations
+       q₅ = atan2(R[1,0], R[1,1])  
+       q₆ = atan2(R[1,2], R[1,0])  
+       φ  = atan2(R[2,1], −R[0,1]).
+    A compact branch handles the singular case |sin q₅|≈0.
+3.  With φ known, the already‑derived planar geometry gives q₂, q₃, q₄ exactly as before.
+
+The final routine returns one consistent configuration (it keeps the branch‑selection strategy that minimises the residual position error).
+
+```python
+import math
+import numpy as np
+
+
+def inverse_kinematics(
+    p: tuple[float, float, float], r: tuple[float, float, float]
+) -> tuple[float, float, float, float, float, float]:
+    """
+    Closed‑form inverse kinematics for the complete 6‑DOF manipulator.
+
+    Parameters
+    ----------
+    p : (x, y, z)
+        Desired TCP position in the base frame (metres).
+    r : (roll, pitch, yaw)
+        Desired TCP orientation given as intrinsic XYZ (URDF convention) Euler
+        angles, in radians.
+
+    Returns
+    -------
+    q1 … q6 : float
+        A consistent joint configuration (radians) that realises (p, r).
+    """
+    # ------------------------------------------------------------------
+    # Constant geometry -------------------------------------------------
+    L1 = 0.425       # link‑3 length  (m)
+    L2 = 0.39225     # link‑4 length  (m)
+    L_tcp = 0.09465  # offset along local z before joint‑6 (m)
+    TCP_Y = 0.0823   # final tool offset along local y  (m)
+
+    y_const = 0.13585 - 0.1197 + 0.093  # fixed displacement accumulated in y
+
+    # ------------------------------------------------------------------
+    # Helper rotation constructors -------------------------------------
+    def Rx(a):
+        ca, sa = math.cos(a), math.sin(a)
+        return np.array([[1, 0, 0], [0, ca, -sa], [0, sa, ca]])
+
+    def Ry(a):
+        ca, sa = math.cos(a), math.sin(a)
+        return np.array([[ca, 0, sa], [0, 1, 0], [-sa, 0, ca]])
+
+    def Rz(a):
+        ca, sa = math.cos(a), math.sin(a)
+        return np.array([[ca, -sa, 0], [sa, ca, 0], [0, 0, 1]])
+
+    # Desired orientation ------------------------------------------------
+    roll, pitch, yaw = r
+    R_des = Rz(yaw) @ Ry(pitch) @ Rx(roll)
+
+    # ------------------------------------------------------------------
+    # Remove the final tool offset (translation along +Y after a +90° yaw)
+    # to obtain the “pseudo‑TCP” (frame after joint‑6 translation, before
+    # the Y rotation of joint‑6):
+    #
+    #   p₆ = p_des – R_des · (Rz(−π/2) · [0, TCP_Y, 0]^T)
+    #       = p_des – R_des · [TCP_Y, 0, 0]^T
+    #
+    p_vec = np.array(p, dtype=float)
+    p6_vec = p_vec - R_des @ np.array([TCP_Y, 0.0, 0.0])
+
+    # ------------------------------------------------------------------
+    # Candidates for q1 (two solutions due to the planar Y‑offset) -------
+    p6_x, p6_y, p6_z = p6_vec
+    r_xy = math.hypot(p6_x, p6_y)
+    # Clamp ratio for numerical safety
+    ratio = max(-1.0, min(1.0, y_const / max(1e-9, r_xy)))
+    theta = math.atan2(p6_y, p6_x)
+    a = math.asin(ratio)
+    q1_candidates = (theta - a, theta - (math.pi - a))
+
+    best_err = float("inf")
+    best_sol = None
+
+    # ------------------------------------------------------------------
+    # Iterate over both q1 branches -------------------------------------
+    for q1 in q1_candidates:
+        cq1, sq1 = math.cos(q1), math.sin(q1)
+        Rz_m_q1 = np.array([[cq1, sq1, 0], [-sq1, cq1, 0], [0, 0, 1]])
+
+        # Orientation decoupling  (Y–Z–Y) --------------------------------
+        R_tmp = Rz_m_q1 @ R_des @ Rz(-math.pi / 2)
+
+        s5 = math.hypot(R_tmp[1, 0], R_tmp[1, 2])
+        c5 = R_tmp[1, 1]
+        # q5: general definition keeps the correct sign
+        q5 = math.atan2(R_tmp[1, 0], c5)  # same expression as in the 5‑link case
+        # Handle possible singularity (|sin q5| ~ 0)
+        if abs(s5) < 1e-8:
+            # Treat as q5 == 0  →  the sequence collapses:  Ry(φ+q6)
+            q5 = 0.0
+            q6 = 0.0
+            phi = math.atan2(R_tmp[0, 2], R_tmp[2, 2])
+        else:
+            q6 = math.atan2(R_tmp[1, 2], R_tmp[1, 0])  # s5 cancels
+            phi = math.atan2(R_tmp[2, 1], -R_tmp[0, 1])
+
+        # ----------------------------------------------------------------
+        # Translational sub‑problem  (identical to the previous solver) ---
+        # Rotate the pseudo‑TCP into the base XZ‑plane of the 2‑R section
+        p_bar = Rz_m_q1 @ p6_vec
+        pb_x, pb_y, pb_z = p_bar
+
+        # Planar 2‑R geometry in the rotated frame
+        Px = pb_x - L_tcp * math.sin(phi)
+        Pz = pb_z - L_tcp * math.cos(phi)
+        r2 = math.hypot(Px, Pz)
+
+        # Cosine law for q3
+        cos_q3 = (r2 * r2 - L1 * L1 - L2 * L2) / (2 * L1 * L2)
+        cos_q3 = max(-1.0, min(1.0, cos_q3))
+        for q3 in (math.acos(cos_q3), -math.acos(cos_q3)):
+            # q2 from 2‑link analytic solution
+            s3 = math.sin(q3)
+            c3 = math.cos(q3)
+            q2 = math.atan2(Px, Pz) - math.atan2(L2 * s3, L1 + L2 * c3)
+            # q4 closes the spherical wrist
+            q4 = phi - (q2 + q3)
+
+            # ------------------------------------------------------------
+            # Evaluate position error to pick the best solution ----------
+            # Reconstruct the point reached by the 3‑link planar arm plus
+            # the L_tcp offset to compare with p_bar.
+            calc_x = (
+                L1 * math.sin(q2)
+                + L2 * math.sin(q2 + q3)
+                + L_tcp * math.sin(phi)
+            )
+            calc_z = (
+                L1 * math.cos(q2)
+                + L2 * math.cos(q2 + q3)
+                + L_tcp * math.cos(phi)
+            )
+            err = math.hypot(calc_x - pb_x, calc_z - pb_z)
+
+            if err < best_err:
+                best_err = err
+                best_sol = (q1, q2, q3, q4, q5, q6)
+
+    # ------------------------------------------------------------------
+    # Return the best branch found --------------------------------------
+    if best_sol is None:  # should never happen (targets are guaranteed reachable)
+        raise RuntimeError("IK solver failed to converge.")
+    return best_sol
+```

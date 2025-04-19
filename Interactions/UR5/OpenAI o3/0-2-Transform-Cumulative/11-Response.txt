@@ -1,0 +1,178 @@
+```python
+import math
+from typing import Tuple
+import numpy as np
+
+
+# -----------------------------  helpers  -------------------------------- #
+def _rotx(a: float) -> np.ndarray:
+    ca, sa = math.cos(a), math.sin(a)
+    return np.array([[1.0, 0.0, 0.0],
+                     [0.0,  ca, -sa],
+                     [0.0,  sa,  ca]])
+
+
+def _roty(a: float) -> np.ndarray:
+    ca, sa = math.cos(a), math.sin(a)
+    return np.array([[ ca, 0.0,  sa],
+                     [0.0, 1.0, 0.0],
+                     [-sa, 0.0,  ca]])
+
+
+def _rotz(a: float) -> np.ndarray:
+    ca, sa = math.cos(a), math.sin(a)
+    return np.array([[ ca, -sa, 0.0],
+                     [ sa,  ca, 0.0],
+                     [0.0, 0.0, 1.0]])
+
+
+def _mat_to_rpy(R: np.ndarray) -> Tuple[float, float, float]:
+    """
+    r‑p‑y (X‑Y‑Z / roll‑pitch‑yaw) extraction identical to
+    ROS / URDF “static tf” convention.
+    The returned angles are in the range:
+        roll  ∈ (‑π,  π]
+        pitch ∈ [‑π/2, π/2]
+        yaw   ∈ (‑π,  π]
+    """
+    # numeric guard
+    r20 = R[2, 0]
+    if abs(r20) < 1.0 - 1e-10:
+        pitch = math.asin(-r20)
+        roll  = math.atan2(R[2, 1], R[2, 2])
+        yaw   = math.atan2(R[1, 0], R[0, 0])
+    else:                                     # gimbal lock
+        pitch = math.pi/2 if r20 <= -1.0 else -math.pi/2
+        roll  = math.atan2(-R[0, 1], R[0, 2])
+        yaw   = 0.0
+    return roll, pitch, yaw
+
+
+def _ang_diff(a: float, b: float) -> float:
+    """
+    Smallest absolute difference between two angles.
+    """
+    d = (a - b) % (2.0 * math.pi)
+    if d > math.pi:
+        d -= 2.0 * math.pi
+    return abs(d)
+
+
+# ------------------------  inverse kinematics  --------------------------- #
+def inverse_kinematics(p: Tuple[float, float, float],
+                       r: Tuple[float, float, float]) -> Tuple[float, float, float]:
+    """
+    Closed‑form inverse kinematics for the 3‑DOF serial chain described in the
+    problem statement.
+
+    Parameters
+    ----------
+    p : (x, y, z)
+        Desired TCP position (metres) in the base frame.
+    r : (roll, pitch, yaw)
+        Desired TCP orientation given as URDF RPY extrinsic angles (rad).
+
+    Returns
+    -------
+    (θ1, θ2, θ3)
+        Joint angles in radians (within the ±2π joint limits) that reproduce
+        the requested pose exactly (up to numerical tolerance).
+    """
+    # ------------------------------------------------------------------ #
+    #  Geometric constants (metres)                                      #
+    # ------------------------------------------------------------------ #
+    d12   = 0.13585                      # base  → joint‑2 translation (fixed, along +Y)
+    v23   = np.array([0.0, -0.1197, 0.425])
+    v3e   = np.array([0.0,  0.0,     0.39225])
+    a     = 0.425                       # length joint‑2 → joint‑3  (along Z2)
+    b     = 0.39225                     # length joint‑3 → TCP      (along Z3)
+
+    # ------------------------------------------------------------------ #
+    #  Orientation part : extract θ1 and θsum = θ2+θ3 from R_target      #
+    # ------------------------------------------------------------------ #
+    roll_t, pitch_t, yaw_t = r
+    R_target = _rotz(yaw_t) @ _roty(pitch_t) @ _rotx(roll_t)
+
+    # θ1 from the second column of R (note: R01 = -sinθ1, R11 =  cosθ1)
+    theta1 = math.atan2(-R_target[0, 1], R_target[1, 1])
+
+    # overall pitch (about Y) that must be produced by joints 2 & 3
+    theta_sum = math.atan2(-R_target[2, 0], R_target[2, 2])   # θ2 + θ3
+
+    # ------------------------------------------------------------------ #
+    #  Position of the wrist centre (joint‑3)                            #
+    # ------------------------------------------------------------------ #
+    p_tcp    = np.asarray(p, dtype=float)
+    p_wrist  = p_tcp - R_target @ v3e                 # remove last fixed offset
+    p_wrist -= np.array([0.0, d12, 0.0])              # express relative to joint‑2 origin
+
+    # Express in frame‑2 (i.e. undo the base Z rotation)
+    c1, s1 = math.cos(theta1), math.sin(theta1)
+    RzT    = np.array([[ c1,  s1, 0.0],
+                       [-s1,  c1, 0.0],
+                       [0.0, 0.0, 1.0]])
+    v      = RzT @ p_wrist                            # coordinates in frame 2
+    x, _, z = v                                       # Y‑component is along the rotation axis
+
+    # ------------------------------------------------------------------ #
+    #  Planar two‑link IK in X‑Z plane of frame‑2                         #
+    # ------------------------------------------------------------------ #
+    d_sq = x * x + z * z
+    # numeric clipping for acos
+    cos_t2 = (d_sq - a * a - b * b) / (2.0 * a * b)
+    cos_t2 = max(min(cos_t2, 1.0), -1.0)
+    base_angle = math.acos(cos_t2)
+
+    # Two possible elbows (up / down)
+    theta2_candidates = [ base_angle, -base_angle ]
+
+    best_solution = None
+    best_match    = float('inf')
+
+    for theta2 in theta2_candidates:
+        # find the auxiliary angle between link‑1 and the line to wrist
+        phi = math.atan2(x, z)
+        psi = math.atan2(b * math.sin(theta2),
+                         a + b * math.cos(theta2))
+        # the actual joint‑2 angle (about Y) that positions link‑3
+        theta2_actual = phi - psi
+
+        # complete the chain
+        theta3 = theta_sum - theta2_actual
+
+        # ------------------------------------------------------------------ #
+        #  Generate equivalent solutions by adding / subtracting 2π to θ2    #
+        #  (and compensating θ3) so that all representations in the joint     #
+        #  limits are inspected.                                              #
+        # ------------------------------------------------------------------ #
+        for k in (-1, 0, 1):
+            theta2_k = theta2_actual + 2.0 * math.pi * k
+            theta3_k = theta3       - 2.0 * math.pi * k
+
+            # keep within the allowed limits ( ± 2π as per task statement )
+            if not (-2.0 * math.pi <= theta2_k <= 2.0 * math.pi):
+                continue
+            if not (-2.0 * math.pi <= theta3_k <= 2.0 * math.pi):
+                continue
+
+            # ------------------------------------------------------------------ #
+            #  Compare orientation obtained with this candidate to the request   #
+            # ------------------------------------------------------------------ #
+            R_check = _rotz(theta1) @ _roty(theta2_k + theta3_k)
+            r_check = _mat_to_rpy(R_check)
+
+            diff = (_ang_diff(r_check[0], roll_t) +
+                    _ang_diff(r_check[1], pitch_t) +
+                    _ang_diff(r_check[2], yaw_t))
+
+            if diff < best_match:
+                best_match   = diff
+                best_solution = (theta1, theta2_k, theta3_k)
+
+            # exact enough – stop early
+            if best_match < 1e-6:
+                return best_solution
+
+    # After scanning all variants the best solution is returned
+    return best_solution
+```

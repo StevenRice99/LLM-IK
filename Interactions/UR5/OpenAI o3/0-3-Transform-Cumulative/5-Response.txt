@@ -1,0 +1,175 @@
+Here is a single, self‑contained, closed–form inverse–kinematics routine that returns joint angles
+(θ1 … θ4) for the manipulator described in the “DETAILS” section.
+
+```python
+def inverse_kinematics(
+        p: tuple[float, float, float],
+        r: tuple[float, float, float]
+) -> tuple[float, float, float, float]:
+    """
+    Closed‑form analytical IK for the 4‑DOF manipulator whose geometry is
+    given in the task description.
+
+    Parameters
+    ----------
+    p : (x, y, z)
+        Desired TCP position in the base frame  [metres].
+    r : (rx, ry, rz)
+        Desired TCP orientation given as roll‑pitch‑yaw angles (URDF
+        convention, i.e. R = Rz(rz) • Ry(ry) • Rx(rx))  [radians].
+
+    Returns
+    -------
+    θ1, θ2, θ3, θ4  (all radians, wrapped to [‑π , π])
+    """
+    # ------------------------------------------------------------------
+    # Utilities
+    # ------------------------------------------------------------------
+    import math
+    import numpy as np
+
+    def wrap(a: float) -> float:
+        """map angle to [‑π , π]."""
+        return (a + math.pi) % (2.0 * math.pi) - math.pi
+
+    def rpy_to_matrix(rx: float, ry: float, rz: float) -> np.ndarray:
+        """URDF roll‑pitch‑yaw → rotation matrix (R = Rz · Ry · Rx)."""
+        cx, sx = math.cos(rx), math.sin(rx)
+        cy, sy = math.cos(ry), math.sin(ry)
+        cz, sz = math.cos(rz), math.sin(rz)
+
+        Rz = np.array([[cz, -sz, 0.0],
+                       [sz,  cz, 0.0],
+                       [0.0, 0.0, 1.0]])
+        Ry = np.array([[cy, 0.0, sy],
+                       [0.0, 1.0, 0.0],
+                       [-sy, 0.0, cy]])
+        Rx = np.array([[1.0, 0.0, 0.0],
+                       [0.0, cx, -sx],
+                       [0.0, sx,  cx]])
+        return Rz @ Ry @ Rx
+
+    def Rz(t: float) -> np.ndarray:
+        c, s = math.cos(t), math.sin(t)
+        return np.array([[c, -s, 0.0],
+                         [s,  c, 0.0],
+                         [0.0, 0.0, 1.0]])
+
+    def Ry(t: float) -> np.ndarray:
+        c, s = math.cos(t), math.sin(t)
+        return np.array([[c, 0.0, s],
+                         [0.0, 1.0, 0.0],
+                         [-s, 0.0, c]])
+
+    # ------------------------------------------------------------------
+    # Constant link parameters  (metres)
+    # ------------------------------------------------------------------
+    L_Y = 0.13585 - 0.1197 + 0.093          # aggregated constant offset in +Y
+    A   = 0.425                             # link‑2 length  (joint‑2 → joint‑3)
+    B   = 0.39225                           # link‑3 length  (joint‑3 → joint‑4)
+
+    # ------------------------------------------------------------------
+    # Pre‑compute data that are re‑used for each candidate
+    # ------------------------------------------------------------------
+    px, py, pz = p
+    rxy = math.hypot(px, py)                # radial distance in XY plane
+
+    # Two possible solutions for θ1
+    psi   = math.atan2(py, px)              # angle of TCP projection
+    ratio = L_Y / rxy if rxy > 1e-12 else 0.0
+    ratio = max(min(ratio, 1.0), -1.0)      # clip for numerical safety
+    alpha = math.asin(ratio)
+
+    theta1_list = [wrap(psi - alpha),       # “left” solution
+                   wrap(psi + alpha - math.pi)]  # “right” solution
+
+    # Desired orientation matrix
+    R_des = rpy_to_matrix(*r)
+
+    best_err = float('inf')
+    best_sol = (0.0, 0.0, 0.0, 0.0)
+
+    # ------------------------------------------------------------------
+    # Enumerate all analytical candidates
+    # ( 2 possibilities for θ1  ×  2 possibilities for θ3 )
+    # ------------------------------------------------------------------
+    for theta1 in theta1_list:
+        # ------------------------------------------------------------------
+        # Transform TCP position into the frame that is rotated by −θ1
+        # (the frame of the planar Y‑axis chain)
+        # ------------------------------------------------------------------
+        c1, s1 = math.cos(theta1), math.sin(theta1)
+        x_p =  c1 * px + s1 * py            # X′
+        z_p =  pz                           # Z  (unchanged)
+        # (y′ should be ≈ L_Y by construction)
+
+        # Distance in the X′Z plane
+        d_sq = x_p * x_p + z_p * z_p
+
+        # θ3 from the cosine law for the 2‑link planar manipulator
+        cos_t3 = (d_sq - A * A - B * B) / (2.0 * A * B)
+        cos_t3 = max(min(cos_t3, 1.0), -1.0)
+        theta3_candidates = [math.acos(cos_t3),      # elbow‑down
+                             -math.acos(cos_t3)]     # elbow‑up
+
+        for theta3 in theta3_candidates:
+            # θ2 from tangent formula
+            k1 = A + B * math.cos(theta3)
+            k2 = B * math.sin(theta3)
+            theta2 = math.atan2(x_p, z_p) - math.atan2(k2, k1)
+            theta2 = wrap(theta2)
+
+            # ------------------------------------------------------------------
+            # Orientation:  R = Rz(θ1) · Ry(θ2 + θ3 + θ4)
+            # ------------------------------------------------------------------
+            R_rel   = Rz(-theta1) @ R_des          # remove the effect of θ1
+            phi     = math.atan2(R_rel[0, 2], R_rel[0, 0])  # required Σ about Y
+            theta4  = wrap(phi - theta2 - theta3)
+
+            # ------------------------------------------------------------------
+            # Evaluate this candidate
+            # ------------------------------------------------------------------
+            # Orientation error
+            R_cand = Rz(theta1) @ Ry(theta2 + theta3 + theta4)
+            R_err  = R_cand.T @ R_des
+            angle_err = math.acos(
+                max(-1.0, min(1.0, 0.5 * (np.trace(R_err) - 1.0)))
+            )
+
+            # Position error (the analytical construction should
+            #   already satisfy it up to numerical noise)
+            x_chk = (A * math.sin(theta2) +
+                     B * math.sin(theta2 + theta3))
+            z_chk = (A * math.cos(theta2) +
+                     B * math.cos(theta2 + theta3))
+            # rotate back to world frame and add Y‑offset
+            px_chk = c1 * x_chk - s1 * L_Y
+            py_chk = s1 * x_chk + c1 * L_Y
+            pz_chk = z_chk
+            pos_err = math.sqrt((px_chk - px) ** 2 +
+                                (py_chk - py) ** 2 +
+                                (pz_chk - pz) ** 2)
+
+            total_err = pos_err + angle_err
+            if total_err < best_err:
+                best_err = total_err
+                best_sol = (wrap(theta1),
+                            wrap(theta2),
+                            wrap(theta3),
+                            wrap(theta4))
+
+    return best_sol
+```
+
+The routine
+
+1. Computes the two possible values of joint 1 that satisfy the constant
+   Y‑offset of the mechanism.
+2. For each θ1, solves the 2‑link planar problem for the elbow‑down and
+   elbow‑up configurations (two possibilities for θ3).
+3. Determines θ4 from the required TCP orientation after removing the
+   contribution of joint 1.
+4. Evaluates all four analytical candidates and returns the one whose
+   forward kinematics is closest (numerically) to the requested pose.
+
+All returned angles are wrapped to the standard interval [‑π , π].

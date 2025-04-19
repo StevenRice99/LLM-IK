@@ -1,0 +1,121 @@
+Here is a complete, closed‑form analytical inverse–kinematics routine for the four–axis arm described in the “DETAILS” section.
+
+```python
+import math
+import numpy as np
+
+
+def _wrap(a: float) -> float:
+    """
+    Wraps an angle to the interval [-π , π].
+    """
+    a = (a + math.pi) % (2.0 * math.pi) - math.pi
+    return a
+
+
+def _rpy_to_matrix(r: tuple[float, float, float]) -> np.ndarray:
+    """
+    Roll / Pitch / Yaw  (XYZ convention)  →  rotation matrix.
+    """
+    rx, ry, rz = r
+    cx, sx = math.cos(rx), math.sin(rx)
+    cy, sy = math.cos(ry), math.sin(ry)
+    cz, sz = math.cos(rz), math.sin(rz)
+
+    # R = Rz · Ry · Rx   (URDF's default)
+    Rz = np.array([[cz, -sz, 0.0],
+                   [sz,  cz, 0.0],
+                   [0.0, 0.0, 1.0]])
+    Ry = np.array([[cy, 0.0, sy],
+                   [0.0, 1.0, 0.0],
+                   [-sy, 0.0, cy]])
+    Rx = np.array([[1.0, 0.0, 0.0],
+                   [0.0, cx, -sx],
+                   [0.0, sx,  cx]])
+    return Rz @ Ry @ Rx
+
+
+def inverse_kinematics(
+        p: tuple[float, float, float],
+        r: tuple[float, float, float]
+) -> tuple[float, float, float, float]:
+    """
+    Computes the four joint angles (θ1 … θ4) that realise the requested
+    TCP position `p = (x, y, z)` and orientation given as intrinsic
+    roll / pitch / yaw angles `r = (rx, ry, rz)`.
+
+    All returned angles are wrapped to the interval [-π , π].
+    """
+    # ------------------------------------------------------------------
+    # Constants (taken from the URDF)
+    # ------------------------------------------------------------------
+    L_Y = 0.13585 - 0.1197 + 0.093        # total constant offset along local Y
+    A   = 0.425                           # first “planar” link length   (joint‑2 → joint‑3)
+    B   = 0.39225                         # second “planar” link length  (joint‑3 → joint‑4)
+
+    # ------------------------------------------------------------------
+    # Target position
+    # ------------------------------------------------------------------
+    px, py, pz = p
+    r_xy = math.hypot(px, py)                      # distance of TCP projection in the XY‑plane
+
+    # ------------------------------------------------------------------
+    # Joint‑1 (rotation about Z)
+    # Requires that the rotated Y‑component equals the fixed link offset
+    #     r_xy * sin(ψ - θ1) = L_Y
+    # with ψ = atan2(py , px).
+    # ------------------------------------------------------------------
+    if abs(L_Y) > r_xy + 1e-9:
+        raise ValueError('Target outside of horizontal workspace.')
+
+    psi         = math.atan2(py, px)
+    alpha       = math.asin(L_Y / r_xy)
+    # two possible solutions; we use the “elbow‑down” configuration
+    theta1      = _wrap(psi - alpha)
+
+    # ------------------------------------------------------------------
+    # Transform the position into the frame that has been rotated by –θ1
+    # (i.e. the frame in which the remaining joints act in the XZ‑plane).
+    # In this frame   y' = L_Y   by construction.
+    # ------------------------------------------------------------------
+    c1, s1 = math.cos(theta1), math.sin(theta1)
+    x_p    =  c1 * px + s1 * py                     # planar X′
+    z_p    =  pz                                    # planar Z  (unchanged)
+    # numerical clean‑up
+    if abs(x_p) < 1e-12:
+        x_p = 0.0
+
+    # ------------------------------------------------------------------
+    # Joints‑2 & ‑3 : classical 2‑link planar inverse kinematics
+    # ------------------------------------------------------------------
+    d_sq      = x_p * x_p + z_p * z_p
+    cos_t3    = (d_sq - A * A - B * B) / (2.0 * A * B)
+    cos_t3    = max(min(cos_t3, 1.0), -1.0)         # clip   (numerical safety)
+    # pick “elbow‑down” solution,  θ3 ≥ 0
+    theta3    = math.acos(cos_t3)
+
+    # θ2 from tangent formula
+    k1        = A + B * cos_t3
+    k2        = B * math.sin(theta3)
+    theta2    = math.atan2(x_p, z_p) - math.atan2(k2, k1)
+
+    theta2    = _wrap(theta2)
+    theta3    = _wrap(theta3)
+
+    # ------------------------------------------------------------------
+    # Joint‑4 from the required orientation
+    # ------------------------------------------------------------------
+    R_des     = _rpy_to_matrix(r)
+    # In the arm’s structure  R = Rz(θ1) · Ry(θ2+θ3+θ4)
+    # Therefore  θ234 = atan2(−R[2,0] , R[2,2])
+    theta234  = math.atan2(-R_des[2, 0], R_des[2, 2])
+    theta4    = _wrap(theta234 - theta2 - theta3)
+
+    # ------------------------------------------------------------------
+    # Return the joint vector
+    # ------------------------------------------------------------------
+    return (_wrap(theta1),
+            _wrap(theta2),
+            _wrap(theta3),
+            _wrap(theta4))
+```

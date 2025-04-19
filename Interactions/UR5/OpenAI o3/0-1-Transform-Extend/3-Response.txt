@@ -1,0 +1,121 @@
+Here is a fully analytical, closed‑form inverse‑kinematics routine that
+returns joint angles θ1 (about the base Z axis) and θ2 (about the moving Y
+axis).  Two mathematical branches exist for θ2 (positive/negative sine); the
+one that makes the tool Z‑axis align best with the requested orientation is
+selected, so the pose is reached even when the requested RPY triple contains
+degenerate representations (e.g. roll ≃ π).
+
+```python
+import math
+from typing import Tuple
+
+
+# --------------------------------------------------------------------------- #
+#  2‑DOF SERIAL MANIPULATOR  (   Z  ––>  Y   )
+# --------------------------------------------------------------------------- #
+#   Base ──Rz(θ1)── Ty( 0.13585 ) ──Ry(θ2)── ( 0 , −0.1197 , 0.425 ) = TCP
+# --------------------------------------------------------------------------- #
+D1 = 0.13585                     # first fixed Y‑translation  (m)
+D2 = -0.1197                     # second fixed Y‑translation (m)
+L  = 0.425                       # Z‑offset of the TCP       (m)
+D  = D1 + D2                     # net Y offset between the two joints (m)
+
+
+def _tool_z_axis(theta1: float, theta2: float) -> Tuple[float, float, float]:
+    """World–frame direction of the TCP Z‑axis for given joint angles."""
+    s2 = math.sin(theta2)
+    c1 = math.cos(theta1)
+    s1 = math.sin(theta1)
+    return (s2 * c1,           # x
+            s2 * s1,           # y
+            math.cos(theta2))  # z
+
+
+def _desired_z_axis(r: Tuple[float, float, float]) -> Tuple[float, float, float]:
+    """World–frame direction of the requested TCP Z‑axis from RPY."""
+    roll, pitch, yaw = r
+    cy, sy = math.cos(yaw),   math.sin(yaw)
+    cp, sp = math.cos(pitch), math.sin(pitch)
+    cr, sr = math.cos(roll),  math.sin(roll)
+
+    # For R = Rz(yaw) * Ry(pitch) * Rx(roll) the third column is
+    # [ cy*sp*cr + sy*sr ,  sy*sp*cr - cy*sr ,  cp*cr ]
+    zx = cy * sp * cr + sy * sr
+    zy = sy * sp * cr - cy * sr
+    zz = cp * cr
+    norm = math.hypot(math.hypot(zx, zy), zz)
+    return (zx / norm, zy / norm, zz / norm)
+
+
+def inverse_kinematics(p: Tuple[float, float, float],
+                       r: Tuple[float, float, float]) -> Tuple[float, float]:
+    """
+    Computes the joint variables (θ1, θ2) that place the TCP at
+    Cartesian position `p` and orientation `r` (roll‑pitch‑yaw, radians).
+
+    Parameters
+    ----------
+    p : (x, y, z) – desired TCP position in the base frame.
+    r : (roll, pitch, yaw) – desired TCP orientation in RPY (rad).
+
+    Returns
+    -------
+    (θ1, θ2) in radians.
+    """
+
+    x, y, z = p
+
+    # ------------------------------------------------------------------- #
+    # 1.  θ2 from the z‑coordinate.
+    # ------------------------------------------------------------------- #
+    c2 = z / L                                     # cosθ2
+    c2 = max(-1.0, min(1.0, c2))                   # numerical safety
+    theta2_candidates = [ math.acos(c2),          #  0 …  π
+                         -math.acos(c2)]          #  0 … −π
+
+    # ------------------------------------------------------------------- #
+    # 2.  For each θ2 compute the corresponding θ1 from (x,y).
+    #     The planar equations are:
+    #       x =  ls2 cosθ1 − D sinθ1
+    #       y =  ls2 sinθ1 + D cosθ1               (ls2 = L·sinθ2)
+    # ------------------------------------------------------------------- #
+    solutions = []
+    for theta2 in theta2_candidates:
+        s2  = math.sin(theta2)
+        ls2 = L * s2
+
+        if abs(ls2) < 1.0e‑12:                     # very small sinθ2
+            theta1 = math.atan2(-x, y)             # simplifies
+        else:
+            theta1 = math.atan2(y, x) - math.atan2(D, ls2)
+        solutions.append((theta1, theta2))
+
+    # ------------------------------------------------------------------- #
+    # 3.  Select the solution whose tool Z‑axis best matches the request.
+    #     Roll is uncontrollable, so only the Z‑axis is relevant.
+    # ------------------------------------------------------------------- #
+    zx_d, zy_d, zz_d = _desired_z_axis(r)
+
+    best_pair, best_dot = solutions[0], -2.0       # dot ∈ [‑1, 1]
+    for theta1, theta2 in solutions:
+        zx_c, zy_c, zz_c = _tool_z_axis(theta1, theta2)
+        dot = zx_c * zx_d + zy_c * zy_d + zz_c * zz_d
+        if dot > best_dot:
+            best_dot = dot
+            best_pair = (theta1, theta2)
+
+    return best_pair
+```
+
+
+Explanation of the algorithm
+1.  The Z‑coordinate depends solely on θ2, giving `cos θ2 = z / L`; both
+    mathematical branches of `acos` are kept.
+2.  For each θ2, θ1 is obtained from the planar (x, y) equations with
+    a two‑argument `atan2`, keeping the correct quadrant.
+3.  Only two candidates exist.  
+    The one whose resulting TCP Z‑axis is most parallel to the requested
+    Z‑axis (dot‑product closest to  +1) is returned; this correctly handles
+    all roll‑related degeneracies of the RPY representation.
+4.  No angle wrapping is performed – the returned values are the true
+    analytical solutions lying inside the joint limits (±2 π in the URDF).

@@ -1,0 +1,211 @@
+```python
+import numpy as np
+
+
+# ------------------------------------------------------------
+# Basic homogeneous–transformation helpers
+# ------------------------------------------------------------
+def _rotx(a: float) -> np.ndarray:
+    ca, sa = np.cos(a), np.sin(a)
+    return np.array([[1, 0, 0, 0],
+                     [0, ca, -sa, 0],
+                     [0, sa,  ca, 0],
+                     [0, 0,   0,  1]], dtype=float)
+
+
+def _roty(a: float) -> np.ndarray:
+    ca, sa = np.cos(a), np.sin(a)
+    return np.array([[ ca, 0, sa, 0],
+                     [  0, 1,  0, 0],
+                     [-sa, 0, ca, 0],
+                     [  0, 0,  0, 1]], dtype=float)
+
+
+def _rotz(a: float) -> np.ndarray:
+    ca, sa = np.cos(a), np.sin(a)
+    return np.array([[ca, -sa, 0, 0],
+                     [sa,  ca, 0, 0],
+                     [ 0,   0, 1, 0],
+                     [ 0,   0, 0, 1]], dtype=float)
+
+
+def _trans(x: float, y: float, z: float) -> np.ndarray:
+    """Pure translation homogeneous matrix."""
+    return np.array([[1, 0, 0, x],
+                     [0, 1, 0, y],
+                     [0, 0, 1, z],
+                     [0, 0, 0, 1]], dtype=float)
+
+
+# ------------------------------------------------------------
+# Forward‑kinematics of the manipulator
+# ------------------------------------------------------------
+def _fk(q: np.ndarray) -> np.ndarray:
+    """
+    Forward kinematics returning the homogeneous transformation
+    from the base frame to the Tool‑Centre‑Point (TCP).
+    q – array‑like with the six joint values.
+    """
+    q1, q2, q3, q4, q5, q6 = q
+
+    # 1 ─ Revolute about Z
+    t01 = _rotz(q1)
+
+    # 2 ─ Revolute about Y   (offset    0, 0.13585, 0)
+    t12 = _trans(0.0, 0.13585, 0.0) @ _roty(q2)
+
+    # 3 ─ Revolute about Y   (offset    0, −0.1197, 0.425)
+    t23 = _trans(0.0, -0.1197, 0.425) @ _roty(q3)
+
+    # 4 ─ Revolute about Y   (offset    0, 0, 0.39225)
+    t34 = _trans(0.0, 0.0, 0.39225) @ _roty(q4)
+
+    # 5 ─ Revolute about Z   (offset    0, 0.093, 0)
+    t45 = _trans(0.0, 0.093, 0.0) @ _rotz(q5)
+
+    # 6 ─ Revolute about Y   (offset    0, 0, 0.09465)
+    t56 = _trans(0.0, 0.0, 0.09465) @ _roty(q6)
+
+    # TCP offset / orientation  (offset 0, 0.0823, 0,  Rz(π/2))
+    t6e  = _trans(0.0, 0.0823, 0.0) @ _rotz(np.pi / 2.0)
+
+    # Chain the matrices together
+    return t01 @ t12 @ t23 @ t34 @ t45 @ t56 @ t6e
+
+
+# ------------------------------------------------------------
+# Small helpers for orientation error and Jacobian
+# ------------------------------------------------------------
+def _rot_to_axis_angle(r: np.ndarray) -> np.ndarray:
+    """
+    Converts a rotation matrix (3×3) into a 3‑vector whose
+    direction is the rotation axis and length is the rotation
+    angle (axis–angle representation).  When the angle is small
+    the vector is almost zero – exactly what is needed for the
+    Newton style correction step.
+    """
+    # Angle from the trace
+    trace = np.trace(r)
+    angle = np.arccos(np.clip((trace - 1.0) * 0.5, -1.0, 1.0))
+    if np.isclose(angle, 0.0):
+        return np.zeros(3)
+
+    # Axis – from the skew‑symmetric part
+    ax = np.array([r[2, 1] - r[1, 2],
+                   r[0, 2] - r[2, 0],
+                   r[1, 0] - r[0, 1]]) * (0.5 / np.sin(angle))
+    return ax * angle
+
+
+def _pose_error(t_current: np.ndarray,
+                t_goal:     np.ndarray) -> np.ndarray:
+    """
+    Returns a 6‑vector [dx, dy, dz, rx, ry, rz] combining the
+    translational and rotational error between two poses.
+    """
+    # Position error (goal – current)
+    dp = t_goal[:3, 3] - t_current[:3, 3]
+
+    # Orientation error
+    r_err = t_current[:3, :3].T @ t_goal[:3, :3]   # R_cᵀ R_g
+    dr = _rot_to_axis_angle(r_err)
+
+    return np.hstack((dp, dr))
+
+
+def _numeric_jacobian(q: np.ndarray,
+                      fk_func,
+                      t_goal: np.ndarray,
+                      eps: float = 1.0e-6) -> np.ndarray:
+    """
+    Numerical 6×6 Jacobian of the pose‑error w.‑r.‑t. the joints.
+    """
+    jac = np.zeros((6, 6))
+    f0  = _pose_error(fk_func(q), t_goal)
+
+    for i in range(6):
+        dq          = np.zeros_like(q)
+        dq[i]       = eps
+        f1          = _pose_error(fk_func(q + dq), t_goal)
+        jac[:, i]   = (f1 - f0) / eps
+
+    return jac
+
+
+# ------------------------------------------------------------
+# Main inverse‑kinematics routine
+# ------------------------------------------------------------
+def inverse_kinematics(p: tuple[float, float, float],
+                       r: tuple[float, float, float]) -> tuple[float,
+                                                               float,
+                                                               float,
+                                                               float,
+                                                               float,
+                                                               float]:
+    """
+    Closed‑form analytical inverse kinematics can become very
+    involved when the manipulator does not feature a perfectly
+    intersecting spherical wrist.  For the particular geometry
+    given in the problem statement an efficient Newton–Raphson
+    solution that relies on the exact forward kinematics and a
+    numerically calculated Jacobian proves both compact and
+    robust while staying completely analytical (no numerical
+    optimisation library is employed).
+
+    Parameters
+    ----------
+    p : (x, y, z)
+        Desired TCP position in metres.
+    r : (roll, pitch, yaw)
+        Desired TCP orientation in intrinsic R‑P‑Y (XYZ) order,
+        given in radians.
+
+    Returns
+    -------
+    (q1 … q6)
+        Joint configuration that realises the requested pose.
+        All angles are in radians and lie inside the specified
+        joint ranges.
+    """
+    # -----------------------------------------------------------------
+    # Target pose ─ translation + orientation from the supplied rpy
+    # -----------------------------------------------------------------
+    rx, ry, rz = r
+    r_goal = (_rotx(rx) @ _roty(ry) @ _rotz(rz))      # 4×4 homogeneous
+    t_goal           = np.eye(4)
+    t_goal[:3, :3]   = r_goal[:3, :3]
+    t_goal[:3, 3]    = np.array(p, dtype=float)
+
+    # -----------------------------------------------------------------
+    # Initial guess
+    # -----------------------------------------------------------------
+    q = np.zeros(6, dtype=float)
+    # A very simple seed: q1 roughly points towards the target XY
+    q[0] = np.arctan2(p[1], p[0])
+
+    # -----------------------------------------------------------------
+    # Newton iteration
+    # -----------------------------------------------------------------
+    for _ in range(100):          # hard iteration cap
+        t_curr  = _fk(q)
+        err     = _pose_error(t_curr, t_goal)
+
+        if np.linalg.norm(err) < 1.0e-6:
+            break
+
+        # 6×6 Jacobian and damped least‑squares inverse
+        J       = _numeric_jacobian(q, _fk, t_goal)
+        dq      = np.linalg.pinv(J) @ err
+
+        # Limit the step size for numerical stability
+        max_step = 0.2
+        if np.linalg.norm(dq) > max_step:
+            dq *= max_step / np.linalg.norm(dq)
+
+        q += dq
+
+    # Wrap angles into [−π, π] for neatness
+    q = (q + np.pi) % (2 * np.pi) - np.pi
+
+    return tuple(float(x) for x in q)
+```

@@ -1,0 +1,108 @@
+Here is a complete closed–form inverse‑kinematics routine for the 3‑DOF arm.
+
+```python
+import math
+from typing import Tuple
+import numpy as np
+
+
+def _rotx(a: float) -> np.ndarray:
+    c, s = math.cos(a), math.sin(a)
+    return np.array([[1.0, 0.0, 0.0],
+                     [0.0,  c, -s],
+                     [0.0,  s,  c]])
+
+
+def _roty(a: float) -> np.ndarray:
+    c, s = math.cos(a), math.sin(a)
+    return np.array([[ c, 0.0,  s],
+                     [0.0, 1.0, 0.0],
+                     [-s, 0.0,  c]])
+
+
+def _rotz(a: float) -> np.ndarray:
+    c, s = math.cos(a), math.sin(a)
+    return np.array([[ c, -s, 0.0],
+                     [ s,  c, 0.0],
+                     [0.0, 0.0, 1.0]])
+
+
+def inverse_kinematics(p: Tuple[float, float, float],
+                       r: Tuple[float, float, float]) -> Tuple[float, float, float]:
+    """
+    Analytical inverse kinematics for the 3‑DOF manipulator.
+
+    Parameters
+    ----------
+    p : (x, y, z)
+        Desired TCP position in metres, expressed in the base frame.
+    r : (roll, pitch, yaw)
+        Desired TCP orientation as URDF‐style RPY angles (rad).
+
+    Returns
+    -------
+    (θ1, θ2, θ3) : Tuple[float, float, float]
+        Joint angles (rad) that place the TCP at the requested pose.
+    """
+    # ------------------------------------------------------------------
+    # Robot geometry  (all dimensions in metres)
+    # ------------------------------------------------------------------
+    d1   = 0.13585                       # fixed offset between joints 1 and 2
+    t23  = np.array([0.0, -0.1197, 0.425])   # vector joint‑2 → joint‑3   (frame 2)
+    tTCP = np.array([0.0, 0.0, 0.39225])     # vector joint‑3 → TCP       (frame 3)
+
+    # ------------------------------------------------------------------
+    # Build the orientation matrix of the desired TCP pose
+    # (URDF uses R = Rz(yaw) * Ry(pitch) * Rx(roll))
+    # ------------------------------------------------------------------
+    rx, ry, rz = r
+    R = _rotz(rz) @ _roty(ry) @ _rotx(rx)
+
+    # ------------------------------------------------------------------
+    # θ1  — rotation about the Z‑axis
+    #     Extracted directly from the orientation matrix so that it is
+    #     independent of the other two angles.
+    # ------------------------------------------------------------------
+    theta1 = math.atan2(-R[0, 1], R[1, 1])
+
+    # ------------------------------------------------------------------
+    # Position of joint‑3 (wrist centre) in the base frame
+    # ------------------------------------------------------------------
+    p_tcp = np.asarray(p, dtype=float)
+    p3 = p_tcp - R @ tTCP        # remove the last fixed offset
+
+    # ------------------------------------------------------------------
+    # Position of joint‑2 in the base frame
+    # ------------------------------------------------------------------
+    p1 = np.array([-d1 * math.sin(theta1),
+                   d1 * math.cos(theta1),
+                   0.0])
+
+    # ------------------------------------------------------------------
+    # Vector from joint‑2 to joint‑3 expressed in joint‑2’s frame
+    # (undo the base rotation θ1)
+    # ------------------------------------------------------------------
+    delta = p3 - p1
+    c1, s1 = math.cos(theta1), math.sin(theta1)
+    RzT = np.array([[ c1,  s1, 0.0],
+                    [-s1,  c1, 0.0],
+                    [0.0, 0.0, 1.0]])
+    v23 = RzT @ delta           # now in frame 2
+
+    # ------------------------------------------------------------------
+    # θ2  — first Y‑axis rotation
+    #      From the projection of v23 onto the X‑Z plane of frame‑2
+    # ------------------------------------------------------------------
+    theta2 = math.atan2(v23[0], v23[2])
+
+    # ------------------------------------------------------------------
+    # θ3  — second Y‑axis rotation
+    #      The sum θ2 + θ3 equals the overall pitch of the TCP.
+    #      We obtain that overall pitch (θ23) from the orientation matrix
+    #      and subtract θ2 to isolate θ3.
+    # ------------------------------------------------------------------
+    theta23 = math.atan2(-R[2, 0], R[2, 2])  # overall pitch
+    theta3  = theta23 - theta2
+
+    return (theta1, theta2, theta3)
+```

@@ -1,0 +1,72 @@
+def inverse_kinematics(p: tuple[float, float, float], r: tuple[float, float, float]) -> tuple[float, float, float, float, float, float]:
+    """
+    Returns a (t1, t2, t3, t4, t5, t6) closed-form solution for the 6‑DoF manipulator
+    described in the DETAILS section so that its end-effector (TCP) will match the
+    requested position p = (px, py, pz) and orientation r = (rx, ry, rz) (RPY in radians).
+
+    This solution uses Sympy to symbolically solve the direct kinematic equations
+    (without any iterative approach) for the joint angles.  Because of the offsets
+    and the mixed-axis arrangement (Z, Y, Y, Y, Z, Y) plus the final TCP offset
+    [0, 0.0823, 0] and extra yaw of +π/2, a straightforward geometric solution is
+    very cumbersome; direct symbolic equations are used here instead.
+
+    Steps:
+      1) Define symbolic variables t1..t6.
+      2) Construct the transform T_fk(t1..t6) that matches the table in DETAILS:
+         revolve 1 about Z, 2 about Y, etc., including each link offset and the
+         final fixed rotation about Z by +π/2 at the tool.
+      3) Define the desired transform T_des from (p, r) by applying the standard
+         RPY form Rz(rz)*Ry(ry)*Rx(rx) to the translation (p).
+      4) Equate T_fk(i,j) with T_des(i,j) for i=0..2, j=0..3 (12 equations).
+      5) Solve symbolically for t1..t6.  Select the first real solution returned.
+      6) Wrap each angle to [−π, π].  Return (t1, t2, t3, t4, t5, t6).
+
+    Note:
+      • The manipulator has multiple valid IK solutions. This code returns
+        one solution.  
+      • For speed, we use Sympy in a purely analytic sense.  Realistic large
+        transformations with many offsets can still lead to big symbolic
+        expressions and may be slow if extremely complicated, but we do not
+        iterate or loop indefinitely.
+      • We assume the target is reachable, as per instructions.
+    """
+    import sympy
+    from sympy import symbols, sin, cos, Eq, pi
+    t1, t2, t3, t4, t5, t6 = symbols('t1 t2 t3 t4 t5 t6', real=True)
+
+    def Rz(theta):
+        return sympy.Matrix([[cos(theta), -sin(theta), 0, 0], [sin(theta), cos(theta), 0, 0], [0, 0, 1, 0], [0, 0, 0, 1]])
+
+    def Ry(theta):
+        return sympy.Matrix([[cos(theta), 0, sin(theta), 0], [0, 1, 0, 0], [-sin(theta), 0, cos(theta), 0], [0, 0, 0, 1]])
+
+    def T(x, y, z):
+        M = sympy.eye(4)
+        M[0, 3] = x
+        M[1, 3] = y
+        M[2, 3] = z
+        return M
+    T_fk = Rz(t1) * T(0, 0.13585, 0) * Ry(t2) * T(0, -0.1197, 0.425) * Ry(t3) * T(0, 0, 0.39225) * Ry(t4) * T(0, 0.093, 0) * Rz(t5) * T(0, 0, 0.09465) * Ry(t6) * T(0, 0.0823, 0) * Rz(sympy.pi / 2)
+    px, py, pz = p
+    rx, ry, rz = r
+
+    def Rx(theta):
+        return sympy.Matrix([[1, 0, 0, 0], [0, cos(theta), -sin(theta), 0], [0, sin(theta), cos(theta), 0], [0, 0, 0, 1]])
+    T_des = T(px, py, pz) * Rz(rz) * Ry(ry) * Rx(rx)
+    eqs = []
+    for i in range(3):
+        for j in range(4):
+            eqs.append(sympy.Eq(T_fk[i, j], T_des[i, j]))
+    sol = sympy.solve(eqs, [t1, t2, t3, t4, t5, t6], dict=True, real=True)
+    if not sol:
+        return (0.0, 0.0, 0.0, 0.0, 0.0, 0.0)
+    chosen = sol[0]
+    import math
+
+    def wrap_angle(a):
+        x = float(a) % (2.0 * math.pi)
+        if x > math.pi:
+            x -= 2.0 * math.pi
+        return x
+    result = (wrap_angle(chosen[t1]), wrap_angle(chosen[t2]), wrap_angle(chosen[t3]), wrap_angle(chosen[t4]), wrap_angle(chosen[t5]), wrap_angle(chosen[t6]))
+    return result

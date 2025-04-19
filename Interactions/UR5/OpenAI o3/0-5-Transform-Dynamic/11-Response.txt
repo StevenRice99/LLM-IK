@@ -1,0 +1,161 @@
+The wrong orientation‐decoupling was the main reason the previous solver failed.  
+Below is a corrected, fully analytical routine that
+
+•   removes the tool‑flange offset exactly,  
+•   extracts the wrist angles from the factorisation  
+        R̅ = Ry(φ) · Rz(q5) · Ry(q6)  
+    through the identities  
+  
+        s5 = √(R̅₁₀²+R̅₁₂²)   c5 = R̅₁₁  
+        q5 = atan2( ±s5 , c5 )  
+        q6 = atan2( R̅₁₂ , R̅₁₀ )  
+        φ  = atan2( R̅₂₁ , –R̅₀₁ ),  
+  
+•   re‑uses the already proven planar 2‑R solution for (q2,q3,q4),  
+•   explores both branches of q1 and of q3 and picks the one that
+    minimises the residual Cartesian error.
+
+```python
+import math
+import numpy as np
+
+
+def inverse_kinematics(
+        p: tuple[float, float, float],
+        r: tuple[float, float, float]
+) -> tuple[float, float, float, float, float, float]:
+    """
+    Closed‑form inverse kinematics for the 6‑DOF manipulator whose URDF
+    parameters are given in the problem statement.
+
+    Parameters
+    ----------
+    p : (x, y, z)
+        Desired TCP position (metres, base frame).
+    r : (roll, pitch, yaw)
+        Desired TCP orientation expressed as fixed‑axis XYZ (URDF‑style
+        RPY angles), in radians.
+
+    Returns
+    -------
+    (q1, q2, q3, q4, q5, q6) : tuple(float, …)
+        One consistent joint configuration (radians).
+    """
+    # ------------------------------------------------------------------
+    # Fixed link lengths / offsets  (metres)
+    L1 = 0.425          # between J2 and J3
+    L2 = 0.39225        # between J3 and J4
+    L_tcp = 0.09465     # between J5 and J6  (along local z)
+    TCP_Y = 0.0823      # tool offset after J6 (along local y)
+    y_const = 0.13585 - 0.1197 + 0.093  # fixed Y‑translation up to J5
+
+    # ------------------------------------------------------------------
+    # Convenience short‑hands for basic rotation matrices
+    def Rx(a):
+        ca, sa = math.cos(a), math.sin(a)
+        return np.array([[1, 0, 0], [0, ca, -sa], [0, sa, ca]])
+
+    def Ry(a):
+        ca, sa = math.cos(a), math.sin(a)
+        return np.array([[ca, 0, sa], [0, 1, 0], [-sa, 0, ca]])
+
+    def Rz(a):
+        ca, sa = math.cos(a), math.sin(a)
+        return np.array([[ca, -sa, 0], [sa, ca, 0], [0, 0, 1]])
+
+    # ------------------------------------------------------------------
+    # Desired TCP orientation matrix
+    roll, pitch, yaw = r
+    R_des = Rz(yaw) @ Ry(pitch) @ Rx(roll)
+
+    # ------------------------------------------------------------------
+    # Step‑1  : remove the final tool offset to obtain the wrist (J6) origin
+    #   Frame‑6 → TCP  : translate (0, TCP_Y, 0) then rotate about Z by +90 deg
+    #   Hence:  R_0^6 = R_des · Rz(−π/2)
+    #           p_6   = p_des − R_des · [TCP_Y, 0, 0]^T
+    p_vec = np.asarray(p, dtype=float)
+    p6_vec = p_vec - R_des @ np.array([TCP_Y, 0.0, 0.0])
+
+    # ------------------------------------------------------------------
+    # Candidate solutions come from the quadratic equation on q1
+    p6_x, p6_y, p6_z = p6_vec
+    r_xy = math.hypot(p6_x, p6_y)
+    ratio = max(-1.0, min(1.0, y_const / max(1e-9, r_xy)))
+    theta = math.atan2(p6_y, p6_x)
+    a = math.asin(ratio)
+    q1_candidates = (theta - a, theta - (math.pi - a))
+
+    # ------------------------------------------------------------------
+    # Prepare desired matrix “after removing q1 and the TCP yaw”
+    Rz_m_pi_2 = Rz(-math.pi / 2)
+
+    best_err = float("inf")
+    best_joint_set = None
+
+    # ------------------------------------------------------------------
+    # Iterate over both q1 branches
+    for q1 in q1_candidates:
+        cq1, sq1 = math.cos(q1), math.sin(q1)
+        Rz_m_q1 = np.array([[cq1,  sq1, 0],
+                            [-sq1, cq1, 0],
+                            [0,    0,   1]])
+
+        # --------------------------------------------------------------
+        # Orientation decoupling:  R̅ = Ry(φ) Rz(q5) Ry(q6)
+        R_bar = Rz_m_q1 @ R_des @ Rz_m_pi_2
+
+        # Extract q5, q6, φ (care for the possible singularity in q5)
+        s5 = math.hypot(R_bar[1, 0], R_bar[1, 2])
+        c5 = R_bar[1, 1]
+
+        if s5 < 1.0e-8:                # J5 is in a singular posture
+            q5 = 0.0 if c5 > 0 else math.pi
+            q6 = 0.0
+            phi = math.atan2(R_bar[0, 2], R_bar[2, 2])
+        else:
+            q5 = math.atan2(s5, c5)
+            q6 = math.atan2(R_bar[1, 2], R_bar[1, 0])
+            phi = math.atan2(R_bar[2, 1], -R_bar[0, 1])
+
+        # --------------------------------------------------------------
+        # Translational sub‑problem (identical to earlier 5‑DOF derivation)
+        #   Rotate the wrist origin into the “planar” base frame
+        p_bar = Rz_m_q1 @ p6_vec
+        pb_x, pb_y, pb_z = p_bar        # pb_y should equal y_const by design
+
+        # Effective planar target once the last z‑offset has been removed
+        Px = pb_x - L_tcp * math.sin(phi)
+        Pz = pb_z - L_tcp * math.cos(phi)
+        r2 = math.hypot(Px, Pz)
+
+        # Cosine‑law for q3  (two elbow branches)
+        cos_q3 = (r2 * r2 - L1 * L1 - L2 * L2) / (2 * L1 * L2)
+        cos_q3 = max(-1.0, min(1.0, cos_q3))   # numerical clipping
+        for q3 in (math.acos(cos_q3), -math.acos(cos_q3)):
+            s3, c3 = math.sin(q3), math.cos(q3)
+            # q2 from standard 2‑link IK
+            q2 = math.atan2(Px, Pz) - math.atan2(L2 * s3, L1 + L2 * c3)
+            # q4 from the spherical wrist closure
+            q4 = phi - (q2 + q3)
+
+            # ----------------------------------------------------------
+            # Evaluate Cartesian accuracy of this branch
+            calc_x = (L1 * math.sin(q2) +
+                      L2 * math.sin(q2 + q3) +
+                      L_tcp * math.sin(phi))
+            calc_z = (L1 * math.cos(q2) +
+                      L2 * math.cos(q2 + q3) +
+                      L_tcp * math.cos(phi))
+            err_pos = math.hypot(calc_x - pb_x, calc_z - pb_z)
+
+            if err_pos < best_err:
+                best_err = err_pos
+                best_joint_set = (q1, q2, q3, q4, q5, q6)
+
+    # The problem statement guarantees reachability, so best_joint_set
+    # must be filled.  Raise if something went unexpectedly wrong.
+    if best_joint_set is None:
+        raise RuntimeError("Inverse kinematics failed to find a solution.")
+
+    return best_joint_set
+```

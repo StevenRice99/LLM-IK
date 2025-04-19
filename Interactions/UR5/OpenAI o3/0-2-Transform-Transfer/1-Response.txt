@@ -1,0 +1,119 @@
+```python
+import math
+from typing import Tuple, List
+
+
+def _wrap_to_pi(a: float) -> float:
+    """
+    Wrap an angle to the range [-π, π).
+    """
+    while a >= math.pi:
+        a -= 2.0 * math.pi
+    while a < -math.pi:
+        a += 2.0 * math.pi
+    return a
+
+
+def _solve_set(
+    x: float, y: float, z: float, k: float, theta3: float
+) -> Tuple[float, float, float]:
+    """
+    Compute θ1 and θ2 that accompany a candidate θ3.
+    """
+    # Link‑length auxiliaries
+    C = 0.425 + 0.39225 * math.cos(theta3)
+    D = 0.39225 * math.sin(theta3)
+
+    # Distance in the base‑XY plane measured from the line that is k
+    # away from the Z‑axis (see analytical derivation in EXISTING code)
+    A_sq = x * x + y * y - k * k
+    A = math.sqrt(max(A_sq, 0.0))  # numerical safety
+
+    # θ2 from the intersection of two circles (law of sines / cosines)
+    denom_2 = C * C + D * D
+    sin_t2 = (C * A - D * z) / denom_2
+    cos_t2 = (C * z + D * A) / denom_2
+    theta2 = math.atan2(sin_t2, cos_t2)
+
+    # θ1 from projection in the XY‑plane
+    if x == 0.0 and y == 0.0:
+        theta1 = 0.0
+    else:
+        cos_t1_num = A * x + k * y
+        sin_t1_num = A * y - k * x
+        theta1 = math.atan2(sin_t1_num, cos_t1_num)
+
+    return theta1, theta2, theta3
+
+
+def inverse_kinematics(
+    p: Tuple[float, float, float], r: Tuple[float, float, float]
+) -> Tuple[float, float, float]:
+    """
+    Analytical inverse kinematics for the 3‑DoF arm defined in DETAILS.
+
+    Parameters
+    ----------
+    p : (x, y, z)
+        Desired tool‑centre‑point position expressed in the base frame [metres].
+    r : (roll, pitch, yaw)
+        Desired orientation expressed as fixed‑axis (XYZ / RPY) Euler angles [rad].
+        Because the mechanism offers only two independent orientation DoF
+        (yaw about Z and pitch about Y after yaw), the supplied targets will
+        obey roll ≈ 0 and the relationship  pitch = θ2 + θ3,  yaw = θ1.
+
+    Returns
+    -------
+    (θ1, θ2, θ3) : tuple of floats
+        Joint angles in radians that realise the requested pose.
+    """
+    x, y, z = p
+    roll_d, pitch_d, yaw_d = r
+
+    # Geometric constants that appear repeatedly in the closed‑form solution
+    k = 0.01615  # 0.13585 − 0.1197
+    k_sq = k * k
+
+    # ---------- candidate solutions for θ3 ---------------------------------
+    # From the law of cosines applied to the triangle formed by links 2 & 3
+    numerator = x * x + y * y + z * z - 0.334746  # = |p|² − (a² + b² + k²)
+    denom = 0.3334125                              # = 2 * 0.425 * 0.39225
+    cos_theta3 = numerator / denom
+    # Numerical clamping – avoid domain errors in acos
+    cos_theta3 = max(min(cos_theta3, 1.0), -1.0)
+
+    theta3_candidates: List[float] = [
+        math.acos(cos_theta3),      # “elbow‑down”
+        -math.acos(cos_theta3),     # “elbow‑up”
+    ]
+
+    # ---------- build every full joint set and compare orientation ----------
+    best_set: Tuple[float, float, float] | None = None
+    best_err = float("inf")
+
+    for th3 in theta3_candidates:
+        th1, th2, th3 = _solve_set(x, y, z, k, th3)
+
+        # Orientation produced by this joint set
+        yaw_sol = _wrap_to_pi(th1)
+        pitch_sol = _wrap_to_pi(th2 + th3)
+
+        # Roll is always zero for this mechanism
+        roll_sol = 0.0
+
+        # Magnitude of orientation error (wrapped into [‑π, π))
+        err = (
+            abs(_wrap_to_pi(roll_sol - roll_d))
+            + abs(_wrap_to_pi(pitch_sol - pitch_d))
+            + abs(_wrap_to_pi(yaw_sol - yaw_d))
+        )
+
+        if err < best_err:
+            best_err = err
+            best_set = (th1, th2, th3)
+
+    # The statement of the task guarantees at least one valid solution
+    assert best_set is not None, "No kinematic solution found for the supplied pose."
+
+    return best_set
+```

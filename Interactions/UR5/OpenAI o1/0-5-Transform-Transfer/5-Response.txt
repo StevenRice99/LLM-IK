@@ -1,0 +1,123 @@
+```python
+def inverse_kinematics(p: tuple[float, float, float], r: tuple[float, float, float]) -> tuple[float, float, float, float, float, float]:
+    """
+    Gets the joint values needed to reach position p = (px, py, pz) and
+    orientation r = (rx, ry, rz) in closed form (symbolic) for the specified
+    6-DoF manipulator.
+
+    The geometry and joint definitions follow the DETAILS table:
+        Revolute 1: Z-axis
+        Revolute 2: Y-axis
+        Revolute 3: Y-axis
+        Revolute 4: Y-axis
+        Revolute 5: Z-axis
+        Revolute 6: Y-axis
+        TCP:        Translation [0, 0.0823, 0], then orientation [0, 0, pi/2].
+
+    Returns:
+      (t1, t2, t3, t4, t5, t6) in radians, each constrained to [-pi, pi].
+    """
+    import sympy
+    from sympy import symbols, sin, cos, Eq, solve, pi
+
+    # Symbolic variables for each joint angle
+    t1, t2, t3, t4, t5, t6 = symbols('t1 t2 t3 t4 t5 t6', real=True)
+
+    # Helper functions for transformations
+    def Rz(theta):
+        return sympy.Matrix([
+            [cos(theta), -sin(theta), 0, 0],
+            [sin(theta),  cos(theta), 0, 0],
+            [0,           0,          1, 0],
+            [0,           0,          0, 1]
+        ])
+
+    def Ry(theta):
+        return sympy.Matrix([
+            [cos(theta),  0, sin(theta), 0],
+            [0,           1, 0,          0],
+            [-sin(theta), 0, cos(theta), 0],
+            [0,           0, 0,          1]
+        ])
+
+    def T(v):
+        """Translation by vector v = [x, y, z]."""
+        m = sympy.eye(4)
+        m[0, 3] = v[0]
+        m[1, 3] = v[1]
+        m[2, 3] = v[2]
+        return m
+
+    # Build the forward kinematics up to the TCP link as in DETAILS:
+    #  1) Revolute 1 about Z, no offset
+    #  2) Translate [0, 0.13585, 0], revolve about Y
+    #  3) Translate [0, -0.1197, 0.425], revolve about Y
+    #  4) Translate [0, 0, 0.39225], revolve about Y
+    #  5) Translate [0, 0.093, 0], revolve about Z
+    #  6) Translate [0, 0, 0.09465], revolve about Y
+    #  TCP) Translate [0, 0.0823, 0], then final orientation [0, 0, pi/2].
+    T_fk = (Rz(t1)
+            * T([0, 0.13585, 0]) * Ry(t2)
+            * T([0, -0.1197, 0.425]) * Ry(t3)
+            * T([0, 0, 0.39225]) * Ry(t4)
+            * T([0, 0.093, 0]) * Rz(t5)
+            * T([0, 0, 0.09465]) * Ry(t6)
+            * T([0, 0.0823, 0])
+            * Rz(sympy.pi/2)
+    )
+
+    # Desired transform from world to TCP:
+    # Let r = (rx, ry, rz) interpret as extrinsic rotations about X, Y, Z in order:
+    # T_des = T([px, py, pz]) * Rz(rz) * Ry(ry) * Rx(rx).
+    # We'll define them carefully:
+    px, py, pz = p
+    rx, ry, rz = r
+
+    def Rx(theta):
+        return sympy.Matrix([
+            [1,          0,           0, 0],
+            [0, cos(theta), -sin(theta), 0],
+            [0, sin(theta),  cos(theta), 0],
+            [0,          0,           0, 1]
+        ])
+
+    T_des = (T([px, py, pz])
+             * Rz(rz)
+             * Ry(ry)
+             * Rx(rx))
+
+    # Equate each element of T_fk with T_des
+    eqs = []
+    for i in range(3):
+        for j in range(4):
+            eqs.append(Eq(T_fk[i, j], T_des[i, j]))
+
+    # Solve symbolic equations (this can return multiple solutions)
+    solutions = solve(eqs, [t1, t2, t3, t4, t5, t6], dict=True)
+
+    # If no solution found (shouldn't happen per instructions), return zeros
+    if not solutions:
+        return (0.0, 0.0, 0.0, 0.0, 0.0, 0.0)
+
+    # Pick the first valid solution
+    sol = solutions[0]
+
+    # A helper to wrap angles to [-pi, pi]
+    def wrap_angle(angle_value):
+        val = float(angle_value) % (2.0 * 3.141592653589793)
+        if val > 3.141592653589793:
+            val -= 2.0 * 3.141592653589793
+        return val
+
+    # Extract and wrap each joint angle
+    result = (
+        wrap_angle(sol[t1]),
+        wrap_angle(sol[t2]),
+        wrap_angle(sol[t3]),
+        wrap_angle(sol[t4]),
+        wrap_angle(sol[t5]),
+        wrap_angle(sol[t6]),
+    )
+
+    return result
+```

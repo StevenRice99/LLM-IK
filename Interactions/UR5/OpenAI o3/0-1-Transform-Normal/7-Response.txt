@@ -1,0 +1,155 @@
+```python
+import math
+from typing import Tuple
+
+# ---------------------------------------------------------------------
+#  Geometric constants  (metres)
+# ---------------------------------------------------------------------
+_D1_Y = 0.13585                 # base  → joint‑2 translation (along Y)
+_D2_Y = -0.1197                 # joint‑2 → TCP translation (along Y)
+_D2_Z = 0.425                   # joint‑2 → TCP translation (along Z)
+
+_VY = _D1_Y + _D2_Y             # fixed Y–offset that never changes
+
+_TWO_PI = 2.0 * math.pi
+
+
+# ---------------------------------------------------------------------
+#  Forward kinematics (position only – needed to pick the correct branch)
+# ---------------------------------------------------------------------
+def _fk_position(q1: float, q2: float) -> Tuple[float, float, float]:
+    """
+    Closed‑form forward kinematics for the TCP position.
+
+    q1 : rotation about base Z  (revolute‑1)
+    q2 : rotation about local Y (revolute‑2)
+    """
+    s1, c1 = math.sin(q1), math.cos(q1)
+    s2, c2 = math.sin(q2), math.cos(q2)
+
+    ax = _D2_Z * s2            # X in frame after joint‑2
+    ay = _VY                   # Y     »      »       »
+    az = _D2_Z * c2            # Z     »      »       »
+
+    # rotate (ax , ay) about Z by q1
+    px =  c1 * ax - s1 * ay
+    py =  s1 * ax + c1 * ay
+    pz =  az
+    return px, py, pz
+
+
+# ---------------------------------------------------------------------
+#  Helper : build rotation matrix from extrinsic RPY (Z–Y–X) angles
+# ---------------------------------------------------------------------
+def _rotation_from_rpy(rx: float, ry: float, rz: float) -> list[list[float]]:
+    sr, cr = math.sin(rx), math.cos(rx)
+    sp, cp = math.sin(ry), math.cos(ry)
+    sy, cy = math.sin(rz), math.cos(rz)
+
+    # R = Rz(rz) · Ry(ry) · Rx(rx)
+    return [
+        [cy * cp, cy * sp * sr - sy * cr, cy * sp * cr + sy * sr],
+        [sy * cp, sy * sp * sr + cy * cr, sy * sp * cr - cy * sr],
+        [  -sp  ,          cp * sr      ,          cp * cr      ],
+    ]
+
+
+# ---------------------------------------------------------------------
+#  Main inverse kinematics routine
+# ---------------------------------------------------------------------
+def inverse_kinematics(
+    p: Tuple[float, float, float],
+    r: Tuple[float, float, float]
+) -> Tuple[float, float]:
+    """
+    Analytical inverse kinematics of a 2‑DoF serial arm whose
+    kinematics are
+
+        R(q) = Rz(q1) · Ry(q2)
+        p(q) = Rz(q1) · ( d1 + Ry(q2) · d2 )
+
+    with
+        d1 = ( 0 , 0.13585 , 0     )
+        d2 = ( 0 , –0.1197 , 0.425 )
+
+    Parameters
+    ----------
+    p : (x, y, z)
+        Desired TCP position expressed in the base frame  [metres].
+    r : (rx, ry, rz)
+        Desired TCP orientation in extrinsic roll‑pitch‑yaw  [radians].
+
+    Returns
+    -------
+    (q1, q2)  — joint angles in radians (inside  (−π, π] )
+    """
+    px_d, py_d, pz_d = p
+    rx, ry, rz       = r
+
+    # --------------------------------------------------------------
+    # 1.  Desired rotation matrix
+    # --------------------------------------------------------------
+    R = _rotation_from_rpy(rx, ry, rz)
+
+    # --------------------------------------------------------------
+    # 2.  Extract joint‑2 angle  q2   from   R[2,0] = –sin q2 ,
+    #                                         R[2,2] =  cos q2
+    #    atan2 gives a result in (−π, π]
+    # --------------------------------------------------------------
+    q2 = math.atan2(-R[2][0], R[2][2])
+
+    # --------------------------------------------------------------
+    # 3.  Extract joint‑1 angle  q1
+    #
+    #     When  cos q2  is not too small we use
+    #          cos q1 =  R[0,0] / cos q2
+    #          sin q1 =  R[1,0] / cos q2
+    #     Otherwise fall back to
+    #          sin q1 = –R[0,1]
+    #          cos q1 =  R[1,1]
+    # --------------------------------------------------------------
+    EPS = 1.0e-9
+    c2 = R[2][2]
+
+    if abs(c2) > EPS:
+        c1 =  R[0][0] / c2
+        s1 =  R[1][0] / c2
+    else:                          # gimbal singularity  (|cos q2| ≈ 0)
+        s1 = -R[0][1]
+        c1 =  R[1][1]
+
+    q1 = math.atan2(s1, c1)
+
+    # --------------------------------------------------------------
+    # 4.  Two analytic solutions exist:
+    #       (q1 ,  q2)           and          (q1+π ,  –q2)
+    #    Choose the one whose forward kinematics matches
+    #    the desired position best.
+    # --------------------------------------------------------------
+    candidates = [
+        (q1, q2),
+        (q1 + math.pi, -q2)
+    ]
+
+    best_pair   = None
+    best_error2 = float("inf")
+
+    for q1_c, q2_c in candidates:
+        px_c, py_c, pz_c = _fk_position(q1_c, q2_c)
+        err2 = (px_c - px_d) ** 2 + (py_c - py_d) ** 2 + (pz_c - pz_d) ** 2
+        if err2 < best_error2:
+            best_error2 = err2
+            best_pair   = (q1_c, q2_c)
+
+    # The problem statement guarantees reachability, therefore
+    # at least one candidate must be correct within numerical noise.
+    q1_sol, q2_sol = best_pair
+
+    # --------------------------------------------------------------
+    # 5.  Wrap into the interval  (−π, π]   (well inside ±2π limits)
+    # --------------------------------------------------------------
+    q1_sol = (q1_sol + math.pi) % _TWO_PI - math.pi
+    q2_sol = (q2_sol + math.pi) % _TWO_PI - math.pi
+
+    return q1_sol, q2_sol
+```

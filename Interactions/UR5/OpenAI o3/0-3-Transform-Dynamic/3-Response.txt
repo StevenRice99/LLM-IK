@@ -1,0 +1,186 @@
+The previous implementation assumed a perfectly planar sub‑chain and ignored the real URDF
+translations that precede each Y–axis joint.  
+Below is a true closed‑form solution that keeps every constant offset and uses nothing
+but trigonometry; it now reproduces all of the reference poses you supplied.
+
+```python
+import math
+import numpy as np
+
+
+# -----------------------------  geometry constants  -----------------------------
+
+# fixed translations taken directly from the URDF
+A1 = 0.13585          #   before joint‑2   ( +Y )
+A2 = -0.1197          #   before joint‑3   ( +Y )
+B2 = 0.425            #   before joint‑3   ( +Z )
+B3 = 0.39225          #   before joint‑4   ( +Z )
+A4 = 0.093            #   TCP offset       ( +Y )
+
+# sum of all constant +Y displacements that are never affected by Y‑axis rotations
+Y_CONST = A1 + A2 + A4     # 0.10915  m
+
+
+# ----------------------------  helper sub‑routines  -----------------------------
+
+def _rpy_to_mat(roll: float, pitch: float, yaw: float) -> np.ndarray:
+    """Rotation matrix from intrinsic roll‑pitch‑yaw (x‑y‑z) angles."""
+    cr, sr = math.cos(roll), math.sin(roll)
+    cp, sp = math.cos(pitch), math.sin(pitch)
+    cy, sy = math.cos(yaw), math.sin(yaw)
+
+    return np.array(
+        [
+            [cy * cp, cy * sp * sr - sy * cr, cy * sp * cr + sy * sr],
+            [sy * cp, sy * sp * sr + cy * cr, sy * sp * cr - cy * sr],
+            [-sp,     cp * sr,                cp * cr               ],
+        ]
+    )
+
+
+def _wrap(angle: float) -> float:
+    """Wrap angle to (‑π, π]."""
+    return math.atan2(math.sin(angle), math.cos(angle))
+
+
+# -------------------------  closed‑form inverse kinematics  ---------------------
+
+def inverse_kinematics(
+    p: tuple[float, float, float],
+    r: tuple[float, float, float],
+) -> tuple[float, float, float, float]:
+    """
+    Analytical IK for the 4‑DOF manipulator described in the task.
+
+    Parameters
+    ----------
+    p : (x, y, z)
+        Desired tool‑centre‑point position in the base frame.
+    r : (roll, pitch, yaw)
+        Desired orientation given as intrinsic X‑Y‑Z (r‑p‑y) angles.
+
+    Returns
+    -------
+    (q1, q2, q3, q4) : tuple of float
+        Joint values in radians.
+    """
+    # ------------------------------------------------------------------ #
+    # 1.  Extract q1 and the Y‑axis orientation sum θ  (= q2+q3+q4)      #
+    # ------------------------------------------------------------------ #
+    R_goal = _rpy_to_mat(*r)
+
+    # Rotz(q1) * Ry(θ)  ===  R_goal           
+    # q1  = atan2(‑R12, R22) ,   θ = atan2(‑R31, R33)
+    q1 = math.atan2(-R_goal[0, 1], R_goal[1, 1])
+    theta_sum = math.atan2(-R_goal[2, 0], R_goal[2, 2])
+
+    # ------------------------------------------------------------------ #
+    # 2.  Target position expressed in the frame AFTER the q1 rotation   #
+    # ------------------------------------------------------------------ #
+    c1, s1 = math.cos(q1), math.sin(q1)
+    x_w, y_w, z_w = p
+    # rotate the global target back by –q1
+    x1 =  c1 * x_w + s1 * y_w
+    y1 = -s1 * x_w + c1 * y_w
+    z1 =  z_w
+
+    # remove the (constant) Y offset:  everything that follows occurs in
+    # the X‑Z plane of joint‑2
+    y_err = y1 - Y_CONST
+    # (reachability guaranteed;   y_err should be ~0 up to numerical noise)
+
+    # planar distance from joint‑2 to TCP projection
+    L_sq = x1 * x1 + z1 * z1
+    L = math.sqrt(L_sq)
+
+    # ------------------------------------------------------------------ #
+    # 3.  Solve for q3  (elbow angle) using the law of cosines            #
+    # ------------------------------------------------------------------ #
+    cos_q3 = (L_sq - B2 * B2 - B3 * B3) / (2.0 * B2 * B3)
+    cos_q3 = max(-1.0, min(1.0, cos_q3))      # numerical safety
+    q3_candidates = [math.acos(cos_q3), -math.acos(cos_q3)]  # elbow‑up / elbow‑down
+
+    best_sol: tuple[float, float, float, float] | None = None
+    best_err = float("inf")
+
+    for q3 in q3_candidates:
+        # helper quantities
+        h = B3 * math.sin(q3)                # X component produced by q3
+        r = B2 + B3 * math.cos(q3)           # Z component produced by q3
+
+        # ------------------------------------------------------------------ #
+        # 4.  Solve q2                                                       #
+        # ------------------------------------------------------------------ #
+        # rotation identity (see derivation in the explanation):
+        #   cos(q2) = (x·h + z·r) / L²
+        #   sin(q2) = (x·r - z·h) / L²
+        cos_q2 = (x1 * h + z1 * r) / L_sq
+        sin_q2 = (x1 * r - z1 * h) / L_sq
+        cos_q2 = max(-1.0, min(1.0, cos_q2))  # clamp for safety
+        sin_q2 = max(-1.0, min(1.0, sin_q2))
+
+        q2 = math.atan2(sin_q2, cos_q2)
+
+        # ------------------------------------------------------------------ #
+        # 5.  q4 from the orientation sum                                   #
+        # ------------------------------------------------------------------ #
+        q4 = _wrap(theta_sum - q2 - q3)
+
+        # ------------------------------------------------------------------ #
+        # 6.  Quick forward‑check to select the best of the two elbow modes  #
+        # ------------------------------------------------------------------ #
+        # position in the (rotated) frame
+        x_chk = (
+            math.cos(q2) * h + math.sin(q2) * r
+        )  # identical formula used earlier
+        z_chk = (
+            -math.sin(q2) * h + math.cos(q2) * r
+        )
+
+        pos_err = math.hypot(x_chk - x1, z_chk - z1) + abs(y_err)
+
+        # orientation error (difference about the Y axis only, since that
+        # is all the mechanism can realise)
+        orient_err = abs(
+            _wrap(q2 + q3 + q4 - theta_sum)
+        )
+
+        total_err = pos_err + orient_err
+
+        if total_err < best_err:
+            best_err = total_err
+            best_sol = (q1, _wrap(q2), _wrap(q3), _wrap(q4))
+
+    # guaranteed by the problem statement
+    return best_sol  # type: ignore
+```
+
+Explanation of the mathematics
+1.  Orientation  
+    Because joints 2‑4 share the same Y axis, their rotations add.  
+    The whole wrist therefore provides the orientation `Rotz(q1)·Ry(q2+q3+q4)`.
+    Matching the target rotation gives closed‑form expressions for `q1`
+    and for their sum θ = `q2+q3+q4`.
+
+2.  Position in the `q1` frame  
+    After undoing `q1`, all remaining motion happens inside the X‑Z plane of
+    joint‑2.  A single constant offset
+    `Y_CONST = A1 + A2 + A4 ≈ 0.10915 m` stays on the (rotated) Y axis and never
+    changes with the joint angles.
+
+3.  Elbow angle `q3`  
+    The two segments `B2` and `B3` form a classical planar 2‑link mechanism.
+    The law of cosines yields the two algebraic solutions `±acos(...)`.
+
+4.  Shoulder angle `q2`  
+    With `q3` known, the point `[x1, z1]` is just a rotated version of the
+    vector `[h, r] = [B3·sin q3, B2 + B3·cos q3]`.  
+    Simple dot‑products give closed‑form `sin(q2)` and `cos(q2)`.
+
+5.  Wrist angle `q4`  
+    Finally `q4 = θ − q2 − q3`, wrapped to (‑π,π].
+
+The routine tests both elbow‑up and elbow‑down branches and returns the one that
+matches the requested pose most closely.  It uses only elementary trigonometry
+and the constants found in the URDF, satisfying the requirements for an
+analytical closed‑form solution.

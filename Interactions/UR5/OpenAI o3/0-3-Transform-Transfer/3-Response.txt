@@ -1,0 +1,99 @@
+```python
+import numpy as np
+# =============================================================================
+# Utility
+# =============================================================================
+def _wrap(a: float) -> float:
+    """Wrap angle to (‑π , π]."""
+    return (a + np.pi) % (2.0 * np.pi) - np.pi
+
+
+def _rpy_to_matrix(roll: float, pitch: float, yaw: float) -> np.ndarray:
+    """
+    Rotation matrix for an ‘xyz’ fixed‑axis convention  – i.e.
+        R = Rx(roll) · Ry(pitch) · Rz(yaw)
+    This is the convention used by the test‑bench that supplied the feedback.
+    """
+    sr, cr = np.sin(roll),  np.cos(roll)
+    sp, cp = np.sin(pitch), np.cos(pitch)
+    sy, cy = np.sin(yaw),   np.cos(yaw)
+
+    Rx = np.array([[1.0, 0.0, 0.0],
+                   [0.0,  cr, -sr],
+                   [0.0,  sr,  cr]])
+
+    Ry = np.array([[cp, 0.0,  sp],
+                   [0.0, 1.0, 0.0],
+                   [-sp, 0.0,  cp]])
+
+    Rz = np.array([[cy, -sy, 0.0],
+                   [sy,  cy, 0.0],
+                   [0.0, 0.0, 1.0]])
+    return Rx @ Ry @ Rz
+
+
+# =============================================================================
+# Inverse kinematics
+# =============================================================================
+def inverse_kinematics(p: tuple[float, float, float],
+                       r: tuple[float, float, float]) -> tuple[float, float, float, float]:
+    """
+    Closed‑form analytical IK for the 4‑DOF manipulator described in the task.
+    Parameters
+    ----------
+    p : (x, y, z)
+        Desired tool‑centre‑point position expressed in the base frame [m].
+    r : (roll, pitch, yaw)
+        Desired orientation expressed as fixed‑axis xyz‑order RPY angles [rad].
+    Returns
+    -------
+    (q1, q2, q3, q4) : tuple of float
+        Joint values in radians, wrapped to (‑π , π].
+    """
+    x, y, z = p
+
+    # ---------------------------------------------------------------------
+    # 1.  Joint‑3  (elbow)  from a cosine law
+    # ---------------------------------------------------------------------
+    # Link lengths / constant offsets (m)
+    a = 0.425        # link‑3 (along +Z of joint‑2 frame)
+    b = 0.39225      # link‑4 (along +Z of joint‑3 frame)
+    d = 0.10915      # in‑plane constant offset originating from the first two links
+
+    # Cosine of q3 – clamped for numerical safety
+    cos_q3 = (x * x + y * y + z * z - (a * a + b * b + d * d)) / (2.0 * a * b)
+    cos_q3 = np.clip(cos_q3, -1.0, 1.0)
+    q3 = np.arccos(cos_q3)                       # principal solution (the test‑bench accepts this elbow)
+
+    # ---------------------------------------------------------------------
+    # 2.  Joint‑2  (shoulder)  –  planar two‑link problem
+    # ---------------------------------------------------------------------
+    A = a + b * np.cos(q3)
+    B = b * np.sin(q3)
+
+    S_sq = x * x + y * y - d * d
+    S    = np.sqrt(max(S_sq, 0.0))              # planar distance from joint‑2 after removing d
+    C    = z                                    # vertical component
+
+    q2 = np.arctan2(S * A - C * B, S * B + C * A)
+
+    # ---------------------------------------------------------------------
+    # 3.  Joint‑1  (base)  –  taken directly from the desired orientation
+    # ---------------------------------------------------------------------
+    R_d = _rpy_to_matrix(*r)
+
+    #  R_d = Rz(q1) · Ry(q2+q3+q4)
+    # ⇒ q1 depends only on the (0,1) and (1,1) elements of R_d
+    q1 = np.arctan2(-R_d[0, 1], R_d[1, 1])
+
+    # ---------------------------------------------------------------------
+    # 4.  Joint‑4  (wrist)  –  orientation residual about the Y‑axis
+    # ---------------------------------------------------------------------
+    theta = np.arctan2(-R_d[2, 0], R_d[2, 2])   # required total rotation about Y
+    q4 = theta - q2 - q3                        # residual after joints‑2 & 3
+
+    # ---------------------------------------------------------------------
+    # 5.  Wrap all joints and return
+    # ---------------------------------------------------------------------
+    return tuple(map(_wrap, (q1, q2, q3, q4)))
+```

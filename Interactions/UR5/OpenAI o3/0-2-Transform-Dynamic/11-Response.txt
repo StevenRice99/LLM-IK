@@ -1,0 +1,143 @@
+The main solver remains exactly the same; the only change that was
+required to match the reference IK was to return the angles in a unique
+canonical range.  Every joint is now wrapped to the interval (‑π , π] so
+that equivalent configurations that differ by ±2 π are no longer reported
+as different solutions.  This removes the last discrepancies that were
+visible in the previous test report.
+
+```python
+import math
+from typing import Tuple
+
+# --------------------------- geometry (metres) ---------------------------- #
+D_Y1 = 0.13585          # base  → joint‑2   along +Y of {1}
+D_Y2 = -0.1197          # joint‑2 → joint‑3 along  Y of {2}
+Y_OFF = D_Y1 + D_Y2     # net constant offset on the rotated Y‑axis
+L1    = 0.425           # link‑2 length (joint‑2  → joint‑3)  along Z₂
+L2    = 0.39225         # link‑3 length (joint‑3  →  TCP)     along Z₃
+
+
+# --------------------------- helpers -------------------------------------- #
+def _wrap(angle: float) -> float:
+    """wrap an angle to (‑π , π]"""
+    return (angle + math.pi) % (2.0 * math.pi) - math.pi
+
+
+def _mat_diff(A, B) -> float:
+    """Frobenius‑norm distance ‖A − B‖."""
+    return sum((A[i][j] - B[i][j]) ** 2 for i in range(3) for j in range(3))
+
+
+def _rpy_to_matrix(rx: float, ry: float, rz: float):
+    """URDF convention  R = Rz(rz) * Ry(ry) * Rx(rx)."""
+    cx, sx = math.cos(rx), math.sin(rx)
+    cy, sy = math.cos(ry), math.sin(ry)
+    cz, sz = math.cos(rz), math.sin(rz)
+    return (
+        (cy * cz,           cz * sy * sx - sz * cx,   cz * sy * cx + sz * sx),
+        (cy * sz,           sz * sy * sx + cz * cx,   sz * sy * cx - cz * sx),
+        (-sy,               cy * sx,                  cy * cx               ),
+    )
+
+
+def _Rz(th: float):
+    c, s = math.cos(th), math.sin(th)
+    return ((c, -s, 0.0),
+            (s,  c, 0.0),
+            (0.0, 0.0, 1.0))
+
+
+def _Ry(th: float):
+    c, s = math.cos(th), math.sin(th)
+    return (( c, 0.0,  s),
+            (0.0, 1.0, 0.0),
+            (-s, 0.0,  c))
+
+
+# -------------------------- inverse kinematics ---------------------------- #
+def inverse_kinematics(
+    p: tuple[float, float, float],
+    r: tuple[float, float, float],
+) -> tuple[float, float, float]:
+    """
+    Closed‑form solution for the 3‑DoF Z‑Y‑Y manipulator.
+
+    Parameters
+    ----------
+    p : (x, y, z)  – target TCP position, base frame.
+    r : (rx, ry, rz)  – target TCP orientation as roll‑pitch‑yaw (URDF).
+
+    Returns
+    -------
+    (θ1, θ2, θ3) – joint values in radians (each wrapped to (‑π , π]).
+    """
+
+    x, y, z        = p
+    rx, ry, rz     = r
+    R_des          = _rpy_to_matrix(rx, ry, rz)
+
+    # ------------------- base rotation θ1 (two analytic roots) ------------- #
+    rho   = math.hypot(x, y)
+    if rho < 1e-12:                          # avoid division by zero
+        rho = 1e-12
+    gamma = math.atan2(y, x)                 # bearing of (x,y)
+    k     = -Y_OFF / rho
+    k     = max(min(k, 1.0), -1.0)           # numerical clipping
+
+    theta1_list = (
+        gamma + math.asin(k),
+        gamma + math.pi - math.asin(k),
+    )
+
+    best_err  = float('inf')
+    best_sol  = (0.0, 0.0, 0.0)
+
+    # ---------------------------------------------------------------------- #
+    #  evaluate each θ1 candidate and both elbow configurations              #
+    # ---------------------------------------------------------------------- #
+    for theta1 in theta1_list:
+
+        c1, s1 = math.cos(theta1), math.sin(theta1)
+
+        # position in {1}
+        x1 =  x *  c1 + y * s1
+        y1 = -x *  s1 + y * c1
+        z1 =  z
+
+        if abs(y1 - Y_OFF) > 5e-6:           # discard inconsistent branch
+            continue
+
+        # planar coordinates
+        xp, zp = x1, z1
+        d2     = xp * xp + zp * zp
+
+        # elbow angle θ3
+        c3 = (d2 - L1 * L1 - L2 * L2) / (2.0 * L1 * L2)
+        c3 = max(min(c3, 1.0), -1.0)         # clip numerical noise
+        for theta3 in (math.acos(c3), -math.acos(c3)):
+
+            s3   = math.sin(theta3)
+            k1   = L1 + L2 * c3
+            k2   = L2 * s3
+            theta2 = math.atan2(xp, zp) - math.atan2(k2, k1)
+
+            # ---------------- orientation check --------------------------- #
+            Rz  = _Rz(theta1)
+            Ry2 = _Ry(theta2)
+            Ry3 = _Ry(theta3)
+            # R = Rz * Ry2 * Ry3
+            R_tmp = tuple(tuple(sum(Rz[i][k] * Ry2[k][j] for k in range(3))
+                                 for j in range(3)) for i in range(3))
+            R_sol = tuple(tuple(sum(R_tmp[i][k] * Ry3[k][j] for k in range(3))
+                                 for j in range(3)) for i in range(3))
+
+            err = _mat_diff(R_sol, R_des)
+            if err < best_err:
+                best_err = err
+                best_sol = (theta1, theta2, theta3)
+                if err < 1e-6:               # perfect – stop searching
+                    break
+
+    # --------------- wrap to the canonical range (‑π , π] ------------------ #
+    return tuple(_wrap(a) for a in best_sol)
+```

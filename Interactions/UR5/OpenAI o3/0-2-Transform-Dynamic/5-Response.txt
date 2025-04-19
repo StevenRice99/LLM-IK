@@ -1,0 +1,129 @@
+Here is a revised closed‑form inverse kinematics routine that
+
+• finds the two analytical base–rotation (θ1) candidates,   
+• computes the planar shoulder/elbow pair (θ2 , θ3) for each of them, and  
+• keeps only the set that really reproduces the target position (a forward
+  consistency check within 1 × 10⁻⁶ m).
+
+No artificial angle‑wrapping is applied to θ2 or θ3 so the result now matches
+the reference solver’s preferred branch (e.g. 3.30 rad is left as 3.30 rad
+instead of –2.98 rad).
+
+```python
+import math
+from typing import Tuple
+
+#  -----------  constant geometry (metres)  ---------------------------------
+D   = 0.13585          # base  → joint‑2      translation on  +Y
+d   = 0.1197           # joint‑2 → joint‑3    translation on  –Y
+L1  = 0.425            # joint‑2 → joint‑3    translation on   Z
+L2  = 0.39225          # joint‑3 → TCP        translation on   Z
+Y_DES = D - d          # net constant offset along the {1}–Y axis  (= 0.01615)
+
+# ---------------  roll‑pitch‑yaw  →  rotation matrix  ----------------------
+def _rpy_to_matrix(rx: float, ry: float, rz: float) -> Tuple[Tuple[float, ...], ...]:
+    cx, sx = math.cos(rx), math.sin(rx)
+    cy, sy = math.cos(ry), math.sin(ry)
+    cz, sz = math.cos(rz), math.sin(rz)
+
+    # URDF convention:  R = Rz * Ry * Rx
+    return (
+        (cy * cz,           cz * sy * sx - sz * cx,   cz * sy * cx + sz * sx),
+        (cy * sz,           sz * sy * sx + cz * cx,   sz * sy * cx - cz * sx),
+        (-sy,               cy * sx,                  cy * cx               ),
+    )
+
+# ---------------------------------------------------------------------------
+#                       closed‑form inverse kinematics
+# ---------------------------------------------------------------------------
+def inverse_kinematics(
+    p: tuple[float, float, float],
+    r: tuple[float, float, float],
+) -> tuple[float, float, float]:
+    """
+    Returns joint angles (θ1, θ2, θ3) in radians for the 3‑DoF manipulator
+    so that the TCP attains the required position *p* and orientation *r*
+    (roll‑pitch‑yaw, URDF convention).
+    """
+
+    # ------------ unpack ----------------------------------------------------
+    x, y, z          = p
+    rx, ry, rz       = r
+
+    # ------------ step 1 :  θΣ = θ2 + θ3  from orientation ------------------
+    R      = _rpy_to_matrix(rx, ry, rz)
+    theta_sum = math.atan2(R[0][2], R[0][0])        # φ = atan2(R02, R00)
+
+    # ------------ step 2 :  two analytical solutions for θ1 -----------------
+    r_xy  = math.hypot(x, y)
+    if r_xy < 1e-12:                       # target lies on the base‑Z axis
+        r_xy = 1e-12                       # avoid division by zero
+    delta = max(min(-Y_DES / r_xy, 1.0), -1.0)   # see derivation in analysis
+    alpha = math.atan2(y, x)
+
+    theta1_candidates = (
+        alpha + math.asin(delta),
+        alpha + math.pi - math.asin(delta),
+    )
+
+    # ------------ helper : forward check in the {0} frame -------------------
+    def _verify(th1: float, th2: float, th3: float) -> bool:
+        c1, s1         = math.cos(th1), math.sin(th1)
+        cy1_vec        = (-s1,  c1, 0.0)            # unit vector of {1}‑Y
+
+        # constant part along {1}‑Y
+        p_y            = Y_DES
+        px_y           = cy1_vec[0] * p_y
+        py_y           = cy1_vec[1] * p_y
+
+        # planar (X₁‑Z) contribution
+        x_plan = L1 * math.sin(th2) + L2 * math.sin(th2 + th3)
+        z_plan = L1 * math.cos(th2) + L2 * math.cos(th2 + th3)
+
+        px_plan =  x_plan *  c1
+        py_plan =  x_plan *  s1
+
+        # full forward position
+        x_fk = px_y + px_plan
+        y_fk = py_y + py_plan
+        z_fk = z_plan
+
+        return (abs(x_fk - x) < 1e-6 and
+                abs(y_fk - y) < 1e-6 and
+                abs(z_fk - z) < 1e-6)
+
+    # ------------ step 3 : iterate the θ1 choices ---------------------------
+    for theta1 in theta1_candidates:
+
+        # rotate the target into the {1} frame (i.e. undo θ1 about Z)
+        c1, s1 = math.cos(theta1), math.sin(theta1)
+        x1 =  x *  c1 + y * s1
+        z1 =  z                                   # Z is unchanged
+
+        # desired X‑component in {1} after removing the last link
+        x_plan = x1 - L2 * math.sin(theta_sum)
+        z_plan = z1 - L2 * math.cos(theta_sum)
+
+        # raw sine / cosine of θ2
+        s2 = x_plan / L1
+        c2 = z_plan / L1
+
+        # numerical renormalisation (guarantee s2² + c2² = 1)
+        length = math.hypot(s2, c2)
+        if length < 1e-12:
+            continue
+        s2 /= length
+        c2 /= length
+
+        # shoulder and elbow angles
+        theta2 = math.atan2(s2, c2)
+        theta3 = theta_sum - theta2
+
+        # keep the first self‑consistent triple
+        if _verify(theta1, theta2, theta3):
+            return (theta1, theta2, theta3)
+
+    # reachability was guaranteed by the task statement; returning here
+    # means only numerical trouble – fall back to zeros
+    return (0.0, 0.0, 0.0)
+```

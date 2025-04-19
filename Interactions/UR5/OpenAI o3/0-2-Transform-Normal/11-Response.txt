@@ -1,0 +1,156 @@
+```python
+import numpy as np
+
+# -------------------------------------------------------------------------
+# Elementary rotations ----------------------------------------------------
+# -------------------------------------------------------------------------
+def _rotx(a: float) -> np.ndarray:
+    ca, sa = np.cos(a), np.sin(a)
+    return np.array([[1, 0, 0],
+                     [0, ca, -sa],
+                     [0, sa,  ca]])
+
+
+def _roty(a: float) -> np.ndarray:
+    ca, sa = np.cos(a), np.sin(a)
+    return np.array([[ ca, 0,  sa],
+                     [  0, 1,   0],
+                     [-sa, 0,  ca]])
+
+
+def _rotz(a: float) -> np.ndarray:
+    ca, sa = np.cos(a), np.sin(a)
+    return np.array([[ca, -sa, 0],
+                     [sa,  ca, 0],
+                     [ 0,   0, 1]])
+
+
+# -------------------------------------------------------------------------
+# R ‑‑> RPY  (URDF convention :  Rz(yaw) · Ry(pitch) · Rx(roll)) ----------
+# -------------------------------------------------------------------------
+def _rpy_from_R(R: np.ndarray) -> tuple[float, float, float]:
+    yaw   = np.arctan2(R[1, 0], R[0, 0])
+    pitch = np.arctan2(-R[2, 0], np.hypot(R[2, 1], R[2, 2]))
+    roll  = np.arctan2(R[2, 1], R[2, 2])
+    return roll, pitch, yaw
+
+
+def inverse_kinematics(
+        p: tuple[float, float, float],
+        r: tuple[float, float, float]) -> tuple[float, float, float]:
+    """
+    Closed‑form inverse kinematics for the 3‑DOF serial manipulator
+    (axes Z‑Y‑Y) described in the DETAILS section.
+
+    Parameters
+    ----------
+    p : (x, y, z) – desired TCP position in the base frame  [m]
+    r : (roll, pitch, yaw) – desired orientation as URDF R‑P‑Y angles [rad]
+
+    Returns
+    -------
+    (θ1, θ2, θ3)  – joint values for Revolute‑1, ‑2 and ‑3 [rad]
+    """
+
+    # ---------------------------------------------------------------------
+    # Constant geometry ----------------------------------------------------
+    # ---------------------------------------------------------------------
+    d1 = np.array([0.0,  0.13585, 0.0])      # base  → joint‑2
+    d2 = np.array([0.0, -0.11970, 0.42500])  # joint‑2 → joint‑3
+    d3 = 0.39225                              # joint‑3 → TCP (along Z₃)
+
+    a = d3               # = 0.39225
+    b = d2[2]            # = 0.425
+    const_y = d2[1]      # = −0.1197
+    # ---------------------------------------------------------------------
+
+    # ---------------------------------------------------------------------
+    # Desired rotation matrix and composite pitch -------------------------
+    # ---------------------------------------------------------------------
+    roll_d, pitch_d, yaw_d = r
+    R_d = _rotz(yaw_d) @ _roty(pitch_d) @ _rotx(roll_d)
+
+    # yaw (θ₁)   -----------------------------------------------------------
+    theta1 = np.arctan2(-R_d[0, 1], R_d[1, 1])
+
+    # composite pitch (θ₂+θ₃) ---------------------------------------------
+    theta23_des = np.arctan2(-R_d[2, 0], R_d[2, 2])
+    # ---------------------------------------------------------------------
+
+    # ---------------------------------------------------------------------
+    # Target position in the joint‑2 frame --------------------------------
+    # ---------------------------------------------------------------------
+    p = np.asarray(p, dtype=float)
+    p1 = _rotz(-theta1) @ p - d1
+    px, py, pz = p1
+
+    # ---------------------------------------------------------------------
+    # Planar distances (XZ‑plane) -----------------------------------------
+    # ---------------------------------------------------------------------
+    r_sq = px * px + pz * pz
+    r_len = np.sqrt(r_sq)
+
+    # θ₃ from the law of cosines  -----------------------------------------
+    cos_t3 = (r_sq - (a * a + b * b)) / (2.0 * a * b)
+    cos_t3 = np.clip(cos_t3, -1.0, 1.0)
+    sin_t3_abs = np.sqrt(1.0 - cos_t3 * cos_t3)
+
+    # Two possible elbow configurations
+    theta3_candidates = (np.arctan2( sin_t3_abs,  cos_t3),
+                         np.arctan2(-sin_t3_abs,  cos_t3))
+    # ---------------------------------------------------------------------
+
+    # ---------------------------------------------------------------------
+    # Helper to compute (θ₂, pose‑error, roll‑error) for a θ₃ -------------
+    # ---------------------------------------------------------------------
+    alpha = np.arctan2(px, pz)                       # angle of target line
+
+    def _evaluate(th3: float) -> tuple[float, float, float]:
+        s3, c3 = np.sin(th3), np.cos(th3)
+        gamma = np.arctan2(a * s3, b + a * c3)       # internal angle
+        th2 = alpha - gamma
+
+        # Predicted TCP in joint‑2 frame
+        s2, c2 = np.sin(th2), np.cos(th2)
+        k1 = b + a * c3
+        k2 =      a * s3
+        pred = np.array([c2 * k2 + s2 * k1,
+                         const_y,
+                        -s2 * k2 + c2 * k1])
+
+        pos_err = np.linalg.norm(pred - p1)
+
+        # Orientation error : we prefer the candidate whose *roll* matches
+        R_pred = _rotz(theta1) @ _roty(th2 + th3)
+        roll_p, _, _ = _rpy_from_R(R_pred)
+        # shortest signed distance between rolls (considering 2π periodicity)
+        roll_err = np.min(np.abs([roll_p - roll_d,
+                                  roll_p - roll_d + 2*np.pi,
+                                  roll_p - roll_d - 2*np.pi]))
+        return th2, pos_err, roll_err
+
+    # ---------------------------------------------------------------------
+    # Pick the best elbow configuration -----------------------------------
+    # 1. lowest position error
+    # 2. then smallest roll‑error (to reproduce the caller’s roll sign)
+    # ---------------------------------------------------------------------
+    best   = None
+    best_e = (np.inf, np.inf)   # (position, roll)
+    for th3 in theta3_candidates:
+        th2, pe, re = _evaluate(th3)
+        if (pe < best_e[0] - 1e-9) or (abs(pe - best_e[0]) < 1e-9 and re < best_e[1]):
+            best   = (th2, th3)
+            best_e = (pe, re)
+
+    theta2, theta3 = best
+    # ---------------------------------------------------------------------
+
+    # ---------------------------------------------------------------------
+    # Return – keep θ₁, θ₂ exactly as found; do NOT wrap θ₃ so the solver
+    #           can output values beyond ±π if the caller used them.  -----
+    # ---------------------------------------------------------------------
+    def _wrap(a: float) -> float:          # wrap to (‑π, π]
+        return (a + np.pi) % (2*np.pi) - np.pi
+
+    return float(_wrap(theta1)), float(_wrap(theta2)), float(theta3)
+```

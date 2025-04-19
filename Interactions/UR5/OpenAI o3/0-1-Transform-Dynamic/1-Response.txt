@@ -1,0 +1,111 @@
+```python
+import math
+from typing import Tuple
+
+
+def _wrap(angle: float) -> float:
+    """
+    Wrap an angle to the interval [-π, π].
+    """
+    return math.atan2(math.sin(angle), math.cos(angle))
+
+
+def inverse_kinematics(
+        p: Tuple[float, float, float],
+        r: Tuple[float, float, float]
+) -> Tuple[float, float]:
+    """
+    Analytical closed–form inverse kinematics for the 2‑DoF chain described in
+    the DETAILS section.
+
+    J1 : revolute about Z            – located at the base frame
+    J2 : revolute about Y            – translation (0, 0.13585, 0) wrt J1
+    TCP: fixed transform             – (0, ­0.1197, 0.425) wrt J2
+
+    The resulting forward‑kinematics position (in the world frame) is
+
+        p = Rz(θ1) · t1 + Rz(θ1) · Ry(θ2) · t2
+
+    where
+        t1 = [0              ,  0.13585 , 0     ]ᵀ
+        t2 = [0              , ­0.1197  , 0.425 ]ᵀ
+
+    which simplifies to
+
+        px =  0.425·sin(θ2)·cos(θ1) − 0.01615·sin(θ1)
+        py =  0.425·sin(θ2)·sin(θ1) + 0.01615·cos(θ1)
+        pz =  0.425·cos(θ2)
+
+    Orientation (roll‑pitch‑yaw, extrinsic X‑Y‑Z) is
+
+        roll  = 0
+        pitch = θ2
+        yaw   = θ1
+
+    Parameters
+    ----------
+    p : (x, y, z) target position in metres.
+    r : (roll, pitch, yaw) target orientation in radians.
+
+    Returns
+    -------
+    (θ1, θ2) : Joint angles in radians fulfilling both position and orientation.
+    """
+
+    # --------------------------------------------------------------------- #
+    #  Constants (all distances in metres)
+    # --------------------------------------------------------------------- #
+    L = 0.425          # length along TCP local Z
+    d = 0.01615        # residual fixed Y–offset  (0.13585 - 0.1197)
+    # --------------------------------------------------------------------- #
+
+    x, y, z = p
+    roll_t, pitch_t, yaw_t = r          # desired orientation
+
+    # --------------------------  θ₂  (joint‑2) --------------------------- #
+    # From the z–component:  pz = 0.425·cos θ₂
+    cos_2 = z / L
+    # Numerical safety – clamp to valid domain
+    cos_2 = max(min(cos_2, 1.0), -1.0)
+
+    sin_2_abs = math.sqrt(max(0.0, 1.0 - cos_2 * cos_2))
+
+    # Choose the sign of sin θ₂ so that the resulting pitch matches the
+    # requested orientation as closely as possible.
+    if abs(math.sin(pitch_t)) > 1e-9:
+        sin_2 = math.copysign(sin_2_abs, math.sin(pitch_t))
+    else:
+        # If no preference (pitch≈0) pick the “elbow‑down” solution (positive)
+        sin_2 = sin_2_abs
+
+    theta2 = math.atan2(sin_2, cos_2)
+
+    # --------------------------  θ₁  (joint‑1) --------------------------- #
+    # In the XY–plane we have:  p_xy = Rz(θ₁) · [L·sin θ₂, d]ᵀ
+    # Therefore  θ₁ = arg(p_xy) − arg([L·sin θ₂, d])
+    v_x = L * sin_2   # first component of vector being rotated
+    v_y = d
+
+    alpha = math.atan2(y, x)            # arg(p_xy)
+    beta  = math.atan2(v_y, v_x)        # arg([L·sin θ₂, d])
+
+    theta1 = alpha - beta
+
+    # ---------------------------  Wrap & Align --------------------------- #
+    theta1 = _wrap(theta1)
+    theta2 = _wrap(theta2)
+
+    # Align the solution with the requested yaw/pitch if they were provided
+    # (keep within joint limits, which are ±2π).
+    while theta1 - yaw_t >  math.pi:
+        theta1 -= 2 * math.pi
+    while theta1 - yaw_t < -math.pi:
+        theta1 += 2 * math.pi
+
+    while theta2 - pitch_t >  math.pi:
+        theta2 -= 2 * math.pi
+    while theta2 - pitch_t < -math.pi:
+        theta2 += 2 * math.pi
+
+    return theta1, theta2
+```

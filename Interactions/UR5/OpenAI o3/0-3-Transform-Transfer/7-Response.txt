@@ -1,0 +1,151 @@
+```python
+import numpy as np
+
+# ------------------------------------------------------------------
+# Elementary rotations
+# ------------------------------------------------------------------
+def _rotz(q: float) -> np.ndarray:
+    cq, sq = np.cos(q), np.sin(q)
+    return np.array([[cq, -sq, 0.0],
+                     [sq,  cq, 0.0],
+                     [0.0, 0.0, 1.0]])
+
+def _roty(q: float) -> np.ndarray:
+    cq, sq = np.cos(q), np.sin(q)
+    return np.array([[ cq, 0.0,  sq],
+                     [ 0.0, 1.0, 0.0],
+                     [-sq, 0.0,  cq]])
+
+# ------------------------------------------------------------------
+# URDF‑style R = Rz(yaw) · Ry(pitch) · Rx(roll)
+# ------------------------------------------------------------------
+def _rpy_to_matrix(roll: float, pitch: float, yaw: float) -> np.ndarray:
+    return _rotz(yaw) @ _roty(pitch) @ _rotx(roll)
+
+def _rotx(q: float) -> np.ndarray:
+    cq, sq = np.cos(q), np.sin(q)
+    return np.array([[1.0, 0.0, 0.0],
+                     [0.0, cq, -sq],
+                     [0.0, sq,  cq]])
+
+# ------------------------------------------------------------------
+# Forward kinematics – only for candidate selection inside IK
+# ------------------------------------------------------------------
+def _fk(q1: float, q2: float, q3: float, q4: float) -> tuple[np.ndarray, np.ndarray]:
+    """
+    Computes TCP position and orientation (rotation matrix) for
+    the given joint tuple – used internally for branch selection.
+    """
+    # Constant translations in their local frames
+    d1 = np.array([0.0, 0.13585, 0.0])                 # base → joint‑2
+    d2 = np.array([0.0, -0.1197, 0.425])               # joint‑2 → joint‑3
+    d3 = np.array([0.0, 0.0, 0.39225])                 # joint‑3 → joint‑4
+    d4 = np.array([0.0, 0.093, 0.0])                   # joint‑4 → TCP
+
+    R01 = _rotz(q1)
+    p01 = R01 @ d1
+
+    R12 = _roty(q2)
+    R02 = R01 @ R12
+    p02 = p01 + R02 @ d2
+
+    R23 = _roty(q3)
+    R03 = R02 @ R23
+    p03 = p02 + R03 @ d3
+
+    R34 = _roty(q4)
+    R04 = R03 @ R34
+    p04 = p03 + R04 @ d4
+
+    return p04, R04
+
+
+# ------------------------------------------------------------------
+# Helpers
+# ------------------------------------------------------------------
+def _wrap(a: float) -> float:
+    """Wrap angle to (‑π , π]."""
+    return (a + np.pi) % (2.0 * np.pi) - np.pi
+
+
+# ------------------------------------------------------------------
+# Main analytical inverse kinematics
+# ------------------------------------------------------------------
+def inverse_kinematics(p: tuple[float, float, float],
+                       r: tuple[float, float, float]) -> tuple[float, float, float, float]:
+    """
+    Closed‑form 4‑DOF inverse kinematics (position + orientation)
+    for the manipulator described in the task.
+    Parameters
+    ----------
+    p : (x, y, z)  – desired TCP position  [m]
+    r : (roll, pitch, yaw)  – desired orientation, URDF RPY [rad]
+    Returns
+    -------
+    (q1, q2, q3, q4) wrapped to (‑π , π]
+    """
+
+    # ------------------------------------------------------------------
+    # Constants
+    # ------------------------------------------------------------------
+    a = 0.425        # link‑3 length  (m)
+    b = 0.39225      # link‑4 length (m)
+    d = 0.10915      # constant offset along the (rotated) Y axis (m)
+
+    x, y, z = p
+    R_d = _rotz(r[2]) @ _roty(r[1]) @ _rotx(r[0])   # Rz(yaw)·Ry(p)·Rx(r)
+
+    # ------------------------------------------------------------------
+    # Joint‑3  (elbow)  from cosine law
+    # ------------------------------------------------------------------
+    c3 = (x*x + y*y + z*z - (a*a + b*b + d*d)) / (2.0 * a * b)
+    c3 = np.clip(c3, -1.0, 1.0)
+    q3_pos = np.arccos(c3)          # elbow “down”
+    q3_neg = -q3_pos                # elbow “up”
+
+    # ------------------------------------------------------------------
+    # Branch enumeration :  S‑sign  ×  elbow‑sign
+    # ------------------------------------------------------------------
+    S_mag = np.sqrt(max(x*x + y*y - d*d, 0.0))
+    candidate_solutions = []
+
+    for S in (+S_mag, -S_mag):             # front / back reach
+        # angle φ between vector [S,d] and +X
+        phi = np.arctan2(d, S)
+        base_ang = np.arctan2(y, x)
+        q1 = base_ang - phi                # unique solution for this S‑sign
+
+        for q3 in (q3_pos, q3_neg):
+
+            # Auxiliary values for q2
+            A = a + b * np.cos(q3)
+            B = b * np.sin(q3)
+
+            num = S * A - z * B
+            den = S * B + z * A
+            q2 = np.arctan2(num, den)
+
+            # Desired total rotation about Y
+            theta = np.arctan2(-R_d[2, 0], R_d[2, 2])
+            q4 = theta - q2 - q3
+
+            # Store wrapped candidate
+            candidate_solutions.append(tuple(map(_wrap, (q1, q2, q3, q4))))
+
+    # ------------------------------------------------------------------
+    # Select the candidate that reproduces the target most closely
+    # ------------------------------------------------------------------
+    best_q = None
+    best_err = np.inf
+
+    for q1, q2, q3, q4 in candidate_solutions:
+        p_test, R_test = _fk(q1, q2, q3, q4)
+        pos_err = np.linalg.norm(p_test - np.asarray(p))
+        ori_err = np.linalg.norm(R_test - R_d)
+        err = pos_err + 0.2 * ori_err        # small weight on orientation
+        if err < best_err:
+            best_err = err
+            best_q = (q1, q2, q3, q4)
+
+    return best_q
+```

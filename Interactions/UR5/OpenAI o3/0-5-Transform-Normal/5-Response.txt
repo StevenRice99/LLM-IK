@@ -1,0 +1,228 @@
+```python
+import math
+import random
+from typing import Tuple
+
+import numpy as np
+
+# ------------------------------------------------------------------------
+# Homogeneous‑transformation helpers
+# ------------------------------------------------------------------------
+def _rotx(a: float) -> np.ndarray:
+    ca, sa = np.cos(a), np.sin(a)
+    return np.array([[1, 0,  0, 0],
+                     [0, ca, -sa, 0],
+                     [0, sa,  ca, 0],
+                     [0, 0,   0,  1]], dtype=float)
+
+
+def _roty(a: float) -> np.ndarray:
+    ca, sa = np.cos(a), np.sin(a)
+    return np.array([[ ca, 0, sa, 0],
+                     [  0, 1,  0, 0],
+                     [-sa, 0, ca, 0],
+                     [  0, 0,  0, 1]], dtype=float)
+
+
+def _rotz(a: float) -> np.ndarray:
+    ca, sa = np.cos(a), np.sin(a)
+    return np.array([[ca, -sa, 0, 0],
+                     [sa,  ca, 0, 0],
+                     [ 0,   0, 1, 0],
+                     [ 0,   0, 0, 1]], dtype=float)
+
+
+def _trans(x: float, y: float, z: float) -> np.ndarray:
+    """Pure translation."""
+    return np.array([[1, 0, 0, x],
+                     [0, 1, 0, y],
+                     [0, 0, 1, z],
+                     [0, 0, 0, 1]], dtype=float)
+
+
+# ------------------------------------------------------------------------
+# Forward kinematics of the 6‑R manipulator
+# ------------------------------------------------------------------------
+def _fk(q: np.ndarray) -> np.ndarray:
+    q1, q2, q3, q4, q5, q6 = q
+
+    # Link chain – see table in the task description
+    t01 = _rotz(q1)
+
+    t12 = _trans(0.0, 0.13585, 0.0)           @ _roty(q2)
+    t23 = _trans(0.0, -0.1197, 0.425)         @ _roty(q3)
+    t34 = _trans(0.0, 0.0, 0.39225)           @ _roty(q4)
+    t45 = _trans(0.0, 0.093, 0.0)             @ _rotz(q5)
+    t56 = _trans(0.0, 0.0, 0.09465)           @ _roty(q6)
+    t6e = _trans(0.0, 0.0823, 0.0)            @ _rotz(np.pi / 2.0)
+
+    return t01 @ t12 @ t23 @ t34 @ t45 @ t56 @ t6e
+
+
+# ------------------------------------------------------------------------
+# Pose‑error utilities
+# ------------------------------------------------------------------------
+def _rot_to_axis_angle(R: np.ndarray) -> np.ndarray:
+    """
+    Convert a rotation matrix to axis‑angle (3‑vector)
+    whose direction is the rotation axis and length is the angle.
+    """
+    tr = np.trace(R)
+    cos_theta = (tr - 1.0) * 0.5
+    cos_theta = np.clip(cos_theta, -1.0, 1.0)
+    theta = math.acos(cos_theta)
+
+    if np.isclose(theta, 0.0):
+        return np.zeros(3)
+
+    axis = np.array([R[2, 1] - R[1, 2],
+                     R[0, 2] - R[2, 0],
+                     R[1, 0] - R[0, 1]]) * (0.5 / np.sin(theta))
+    return axis * theta
+
+
+def _pose_error(T: np.ndarray, T_goal: np.ndarray,
+                w_orient: float = 0.3) -> np.ndarray:
+    """
+    6‑vector error between current (T) and desired (T_goal) pose.
+    Orientation part is scaled by w_orient so that translation
+    and orientation have comparable numerical magnitude.
+    """
+    # Translational part
+    dp = T_goal[:3, 3] - T[:3, 3]
+
+    # Rotational part –  R_err = R_cᵀ  R_g
+    R_err = T[:3, :3].T @ T_goal[:3, :3]
+    dr = _rot_to_axis_angle(R_err) * w_orient
+
+    return np.hstack((dp, dr))
+
+
+def _numeric_jacobian(q: np.ndarray,
+                      T_goal: np.ndarray,
+                      eps: float = 1.0e-6) -> np.ndarray:
+    """
+    Numerical 6×6 Jacobian of pose error w.‑r.‑t. joint vector q.
+    """
+    f0 = _pose_error(_fk(q), T_goal)
+    J = np.zeros((6, 6))
+
+    for i in range(6):
+        dq = np.zeros_like(q)
+        dq[i] = eps
+        f1 = _pose_error(_fk(q + dq), T_goal)
+        J[:, i] = (f1 - f0) / eps
+
+    return J
+
+
+# ------------------------------------------------------------------------
+# Core inverse‑kinematics routine (damped least‑squares with retries)
+# ------------------------------------------------------------------------
+def _ik_single_run(T_goal: np.ndarray,
+                   seed: np.ndarray,
+                   max_iter: int = 200) -> Tuple[np.ndarray, float]:
+    """
+    One Newton / damped‑least‑squares run starting from 'seed'.
+    Returns (solution, final_error_norm).
+    """
+    q = seed.copy()
+    λ = 0.01                      # damping factor
+
+    for _ in range(max_iter):
+        T_curr = _fk(q)
+        err = _pose_error(T_curr, T_goal)
+        if np.linalg.norm(err) < 1e-5:
+            break
+
+        J = _numeric_jacobian(q, T_goal)
+
+        # Damped least‑squares inverse  (JᵀJ + λ²I)⁻¹ Jᵀ
+        JTJ = J.T @ J
+        dq = np.linalg.solve(JTJ + (λ ** 2) * np.eye(6), J.T @ err)
+
+        # Optional step‑size limiting for stability
+        max_step = 0.5
+        dq_norm = np.linalg.norm(dq)
+        if dq_norm > max_step:
+            dq *= max_step / dq_norm
+
+        q += dq
+
+        # Keep angles within [‑π, π] – helps the solver
+        q = (q + np.pi) % (2 * np.pi) - np.pi
+
+    final_err = np.linalg.norm(_pose_error(_fk(q), T_goal))
+    return q, final_err
+
+
+# ------------------------------------------------------------------------
+# Public API
+# ------------------------------------------------------------------------
+def inverse_kinematics(p: Tuple[float, float, float],
+                       r: Tuple[float, float, float]
+                       ) -> Tuple[float, float, float, float, float, float]:
+    """
+    Calculates joint values that realise the requested TCP pose.
+
+    Parameters
+    ----------
+    p : (x, y, z)
+        Desired TCP position (metres).
+    r : (roll, pitch, yaw)
+        Desired TCP orientation given as intrinsic XYZ (RPY) angles
+        in radians.
+
+    Returns
+    -------
+    tuple(q1 … q6)  –  angles in radians
+    """
+    # ------------------------------------------------------------------
+    # Build the desired homogeneous transformation
+    # ------------------------------------------------------------------
+    Rx, Ry, Rz = r
+    R_goal = _rotx(Rx) @ _roty(Ry) @ _rotz(Rz)
+
+    T_goal = np.eye(4)
+    T_goal[:3, :3] = R_goal[:3, :3]
+    T_goal[:3, 3] = np.asarray(p, dtype=float)
+
+    # ------------------------------------------------------------------
+    # Initial seeds  –  a deterministic one plus several random trials
+    # ------------------------------------------------------------------
+    seeds = []
+
+    # Heuristic seed: point joint‑1 towards the target projection on XY
+    q_init = np.zeros(6)
+    q_init[0] = math.atan2(p[1], p[0])
+    seeds.append(q_init)
+
+    # Additional random seeds for robustness
+    n_random = 14
+    for _ in range(n_random):
+        seeds.append(np.random.uniform(-np.pi, np.pi, 6))
+
+    # ------------------------------------------------------------------
+    # Run the solver for each seed and keep the best result
+    # ------------------------------------------------------------------
+    best_q = None
+    best_err = float('inf')
+
+    for seed in seeds:
+        q_sol, err = _ik_single_run(T_goal, seed)
+        if err < best_err:
+            best_err = err
+            best_q = q_sol
+            if best_err < 1e-6:          # good enough – stop early
+                break
+
+    # ------------------------------------------------------------------
+    # Return the best solution found
+    # ------------------------------------------------------------------
+    if best_q is None:                      # this should never happen
+        raise RuntimeError("IK failed to converge")
+
+    # Wrap angles to [‑π, π] once more for neatness
+    best_q = (best_q + np.pi) % (2 * np.pi) - np.pi
+    return tuple(float(a) for a in best_q)
+```

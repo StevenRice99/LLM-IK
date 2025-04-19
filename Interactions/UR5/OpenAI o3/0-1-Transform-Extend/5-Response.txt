@@ -1,0 +1,109 @@
+The compilation error came from the non‑ASCII “minus” character that slipped
+inside one numeric literal.  Below is the same analytical solution with only
+plain ASCII characters, so it loads and runs correctly.
+
+```python
+import math
+from typing import Tuple
+
+
+# --------------------------------------------------------------------------- #
+#  2‑DOF SERIAL MANIPULATOR  :   Z–axis revolute  →  Y–axis revolute
+# --------------------------------------------------------------------------- #
+#   Base ── Rz(θ1) ── Ty( 0.13585 ) ── Ry(θ2) ── ( 0 , −0.1197 , 0.425 ) = TCP
+# --------------------------------------------------------------------------- #
+D1 = 0.13585                     # first fixed Y‑translation  (m)
+D2 = -0.1197                     # second fixed Y‑translation (m)
+L  = 0.425                       # Z‑offset of the TCP       (m)
+D  = D1 + D2                     # net Y offset between the two joints (m)
+
+
+# --------------------------------------------------------------------------- #
+#  Utility: TCP Z‑axis in the world frame for given joint angles
+# --------------------------------------------------------------------------- #
+def _tool_z_axis(theta1: float, theta2: float) -> Tuple[float, float, float]:
+    s2 = math.sin(theta2)
+    c1 = math.cos(theta1)
+    s1 = math.sin(theta1)
+    return (s2 * c1,             # x component
+            s2 * s1,             # y component
+            math.cos(theta2))    # z component
+
+
+# --------------------------------------------------------------------------- #
+#  Utility: desired Z‑axis extracted from the requested roll‑pitch‑yaw
+#           R = Rz(yaw) * Ry(pitch) * Rx(roll)   (XYZ fixed‑axis convention)
+# --------------------------------------------------------------------------- #
+def _desired_z_axis(r: Tuple[float, float, float]) -> Tuple[float, float, float]:
+    roll, pitch, yaw = r
+    cy, sy = math.cos(yaw),  math.sin(yaw)
+    cp, sp = math.cos(pitch), math.sin(pitch)
+    cr, sr = math.cos(roll),  math.sin(roll)
+
+    zx = cy * sp * cr + sy * sr
+    zy = sy * sp * cr - cy * sr
+    zz = cp * cr
+
+    n = math.hypot(math.hypot(zx, zy), zz)
+    return (zx / n, zy / n, zz / n)
+
+
+# --------------------------------------------------------------------------- #
+#  Main inverse‑kinematics routine
+# --------------------------------------------------------------------------- #
+def inverse_kinematics(p: Tuple[float, float, float],
+                       r: Tuple[float, float, float]) -> Tuple[float, float]:
+    """
+    Closed‑form IK for the 2‑DOF chain.
+
+    Parameters
+    ----------
+    p : (x, y, z)   Desired TCP position in the base frame.
+    r : (roll, pitch, yaw)   Desired TCP orientation in radians.
+
+    Returns
+    -------
+    (theta1, theta2)   Joint angles in radians.
+    """
+    x, y, z = p
+
+    # ------------------------------------------------------------ #
+    # 1. θ2 from the z‑equation :  z = L * cos θ2
+    # ------------------------------------------------------------ #
+    c2 = max(-1.0, min(1.0, z / L))          # numerical clamp
+    theta2_opts = [ math.acos(c2),           # elbow‑down
+                   -math.acos(c2) ]          # elbow‑up
+
+    # ------------------------------------------------------------ #
+    # 2. θ1 for each θ2 from the planar (x, y) equations
+    #    x =  L sinθ2 cosθ1 − D sinθ1
+    #    y =  L sinθ2 sinθ1 + D cosθ1
+    # ------------------------------------------------------------ #
+    solutions = []
+    for theta2 in theta2_opts:
+        s2  = math.sin(theta2)
+        ls2 = L * s2
+
+        if abs(ls2) < 1.0e-12:               # very small sinθ2  →  special case
+            theta1 = math.atan2(-x, y)
+        else:
+            theta1 = math.atan2(y, x) - math.atan2(D, ls2)
+
+        solutions.append((theta1, theta2))
+
+    # ------------------------------------------------------------ #
+    # 3. Pick the candidate whose TCP Z‑axis matches the requested
+    #    Z‑axis best (largest dot product).
+    # ------------------------------------------------------------ #
+    zx_d, zy_d, zz_d = _desired_z_axis(r)
+
+    best_pair, best_dot = solutions[0], -2.0   # dot ∈ [‑1, 1]
+    for theta1, theta2 in solutions:
+        zx_c, zy_c, zz_c = _tool_z_axis(theta1, theta2)
+        dot = zx_c * zx_d + zy_c * zy_d + zz_c * zz_d
+        if dot > best_dot:
+            best_dot = dot
+            best_pair = (theta1, theta2)
+
+    return best_pair
+```

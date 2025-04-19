@@ -1,0 +1,212 @@
+```python
+import math
+from typing import Tuple, List
+
+# ----------------------------------------------------------------------
+#  Geometry (metres)
+# ----------------------------------------------------------------------
+_D1_Y = 0.13585                    # joint‑1 → joint‑2 translation along Y
+_D2_Y = -0.1197                    # joint‑2 → TCP   translation along Y
+_D2_Z = 0.425                      # joint‑2 → TCP   translation along Z
+_CONST_Y = _D1_Y + _D2_Y           # fixed Y–offset that never changes
+
+_TWO_PI = 2.0 * math.pi
+_JOINT_LIMIT = _TWO_PI             # |qi| ≤ 2 π  according to DETAILS
+
+
+# ----------------------------------------------------------------------
+#  Small utility helpers
+# ----------------------------------------------------------------------
+def _wrap_to_interval(x: float, centre: float = 0.0) -> float:
+    """
+    Wrap an angle to the interval (centre-π , centre+π].
+    The default is (−π , π].
+    """
+    return (x - centre + math.pi) % _TWO_PI - math.pi + centre
+
+
+def _clamp(value: float, low: float, high: float) -> float:
+    return max(low, min(high, value))
+
+
+# ----------------------------------------------------------------------
+#  Elementary rotation matrices
+# ----------------------------------------------------------------------
+def _Rx(a: float) -> List[List[float]]:
+    ca, sa = math.cos(a), math.sin(a)
+    return [[1, 0, 0],
+            [0, ca, -sa],
+            [0, sa,  ca]]
+
+
+def _Ry(a: float) -> List[List[float]]:
+    ca, sa = math.cos(a), math.sin(a)
+    return [[ ca, 0, sa],
+            [  0, 1,  0],
+            [-sa, 0, ca]]
+
+
+def _Rz(a: float) -> List[List[float]]:
+    ca, sa = math.cos(a), math.sin(a)
+    return [[ca, -sa, 0],
+            [sa,  ca, 0],
+            [ 0,   0, 1]]
+
+
+def _mat_mul(A: List[List[float]], B: List[List[float]]) -> List[List[float]]:
+    """3×3 matrix multiplication"""
+    return [
+        [
+            A[i][0] * B[0][j] + A[i][1] * B[1][j] + A[i][2] * B[2][j]
+            for j in range(3)
+        ]
+        for i in range(3)
+    ]
+
+
+def _rotation_from_rpy(rx: float, ry: float, rz: float) -> List[List[float]]:
+    """R = Rz(rz) · Ry(ry) · Rx(rx)  (extrinsic Z‑Y‑X / roll‑pitch‑yaw)"""
+    return _mat_mul(_mat_mul(_Rz(rz), _Ry(ry)), _Rx(rx))
+
+
+def _fwd_position(q1: float, q2: float) -> Tuple[float, float, float]:
+    """
+    Closed‑form forward kinematics for TCP position only
+    (orientation is not needed here).
+    """
+    vx = _D2_Z * math.sin(q2)       # X component after joint‑2 rotation
+    vy = _CONST_Y                   # fixed
+    vz = _D2_Z * math.cos(q2)
+
+    # rotate (vx , vy) in the XY‑plane by q1
+    px =  math.cos(q1) * vx - math.sin(q1) * vy
+    py =  math.sin(q1) * vx + math.cos(q1) * vy
+    pz =  vz
+    return px, py, pz
+
+
+def _orientation_error(Ra: List[List[float]],
+                       Rb: List[List[float]]) -> float:
+    """
+    Frobenius‑norm squared ‖Ra − Rb‖²  (a fast scalar ‘distance’).
+    """
+    return sum(
+        (Ra[i][j] - Rb[i][j]) ** 2
+        for i in range(3) for j in range(3)
+    )
+
+
+# ----------------------------------------------------------------------
+#  Inverse kinematics
+# ----------------------------------------------------------------------
+def inverse_kinematics(
+    p: Tuple[float, float, float],
+    r: Tuple[float, float, float]
+) -> Tuple[float, float]:
+    """
+    Closed‑form analytical IK for the 2‑DoF manipulator described
+    in the DETAILS section.
+
+    Parameters
+    ----------
+    p : (x, y, z)  [metres]
+        Desired TCP position in the base frame.
+    r : (rx, ry, rz)  [radians]
+        Desired TCP orientation as roll‑pitch‑yaw.
+
+    Returns
+    -------
+    (q1, q2)  [radians] :
+        Joint angles for Revolute‑1 (about Z) and Revolute‑2 (about Y).
+    """
+    px, py, pz = p
+    rx, ry, rz = r
+
+    # ------------------------------------------------------------------
+    # Build the desired rotation matrix once; it will be compared with all
+    # candidate solutions afterwards.
+    # ------------------------------------------------------------------
+    R_des = _rotation_from_rpy(rx, ry, rz)
+
+    # ------------------------------------------------------------------
+    # 1.  Candidate list for q2  (joint‑2 / pitch)
+    #
+    #     For reachable orientations produced by this 2‑DoF chain only
+    #     two cases exist:
+    #
+    #       • roll  ≈ 0   →  q2 ≈  ry
+    #       • roll  ≈ π   →  q2 ≈  π − ry
+    #
+    #     Candidates are expanded by ±2 π to respect the joint limits.
+    # ------------------------------------------------------------------
+    cand_q2: List[float] = []
+    base_set = [ry]                      # roll ≈ 0  hypothesis
+    if abs(abs(rx) - math.pi) < 1.0e-3:  # roll very close to π (± sign)
+        base_set.append(math.pi - ry)    # roll ≈ π  hypothesis
+    else:
+        # The alternative branch is kept as well in case roll ≈ 0 fails
+        base_set.append(math.pi - ry)
+
+    for q2_base in base_set:
+        for k in (-_TWO_PI, 0.0, _TWO_PI):
+            q2 = q2_base + k
+            if -_JOINT_LIMIT <= q2 <= _JOINT_LIMIT:
+                cand_q2.append(q2)
+
+    # eliminate duplicates (within a small tolerance)
+    uniq_q2 = []
+    for q2 in cand_q2:
+        if not any(abs(q2 - q) < 1e-10 for q in uniq_q2):
+            uniq_q2.append(q2)
+
+    best_err = float("inf")
+    best_pair: Tuple[float, float] | None = None
+
+    # ------------------------------------------------------------------
+    # 2.  For every q2 candidate find q1 from XY geometry,
+    #     then evaluate position and orientation errors.
+    # ------------------------------------------------------------------
+    vy = _CONST_Y
+    theta_p = math.atan2(py, px)            # angle of desired XY position
+
+    for q2 in uniq_q2:
+        vx = _D2_Z * math.sin(q2)
+        theta_v = math.atan2(vy, vx)        # angle of (vx , vy)
+
+        # Single analytical solution for q1 that aligns (vx, vy) onto (px, py)
+        q1 = theta_p - theta_v
+
+        # Wrap into a convenient range and expand by ±2 π if necessary
+        for k in (-_TWO_PI, 0.0, _TWO_PI):
+            q1_k = q1 + k
+            if not -_JOINT_LIMIT <= q1_k <= _JOINT_LIMIT:
+                continue
+
+            # --- Position error ------------------------------------------------
+            px_c, py_c, pz_c = _fwd_position(q1_k, q2)
+            pos_err = abs(px_c - px) + abs(py_c - py) + abs(pz_c - pz)
+            if pos_err > 1.0e-6:            # unreachable with this pair
+                continue
+
+            # --- Orientation error --------------------------------------------
+            R_cand = _mat_mul(_Rz(q1_k), _Ry(q2))
+            ori_err = _orientation_error(R_cand, R_des)
+
+            if ori_err < best_err:
+                best_err = ori_err
+                best_pair = (q1_k, q2)
+
+    # ------------------------------------------------------------------
+    # 3.  A solution must exist (problem statement guarantees reachability)
+    # ------------------------------------------------------------------
+    if best_pair is None:            # Should never happen
+        raise RuntimeError("IK: no valid solution found (unexpected)")
+
+    q1_sol, q2_sol = best_pair
+
+    # Optional: wrap results into (−π, π] while staying inside joint limits
+    q1_sol = _wrap_to_interval(q1_sol)
+    q2_sol = _wrap_to_interval(q2_sol)
+
+    return q1_sol, q2_sol
+```

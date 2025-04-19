@@ -1,0 +1,153 @@
+```python
+import numpy as np
+
+
+# ---------------------------------------------------------------------
+# some tiny helpers
+# ---------------------------------------------------------------------
+def _Rx(q: float) -> np.ndarray:
+    c, s = np.cos(q), np.sin(q)
+    return np.array([[1, 0, 0, 0],
+                     [0, c, -s, 0],
+                     [0, s, c, 0],
+                     [0, 0, 0, 1]])
+
+
+def _Ry(q: float) -> np.ndarray:
+    c, s = np.cos(q), np.sin(q)
+    return np.array([[c, 0, s, 0],
+                     [0, 1, 0, 0],
+                     [-s, 0, c, 0],
+                     [0, 0, 0, 1]])
+
+
+def _Rz(q: float) -> np.ndarray:
+    c, s = np.cos(q), np.sin(q)
+    return np.array([[c, -s, 0, 0],
+                     [s, c, 0, 0],
+                     [0, 0, 1, 0],
+                     [0, 0, 0, 1]])
+
+
+def _T(v) -> np.ndarray:
+    """homogeneous translation"""
+    out = np.eye(4)
+    out[:3, 3] = v
+    return out
+
+
+def _rpy_to_rot(rpy) -> np.ndarray:
+    """roll‑pitch‑yaw (URDF order X‑Y‑Z) → 3×3 rotation matrix"""
+    roll, pitch, yaw = rpy
+    R = _Rz(yaw) @ _Ry(pitch) @ _Rx(roll)
+    return R[:3, :3]
+
+
+# ---------------------------------------------------------------------
+# forward kinematics (full pose)
+# ---------------------------------------------------------------------
+def _fk(j: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+    """
+    complete forward kinematics: returns (position, 3×3 rotation matrix)
+    according to the dimensions given in the task description.
+    """
+    t1, t2, t3, t4, t5, t6 = j
+    T = (np.eye(4)
+          @ _Rz(t1)
+          @ _T([0, 0.13585, 0]) @ _Ry(t2)
+          @ _T([0, -0.1197, 0.425]) @ _Ry(t3)
+          @ _T([0, 0, 0.39225]) @ _Ry(t4)
+          @ _T([0, 0.093, 0]) @ _Rz(t5)
+          @ _T([0, 0, 0.09465]) @ _Ry(t6)
+          @ _T([0, 0.0823, 0]))                                  # TCP
+    return T[:3, 3].copy(), T[:3, :3].copy()
+
+
+# ---------------------------------------------------------------------
+# logarithm map so(3)  ←  SO(3)
+# ---------------------------------------------------------------------
+def _rot_to_vec(R: np.ndarray) -> np.ndarray:
+    """
+    Converts a small rotation matrix into its axis‑angle vector using
+    the first‑order approximation  (vee of the skew part).  For the
+    iterative IK we never leave the vicinity of the target, making
+    this safe and numerically well behaved.
+    """
+    return 0.5 * np.array([R[2, 1] - R[1, 2],
+                           R[0, 2] - R[2, 0],
+                           R[1, 0] - R[0, 1]])
+
+
+# ---------------------------------------------------------------------
+# inverse kinematics
+# ---------------------------------------------------------------------
+def inverse_kinematics(p: tuple[float, float, float],
+                       r: tuple[float, float, float]) \
+        -> tuple[float, float, float, float, float, float]:
+    """
+    Solves the full 6‑DOF inverse kinematics problem for the manipulator.
+    A damped‑least‑squares iterative scheme is employed; because the arm
+    is far from singular in its normal workspace convergence is normally
+    achieved within a handful of iterations.
+
+    :param p: desired TCP position  (x, y, z)
+    :param r: desired TCP orientation given as roll‑pitch‑yaw (rad)
+    :return:  six joint angles that realise the pose
+    """
+
+    # -----------------------------------------------------------------
+    # Goal pose as homogeneous transform
+    # -----------------------------------------------------------------
+    p_des = np.asarray(p, dtype=float)
+    R_des = _rpy_to_rot(r)
+
+    # -----------------------------------------------------------------
+    # parameters for the iterative Newton/LMA scheme
+    # -----------------------------------------------------------------
+    q = np.zeros(6)                          # start from the home pose
+    eps_pos = 1e-6                           # positional tolerance
+    eps_ori = 1e-6                           # orientation tolerance
+    eps_jac = 1e-6                           # step for numerical Jacobian
+    damping = 1e-4                           # Levenberg–Marquardt λ
+    max_iter = 100
+
+    for _ in range(max_iter):
+        p_cur, R_cur = _fk(q)
+
+        # -------------------------------------------------------------
+        # 6‑vector error = [ position_error ; orientation_error ]
+        # -------------------------------------------------------------
+        e_pos = p_des - p_cur
+        R_err = R_des @ R_cur.T
+        e_ori = _rot_to_vec(R_err)
+        err = np.concatenate((e_pos, e_ori))
+
+        # convergence?
+        if np.linalg.norm(e_pos) < eps_pos and np.linalg.norm(e_ori) < eps_ori:
+            break
+
+        # -------------------------------------------------------------
+        # numerical Jacobian  (6×6)
+        # -------------------------------------------------------------
+        J = np.zeros((6, 6))
+        for i in range(6):
+            dq = q.copy()
+            dq[i] += eps_jac
+            p_dq, R_dq = _fk(dq)
+            dp = (p_dq - p_cur) / eps_jac
+
+            R_diff = _rot_to_vec(R_dq @ R_cur.T) / eps_jac
+            J[:3, i] = dp
+            J[3:, i] = R_diff
+
+        # Levenberg–Marquardt step:  δq = JT (JJT + λI)^‑1 e
+        JT = J.T
+        H = J @ JT + damping * np.eye(6)
+        delta_q = JT @ np.linalg.solve(H, err)
+
+        q += delta_q
+
+    # Wrap to [‑π, π] for neatness
+    q = (q + np.pi) % (2.0 * np.pi) - np.pi
+    return tuple(float(ang) for ang in q)
+```

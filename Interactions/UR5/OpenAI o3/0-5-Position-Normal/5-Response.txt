@@ -1,0 +1,134 @@
+Here is one possible way to compute joint angles that realise any reachable TCP position.  
+The forward–kinematics of the arm is reproduced inside the routine; a damped‑least–squares
+(Newton / pseudoinverse) update is then applied until the translational error is smaller
+than a very small threshold.
+
+```python
+import numpy as np
+
+
+# ------------------------------------------------------------------
+# Forward kinematics – only the TCP position is required
+# ------------------------------------------------------------------
+def _fk_position(joints: np.ndarray) -> np.ndarray:
+    """
+    Computes the TCP position for a given 6‑tuple of joint angles.
+    The implementation follows the order and dimensions given in the
+    DETAILS table of the task description.
+    """
+    t1, t2, t3, t4, t5, t6 = joints
+
+    # rotation helpers
+    def Rz(q):
+        c, s = np.cos(q), np.sin(q)
+        return np.array([[c, -s, 0, 0],
+                         [s,  c, 0, 0],
+                         [0,  0, 1, 0],
+                         [0,  0, 0, 1]])
+
+    def Ry(q):
+        c, s = np.cos(q), np.sin(q)
+        return np.array([[ c, 0,  s, 0],
+                         [ 0, 1,  0, 0],
+                         [-s, 0,  c, 0],
+                         [ 0, 0,  0, 1]])
+
+    # translation helper
+    def T(v):
+        out = np.eye(4)
+        out[:3, 3] = v
+        return out
+
+    # ---- chain ----------------------------------------------------
+    T0 = np.eye(4)
+    # Joint 1 (about Z)
+    T0 = T0 @ Rz(t1)
+    # Joint 2
+    T0 = T0 @ T([0, 0.13585, 0]) @ Ry(t2)
+    # Joint 3
+    T0 = T0 @ T([0, -0.1197, 0.425]) @ Ry(t3)
+    # Joint 4
+    T0 = T0 @ T([0, 0, 0.39225]) @ Ry(t4)
+    # Joint 5
+    T0 = T0 @ T([0, 0.093, 0]) @ Rz(t5)
+    # Joint 6
+    T0 = T0 @ T([0, 0, 0.09465]) @ Ry(t6)
+    # TCP
+    T0 = T0 @ T([0, 0.0823, 0])
+
+    return T0[:3, 3]
+
+
+# ------------------------------------------------------------------
+# Inverse kinematics – numerical Newton / damped least squares
+# ------------------------------------------------------------------
+def inverse_kinematics(p: tuple[float, float, float]) -> tuple[float, float, float,
+                                                                float, float, float]:
+    """
+    Returns one set of joint angles that places the tool‑centre‑point at
+    the requested position p = (x, y, z).  Orientation is not constrained.
+    A damped‑least‑squares iterative solver is used; because the problem
+    is well conditioned in the robot’s normal workspace only a handful
+    of iterations are required.
+    """
+    target = np.asarray(p, dtype=float)
+
+    # start from all zeros (inside the generous ±2π joint limits)
+    q = np.zeros(6)
+
+    eps_pos   = 1.0e-6   # position tolerance  (metres)
+    eps_jac   = 1.0e-6   # finite–difference step (rad)
+    damping   = 1.0e-4   # DLS damping term
+    max_iter  = 100
+
+    for _ in range(max_iter):
+        # current TCP
+        pc = _fk_position(q)
+        err = target - pc
+        if np.linalg.norm(err) < eps_pos:            # success
+            break
+
+        # ----------------------------------------------------------
+        # numerical Jacobian (3×6) – translational part only
+        # ----------------------------------------------------------
+        J = np.zeros((3, 6))
+        for i in range(6):
+            dq        = q.copy()
+            dq[i]    += eps_jac
+            J[:, i]   = (_fk_position(dq) - pc) / eps_jac
+
+        # damped least–squares inverse
+        JT   = J.T
+        JJT  = J @ JT
+        delta = JT @ np.linalg.solve(JJT + damping*np.eye(3), err)
+
+        # take full step (the magnitudes here are very small)
+        q += delta
+
+    # wrap angles into the interval (−π, π] – inside the specified limits
+    q = (q + np.pi) % (2.0 * np.pi) - np.pi
+    return tuple(float(v) for v in q)
+```
+
+
+Explanation of the approach
+---------------------------
+1. The exact forward kinematics (translations only) is reconstructed from the
+   URDF information given in the task description.  
+   Only basic homogeneous‑transformation building blocks
+   (rotation about Z, rotation about Y, and pure translation) are required.
+
+2. For inverse kinematics we exploit the fact that the task constrains
+   only the TCP position (3 scalar equations) whereas six joint variables
+   are available; therefore infinitely many solutions exist.  
+   An efficient way to pick one is by applying the Newton method with the
+   translational Jacobian.  A tiny damping factor makes the pseudoinverse
+   numerically robust even at singular configurations.
+
+3. Because the joint limits cover the full ±2 π range, wrapping the final
+   result into (−π, π] guarantees that every returned angle lies well
+   inside the allowed interval.
+
+The routine is fully self‑contained, uses only NumPy, and satisfies the
+requirement that every reachable target position can be attained without
+any external optimisation package.

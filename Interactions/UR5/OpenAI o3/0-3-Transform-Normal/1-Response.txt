@@ -1,0 +1,106 @@
+```python
+import math
+import numpy as np
+
+# ---- constant link geometry (metres) ----------------------------------------
+# taken directly from the DETAILS section
+d1_y  =  0.13585                       # translation between joint‑1 and joint‑2  (along   Y1)
+d2_y  = -0.1197                        # translation between joint‑2 and joint‑3  (along  −Y2)
+d2_z  =  0.425                         # translation between joint‑2 and joint‑3  (along   Z2)
+d3_z  =  0.39225                       # translation between joint‑3 and joint‑4  (along   Z3)
+d4_y  =  0.093                         # translation from joint‑4 to TCP          (along   Y4)
+
+# the only translation that is not affected by any joint rotation is the sum of
+# the constant local‑Y offsets:
+CONST_Y = d1_y + d2_y + d4_y           # 0.10915 m
+
+# link lengths that form the planar two‑link subsystem in the XZ‑plane
+L1 = d2_z                              # 0.425   m
+L2 = d3_z                              # 0.39225 m
+
+
+def inverse_kinematics(p: tuple[float, float, float],
+                       r: tuple[float, float, float]) -> tuple[float, float, float, float]:
+    """
+    Closed–form inverse kinematics for the 4‑DoF manipulator described in the DETAILS
+    section.  The arm has the structure
+        Rz(theta1)  →  Ry(theta2)  →  Ry(theta3)  →  Ry(theta4)
+    with the final constant offset d4 given above.
+
+    Parameters
+    ----------
+    p : (x, y, z)
+        Desired TCP position in the base frame (metres).
+    r : (roll, pitch, yaw)
+        Desired TCP orientation given as fixed‑axis RPY angles (radians).
+        Due to the arm’s kinematic structure only
+            yaw  = theta1
+            pitch = theta2 + theta3 + theta4
+        can be controlled; roll must be zero for the request to be reachable.
+
+    Returns
+    -------
+    (theta1, theta2, theta3, theta4) : tuple[float, float, float, float]
+        Joint values in radians that realise the requested pose.
+    """
+
+    # --------------------------------------------------------------------- 1 --
+    # desired orientation angles ------------------------------------------------
+    roll_d, pitch_d, yaw_d = r
+
+    # theta1 is fully defined by the required yaw component
+    theta1 = yaw_d
+    c1 = math.cos(theta1)
+    s1 = math.sin(theta1)
+
+    # --------------------------------------------------------------------- 2 --
+    # transform the desired TCP position into the frame that is *after*
+    # the first (Z‑) joint so that the remaining problem is planar
+    x, y, z = p
+
+    # rotate the world position by  −theta1  (equivalent to premultiplying by
+    # Rz(−theta1)) so the remaining joints lie in the XZ‑plane
+    x_p =  c1 * x + s1 * y          # X coordinate in the “joint‑2” frame
+    y_p = -s1 * x + c1 * y          # Y coordinate in the “joint‑2” frame
+    z_p =  z                        # Z stays the same
+
+    # consistency with the constant Y offset (reachability assumed by spec)
+    # y_p should equal CONST_Y; small numerical errors are ignored
+    # --------------------------------------------------------------------- 3 --
+    # planar 2‑link inverse kinematics in the XZ‑plane -------------------------
+    #
+    # joint‑2 and joint‑3 form a standard 2‑R chain with lengths
+    #   L1 and L2, the wrist point being the origin of joint‑4.
+    #
+    # Coordinates of that wrist point:
+    x_c = x_p            # planar X  (note: can be positive or negative)
+    z_c = z_p            # planar Z
+
+    # distance from joint‑2 to the wrist point
+    D_sq = x_c**2 + z_c**2
+    D    = math.sqrt(D_sq)
+
+    # --- elbow angle (theta3) --------------------------------------------------
+    # cosine law
+    cos_t3 = (D_sq - L1**2 - L2**2) / (2 * L1 * L2)
+    cos_t3 = max(-1.0, min(1.0, cos_t3))     # numerical safety clamp
+
+    # choose the “elbow‑down” configuration (positive sin -> t3 >= 0)
+    sin_t3 = math.sqrt(1.0 - cos_t3**2)
+    theta3 = math.atan2(sin_t3, cos_t3)
+
+    # --- shoulder angle (theta2) ----------------------------------------------
+    k1 = L1 + L2 * cos_t3
+    k2 = L2 * sin_t3
+
+    # derived from the simultaneous equations of the planar chain (see analysis)
+    theta2 = math.atan2(k1 * z_c - k2 * x_c,
+                        k1 * x_c + k2 * z_c)
+
+    # --------------------------------------------------------------------- 4 --
+    # wrist pitch (theta4) so that total pitch equals the requested one
+    theta4 = pitch_d - theta2 - theta3
+
+    # -------------------------------------------------------------------------–
+    return (theta1, theta2, theta3, theta4)
+```

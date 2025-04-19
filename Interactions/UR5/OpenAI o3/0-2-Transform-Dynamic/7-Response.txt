@@ -1,0 +1,158 @@
+The main problems were  
+1. extracting θ₂ + θ₃ from the rotation matrix with a formula that only
+   works when the TCP roll is zero, and  
+2. relying on that value while solving the geometry, which sometimes
+   produced no admissible solution and made the routine fall back to
+   the “all zeros” default.
+
+Below is a self–contained, purely analytical IK which
+
+• derives the two possible base angles θ₁ only from the position (this is
+  the only quantity that really constraints θ₁),  
+• treats the remaining two joints as a standard planar 2‑link arm and
+  generates the two elbow configurations for every θ₁ candidate, and  
+• selects the unique triplet that reproduces the requested orientation
+  best (Frobenius‑norm error ≤ 10⁻⁶).  This works even when the supplied
+  RPY contains an arbitrary roll component because the test that finally
+  picks the solution compares full rotation matrices.
+
+```python
+import math
+from typing import Tuple
+
+# ------------------------------------------------------------------------- #
+#  Fixed geometry (metres)                                                  #
+# ------------------------------------------------------------------------- #
+D_Y1 = 0.13585          # base  → joint‑2   along +Y of {1}
+D_Y2 = -0.1197          # joint‑2 → joint‑3 along  Y of {2} (same axis)
+Y_OFF = D_Y1 + D_Y2     # net constant offset on the rotated Y‑axis
+L1    = 0.425           # link‑2 length (joint‑2  → joint‑3)  along Z₂
+L2    = 0.39225         # link‑3 length (joint‑3  →  TCP)     along Z₃
+
+
+# ------------------------------------------------------------------------- #
+#  Basic rotation matrices                                                  #
+# ------------------------------------------------------------------------- #
+def _Rz(theta: float) -> Tuple[Tuple[float, ...], ...]:
+    c, s = math.cos(theta), math.sin(theta)
+    return ((c, -s, 0.0),
+            (s,  c, 0.0),
+            (0.0, 0.0, 1.0))
+
+
+def _Ry(theta: float) -> Tuple[Tuple[float, ...], ...]:
+    c, s = math.cos(theta), math.sin(theta)
+    return (( c, 0.0,  s),
+            (0.0, 1.0, 0.0),
+            (-s, 0.0,  c))
+
+
+def _rpy_to_matrix(rx: float, ry: float, rz: float) -> Tuple[Tuple[float, ...], ...]:
+    cx, sx = math.cos(rx), math.sin(rx)
+    cy, sy = math.cos(ry), math.sin(ry)
+    cz, sz = math.cos(rz), math.sin(rz)
+
+    # URDF convention  R = Rz * Ry * Rx
+    return (
+        (cy * cz,           cz * sy * sx - sz * cx,   cz * sy * cx + sz * sx),
+        (cy * sz,           sz * sy * sx + cz * cx,   sz * sy * cx - cz * sx),
+        (-sy,               cy * sx,                  cy * cx               ),
+    )
+
+
+def _mat_diff(A, B) -> float:
+    """Frobenius‑norm difference ‖A − B‖_F."""
+    return sum((A[i][j] - B[i][j]) ** 2 for i in range(3) for j in range(3))
+
+
+# ------------------------------------------------------------------------- #
+#                     closed‑form inverse kinematics                        #
+# ------------------------------------------------------------------------- #
+def inverse_kinematics(
+    p: tuple[float, float, float],
+    r: tuple[float, float, float],
+) -> tuple[float, float, float]:
+    """
+    Returns the joint angles θ₁, θ₂, θ₃ (radians) that bring the TCP to the
+    requested position *p* and orientation *r* (roll‑pitch‑yaw, URDF rule).
+    Reachability is guaranteed by the task statement.
+    """
+
+    # ------------------------------------------------------------------ #
+    #  1.  Possible values of θ₁ (base rotation about Z)                 #
+    # ------------------------------------------------------------------ #
+    x, y, z = p
+    rho     = math.hypot(x, y)
+    if rho < 1e-12:                       # target directly above / below Z‑axis
+        rho = 1e-12                       # avoid division by zero
+
+    gamma   = math.atan2(y, x)
+    delta   = -Y_OFF / rho
+    delta   = max(min(delta, 1.0), -1.0)  # numerical clipping
+
+    theta1_opts = (
+        gamma + math.asin(delta),
+        gamma + math.pi - math.asin(delta),
+    )
+
+    # ------------------------------------------------------------------ #
+    #  2.  Build the two‑link planar solutions for each θ₁               #
+    # ------------------------------------------------------------------ #
+    rx, ry, rz = r
+    R_des      = _rpy_to_matrix(rx, ry, rz)
+
+    best_err   = float('inf')
+    best_trip  = (0.0, 0.0, 0.0)
+
+    for theta1 in theta1_opts:
+
+        c1, s1 = math.cos(theta1), math.sin(theta1)
+
+        # rotate the target position into the {1} frame
+        x1 =  x *  c1 + y * s1
+        y1 = -x *  s1 + y * c1
+        z1 =  z
+
+        # the Y‑offset must coincide with the constant geometric one
+        if abs(y1 - Y_OFF) > 5e-6:
+            continue                                    # wrong θ₁ branch
+
+        # planar coordinates
+        xp = x1
+        zp = z1
+
+        # distance squared to the shoulder tip
+        d2 = xp * xp + zp * zp
+
+        # elbow angle (two options: “up” and “down”)
+        c3 = (d2 - L1 * L1 - L2 * L2) / (2.0 * L1 * L2)
+        c3 = max(min(c3, 1.0), -1.0)                    # clip rounding
+        for theta3 in (math.acos(c3), -math.acos(c3)):  # +ve and –ve
+
+            s3 = math.sin(theta3)
+            k1 = L1 + L2 * c3
+            k2 = L2 * s3
+
+            theta2 = math.atan2(xp, zp) - math.atan2(k2, k1)
+
+            # ---------------------------------------------------------------- #
+            #  Check orientation                                               #
+            # ---------------------------------------------------------------- #
+            R_sol   = _Rz(theta1)
+            Ry2     = _Ry(theta2)
+            Ry3     = _Ry(theta3)
+            # manual multiplication Rz * Ry * Ry
+            R_tmp = tuple( tuple(sum(R_sol[i][k] * Ry2[k][j] for k in range(3))
+                                   for j in range(3))            for i in range(3))
+            R_sol = tuple( tuple(sum(R_tmp[i][k] * Ry3[k][j] for k in range(3))
+                                   for j in range(3))            for i in range(3))
+
+            err = _mat_diff(R_sol, R_des)
+            if err < best_err:
+                best_err  = err
+                best_trip = (theta1, theta2, theta3)
+                if err < 1e-6:             # perfect match – no need to go on
+                    return best_trip
+
+    return best_trip
+```

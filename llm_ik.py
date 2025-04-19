@@ -1234,12 +1234,11 @@ class Robot:
             for solving, ordered in sorted(best.items())
         }
         for solving in best:
-            s = ("DOF,Joints" if "IKPy" in solving else "DOF,Joints,Name,") + ",".join(FIELDS)
+            s = ("DOF,Joints," if "IKPy" in solving else "DOF,Joints,Name,") + ",".join(FIELDS)
             for length in best[solving]:
                 for lower in best[solving][length]:
                     entry = best[solving][length][lower]
                     length_str = f"{lower + 1}" if length == 1 else f"{lower + 1} to {lower + length}"
-                    s += f"\n{length},{length_str},{entry['Name']}"
                     if "IKPy" in solving:
                         s += f"\n{length},{length_str}"
                     else:
@@ -3872,6 +3871,8 @@ def format_beamer(s: str) -> str:
     s = s.replace("Claude 3.7 Sonnet", "3.7")
     s = s.replace("OpenAI GPT-4o", "GPT-4o")
     s = s.replace("OpenAI o3-mini", "o3-mini")
+    s = s.replace("OpenAI o4-mini", "o4-mini")
+    s = s.replace("OpenAI o3", "o3")
     s = s.replace("OpenAI o1", "o1")
     s = s.replace("Direct", "Dir.")
     s = s.replace("Extend", "Ext.")

@@ -1,0 +1,137 @@
+Okay, I've identified the main issue in the previous attempt. The calculation of `q2` depends on `sin(q3)`, and `q3` can have two principal solutions (`arccos(val)` and `-arccos(val)`) which have cosines that are the same but sines with opposite signs (unless `sin(q3)=0`). This leads to two possible values for `q2`, and consequently two full joint solutions. The feedback indicates that sometimes one solution is correct, and sometimes the other.
+
+I will implement a strategy to calculate both candidate solutions and then choose one based on a deterministic criterion. The criterion will be to select the solution that results in the smallest magnitude for joint `q4` after `q4` is normalized to the range `[-pi, pi]`.
+
+Here's the refined approach:
+1.  Calculate the target orientation matrix (`R_target`) from the input RPY angles (`rx, ry, rz`).
+2.  Calculate the wrist center position `P_wrist = (xw, yw, zw)` by subtracting the TCP offset from the target TCP position, transformed by `R_target`.
+3.  Calculate `q1 = atan2(-R_target[0,1], R_target[1,1])`.
+4.  Calculate `q_sum = q2 + q3 + q4 = atan2(-R_target[2,0], R_target[2,2])`.
+5.  Transform `P_wrist` into Frame 1 (after `q1` rotation) to get `P_wrist_1 = (P_1x, P_1y, P_1z)`:
+    *   `P_1x = cos(q1)*xw + sin(q1)*yw`
+    *   `P_1y = -sin(q1)*xw + cos(q1)*yw` (This should geometrically be `d1y + d2y`. We assume reachability, so this holds.)
+    *   `P_1z = zw`
+6.  The 2R planar arm (lengths `L1=d2z`, `L2=d3z`) operates in Frame 1, aiming for `(X_target, Z_target) = (P_1x, P_1z)`.
+    Calculate `cos_q3_val = (X_target^2 + Z_target^2 - L1^2 - L2^2) / (2 * L1 * L2)`. Clip this value to `[-1, 1]`.
+7.  Generate two candidates for `q3`:
+    *   `q3_A = np.arccos(cos_q3_val)`
+    *   `q3_B = -np.arccos(cos_q3_val)`
+8.  For each `q3` candidate, calculate the corresponding `q2` and `q4`:
+    *   **Solution A (using `q3_A`):**
+        *   `q2_A = atan2(X_target, Z_target) - atan2(L2*sin(q3_A), L1 + L2*cos(q3_A))`
+        *   `q4_A = q_sum - q2_A - q3_A`
+    *   **Solution B (using `q3_B`):**
+        *   `q2_B = atan2(X_target, Z_target) - atan2(L2*sin(q3_B), L1 + L2*cos(q3_B))`
+        *   `q4_B = q_sum - q2_B - q3_B`
+9.  Normalize `q4_A` and `q4_B` to the range `[-pi, pi]`. Let these be `q4_A_norm` and `q4_B_norm`.
+10. Choose the solution:
+    *   If `abs(q4_A_norm) <= abs(q4_B_norm)`, select Solution A: `(q1, q2_A, q3_A, q4_A)`.
+    *   Else, select Solution B: `(q1, q2_B, q3_B, q4_B)`.
+    *   (In case of exact equality in `abs(q4_norm)`, Solution A is preferred as a tie-breaker).
+11. Normalize all four joint angles of the chosen solution to the range `[-pi, pi]`.
+12. Return the chosen, normalized joint angles.
+
+This approach considers both elbow configurations and provides a deterministic way to choose one, which should address the failures noted in the feedback.
+
+```python
+def inverse_kinematics(p: tuple[float, float, float], r: tuple[float, float, float]) -> tuple[float, float, float, float]:
+    import numpy as np
+
+    px, py, pz = p
+    rx, ry, rz = r  # Assuming r = (roll, pitch, yaw) -> (rx, ry, rz)
+
+    # Robot parameters from DETAILS section
+    d1y = 0.13585  # Offset J1 to J2 along J1's Y (effectively, J2's Y in its own frame after q1)
+    d2y = -0.1197 # Offset J2 to J3 along J2's Y
+    d2z = 0.425   # Offset J2 to J3 along J2's Z
+    d3z = 0.39225 # Offset J3 to J4 along J3's Z
+    d4y_tcp = 0.093 # TCP offset from J4 along J4's Y
+
+    # 1. Calculate target rotation matrix R_target from RPY angles (rx, ry, rz)
+    # Assuming RPY = ZYX order for (yaw, pitch, roll): R_target = Rz(rz) * Ry(ry) * Rx(rx)
+    cr, sr = np.cos(rx), np.sin(rx)  # roll (rx)
+    cp, sp = np.cos(ry), np.sin(ry)  # pitch (ry)
+    cy, sy = np.cos(rz), np.sin(rz)  # yaw (rz)
+
+    R_target = np.array([
+        [cy*cp, cy*sp*sr - sy*cr, cy*sp*cr + sy*sr],
+        [sy*cp, sy*sp*sr + cy*cr, sy*sp*cr - cy*sr],
+        [-sp,   cp*sr,            cp*cr]
+    ])
+
+    # 2. Calculate the wrist center position P_wrist (origin of frame 4)
+    # P_wrist = P_tcp - R_target * [0, d4y_tcp, 0]^T (TCP offset is along Y of frame 4)
+    xw = px - R_target[0,1] * d4y_tcp
+    yw = py - R_target[1,1] * d4y_tcp
+    zw = pz - R_target[2,1] * d4y_tcp
+
+    # 3. Calculate q1 from R_target
+    # R_target = Rz(q1) * Ry(q_sum), so R_target[0,1]=-sin(q1), R_target[1,1]=cos(q1)
+    q1 = np.arctan2(-R_target[0,1], R_target[1,1])
+
+    # 4. Calculate q_sum = q2+q3+q4 from R_target
+    # R_target[2,0]=-sin(q_sum), R_target[2,2]=cos(q_sum)
+    q_sum = np.arctan2(-R_target[2,0], R_target[2,2])
+
+    # 5. Transform P_wrist to P_wrist_1 (coordinates in frame after q1 rotation)
+    c1, s1 = np.cos(q1), np.sin(q1)
+    P_1x =  c1*xw + s1*yw  # This is X_target for the 2R arm
+    # P_1y = -s1*xw + c1*yw # This should be d1y + d2y; assumed reachable
+    P_1z =  zw             # This is Z_target for the 2R arm
+
+    X_target = P_1x
+    Z_target = P_1z
+    
+    L1 = d2z
+    L2 = d3z
+
+    # 6. Calculate cos_q3_val for the 2R arm
+    val_num = X_target**2 + Z_target**2 - L1**2 - L2**2
+    val_den = 2 * L1 * L2
+    if val_den == 0: # Avoid division by zero if L1 or L2 is zero (not the case here)
+        # This case implies specific geometry, handle if necessary, though L1,L2 > 0
+        # For now, if this happens, it's likely an issue or unreachable
+        # Given problem constraints, this shouldn't be an issue.
+        # Default to a q3 that might be plausible or signal error.
+        # For safety, if val_den is zero, we can't proceed with this formula.
+        # However, d2z and d3z are non-zero.
+        pass
+
+    cos_q3_val = val_num / val_den
+    cos_q3_val = np.clip(cos_q3_val, -1.0, 1.0) # Ensure value is in [-1, 1]
+
+    # 7. Generate two candidates for q3
+    q3_A = np.arccos(cos_q3_val)
+    q3_B = -np.arccos(cos_q3_val)
+
+    # Helper function to normalize an angle to [-pi, pi]
+    def normalize_angle(angle):
+        return (angle + np.pi) % (2 * np.pi) - np.pi
+
+    # 8. Calculate full solutions for A and B
+    # Solution A
+    sin_q3_A, cos_q3_A = np.sin(q3_A), np.cos(q3_A)
+    q2_A = np.arctan2(X_target, Z_target) - np.arctan2(L2*sin_q3_A, L1 + L2*cos_q3_A)
+    q4_A = q_sum - q2_A - q3_A
+    q4_A_norm = normalize_angle(q4_A)
+
+    # Solution B
+    sin_q3_B, cos_q3_B = np.sin(q3_B), np.cos(q3_B)
+    q2_B = np.arctan2(X_target, Z_target) - np.arctan2(L2*sin_q3_B, L1 + L2*cos_q3_B)
+    q4_B = q_sum - q2_B - q3_B
+    q4_B_norm = normalize_angle(q4_B)
+
+    # 10. Choose the solution based on smallest |q4_norm|
+    chosen_q2, chosen_q3, chosen_q4 = q2_A, q3_A, q4_A
+    if abs(q4_B_norm) < abs(q4_A_norm):
+        chosen_q2, chosen_q3, chosen_q4 = q2_B, q3_B, q4_B
+    # If abs(q4_A_norm) == abs(q4_B_norm), we default to solution A (already set)
+
+    # 11. Normalize all chosen joint angles
+    final_q1 = normalize_angle(q1)
+    final_q2 = normalize_angle(chosen_q2)
+    final_q3 = normalize_angle(chosen_q3)
+    final_q4 = normalize_angle(chosen_q4)
+    
+    return (final_q1, final_q2, final_q3, final_q4)
+```

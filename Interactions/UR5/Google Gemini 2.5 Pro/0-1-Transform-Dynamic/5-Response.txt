@@ -1,0 +1,181 @@
+The previous solution was very close, with discrepancies at the level of floating-point precision. The feedback indicated that the "correct" joint values led to marginally better outcomes (e.g., orientation error of `1.54e-15` vs `1.80e-15`). The issue likely stemmed from the tolerance (`epsilon`) used in comparing these orientation errors and in the tie-breaking logic. If the tolerance was too large (e.g., `1e-4`), solutions with tiny differences in quality might be considered "equal," and the tie-breaker might not select the truly optimal one according to the reference solution.
+
+The refined approach involves:
+1.  **Stricter Tolerances for Comparisons**: Using a much smaller epsilon (e.g., `1e-10` or `1e-12`) when comparing orientation differences and during tie-breaking. This ensures that even minute improvements in the solution quality are recognized.
+2.  **Refined Selection Logic**:
+    *   If a new candidate solution is significantly better (its orientation error is smaller than the current best error by more than the small comparison epsilon), it becomes the new best.
+    *   If a new candidate's error is virtually identical (within the small comparison epsilon) to the current best error, then tie-breaking rules are applied:
+        *   Prefer the solution with a smaller absolute value of `theta2` (joint 2).
+        *   If `abs(theta2)` values are also virtually identical, further tie-break by preferring a smaller absolute value of `theta1` (joint 1).
+3.  **Precise Joint Limit Checks**: Ensuring joint candidates are strictly within the `[-2*pi, 2*pi]` limits, using a small epsilon for floating point comparisons against these boundaries.
+
+The core algorithm for generating `theta2` candidates from `pz` and then solving for `theta1` from `px, py, theta2` remains the same. The target orientation angles (`th1_orient_target`, `th2_orient_target`) derived from the input `r` (roll, pitch, yaw) also follow the same logic, correctly handling cases where target roll `rx` is `0` or `+/-pi`.
+
+By making the selection criteria more sensitive to small numerical differences, the algorithm should now be able to converge to the specific "correct" joint values provided in the feedback, assuming those values are indeed the ones that minimize the orientation error according to the defined metric, even if by a very small margin.
+
+```python
+import math
+
+def normalize_angle(angle: float) -> float:
+    """Normalize an angle to the range [-pi, pi]."""
+    # atan2(sin(x), cos(x)) is a robust way to normalize to [-pi, pi]
+    return math.atan2(math.sin(angle), math.cos(angle))
+
+def inverse_kinematics(p: tuple[float, float, float], r: tuple[float, float, float]) -> tuple[float, float]:
+    """
+    Gets the joint values needed to reach position "p" and orientation "r".
+    :param p: The position to reach in the form [x, y, z].
+    :param r: The orientation to reach in radians in the form [rx, ry, rz] (roll, pitch, yaw).
+    :return: A tuple of the joint values (joint1, joint2) for reaching position "p" and orientation "r".
+    """
+    px, py, pz = p
+    rx, ry, rz = r
+
+    # Robot geometric constants
+    L1y = 0.13585
+    L2y_tcp = -0.1197
+    L2z_tcp = 0.425
+    L_sum_y = L1y + L2y_tcp # 0.01615
+
+    # Tolerances
+    # Epsilon for checking if roll is 0 or pi, and for general float comparisons near zero
+    geom_epsilon = 1e-6 
+    # Epsilon for comparing solution quality (orientation differences) and tie-breaker values
+    comparison_epsilon = 1e-10 
+    # Epsilon for joint limit checks
+    limit_epsilon = 1e-9
+
+
+    # --- Step 1: Determine target orientation angles (th1_orient_target, th2_orient_target) from r ---
+    th1_orient_target: float
+    th2_orient_target: float
+
+    if abs(rx) < geom_epsilon: # Roll is close to 0
+        th1_orient_target = normalize_angle(rz)
+        th2_orient_target = normalize_angle(ry)
+    elif abs(rx - math.pi) < geom_epsilon or abs(rx + math.pi) < geom_epsilon: # Roll is close to pi or -pi
+        th1_orient_target = normalize_angle(rz + math.pi)
+        th2_orient_target = normalize_angle(math.atan2(math.sin(ry), -math.cos(ry))) # Equivalent to normalize_angle(pi - ry)
+    else:
+        # Fallback for unexpected roll values, though problem implies reachability (rx should be 0 or pi)
+        # Defaulting to roll = 0 interpretation.
+        th1_orient_target = normalize_angle(rz)
+        th2_orient_target = normalize_angle(ry)
+
+    # --- Step 2: Calculate cos(theta2) from pz ---
+    if abs(L2z_tcp) < geom_epsilon: 
+        # This case should ideally not happen for L2z_tcp = 0.425.
+        # If L2z_tcp is zero, pz must also be zero for a solution to exist.
+        # If pz is non-zero, there's no solution for theta2.
+        # Assuming reachability, if L2z_tcp was 0, pz would be 0.
+        # In such a gimbal-like situation, theta2 could be anything if pz=0.
+        # However, for this robot, L2z_tcp is not zero.
+        cos_th2 = 0.0 # Placeholder, actual handling would be more complex if L2z_tcp could be 0
+    else:
+        cos_th2 = pz / L2z_tcp
+    
+    cos_th2 = max(-1.0, min(1.0, cos_th2)) # Clamp to [-1, 1] due to potential float inaccuracies
+    
+    alpha_acos = math.acos(cos_th2) # Principal value in [0, pi]
+
+    # --- Step 3: Generate theta2 candidates ---
+    # These forms cover solutions based on acos and 2*pi periodicity.
+    th2_candidate_forms = [
+        alpha_acos,
+        -alpha_acos,
+        alpha_acos - 2 * math.pi,
+        -alpha_acos + 2 * math.pi,
+        alpha_acos + 2 * math.pi, # Adding more candidates to be safe
+        -alpha_acos - 2 * math.pi
+    ]
+    
+    # Filter by joint limits [-2*pi, 2*pi]
+    min_joint_limit = -2 * math.pi - limit_epsilon
+    max_joint_limit = 2 * math.pi + limit_epsilon
+    
+    th2_eval_candidates = []
+    for th2_val in th2_candidate_forms:
+        # Normalize first to handle values far outside [-2pi, 2pi] before limit check
+        # Although the forms are already somewhat controlled.
+        # normalized_th2_val = normalize_angle(th2_val) # Normalizing here might be too restrictive.
+        # The forms themselves should be checked against limits.
+        if min_joint_limit <= th2_val <= max_joint_limit:
+            th2_eval_candidates.append(th2_val)
+    
+    # Ensure uniqueness and sort. Sorting helps in deterministic behavior if multiple solutions are truly identical.
+    th2_eval_candidates = sorted(list(set(th2_eval_candidates)))
+
+    if not th2_eval_candidates: 
+        # This should not happen if a solution is reachable and alpha_acos is valid.
+        # As a fallback, ensure at least the principal values are considered if filtering was too aggressive.
+        if min_joint_limit <= alpha_acos <= max_joint_limit:
+             th2_eval_candidates.append(alpha_acos)
+        if alpha_acos != 0 and alpha_acos != math.pi: # Avoid duplicate for -0 or -pi
+            if min_joint_limit <= -alpha_acos <= max_joint_limit:
+                 th2_eval_candidates.append(-alpha_acos)
+        th2_eval_candidates = sorted(list(set(th2_eval_candidates))) # Re-sort and unique
+        if not th2_eval_candidates: # Absolute fallback
+            return (th1_orient_target, th2_orient_target) # Or some error state
+
+
+    # --- Step 4: Find the best (theta1, theta2) pair ---
+    best_solution_joints = None
+    min_orientation_diff = float('inf')
+
+    for th2_k_candidate in th2_eval_candidates:
+        s2k = math.sin(th2_k_candidate)
+        # c2k = math.cos(th2_k_candidate) # This is cos_th2 (or related) by construction of candidates
+
+        Ak = s2k * L2z_tcp
+        Bk = L_sum_y
+
+        # Solve for th1_k_candidate
+        # px = Ak * cos(th1) - Bk * sin(th1)
+        # py = Ak * sin(th1) + Bk * cos(th1)
+        # th1 = atan2(py, px) - atan2(Bk, Ak)
+        th1_k_candidate = normalize_angle(math.atan2(py, px) - math.atan2(Bk, Ak))
+
+        # Calculate orientation difference
+        diff_th1 = abs(normalize_angle(th1_k_candidate - th1_orient_target))
+        diff_th2 = abs(normalize_angle(th2_k_candidate - th2_orient_target))
+        current_orientation_diff = diff_th1 + diff_th2
+
+        if best_solution_joints is None:
+            min_orientation_diff = current_orientation_diff
+            best_solution_joints = (th1_k_candidate, th2_k_candidate)
+        else:
+            if current_orientation_diff < min_orientation_diff - comparison_epsilon:
+                # Current solution is significantly better
+                min_orientation_diff = current_orientation_diff
+                best_solution_joints = (th1_k_candidate, th2_k_candidate)
+            elif abs(current_orientation_diff - min_orientation_diff) < comparison_epsilon:
+                # Errors are virtually identical, apply tie-breakers
+                current_abs_th2 = abs(th2_k_candidate)
+                best_abs_th2 = abs(best_solution_joints[1])
+
+                if current_abs_th2 < best_abs_th2 - comparison_epsilon:
+                    # Current abs(th2) is significantly smaller
+                    min_orientation_diff = current_orientation_diff 
+                    best_solution_joints = (th1_k_candidate, th2_k_candidate)
+                elif abs(current_abs_th2 - best_abs_th2) < comparison_epsilon:
+                    # abs(th2) are also virtually identical, try tie-breaking on abs(th1)
+                    current_abs_th1 = abs(th1_k_candidate)
+                    best_abs_th1 = abs(best_solution_joints[0])
+                    if current_abs_th1 < best_abs_th1 - comparison_epsilon: 
+                        min_orientation_diff = current_orientation_diff
+                        best_solution_joints = (th1_k_candidate, th2_k_candidate)
+    
+    if best_solution_joints is None:
+        # This fallback should ideally not be reached if a solution always exists and candidates are generated.
+        # If it is, it implies no valid th2_eval_candidates were found or an issue in logic.
+        # Return a guess based on orientation targets, though position might be off.
+        # Or, use the first raw acos solution for theta2 and derive theta1.
+        th2_fb = alpha_acos
+        s2_fb = math.sin(th2_fb)
+        A_fb = s2_fb * L2z_tcp
+        B_fb = L_sum_y
+        th1_fb = normalize_angle(math.atan2(py, px) - math.atan2(B_fb, A_fb))
+        return (th1_fb, th2_fb)
+
+    return best_solution_joints
+```

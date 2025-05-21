@@ -1,0 +1,174 @@
+The core of the inverse kinematics solution involves several steps:
+
+1.  **Target Transformation**:
+    *   The input target orientation `r = (roll, pitch, yaw)` is converted into a 3x3 rotation matrix, `R_target`. The convention used is ZYX Euler angles: `R_target = Rz(yaw) * Ry(pitch) * Rx(roll)`.
+    *   The wrist center position, `P_wc = (pwx, pwy, pwz)`, which is the origin of Link 4, is calculated. This is done by subtracting the TCP's offset from the target position `p`. The TCP is offset by `TCP_offset_y` along Link 4's Y-axis (which has the orientation `R_target`).
+        `P_wc = p - R_target * [0, TCP_offset_y, 0]^T`.
+
+2.  **Solving for q1 and q_sum_angles**:
+    *   The robot's kinematic structure implies that the orientation of Link 4 relative to the base is `R_L4_base = Rz(q1) * Ry(q2 + q3 + q4)`. Since `R_target` is this orientation, we have `R_target = Rz(q1) * Ry(q_sum_angles)`, where `q_sum_angles = q2 + q3 + q4`.
+    *   By comparing elements of `R_target` to the general form of `Rz(angle1) * Ry(angle2)`, we can solve for `q1` and `q_sum_angles`.
+        If `Rz(q1)Ry(q_s) = [[c1*cs, -s1, c1*ss], [s1*cs, c1, s1*ss], [-ss, 0, cs]]` (this form implies `r32` of `R_target` must be 0, which is assumed for reachability):
+        *   `q1 = atan2(-r12, r22)` (derived from `r12 = -sin(q1)` and `r22 = cos(q1)`).
+        *   `q_sum_angles = atan2(-r31, r33)` (derived from `r31 = -sin(q_sum_angles)` and `r33 = cos(q_sum_angles)`).
+
+3.  **Planar Inverse Kinematics for q2 and q3**:
+    *   The wrist center `P_wc` is transformed into Frame 1 (the coordinate frame after the `q1` rotation, with its origin at the base): `P_wc_F1 = Rz(-q1) * P_wc`.
+    *   The components of `P_wc_F1` relevant for the 2D planar arm kinematics (formed by links `l2z` and `l3z`, rotating in a plane due to `q2` and `q3`) are `vx_planar = P_wc_F1.x` and `vz_planar = P_wc_F1.z`. These are effectively the coordinates of `P_wc` in the XZ-plane of Joint 2's frame.
+    *   Using the law of cosines for the planar triangle with sides `l2z`, `l3z`, and hypotenuse `sqrt(vx_planar^2 + vz_planar^2)`:
+        `cos_q3_val = (vx_planar^2 + vz_planar^2 - l2z^2 - l3z^2) / (2 * l2z * l3z)`.
+    *   This `cos_q3_val` is clamped to the range `[-1, 1]` to handle potential floating-point inaccuracies.
+    *   This gives two solutions for `q3`:
+        *   `q3_A = acos(cos_q3_clamped)` (this solution will be in `[0, pi]`)
+        *   `q3_B = -acos(cos_q3_clamped)` (this solution will be in `[-pi, 0]`)
+
+4.  **Solving for q2 (for each q3 solution)**:
+    *   For each `q3` solution (`q3_choice`, using `cos_q3_clamped`):
+        Let `X_arm = l3z * sin(q3_choice)` and `Z_arm = l2z + l3z * cos_q3_clamped`. These are coordinates of the wrist center relative to Joint 2's origin, in a frame aligned with Joint 2 *before* the `q2` rotation.
+    *   The transformation by `q2` (a Y-axis rotation) gives:
+        `vx_planar = cos(q2)*X_arm + sin(q2)*Z_arm`
+        `vz_planar = -sin(q2)*X_arm + cos(q2)*Z_arm`
+    *   Solving this system for `sin(q2)` and `cos(q2)`:
+        `sin_q2 = (vx_planar*Z_arm - vz_planar*X_arm) / (X_arm^2 + Z_arm^2)`
+        `cos_q2 = (vx_planar*X_arm + vz_planar*Z_arm) / (X_arm^2 + Z_arm^2)`
+        (The denominator `X_arm^2 + Z_arm^2` is also equal to `vx_planar^2 + vz_planar^2`).
+    *   `q2 = atan2(sin_q2, cos_q2)`.
+
+5.  **Solving for q4 (for each set of q2, q3)**:
+    *   `q4 = q_sum_angles - q2 - q3`.
+
+6.  **Solution Selection**:
+    *   Two distinct sets of joint angles `(q1, q2, q3, q4)` are generated (one from `q3_A`, one from `q3_B`).
+    *   A common heuristic to choose between these solutions is to select the one for which the absolute value of `q4` (normalized to `[-pi, pi]`) is minimized. This often corresponds to a "smoother" or "more direct" wrist motion.
+    *   In case of a tie (or near-equality within a small epsilon), the solution derived from `q3_A` (where `q3_A >= 0`) is preferred.
+
+This procedure provides a complete, closed-form analytical solution for the inverse kinematics.
+
+```python
+import math
+
+def inverse_kinematics(p: tuple[float, float, float], r: tuple[float, float, float]) -> tuple[float, float, float, float]:
+    px, py, pz = p
+    rx_in, ry_in, rz_in = r # roll, pitch, yaw (ZYX Euler)
+
+    # Link parameters
+    l2z = 0.425    # Effective length of link 2 in the Z direction of J2's frame
+    l3z = 0.39225  # Effective length of link 3 in the Z direction of J3's frame
+    TCP_offset_y = 0.093 # Offset from J4 frame (wrist center) to TCP along J4's Y-axis
+
+    # 1. Calculate R_target from r_angles (Rz(yaw)Ry(pitch)Rx(roll))
+    crx = math.cos(rx_in)
+    srx = math.sin(rx_in)
+    cry = math.cos(ry_in)
+    sry = math.sin(ry_in)
+    crz = math.cos(rz_in)
+    srz = math.sin(rz_in)
+
+    r11 = crz * cry
+    r12 = crz * sry * srx - srz * crx
+    # r13 = crz * sry * crx + srz * srx # Not strictly needed for q1, q_sum
+    # r21 = srz * cry # Not needed for q1
+    r22 = srz * sry * srx + crz * crx
+    # r23 = srz * sry * crx - crz * srx # Not strictly needed
+    r31 = -sry
+    r32 = cry * srx 
+    r33 = cry * crx
+    
+    # 2. Calculate Wrist Center P_wc (origin of Link 4 frame)
+    pwx = px - r12 * TCP_offset_y
+    pwy = py - r22 * TCP_offset_y
+    pwz = pz - r32 * TCP_offset_y
+
+    # 3. Solve for q1 and q_sum_angles = q2+q3+q4
+    # R_target = Rz(q1)Ry(q_sum_angles) implies r32 = 0.
+    # r12 = -sin(q1), r22 = cos(q1) (assuming q_sum_angles is not gimbal lock for this)
+    q1 = math.atan2(-r12, r22)
+    
+    # r31 = -sin(q_sum_angles), r33 = cos(q_sum_angles)
+    q_sum_angles = math.atan2(-r31, r33)
+
+    # 4. Transform P_wc to Frame 1 (after q1 rotation) and define planar coords for J2, J3
+    c1 = math.cos(q1)
+    s1 = math.sin(q1)
+    
+    # P_wc components in Frame 1 (origin at base, Z-axis aligned with base Z, X-axis rotated by q1)
+    pwx_F1 = c1 * pwx + s1 * pwy
+    # pwy_F1 = -s1 * pwx + c1 * pwy # This component should satisfy Y-height constraints with L0y, l2y
+    pwz_F1 = pwz
+
+    # vx_planar and vz_planar are coordinates of P_wc relative to J2's origin, in J2's XZ plane.
+    # J2's origin is at (0, L0y, 0) in Frame 1. The planar IK is for displacement from J2's origin.
+    vx_planar = pwx_F1 
+    vz_planar = pwz_F1 
+
+    # 5. Solve for cos(q3)
+    cos_q3_num = vx_planar**2 + vz_planar**2 - l2z**2 - l3z**2
+    cos_q3_den = 2 * l2z * l3z
+    
+    if abs(cos_q3_den) < 1e-12: 
+        cos_q3_clamped = 2.0 # Force out of range if denominator is zero (e.g. l2z or l3z is zero)
+    else:
+        cos_q3_clamped = cos_q3_num / cos_q3_den
+
+    # Clamp cos_q3_clamped to [-1, 1]
+    if cos_q3_clamped > 1.0: cos_q3_clamped = 1.0
+    elif cos_q3_clamped < -1.0: cos_q3_clamped = -1.0
+    
+    q3_A = math.acos(cos_q3_clamped)  # q3_A is in [0, pi]
+    q3_B = -math.acos(cos_q3_clamped) # q3_B is in [-pi, 0]
+
+    solutions_data = []
+
+    for q3_choice in [q3_A, q3_B]:
+        s3 = math.sin(q3_choice)
+        # c3 is cos_q3_clamped, as cos(q3_A) = cos(q3_B) = cos_q3_clamped
+        c3 = cos_q3_clamped 
+
+        # Coordinates of wrist relative to J2 origin, in J2's frame *before* q2 rotation
+        X_arm = l3z * s3
+        Z_arm = l2z + l3z * c3
+        
+        # Denominator for q2 calculation: X_arm^2 + Z_arm^2, which is also vx_planar^2 + vz_planar^2
+        den_q2_calc = vx_planar**2 + vz_planar**2
+
+        if abs(den_q2_calc) < 1e-12: # If P_wc is (nearly) on J2's rotation axis
+            # This implies X_arm and Z_arm must also be (nearly) zero.
+            # q2 is indeterminate in this singularity; choose 0 by convention.
+            s2_val = 0.0 
+            c2_val = 1.0 
+        else:
+            # vx_planar = c2*X_arm + s2*Z_arm
+            # vz_planar = -s2*X_arm + c2*Z_arm
+            s2_val = (vx_planar * Z_arm - vz_planar * X_arm) / den_q2_calc
+            c2_val = (vx_planar * X_arm + vz_planar * Z_arm) / den_q2_calc
+        
+        q2_choice = math.atan2(s2_val, c2_val)
+        q4_choice = q_sum_angles - q2_choice - q3_choice
+        
+        solutions_data.append({'q1': q1, 'q2': q2_choice, 'q3': q3_choice, 'q4': q4_choice, 'is_A': (q3_choice == q3_A)})
+
+    # 6. Select best solution based on minimizing |normalized(q4)|
+    best_solution_idx = -1
+    min_abs_norm_q4 = float('inf')
+
+    for idx, sol_data in enumerate(solutions_data):
+        q4_norm = math.atan2(math.sin(sol_data['q4']), math.cos(sol_data['q4']))
+        current_abs_norm_q4 = abs(q4_norm)
+        
+        if current_abs_norm_q4 < min_abs_norm_q4:
+            min_abs_norm_q4 = current_abs_norm_q4
+            best_solution_idx = idx
+        elif abs(current_abs_norm_q4 - min_abs_norm_q4) < 1e-9: # Tie-breaking
+            # If q4 values are same, prefer solution A (q3 >= 0)
+            if solutions_data[idx]['is_A']:
+                best_solution_idx = idx
+            # If current best is B and this is A with same q4, switch to A.
+            # If current best is A and this is B with same q4, keep A.
+            # This logic ensures if both A and B have same min_abs_norm_q4, A is chosen if A is one of them.
+            # If only one solution exists (q3_A=q3_B=0), is_A will be true for the first, false for second if distinct objects.
+            # The loop structure ensures if q3_A and q3_B are identical (e.g. q3=0), sol_A is picked.
+
+    final_sol = solutions_data[best_solution_idx]
+    return (final_sol['q1'], final_sol['q2'], final_sol['q3'], final_sol['q4'])
+
+```

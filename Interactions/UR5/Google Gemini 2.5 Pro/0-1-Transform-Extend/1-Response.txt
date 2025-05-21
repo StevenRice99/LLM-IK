@@ -1,0 +1,105 @@
+To derive the closed-form analytical solution for the inverse kinematics of the 2-DOF serial manipulator, we will primarily use the target position `p = (px, py, pz)` of the TCP. The problem states that we should assume all targets are reachable, which implies that the given orientation `r` will be consistent with the position `p` for the calculated joint angles. This approach is also hinted at by the "EXISTING" solution, which solves a sub-chain based on position.
+
+Let `theta1` be the angle for Revolute Joint 1 (rotation about Z-axis) and `theta2` be the angle for Revolute Joint 2 (rotation about its local Y-axis).
+
+The link parameters are:
+*   Link 1 to Link 2: Translation `[0, L1_y, 0]` where `L1_y = 0.13585`.
+*   Link 2 to TCP: Translation `[0, L2_y_tcp, L2_z_tcp]` where `L2_y_tcp = -0.1197` and `L2_z_tcp = 0.425`.
+
+The forward kinematics equations for the TCP position `(px, py, pz)` are:
+1.  `px = -sin(theta1)*(L1_y + L2_y_tcp) + cos(theta1)*sin(theta2)*L2_z_tcp`
+2.  `py =  cos(theta1)*(L1_y + L2_y_tcp) + sin(theta1)*sin(theta2)*L2_z_tcp`
+3.  `pz =  cos(theta2)*L2_z_tcp`
+
+We can solve for `theta2` using equation (3):
+`cos(theta2) = pz / L2_z_tcp`
+Since `L2_z_tcp = 0.425` is non-zero, and assuming the target is reachable, `abs(pz / L2_z_tcp) <= 1`.
+`theta2 = acos(pz / L2_z_tcp)`
+This will yield `theta2` in the range `[0, pi]`. Consequently, `sin(theta2)` will be non-negative.
+
+Now, substitute `sin(theta2)` and `cos(theta2)` into equations (1) and (2).
+Let:
+*   `A = L1_y + L2_y_tcp`
+*   `B = sin(theta2) * L2_z_tcp`
+
+Equations (1) and (2) become:
+1.  `px = -A*sin(theta1) + B*cos(theta1)`
+2.  `py =  A*cos(theta1) + B*sin(theta1)`
+
+This system can be rewritten as:
+1.  `px = B*cos(theta1) - A*sin(theta1)`
+2.  `py = B*sin(theta1) + A*cos(theta1)`
+
+This is a standard form that can be solved for `theta1` using `atan2`.
+If we consider `(px, py)` as a point in a 2D plane, these equations relate `(px, py)` to `(B, A)` through a rotation `theta1`.
+The solution for `theta1` is:
+`theta1 = atan2(py, px) - atan2(A, B)`
+
+The value `A = L1_y + L2_y_tcp = 0.13585 - 0.1197 = 0.01615`. Since `A` is non-zero, `atan2(A, B)` is well-defined.
+Also, `px^2 + py^2 = A^2 + B^2`. Since `A` is non-zero, `px` and `py` cannot both be zero simultaneously, so `atan2(py, px)` is also well-defined.
+
+The resulting `theta1` will be in the range `(-2pi, 2pi)`, and `theta2` in `[0, pi]`, both within the specified joint limits of `[-2pi, 2pi]`.
+
+```python
+import math
+
+# Constants from the problem description
+L1_Y_OFFSET = 0.13585  # Position of Revolute 2 origin relative to Revolute 1 origin: [0, 0.13585, 0] in Link 1 frame
+TCP_Y_OFFSET_IN_L2 = -0.1197  # TCP position relative to Revolute 2 origin: [0, -0.1197, 0.425] in Link 2 frame
+TCP_Z_OFFSET_IN_L2 = 0.425    # TCP Z position relative to Revolute 2 origin
+
+def inverse_kinematics(p: tuple[float, float, float], r: tuple[float, float, float]) -> tuple[float, float]:
+    """
+    Gets the joint values needed to reach position "p" and orientation "r".
+    It is assumed that the provided (p, r) is reachable and consistent.
+    The solution is derived primarily from the position 'p'. The orientation 'r' is
+    assumed to be consistent with 'p' for the calculated joint angles due to the
+    "reachable" constraint provided in the problem description.
+
+    :param p: The target position [x, y, z] of the TCP.
+    :param r: The target orientation [roll, pitch, yaw] in radians of the TCP.
+              This input is not directly used in this specific solution method under
+              the assumption of consistency with 'p'.
+    :return: A tuple (joint1_angle, joint2_angle) in radians.
+    """
+    px, py, pz = p
+
+    # Solve for joint 2 (theta2)
+    # From forward kinematics: pz = cos(theta2) * TCP_Z_OFFSET_IN_L2
+    # (Assuming TCP_Z_OFFSET_IN_L2 is not zero, which is 0.425 here)
+    cos_theta2 = pz / TCP_Z_OFFSET_IN_L2
+    
+    # "Assume all targets given as inputs to the method will be reachable"
+    # implies abs(cos_theta2) <= 1.0, so direct use in math.acos is safe.
+    theta2 = math.acos(cos_theta2)  # theta2 will be in [0, pi]
+
+    # Calculate sin(theta2) for the next step.
+    # Since theta2 is in [0, pi], sin(theta2) will be non-negative.
+    sin_theta2 = math.sin(theta2)
+
+    # Solve for joint 1 (theta1)
+    # Let A_param = L1_Y_OFFSET + TCP_Y_OFFSET_IN_L2
+    # Let B_param = sin(theta2) * TCP_Z_OFFSET_IN_L2
+    # The forward kinematics equations for px and py are:
+    # px = -A_param*sin(theta1) + B_param*cos(theta1)
+    # py =  A_param*cos(theta1) + B_param*sin(theta1)
+    # This can be solved for theta1 using atan2:
+    # theta1 = atan2(py, px) - atan2(A_param, B_param)
+    
+    A_param = L1_Y_OFFSET + TCP_Y_OFFSET_IN_L2
+    B_param = sin_theta2 * TCP_Z_OFFSET_IN_L2
+    
+    # A_param = 0.13585 - 0.1197 = 0.01615, which is non-zero.
+    # This ensures that atan2(A_param, B_param) is well-defined.
+    # Also, px and py cannot both be zero if A_param is non-zero (since px^2+py^2 = A_param^2+B_param^2),
+    # so atan2(py, px) is also well-defined.
+    
+    theta1 = math.atan2(py, px) - math.atan2(A_param, B_param)
+
+    # theta2 is in [0, pi].
+    # theta1 is the difference of two atan2 results, so it's in (-2*pi, 2*pi).
+    # Both are within the specified joint limits [-2*pi, 2*pi].
+
+    return (theta1, theta2)
+
+```

@@ -1,0 +1,124 @@
+The primary issue in previous attempts seems to be related to the consistent normalization of angles, especially the roll component (`rx`) around the `pi`/`-pi` boundary, and ensuring that the comparison between the calculated orientation and the target orientation uses this consistent normalization.
+
+The refined strategy is:
+1.  **Constants**:
+    *   `L1y = 0.13585`
+    *   `L2y = -0.1197`
+    *   `L2z = 0.425`
+    *   `L_sum_y = L1y + L2y = 0.01615`
+    *   `tol_angle = 1e-5` (tolerance for angle comparisons)
+
+2.  **Angle Normalization Function**:
+    A robust `angle_normalize(angle)` function that maps angles to the range `[-pi, pi)`. `(angle + math.pi) % (2.0 * math.pi) - math.pi` achieves this. This means `pi` will be normalized to `-pi`.
+
+3.  **Solve for `theta2` Candidates**:
+    From `pz = L2z * cos(theta2)`, calculate `cos_theta2_val = pz / L2z` (clamped to `[-1, 1]`).
+    The two primary `theta2` solutions are `th2_A = acos(cos_theta2_val)` and `th2_B = -acos(cos_theta2_val)`. These will be the candidates tested.
+
+4.  **Solve for `theta1` Candidate for each `theta2`**:
+    For each `th2_cand`, calculate `theta1_base = atan2(py, px) - atan2(L_sum_y, L2z * sin(th2_cand))`.
+    The `theta1` candidate will be `th1_cand = angle_normalize(theta1_base)`.
+
+5.  **Calculate RPY from Joints (`calculate_rpy_from_joints`)**:
+    Given `j1` (theta1) and `j2` (theta2):
+    *   `j2_norm_for_branch = angle_normalize(j2)` (normalized to `[-pi, pi)`)
+    *   `calc_pitch = math.asin(math.sin(j2))` (this is inherently in `[-pi/2, pi/2]`)
+    *   If `abs(j2_norm_for_branch) <= (math.pi / 2.0 + tol_angle)` (i.e., `cos(j2)` is non-negative):
+        *   `calc_roll_raw = 0.0`
+        *   `calc_yaw_intermediate = j1`
+    *   Else (`cos(j2)` is negative):
+        *   `calc_roll_raw = math.pi`
+        *   `calc_yaw_intermediate = j1 + math.pi`
+    *   `final_roll = angle_normalize(calc_roll_raw)` (e.g., `math.pi` becomes `-math.pi`)
+    *   `final_yaw = angle_normalize(calc_yaw_intermediate)`
+    *   Return `(final_roll, calc_pitch, final_yaw)`.
+
+6.  **Normalize Target Orientation and Compare**:
+    *   `rx_T_norm = angle_normalize(rx_T)`
+    *   `ry_T_comp = math.asin(math.sin(ry_T))` (to ensure target pitch is also in `[-pi/2, pi/2]` for fair comparison with `calc_pitch`)
+    *   `rz_T_norm = angle_normalize(rz_T)`
+    *   For each `(th1_cand, th2_cand)` pair:
+        *   Calculate `(calc_r, calc_p, calc_y)` using `calculate_rpy_from_joints`.
+        *   `roll_match = abs(calc_r - rx_T_norm) < tol_angle`
+        *   `pitch_match = abs(calc_p - ry_T_comp) < tol_angle`
+        *   `yaw_match = abs(calc_y - rz_T_norm) < tol_angle`
+        *   If all three match, this pair is the solution. The problem guarantees a solution exists, and the feedback implies solutions are typically in the `[-pi, pi]` range for joints.
+
+This approach ensures that all angles involved in the comparison are normalized consistently, which should handle the `pi`/`-pi` ambiguities correctly.
+
+```python
+import math
+
+def inverse_kinematics(p: tuple[float, float, float], r: tuple[float, float, float]) -> tuple[float, float]:
+    px, py, pz = p
+    rx_T_raw, ry_T_raw, rz_T_raw = r
+
+    L1y = 0.13585
+    L2y = -0.1197
+    L2z = 0.425
+    L_sum_y = L1y + L2y
+
+    tol_angle = 1e-5 # Tolerance for angle comparisons
+
+    def angle_normalize_std(angle: float) -> float:
+        """Normalize angle to the range [-pi, pi). Note: pi maps to -pi."""
+        return (angle + math.pi) % (2.0 * math.pi) - math.pi
+
+    def calculate_rpy_from_joints(j1: float, j2: float) -> tuple[float, float, float]:
+        j2_norm_for_branch = angle_normalize_std(j2)
+
+        # Pitch is always in [-pi/2, pi/2] from asin(sin(j2))
+        calc_pitch = math.asin(math.sin(j2)) 
+                                        
+        calc_roll_raw: float
+        calc_yaw_intermediate: float
+
+        # Check if cos(j2_norm_for_branch) is non-negative
+        # abs(j2_norm_for_branch) will be in [0, pi).
+        # If j2_norm_for_branch is in [-pi/2, pi/2), then cos is non-negative.
+        if abs(j2_norm_for_branch) <= (math.pi / 2.0 + tol_angle): 
+            calc_roll_raw = 0.0
+            calc_yaw_intermediate = j1
+        else: # cos(j2_norm_for_branch) is negative
+            calc_roll_raw = math.pi 
+            calc_yaw_intermediate = j1 + math.pi
+        
+        final_roll = angle_normalize_std(calc_roll_raw)
+        final_yaw = angle_normalize_std(calc_yaw_intermediate)
+        
+        return final_roll, calc_pitch, final_yaw
+
+    cos_theta2_val = pz / L2z
+    if cos_theta2_val > 1.0: cos_theta2_val = 1.0
+    elif cos_theta2_val < -1.0: cos_theta2_val = -1.0
+    
+    theta2_options = []
+    th2_sol_acos = math.acos(cos_theta2_val) # in [0, pi]
+    theta2_options.append(th2_sol_acos)
+    if abs(th2_sol_acos) > tol_angle and abs(th2_sol_acos - math.pi) > tol_angle:
+         theta2_options.append(-th2_sol_acos) # Add the negative solution if distinct and not 0 or pi
+
+    rx_T_norm = angle_normalize_std(rx_T_raw)
+    ry_T_comp = math.asin(math.sin(ry_T_raw)) # Ensure target pitch is in [-pi/2, pi/2] for comparison
+    rz_T_norm = angle_normalize_std(rz_T_raw)
+
+    for th2_cand in theta2_options:
+        sin_th2_cand = math.sin(th2_cand)
+        
+        val_A_for_atan = L2z * sin_th2_cand
+        val_B_for_atan = L_sum_y
+        
+        theta1_base = math.atan2(py, px) - math.atan2(val_B_for_atan, val_A_for_atan)
+        th1_cand = angle_normalize_std(theta1_base)
+
+        calc_r, calc_p, calc_y = calculate_rpy_from_joints(th1_cand, th2_cand)
+        
+        roll_match = abs(calc_r - rx_T_norm) < tol_angle
+        pitch_match = abs(calc_p - ry_T_comp) < tol_angle
+        yaw_match = abs(calc_y - rz_T_norm) < tol_angle
+        
+        if roll_match and pitch_match and yaw_match:
+            return (th1_cand, th2_cand)
+            
+    return (0.0, 0.0) # Fallback, should be reached by logic above
+```

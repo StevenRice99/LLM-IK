@@ -1,0 +1,166 @@
+The problem requires a closed-form analytical solution for the inverse kinematics of a 2-DOF serial manipulator. The solution should provide joint angles `(theta1, theta2)` that allow the robot's TCP to reach a target position `p = (px, py, pz)` and orientation `r = (roll, pitch, yaw)`.
+
+**Robot Kinematic Parameters:**
+From the "DETAILS" section:
+*   `L1_y = 0.13585`: Y-offset from Revolute Joint 1 to Revolute Joint 2.
+*   `L2_y_tcp = -0.1197`: TCP's Y-offset in Link 2's frame (frame of Revolute Joint 2).
+*   `L2_z_tcp = 0.425`: TCP's Z-offset in Link 2's frame.
+
+Let's define two key constants for our IK derivation:
+*   `S = L2_z_tcp = 0.425`
+*   `A = L1_y + L2_y_tcp = 0.13585 - 0.1197 = 0.01615`
+
+**Forward Kinematics Equations:**
+Based on standard sequential transformations (`RotZ(theta1)` followed by translation `[0, A, 0]` in the new XY plane, then `RotY(theta2)` affecting the `S` length):
+The position of the TCP `(px, py, pz)` is given by:
+1.  `px = S * sin(theta2) * cos(theta1) - A * sin(theta1)`
+2.  `py = S * sin(theta2) * sin(theta1) + A * cos(theta1)`
+3.  `pz = S * cos(theta2)`
+
+The orientation of the TCP `R_tcp` in the base frame is `RotZ(theta1) * RotY(theta2)`:
+`R_tcp = [[cos(theta1)*cos(theta2), -sin(theta1), cos(theta1)*sin(theta2)],`
+         `[sin(theta1)*cos(theta2),  cos(theta1), sin(theta1)*sin(theta2)],`
+         `[-sin(theta2),             0,           cos(theta2)        ]]`
+
+**Inverse Kinematics Solution Strategy:**
+
+1.  **Solve for `theta2` using `pz`:**
+    From `pz = S * cos(theta2)`, we get `cos(theta2) = pz / S`.
+    This yields two potential solutions for `theta2` (assuming `abs(pz/S) <= 1`, which is guaranteed by the problem statement "all targets ... will be reachable"):
+    *   `theta2_cand1 = acos(pz / S)`
+    *   `theta2_cand2 = -acos(pz / S)`
+
+2.  **Determine target `theta2` from orientation `r`:**
+    The input orientation `r = (roll, pitch, yaw)` corresponds to `R_tcp`. Assuming ZYX Euler angle convention (`R_target = Rz(yaw)Ry(pitch)Rx(roll)`), the elements `R_target(2,0) = -sin(pitch)` and `R_target(2,2) = cos(pitch)*cos(roll)`.
+    Comparing these with `R_tcp(2,0) = -sin(theta2)` and `R_tcp(2,2) = cos(theta2)`, we can find the `theta2` implied by the target orientation:
+    `theta2_from_orientation = atan2(sin(pitch), cos(pitch)*cos(roll))`
+    (Note: `sin(theta2) = sin(pitch)` and `cos(theta2) = cos(pitch)*cos(roll)` must hold for the orientation to be reachable).
+
+3.  **Disambiguate `theta2`:**
+    Choose between `theta2_cand1` and `theta2_cand2` based on which one is angularly closer to `theta2_from_orientation`. The problem implies reachability, so one of these candidates derived from `pz` should match the `theta2` required for the orientation.
+    We calculate the shortest angle between `theta2_cand_i` and `theta2_from_orientation`.
+    Let `chosen_theta2` be the candidate that is closer.
+
+4.  **Solve for `theta1`:**
+    Once `chosen_theta2` is determined, we use the `px` and `py` equations.
+    Let `k1 = S * sin(chosen_theta2)` and `k2 = A`.
+    `px = k1*cos(theta1) - k2*sin(theta1)`
+    `py = k1*sin(theta1) + k2*cos(theta1)`
+    This system can be solved for `theta1` using `atan2`:
+    `theta1 = atan2(py, px) - atan2(k2, k1)`
+    So, `final_theta1 = atan2(py, px) - atan2(A, S * sin(chosen_theta2))`
+
+This approach ensures that the `pz` component of the position is met and uses the orientation `r` to select the appropriate `theta2` solution, which then determines `theta1`.
+
+```python
+import math
+
+# Constants from the problem description
+L1_Y_OFFSET = 0.13585
+TCP_Y_OFFSET_IN_L2 = -0.1197
+TCP_Z_OFFSET_IN_L2 = 0.425
+
+# Derived constants for IK
+S_PARAM = TCP_Z_OFFSET_IN_L2  # Effective length for pz calculation
+A_PARAM = L1_Y_OFFSET + TCP_Y_OFFSET_IN_L2 # Effective Y offset in J1's frame
+
+def inverse_kinematics(p: tuple[float, float, float], r: tuple[float, float, float]) -> tuple[float, float]:
+    """
+    Gets the joint values needed to reach position "p" and orientation "r".
+    :param p: The position to reach in the form [px, py, pz].
+    :param r: The orientation to reach in radians in the form [roll, pitch, yaw].
+    :return: A tuple (joint1_angle, joint2_angle) in radians.
+    """
+    px, py, pz = p
+    r_roll, r_pitch, r_yaw = r
+
+    # Step 1: Calculate cos(theta2) from pz
+    # pz = S_PARAM * cos(theta2)
+    cos_theta2_val = pz / S_PARAM
+    
+    # Clamp cos_theta2_val to [-1, 1] to avoid domain errors with math.acos
+    # due to potential floating point inaccuracies.
+    # Problem states target is reachable, so it should be within this range.
+    if cos_theta2_val > 1.0:
+        cos_theta2_val = 1.0
+    elif cos_theta2_val < -1.0:
+        cos_theta2_val = -1.0
+        
+    # Step 2: Two potential theta2 candidates from pz
+    theta2_candidate_1 = math.acos(cos_theta2_val)  # Typically in [0, pi]
+    theta2_candidate_2 = -math.acos(cos_theta2_val) # Typically in [-pi, 0]
+
+    # Step 3: Determine target theta2 from the orientation r
+    # R_tcp(2,0) = -sin(theta2_orientation) = -sin(r_pitch) (if roll=0) or sin(r_pitch) (if roll=pi, from -sin(pi-r_pitch))
+    # R_tcp(2,2) =  cos(theta2_orientation) =  cos(r_pitch) (if roll=0) or -cos(r_pitch) (if roll=pi, from cos(pi-r_pitch))
+    # More generally, theta2_orientation = atan2(-R_tcp(2,0), R_tcp(2,2))
+    # R_tcp(2,0) from ZYX Euler r = [roll,pitch,yaw] is -sin(pitch)
+    # R_tcp(2,2) from ZYX Euler r = [roll,pitch,yaw] is cos(pitch)*cos(roll)
+    # So, theta2_from_orientation = atan2(sin(r_pitch), cos(r_pitch)*cos(r_roll))
+    
+    # Numerator for atan2 is sin(theta2_orientation)
+    # Denominator for atan2 is cos(theta2_orientation)
+    # sin_theta2_orient = math.sin(r_pitch) # This is -R_tcp(2,0)
+    # cos_theta2_orient = math.cos(r_pitch) * math.cos(r_roll) # This is R_tcp(2,2)
+    # theta2_from_orientation = math.atan2(sin_theta2_orient, cos_theta2_orient)
+    
+    # Corrected derivation for theta2_from_orientation based on R_tcp's last row [-s2, 0, c2]
+    # R_target(2,0) = -sin(r_pitch)
+    # R_target(2,2) = cos(r_pitch)*cos(r_roll)
+    # We need -sin(theta2) = -sin(r_pitch)  => sin(theta2) = sin(r_pitch)
+    # We need  cos(theta2) = cos(r_pitch)*cos(r_roll)
+    # So, theta2_from_orientation = math.atan2(sin(r_pitch), cos(r_pitch)*cos(r_roll))
+    theta2_from_orientation = math.atan2(math.sin(r_pitch), math.cos(r_pitch) * math.cos(r_roll))
+
+    # Step 4: Disambiguate theta2 by choosing the candidate closer to theta2_from_orientation
+    # Helper to find shortest angle difference
+    def shortest_angle_diff(a1, a2):
+        diff = (a2 - a1 + math.pi) % (2 * math.pi) - math.pi
+        return diff
+
+    diff1 = abs(shortest_angle_diff(theta2_candidate_1, theta2_from_orientation))
+    diff2 = abs(shortest_angle_diff(theta2_candidate_2, theta2_from_orientation))
+
+    chosen_theta2: float
+    # Add a small tolerance for floating point comparisons
+    # If diff1 is significantly smaller than diff2, pick candidate 1.
+    # Otherwise, if diff2 is smaller, pick candidate 2.
+    # If they are very close, the choice might not matter if both are valid,
+    # but for determinism, we can pick candidate 1 by default in case of near equality.
+    epsilon = 1e-9 # A small tolerance
+    if diff1 < diff2 - epsilon:
+        chosen_theta2 = theta2_candidate_1
+    elif diff2 < diff1 - epsilon:
+        chosen_theta2 = theta2_candidate_2
+    else:
+        # If differences are very close, check cosines directly with pz/S
+        # This handles cases where theta2_from_orientation might be slightly off due to r precision
+        # but one of the candidates from pz is a better fit for pz.
+        # The primary goal is to match pz, and use r for disambiguation.
+        # If cos(theta2_from_orientation) is closer to cos(theta2_candidate_1) (which is pz/S)
+        # than to cos(theta2_candidate_2) (which is also pz/S, but sign of sine might differ)
+        # This check is essentially about the sign of sin(theta2_from_orientation) vs sin(theta2_candidate_1/2)
+        if abs(math.sin(theta2_candidate_1) - math.sin(theta2_from_orientation)) < abs(math.sin(theta2_candidate_2) - math.sin(theta2_from_orientation)):
+             chosen_theta2 = theta2_candidate_1
+        else:
+             chosen_theta2 = theta2_candidate_2
+
+
+    # Step 5: Solve for theta1
+    # px = S_PARAM*sin(chosen_theta2)*cos(theta1) - A_PARAM*sin(theta1)
+    # py = S_PARAM*sin(chosen_theta2)*sin(theta1) + A_PARAM*cos(theta1)
+    # Let k1 = S_PARAM*sin(chosen_theta2)
+    # Let k2 = A_PARAM
+    # px = k1*cos(theta1) - k2*sin(theta1)
+    # py = k1*sin(theta1) + k2*cos(theta1)
+    # theta1 = atan2(py, px) - atan2(k2, k1)
+    
+    sin_chosen_theta2 = math.sin(chosen_theta2)
+    k1 = S_PARAM * sin_chosen_theta2
+    k2 = A_PARAM
+    
+    final_theta1 = math.atan2(py, px) - math.atan2(k2, k1)
+
+    return (final_theta1, chosen_theta2)
+
+```

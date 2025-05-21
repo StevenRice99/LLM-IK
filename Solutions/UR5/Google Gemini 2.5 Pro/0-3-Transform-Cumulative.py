@@ -1,0 +1,95 @@
+import math
+import numpy as np
+
+def inverse_kinematics(p: tuple[float, float, float], r: tuple[float, float, float]) -> tuple[float, float, float, float]:
+    px, py, pz = p
+    rx_roll, ry_pitch, rz_yaw = r
+    min_limit, max_limit = (-2 * np.pi - 1e-06, 2 * np.pi + 1e-06)
+
+    def get_ordered_joint_candidates(raw_val, min_lim, max_lim):
+        ordered_initial_bases = []
+        ordered_initial_bases.append(raw_val)
+        norm_mpi_pi = (raw_val + np.pi) % (2 * np.pi) - np.pi
+        if abs(raw_val - norm_mpi_pi) > 1e-09:
+            ordered_initial_bases.append(norm_mpi_pi)
+        temp_candidates = []
+        for p_base in ordered_initial_bases:
+            if min_lim <= p_base <= max_lim:
+                temp_candidates.append(p_base)
+        for p_base in ordered_initial_bases:
+            val_plus = p_base + 2 * np.pi
+            if min_lim <= val_plus <= max_lim:
+                temp_candidates.append(val_plus)
+            val_minus = p_base - 2 * np.pi
+            if min_lim <= val_minus <= max_lim:
+                temp_candidates.append(val_minus)
+        final_candidates = []
+        for c_val in temp_candidates:
+            is_new = True
+            for s_val in final_candidates:
+                if abs(c_val - s_val) < 1e-09:
+                    is_new = False
+                    break
+            if is_new:
+                final_candidates.append(c_val)
+        return final_candidates
+    v_L4_TCP = np.array([0, 0.093, 0])
+    d_J1_J2_y = 0.13585
+    d_J2_J3_y = -0.1197
+    d_J4_TCP_y = 0.093
+    L2z = 0.425
+    L3z = 0.39225
+    crx, srx = (np.cos(rx_roll), np.sin(rx_roll))
+    cry, sry = (np.cos(ry_pitch), np.sin(ry_pitch))
+    crz, srz = (np.cos(rz_yaw), np.sin(rz_yaw))
+    Rx_mat = np.array([[1, 0, 0], [0, crx, -srx], [0, srx, crx]])
+    Ry_mat = np.array([[cry, 0, sry], [0, 1, 0], [-sry, 0, cry]])
+    Rz_mat = np.array([[crz, -srz, 0], [srz, crz, 0], [0, 0, 1]])
+    R_tcp_world = Rz_mat @ Ry_mat @ Rx_mat
+    P_w_vec = np.array(p) - R_tcp_world @ v_L4_TCP
+    Pwx, Pwy, Pwz = (P_w_vec[0], P_w_vec[1], P_w_vec[2])
+    Y_arm_plane_offset = d_J1_J2_y + d_J2_J3_y + d_J4_TCP_y
+    A_t1, B_t1, C_t1 = (py, -px, Y_arm_plane_offset)
+    den_t1_sq = A_t1 ** 2 + B_t1 ** 2
+    theta1_base_solutions_ordered = []
+    if den_t1_sq > 1e-12:
+        den_t1 = np.sqrt(den_t1_sq)
+        cos_val_t1_arg = np.clip(C_t1 / den_t1, -1.0, 1.0)
+        alpha_t1 = np.arctan2(B_t1, A_t1)
+        delta_t1 = np.arccos(cos_val_t1_arg)
+        theta1_base_solutions_ordered.append(alpha_t1 + delta_t1)
+        if abs(delta_t1) > 1e-09:
+            theta1_base_solutions_ordered.append(alpha_t1 - delta_t1)
+    elif abs(C_t1) > 1e-06:
+        return (0.0, 0.0, 0.0, 0.0)
+    for theta1_raw_base in theta1_base_solutions_ordered:
+        theta1_loop_vals = get_ordered_joint_candidates(theta1_raw_base, min_limit, max_limit)
+        for theta1 in theta1_loop_vals:
+            c1, s1 = (np.cos(theta1), np.sin(theta1))
+            R01_T = np.array([[c1, s1, 0], [-s1, c1, 0], [0, 0, 1]])
+            R_F1_TCP = R01_T @ R_tcp_world
+            tol_orientation = 0.0001
+            if not (abs(R_F1_TCP[0, 1]) < tol_orientation and abs(R_F1_TCP[1, 0]) < tol_orientation and (abs(R_F1_TCP[1, 2]) < tol_orientation) and (abs(R_F1_TCP[2, 1]) < tol_orientation) and (abs(R_F1_TCP[1, 1] - 1.0) < tol_orientation)):
+                continue
+            beta = np.arctan2(R_F1_TCP[0, 2], R_F1_TCP[0, 0])
+            x_eff, z_eff = (Pwx * c1 + Pwy * s1, Pwz)
+            den_t3_calc = 2 * L2z * L3z
+            if abs(den_t3_calc) < 1e-09:
+                continue
+            cos_theta3_arg = (x_eff ** 2 + z_eff ** 2 - L2z ** 2 - L3z ** 2) / den_t3_calc
+            theta3_val_arc = np.arccos(np.clip(cos_theta3_arg, -1.0, 1.0))
+            theta3_base_options_ordered = []
+            theta3_base_options_ordered.append(-theta3_val_arc)
+            if abs(theta3_val_arc) > 1e-09:
+                theta3_base_options_ordered.append(theta3_val_arc)
+            for t3_raw_base in theta3_base_options_ordered:
+                t3_loop_vals = get_ordered_joint_candidates(t3_raw_base, min_limit, max_limit)
+                for theta3 in t3_loop_vals:
+                    theta2_raw = np.arctan2(x_eff, z_eff) - np.arctan2(L3z * np.sin(theta3), L2z + L3z * np.cos(theta3))
+                    t2_loop_vals = get_ordered_joint_candidates(theta2_raw, min_limit, max_limit)
+                    for theta2 in t2_loop_vals:
+                        theta4_raw = beta - theta2 - theta3
+                        t4_loop_vals = get_ordered_joint_candidates(theta4_raw, min_limit, max_limit)
+                        for theta4 in t4_loop_vals:
+                            return (theta1, theta2, theta3, theta4)
+    return (0.0, 0.0, 0.0, 0.0)

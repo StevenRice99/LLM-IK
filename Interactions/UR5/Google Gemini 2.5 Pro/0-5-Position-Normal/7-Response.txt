@@ -1,0 +1,212 @@
+The problem requires a closed-form analytical solution for the inverse kinematics of a 6-DOF manipulator, specifically for the TCP position, with `q6` (joint 6) set to 0. This leaves 5 joints (`q1` to `q5`) to control 3D position, meaning there are 2 degrees of redundancy. We need to make choices for two parameters to get a unique solution.
+
+Let's choose `q4 = 0` and `q6 = 0`. We will then determine `q5` strategically, and solve for `q1, q2, q3`.
+
+**Nomenclature & Parameters:**
+*   `d1 = 0.13585` (Y-offset from J1 to J2 origin, in J1's frame after `q1`)
+*   `a2 = -0.1197` (Y-offset from J2 to J3 origin, in J2's frame after `q2`)
+*   `d2_z = 0.425` (Z-offset from J2 to J3 origin, in J2's frame after `q2`)
+*   `d3_z = 0.39225` (Z-offset from J3 to J4 origin, in J3's frame after `q3`)
+*   `a4_y = 0.093` (Y-offset from J4 to J5 origin, in J4's frame after `q4`)
+*   `d5_z = 0.09465` (Z-offset from J5 to J6 origin, in J5's frame after `q5`)
+*   `d_tcp_y = 0.0823` (Y-offset from J6 to TCP, in J6's frame after `q6`)
+*   Target position: `(px, py, pz)`
+
+**Derivation Steps:**
+
+1.  **Effective TCP position in J3's frame (`Pw`) if `q4=0, q6=0`:**
+    The TCP position relative to J6 (if `q6=0`) is `[0, d_tcp_y, 0]`.
+    Transforming this to J5's frame (after `q5`): `P_tcp_in_J5 = Rz(q5) * [0, d_tcp_y, d5_z]^T = [-d_tcp_y*s5, d_tcp_y*c5, d5_z]^T`. (Here, `d5_z` is the Z-offset of J6 origin in J5 frame).
+    Transforming to J4's frame (after `q4=0`): `P_tcp_in_J4 = Trans(0, a4_y, 0) * P_tcp_in_J5 = [-d_tcp_y*s5, d_tcp_y*c5 + a4_y, d5_z]^T`.
+    Transforming to J3's frame (after `q3`, this is `Pw`): `Pw = Ry(q4=0) * P_tcp_in_J4 + [0,0,d3_z]^T`.
+    So, `Pw_x = -d_tcp_y*s5`
+    `Pw_y = d_tcp_y*c5 + a4_y`
+    `Pw_z = d5_z + d3_z` (This `d3_z` is the Z-offset of J4 origin in J3 frame).
+
+2.  **Solve for `q5` and `q1`:**
+    The Y-component of the TCP position in J1's frame (before `q1` rotation, but after `d1` translation) is `Y_base = Pw_y + a2 + d1`.
+    `Y_base = (d_tcp_y*c5 + a4_y) + a2 + d1`.
+    We have the relation: `py*cos(q1) - px*sin(q1) = Y_base`.
+    Let `R_xy = sqrt(px^2 + py^2)`. Then `sin(atan2(py,px) - q1) = Y_base / R_xy`.
+    Let `K_const = a4_y + a2 + d1 = 0.093 - 0.1197 + 0.13585 = 0.10915`.
+    So `Y_base = d_tcp_y*c5 + K_const`.
+    We need `| (d_tcp_y*c5 + K_const) / R_xy | <= 1`.
+    *   If `R_xy >= K_const` (i.e., `R_xy >= 0.10915`): Choose `c5 = 0` (`q5 = pi/2`). Then `Y_base = K_const`. `asin_arg = K_const / R_xy <= 1`.
+    *   Else if `R_xy >= K_const - d_tcp_y` (i.e., `0.02685 <= R_xy < 0.10915`): Choose `c5 = (R_xy - K_const) / d_tcp_y`. This makes `Y_base = R_xy`, so `asin_arg = 1`. `q5 = acos(c5)`.
+    *   Else (`R_xy < 0.02685`): Choose `c5 = -1` (`q5 = pi`). This makes `Y_base = K_const - d_tcp_y`. `asin_arg = (K_const - d_tcp_y) / R_xy`. This argument will be `>1`. Clamp it to `1.0`.
+    Once `c5` (and `q5`) is chosen, `Y_base` is known.
+    `alpha = atan2(py,px)`. `beta = asin(Y_base / R_xy)` (argument clamped to `[-1,1]`).
+    `q1 = alpha - beta` (This is one of two solutions for `q1`).
+
+3.  **Solve for `q2` and `q3`:**
+    Let `X_J1_frame = px*cos(q1) + py*sin(q1)` and `Z_J1_frame = pz`. These are the target X and Z coordinates for the Ry(q2)-Ry(q3) part of the arm, which positions `Pw` (with its Z-offset `d2_z`).
+    The "payload" for this 2-DOF system is `(x_p, z_p)` where `x_p = Pw_x = -d_tcp_y*s5` and `z_p = Pw_z = d5_z + d3_z`. The first "link" length is `L1 = d2_z`.
+    The kinematic equations are:
+    `X_J1_frame = cos(q2)*(cos(q3)*x_p + sin(q3)*z_p) + sin(q2)*(-sin(q3)*x_p + cos(q3)*z_p + L1)`
+    `Z_J1_frame = -sin(q2)*(cos(q3)*x_p + sin(q3)*z_p) + cos(q2)*(-sin(q3)*x_p + cos(q3)*z_p + L1)`
+    Let `A = cos(q3)*x_p + sin(q3)*z_p` and `B = -sin(q3)*x_p + cos(q3)*z_p + L1`.
+    Then `X_J1_frame = A*cos(q2) + B*sin(q2)` and `Z_J1_frame = -A*sin(q2) + B*cos(q2)`.
+    This implies `R_target_q23_sq = X_J1_frame^2 + Z_J1_frame^2 = A^2 + B^2`.
+    `A^2+B^2 = (x_p^2 + z_p^2) + L1^2 + 2*L1*(-sin(q3)*x_p + cos(q3)*z_p)`.
+    Let `L_eff_sq = x_p^2+z_p^2`.
+    `cos_phi_elbow_arg = (R_target_q23_sq - L_eff_sq - L1^2) / (2*L1*sqrt(L_eff_sq))` (if `L_eff_sq` and `L1` are non-zero). Clamp this argument to `[-1,1]`. Let `phi_elbow = acos(cos_phi_elbow_arg)`.
+    The angle `q3` can be found from `atan2(-x_p, z_p)` (angle of effective link `L_eff` in J3's XZ plane, relative to Z-axis) and `phi_elbow`.
+    A common solution form: `q3 = atan2(-x_p, z_p) - phi_elbow`. (This corresponds to one "elbow" configuration).
+    Once `q3` is known, `A` and `B` are known.
+    `sin(q2) = (B*X_J1_frame - A*Z_J1_frame) / (A^2+B^2)`.
+    `cos(q2) = (A*X_J1_frame + B*Z_J1_frame) / (A^2+B^2)`.
+    `q2 = atan2(sin(q2), cos(q2))`.
+
+```python
+import math
+
+def inverse_kinematics(p: tuple[float, float, float]) -> tuple[float, float, float, float, float, float]:
+    px, py, pz = p
+
+    # Link parameters
+    d1 = 0.13585
+    a2 = -0.1197
+    d2_z = 0.425
+    d3_z = 0.39225
+    a4_y = 0.093
+    d5_z = 0.09465
+    d_tcp_y = 0.0823
+
+    # Chosen fixed values
+    q4 = 0.0
+    q6 = 0.0
+
+    # Step 1: Determine q5 (and c5, s5)
+    R_xy = math.sqrt(px**2 + py**2)
+    K_const = a4_y + a2 + d1  # 0.10915
+
+    c5 = 0.0
+    # Ensure R_xy is not zero to avoid division issues if K_const is also zero.
+    # However, K_const is non-zero. If R_xy is very small, asin_arg might be large.
+    
+    if R_xy >= K_const: # Case 1: R_xy is relatively large
+        c5 = 0.0 # q5 = pi/2
+    elif R_xy >= K_const - d_tcp_y: # Case 2: R_xy is intermediate
+        if abs(d_tcp_y) < 1e-9: # Avoid division by zero if d_tcp_y is zero
+             c5 = 0.0 # Fallback, though d_tcp_y is not zero here
+        else:
+            c5 = (R_xy - K_const) / d_tcp_y
+    else: # Case 3: R_xy is small
+        c5 = -1.0 # q5 = pi
+
+    # Clamp c5 to valid range due to potential floating point issues or edge cases
+    if c5 > 1.0: c5 = 1.0
+    if c5 < -1.0: c5 = -1.0
+    q5 = math.acos(c5)
+    s5 = math.sin(q5)
+
+    # Step 2: Solve for q1
+    Y_base = d_tcp_y * c5 + K_const
+    
+    asin_arg_q1 = 0.0
+    if R_xy > 1e-9: # Avoid division by zero
+        asin_arg_q1 = Y_base / R_xy
+    elif abs(Y_base) < 1e-9: # Both R_xy and Y_base are zero
+        asin_arg_q1 = 0.0
+    else: # R_xy is zero, Y_base is not. Unreachable with current choices.
+        asin_arg_q1 = 2.0 # Will be clamped.
+        
+    if asin_arg_q1 > 1.0: asin_arg_q1 = 1.0
+    if asin_arg_q1 < -1.0: asin_arg_q1 = -1.0
+    
+    alpha_q1 = math.atan2(py, px)
+    beta_q1 = math.asin(asin_arg_q1)
+    q1 = alpha_q1 - beta_q1 # One solution for q1
+
+    # Step 3: Calculate intermediate target for q2, q3
+    c_q1 = math.cos(q1)
+    s_q1 = math.sin(q1)
+    X_J1_frame = px * c_q1 + py * s_q1
+    Z_J1_frame = pz
+    R_target_q23_sq = X_J1_frame**2 + Z_J1_frame**2
+
+    # Step 4: Define parameters for q2, q3 solution
+    x_p = -d_tcp_y * s5
+    z_p = d5_z + d3_z 
+    L1 = d2_z
+    
+    L_eff_sq = x_p**2 + z_p**2
+    L_eff = math.sqrt(L_eff_sq)
+
+    # Step 5: Solve for q3
+    # phi_elbow = acos( (R_target_q23_sq - L_eff_sq - L1^2) / (2*L1*L_eff) )
+    # q3 = atan2(-x_p, z_p) - phi_elbow (for one elbow config)
+    
+    if L_eff < 1e-6 or abs(L1) < 1e-6 : # Check for zero effective link lengths
+        # Simplified case: if L_eff is zero, Pw is at J3 origin (ignoring Pw_y)
+        # If L1 is also zero, then R_target_q23 must be zero.
+        if abs(R_target_q23_sq - L1**2 - L_eff**2) < 1e-9 : # Target is on L1 or L_eff if other is zero
+             q3 = 0.0 # Or other arbitrary value if L_eff and L1 are both zero and R_target is zero
+        else: # Unreachable or ill-defined
+             q3 = 0.0 # Fallback
+    else:
+        cos_phi_elbow_arg = (R_target_q23_sq - L_eff_sq - L1**2) / (2 * L1 * L_eff)
+        if cos_phi_elbow_arg > 1.0: cos_phi_elbow_arg = 1.0
+        if cos_phi_elbow_arg < -1.0: cos_phi_elbow_arg = -1.0
+        phi_elbow = math.acos(cos_phi_elbow_arg)
+        
+        # Base angle of the effective link L_eff in J3's XZ plane, from Z-axis towards -X-axis
+        # This is atan2(component_along_J3_X_axis, component_along_J3_Z_axis) for vector from J3 to Pw
+        # Pw_x_in_J3_frame = x_p, Pw_z_in_J3_frame = z_p
+        # Angle for q3's rotation: J3 is Ry. Positive q3 rotates J3's X-axis towards Z.
+        # We need q3 such that the vector (x_p, z_p) after rotation by q3, plus d2_z, etc.
+        # The formula used in previous attempts was:
+        # D_prime = R_target_q23_sq - (L_eff_sq + L1**2)
+        # C1_q3 = 2 * L1 * z_p
+        # C2_q3 = -2 * L1 * x_p
+        # phi_q3_acos = D_prime / math.sqrt(C1_q3**2 + C2_q3**2) (if denom != 0)
+        # atan_term_q3 = math.atan2(C2_q3, C1_q3)
+        # q3 = atan_term_q3 - acos(phi_q3_acos_clamped) # Corresponds to one solution branch
+        
+        # Re-using the more direct formulation for q3 from a 2R planar arm:
+        # (X_J1, Z_J1) is target. Links L1 (d2_z) and L_eff, with payload (x_p, z_p) at end of L_eff.
+        # q3 is the angle of L_eff relative to the previous link (J2's Z-axis extension).
+        # The angle phi_elbow is effectively -(q3 - initial_angle_of_Leff_if_q3_is_zero)
+        # Let's use the previous formulation which was more robustly derived:
+        K0_q3_calc = L_eff_sq + L1**2
+        D_q3_calc = R_target_q23_sq - K0_q3_calc
+        
+        # Denominator for acos term for q3
+        den_acos_q3_calc_sq = (2 * L1 * z_p)**2 + (-2 * L1 * x_p)**2 # (C1^2+C2^2)
+        
+        if den_acos_q3_calc_sq < 1e-12 : # Denominator is zero (L1=0 or L_eff=0)
+            if abs(D_q3_calc) < 1e-9: q3 = 0.0 # Indeterminate
+            else: q3 = 0.0 # Unreachable, fallback
+        else:
+            den_acos_q3_calc = math.sqrt(den_acos_q3_calc_sq)
+            acos_arg_q3_calc = D_q3_calc / den_acos_q3_calc
+            
+            if acos_arg_q3_calc > 1.0: acos_arg_q3_calc = 1.0
+            if acos_arg_q3_calc < -1.0: acos_arg_q3_calc = -1.0
+            
+            phi_q3_val = math.acos(acos_arg_q3_calc)
+            atan_term_q3_val = math.atan2(-2 * L1 * x_p, 2 * L1 * z_p) # atan2(C2, C1)
+            q3 = atan_term_q3_val - phi_q3_val # Choose one solution branch
+
+    # Step 6: Solve for q2
+    s_q3 = math.sin(q3)
+    c_q3 = math.cos(q3)
+    
+    A_for_q2 = c_q3 * x_p + s_q3 * z_p
+    B_for_q2 = -s_q3 * x_p + c_q3 * z_p + L1
+    
+    den_q2_atan_sq = A_for_q2**2 + B_for_q2**2 # Should be R_target_q23_sq
+    if den_q2_atan_sq < 1e-9 :
+        q2 = 0.0 # Target at origin of this 2R system, q2 can be arbitrary if A,B are zero
+    else:
+        # s2 = (B_for_q2 * X_J1_frame - A_for_q2 * Z_J1_frame) / den_q2_atan_sq
+        # c2 = (A_for_q2 * X_J1_frame + B_for_q2 * Z_J1_frame) / den_q2_atan_sq
+        # q2 = math.atan2(s2, c2)
+        # Simpler:
+        q2_num_atan = B_for_q2 * X_J1_frame - A_for_q2 * Z_J1_frame
+        q2_den_atan = A_for_q2 * X_J1_frame + B_for_q2 * Z_J1_frame
+        q2 = math.atan2(q2_num_atan, q2_den_atan)
+
+    return (q1, q2, q3, q4, q5, q6)
+
+```

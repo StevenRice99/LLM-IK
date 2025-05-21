@@ -1,0 +1,181 @@
+The core of the inverse kinematics problem for this 4-DOF manipulator involves:
+1.  Calculating the target orientation matrix (`R_target`) from the input Euler angles (roll, pitch, yaw). I'm assuming the standard ZYX convention for Euler angles, meaning `R_target = Rz(yaw) * Ry(pitch) * Rx(roll)`.
+2.  Determining the wrist center position (`P_wc`) by subtracting the TCP offset from the target position, transformed by `R_target`.
+3.  Solving for `q1` (rotation around Z-axis) and the sum of the subsequent Y-axis rotations `q_sum_angles = q2 + q3 + q4`. This can be derived from `R_target`, as the structure of the robot implies `R_target = Rz(q1) * Ry(q_sum_angles)`.
+    *   From this, `r12 = -sin(q1)` and `r22 = cos(q1)` (if `q_sum_angles` is not +/- pi/2, which would be a singularity). So, `q1 = atan2(-r12, r22)`.
+    *   And `r31 = -sin(q_sum_angles)` and `r33 = cos(q_sum_angles)`. So, `q_sum_angles = atan2(-r31, r33)`.
+4.  Transforming `P_wc` into the coordinate frame after the `q1` rotation. Let this transformed point's components relevant for the planar arm be `vx_planar` and `vz_planar`. The transformation also involves accounting for the `L0y` offset.
+    *   `pwx_F1 = cos(q1)*pwx + sin(q1)*pwy`
+    *   `pwy_F1 = -sin(q1)*pwx + cos(q1)*pwy`
+    *   `pwz_F1 = pwz`
+    *   The vector from Joint 2's origin to the wrist center, in this q1-rotated frame, has an x-component `vx_planar = pwx_F1` and a z-component `vz_planar = pwz_F1`. The y-component `pwy_F1 - L0y` should be equal to `l2y` for a reachable target.
+5.  Solving the 2D inverse kinematics for `q2` and `q3` using `vx_planar` and `vz_planar`, and link lengths `l2z` and `l3z`.
+    *   `cos_q3 = (vx_planar^2 + vz_planar^2 - l2z^2 - l3z^2) / (2 * l2z * l3z)`. This value must be clamped to `[-1, 1]`.
+    *   This gives two solutions for `q3`: `q3_A = acos(cos_q3)` and `q3_B = -acos(cos_q3)`.
+6.  For each `q3` solution, calculate the corresponding `q2`.
+    *   Let `X_arm = l3z * sin(q3)` and `Z_arm = l2z + l3z * cos(q3)`.
+    *   Then `q2 = atan2(vx_planar*Z_arm - vz_planar*X_arm, vx_planar*X_arm + vz_planar*Z_arm)`.
+7.  For each pair of `(q2, q3)`, calculate `q4 = q_sum_angles - q2 - q3`.
+8.  A heuristic is needed to choose between the two solutions stemming from `q3_A` and `q3_B`. I will use the heuristic of selecting the solution set `(q1, q2, q3, q4)` for which the absolute value of `q4` (normalized to `[-pi, pi]`) is minimized. This is a common approach to select a "smoother" or "more direct" wrist motion.
+9.  The final joint angles are returned.
+
+The joint limits are `[-2*pi, 2*pi]`. The calculated angles from `atan2` and `acos` are principal values. `q4` might fall outside `[-pi, pi]` but should be within the limits if the target is reachable as per problem statement.
+
+```python
+import math
+
+def inverse_kinematics(p: tuple[float, float, float], r: tuple[float, float, float]) -> tuple[float, float, float, float]:
+    px, py, pz = p
+    # Input r is (roll, pitch, yaw)
+    # Assuming R_target = Rz(yaw) * Ry(pitch) * Rx(roll)
+    rx_in, ry_in, rz_in = r 
+
+    # Link parameters
+    L0y = 0.13585
+    l2y = -0.1197 # This is an offset along J2's Y-axis.
+    l2z = 0.425
+    l3z = 0.39225
+    TCP_offset_y = 0.093
+
+    # 1. Calculate R_target
+    crx = math.cos(rx_in)
+    srx = math.sin(rx_in)
+    cry = math.cos(ry_in)
+    sry = math.sin(ry_in)
+    crz = math.cos(rz_in)
+    srz = math.sin(rz_in)
+
+    r11 = crz * cry
+    r12 = crz * sry * srx - srz * crx
+    # r13 = crz * sry * crx + srz * srx # Not strictly needed for q1, q_sum
+    r21 = srz * cry
+    r22 = srz * sry * srx + crz * crx
+    # r23 = srz * sry * crx - crz * srx # Not strictly needed
+    r31 = -sry
+    r32 = cry * srx # This should be 0 for the Rz(q1)Ry(q_sum) model to hold perfectly.
+                    # Problem assumes reachability, so this condition is met.
+    r33 = cry * crx
+    
+    # 2. Calculate Wrist Center P_wc
+    pwx = px - r12 * TCP_offset_y
+    pwy = py - r22 * TCP_offset_y
+    pwz = pz - r32 * TCP_offset_y
+
+    # 3. Solve for q1 and q_sum_angles
+    # From R_target = Rz(q1)Ry(q_sum):
+    # r12 = -sin(q1), r22 = cos(q1) (assuming cos(q_sum) is not 0, if q_sum is pitch-like)
+    # More robustly, from the structure Rz(q1)Ry(Q) = [[c1cq, -s1, c1sq], [s1cq, c1, s1sq], [-sq, 0, cq]]
+    # This implies r32 = 0.
+    q1 = math.atan2(-r12, r22)
+    
+    # r31 = -sin(q_sum_angles), r33 = cos(q_sum_angles)
+    q_sum_angles = math.atan2(-r31, r33)
+
+    # 4. Transform P_wc to Frame 1 (after q1 rotation) and define planar coords for J2, J3
+    c1 = math.cos(q1)
+    s1 = math.sin(q1)
+    
+    pwx_F1 = c1 * pwx + s1 * pwy
+    # pwy_F1 = -s1 * pwx + c1 * pwy # For check: pwy_F1 - L0y should be l2y
+    pwz_F1 = pwz
+
+    # Planar coordinates for the arm (J2, J3) relative to J2's origin projected on its XZ plane
+    vx_planar = pwx_F1 
+    vz_planar = pwz_F1 
+    # Note: The L0y offset is along the base Y axis.
+    # The l2y offset is along J2's Y axis.
+    # The planar IK for q2, q3 happens in the XZ plane of J2's frame.
+    # The P_wc coordinates are relative to base. After q1 rotation, pwx_F1 and pwz_F1 are the
+    # X and Z coordinates in a frame whose Y axis is aligned with J1's Y axis, and origin at J1.
+    # J2's origin is at (0, L0y, 0) in this frame.
+    # So the vector from J2's origin to P_wc in this frame is (pwx_F1, pwy_F1 - L0y, pwz_F1).
+    # The planar IK uses the X and Z components of this vector: (pwx_F1, pwz_F1).
+
+    # 5. Solve for q3 (two solutions)
+    cos_q3_num = vx_planar**2 + vz_planar**2 - l2z**2 - l3z**2
+    cos_q3_den = 2 * l2z * l3z
+    
+    if abs(cos_q3_den) < 1e-9: # Should not happen if l2z, l3z are non-zero
+        cos_q3 = 2.0 # Force error or out of range if denominator is zero
+    else:
+        cos_q3 = cos_q3_num / cos_q3_den
+
+    if cos_q3 > 1.0: cos_q3 = 1.0
+    elif cos_q3 < -1.0: cos_q3 = -1.0
+    
+    q3_A = math.acos(cos_q3)  # Solution 1 for q3 (typically elbow up/positive)
+    q3_B = -math.acos(cos_q3) # Solution 2 for q3 (typically elbow down/negative)
+
+    solutions = []
+
+    for q3_choice in [q3_A, q3_B]:
+        s3 = math.sin(q3_choice)
+        c3 = math.cos(q3_choice) # This is `cos_q3`
+
+        # 6. Solve for q2 for the chosen q3
+        X_arm = l3z * s3
+        Z_arm = l2z + l3z * c3
+        
+        # Denominator for q2 calculation: X_arm^2 + Z_arm^2, which is also vx_planar^2 + vz_planar^2
+        den_q2_calc = vx_planar**2 + vz_planar**2 # Should be non-zero if reachable and not at J2 axis singularity
+
+        if abs(den_q2_calc) < 1e-12: # If wrist center is on J2 axis (vx_planar=0, vz_planar=0)
+                                     # This implies X_arm and Z_arm must also be zero.
+                                     # This configuration (l2z+l3z*c3=0 and l3z*s3=0) means q2 is indeterminate.
+                                     # Problem assumes reachability and non-singularity for unique solution.
+                                     # If truly hit, q2 could be set to 0 as a convention.
+            s2_val = 0.0
+            c2_val = 1.0 # Default q2 = 0
+        else:
+            # Solve c2*X_arm + s2*Z_arm = vx_planar
+            #      -s2*X_arm + c2*Z_arm = vz_planar
+            # s2_val = (vx_planar * Z_arm - vz_planar * X_arm) / den_q2_calc <--- This was my previous formula for s2
+            # c2_val = (vx_planar * X_arm + vz_planar * Z_arm) / den_q2_calc <--- This was my previous formula for c2
+            # Let's re-derive from atan2(y',x') where y'=s2, x'=c2
+            # vx_planar = c2*X_arm + s2*Z_arm
+            # vz_planar = c2*Z_arm - s2*X_arm
+            # Multiply first by Z_arm, second by X_arm:
+            # vx_planar*Z_arm = c2*X_arm*Z_arm + s2*Z_arm^2
+            # vz_planar*X_arm = c2*Z_arm*X_arm - s2*X_arm^2
+            # Subtract: vx_planar*Z_arm - vz_planar*X_arm = s2*(Z_arm^2 + X_arm^2) => s2
+            s2_val = (vx_planar * Z_arm - vz_planar * X_arm) / den_q2_calc
+            # Multiply first by X_arm, second by Z_arm:
+            # vx_planar*X_arm = c2*X_arm^2 + s2*Z_arm*X_arm
+            # vz_planar*Z_arm = c2*Z_arm^2 - s2*X_arm*Z_arm
+            # Add: vx_planar*X_arm + vz_planar*Z_arm = c2*(X_arm^2 + Z_arm^2) => c2
+            c2_val = (vx_planar * X_arm + vz_planar * Z_arm) / den_q2_calc
+
+        q2_choice = math.atan2(s2_val, c2_val)
+        
+        # 7. Solve for q4
+        q4_choice = q_sum_angles - q2_choice - q3_choice
+        
+        solutions.append({'q1': q1, 'q2': q2_choice, 'q3': q3_choice, 'q4': q4_choice})
+
+    # 8. Select best solution based on minimizing |normalized(q4)|
+    best_solution = None
+    min_abs_norm_q4 = float('inf')
+
+    for sol in solutions:
+        q4_norm = math.atan2(math.sin(sol['q4']), math.cos(sol['q4']))
+        if abs(q4_norm) < min_abs_norm_q4:
+            min_abs_norm_q4 = abs(q4_norm)
+            best_solution = sol
+        # Tie-breaking: if |norm_q4| are equal, prefer solution with q3_A (first one)
+        elif abs(q4_norm) == min_abs_norm_q4 and sol['q3'] == q3_A :
+             best_solution = sol
+
+
+    if best_solution is None: # Should not happen if solutions list is populated
+        # Fallback if no solution was better (e.g. if solutions list was empty, though it won't be)
+        # Or if all q4s were inf.
+        # Default to the first solution (q3_A based)
+        if solutions:
+             best_solution = solutions[0]
+        else: # Highly unlikely error case
+            return (0.0,0.0,0.0,0.0)
+
+
+    return (best_solution['q1'], best_solution['q2'], best_solution['q3'], best_solution['q4'])
+
+```

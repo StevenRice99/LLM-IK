@@ -1,0 +1,174 @@
+The feedback indicates that the previous solution, which used `q1 = theta_p - math.pi + asin_val`, consistently produced joint values (`q_mycode`) that differed from the correct ones (`q_corr`). Specifically, `q1_mycode` and `q2_mycode` often appeared to be alternative solutions to `q1_corr` and `q2_corr` (e.g., `q2_mycode` was `-q2_corr`).
+
+My analysis of the first failed case in the latest feedback showed:
+1.  The `P_wc` calculation is standard.
+2.  The `q1` equation `sin(theta_p - q1) = K_val / R_xy` has two solutions for `q1` in a `2*pi` range:
+    *   `q1_sol1 = theta_p - asin(K_val / R_xy)`
+    *   `q1_sol2 = theta_p - (math.pi - asin(K_val / R_xy)) = theta_p - math.pi + asin_val`
+3.  My previous code (second attempt) used `q1_sol2`. The `q_mycode` in the feedback matched results from this choice.
+4.  If `q1_sol1` was used instead, the resulting `q1` was very close to `q1_corr`.
+5.  Furthermore, if this `q1_sol1` was used to calculate `pwc_x_in_frame1`, and then `q2` was found using `q2 = atan2(pwc_x_in_frame1, pwc_z)`, this `q2` was very close to `q2_corr`.
+
+This suggests that the primary issue was the selection of the `q1` branch. The original first attempt's `q1` logic (`q1 = theta_p - asin_val`) appears to be the one that aligns with the "correct" solutions provided in the feedback.
+
+The proposed solution is to revert the `q1` calculation to this first form and keep the subsequent `q2` and `q3` calculations which depend on `q1`.
+
+The steps are:
+1.  Calculate the wrist center `P_wc = (pwc_x, pwc_y, pwc_z)` from the target TCP position and orientation.
+2.  Define `K_val = d1y + d2y`.
+3.  Calculate `R_xy = sqrt(pwc_x^2 + pwc_y^2)`.
+4.  Calculate `theta_p = atan2(pwc_y, pwc_x)`.
+5.  Calculate `val_for_asin = K_val / R_xy`. Ensure this value is clamped to `[-1.0, 1.0]` to prevent domain errors with `asin` due to potential floating-point inaccuracies.
+6.  Calculate `asin_val = asin(val_for_asin)`.
+7.  Set `q1 = theta_p - asin_val`.
+8.  Transform `pwc_x` into Frame 1 (the frame after q1 rotation): `pwc_x_f1 = cos(q1)*pwc_x + sin(q1)*pwc_y`.
+9.  Calculate `q2 = atan2(pwc_x_f1, pwc_z)`. Note that `pwc_z` is the z-coordinate of the wrist center in the base frame, which is also its z-coordinate in Frame 1.
+10. Calculate `q3` using the matrix equation `Ry(q3) = Ry(-q2) * Rz(-q1) * R_tcp_base`. `q3` is then `atan2(M[0][2], M[0][0])` where `M` is the resulting matrix.
+
+This approach provides a single, deterministic solution set `(q1, q2, q3)`.
+
+```python
+import math
+
+def inverse_kinematics(p: tuple[float, float, float], r: tuple[float, float, float]) -> tuple[float, float, float]:
+    """
+    Gets the joint values needed to reach position "p" and orientation "r".
+    :param p: The position to reach in the form [x, y, z].
+    :param r: The orientation to reach in radians in the form [rx, ry, rz] (roll, pitch, yaw ZYX).
+    :return: A list of the values to set the links to for reaching position "p" and orientation "r".
+    """
+    px, py, pz = p
+    # r is (roll, pitch, yaw)
+    # roll is rx (around X), pitch is ry (around Y), yaw is rz (around Z)
+    # The problem states ZYX Euler angles, so R = Rz(yaw) * Ry(pitch) * Rx(roll)
+    roll, pitch, yaw = r
+
+    # Constants from URDF
+    d1y = 0.13585
+    d2y = -0.1197
+    d2z = 0.425
+    d3z = 0.39225
+
+    # Helper for ZYX Euler angles to rotation matrix
+    # R = Rz(yaw) * Ry(pitch) * Rx(roll)
+    def euler_zyx_to_matrix(y_angle, p_angle, r_angle):
+        cy = math.cos(y_angle)
+        sy = math.sin(y_angle)
+        cp = math.cos(p_angle)
+        sp = math.sin(p_angle)
+        cr = math.cos(r_angle)
+        sr = math.sin(r_angle)
+
+        R = [
+            [cy*cp, cy*sp*sr - sy*cr, cy*sp*cr + sy*sr],
+            [sy*cp, sy*sp*sr + cy*cr, sy*sp*cr - cy*sr],
+            [-sp,   cp*sr,            cp*cr]
+        ]
+        return R
+
+    # Helper for matrix multiplication (3x3 * 3x1 vector)
+    def mat_vec_mult(mat, vec):
+        res = [0.0, 0.0, 0.0]
+        for i in range(3):
+            for j_mult in range(3):
+                res[i] += mat[i][j_mult] * vec[j_mult]
+        return res
+
+    # Helper for 3x3 matrix multiplication (A * B)
+    def mat_mat_mult(A, B):
+        C = [[0.0, 0.0, 0.0], [0.0, 0.0, 0.0], [0.0, 0.0, 0.0]]
+        for i in range(3):
+            for j in range(3):
+                for k_mult in range(3):
+                    C[i][j] += A[i][k_mult] * B[k_mult][j]
+        return C
+
+    # Step 1: Calculate Wrist Center P_wc (origin of J3 frame)
+    R_tcp_base = euler_zyx_to_matrix(yaw, pitch, roll)
+    V_j3_tcp_local = [0.0, 0.0, d3z] 
+    
+    offset_vec = mat_vec_mult(R_tcp_base, V_j3_tcp_local)
+    
+    pwc_x = px - offset_vec[0]
+    pwc_y = py - offset_vec[1]
+    pwc_z = pz - offset_vec[2]
+
+    # Step 2: Solve for q1
+    # From R_xy * sin(theta_p - q1) = K_val
+    # q1 = theta_p - asin(K_val / R_xy)  OR q1 = theta_p - (pi - asin(K_val/R_xy))
+    # Feedback suggests the first branch is the one leading to "correct" solutions.
+    
+    K_val = d1y + d2y # (0.13585 - 0.1197 = 0.01615)
+    R_xy = math.sqrt(pwc_x**2 + pwc_y**2)
+    
+    q1 = 0.0 # Default q1
+    
+    if R_xy > 1e-9: # Avoid division by zero if pwc_x and pwc_y are both zero
+        val_for_asin = K_val / R_xy
+        # Clamp val_for_asin to [-1, 1] to avoid math domain error due to precision
+        if val_for_asin > 1.0:
+            val_for_asin = 1.0
+        elif val_for_asin < -1.0:
+            val_for_asin = -1.0
+        
+        theta_p = math.atan2(pwc_y, pwc_x)
+        asin_val = math.asin(val_for_asin)
+        
+        q1 = theta_p - asin_val # First solution branch
+    else:
+        # This case (R_xy = 0) implies pwc_x = 0 and pwc_y = 0.
+        # This should not happen for a reachable target if K_val is not zero.
+        pass
+
+
+    # Step 3: Solve for q2
+    # Transform P_wc into Frame 1 (after q1 rotation) to solve for q2
+    # pwc_x_f1 = c1*pwc_x + s1*pwc_y
+    # pwc_z_f1 = pwc_z (J1 rotates around Z, so Z component is unchanged)
+    # In Frame 1, P_wc components related to q2 are:
+    # x_coord_in_F1 = d2z*sin(q2)
+    # z_coord_in_F1 = d2z*cos(q2) (This is pwc_z itself)
+    
+    cos_q1 = math.cos(q1)
+    sin_q1 = math.sin(q1)
+
+    pwc_x_in_frame1 = cos_q1 * pwc_x + sin_q1 * pwc_y
+    # pwc_z_in_frame1 is simply pwc_z.
+    
+    # q2 = atan2(sin(q2), cos(q2))
+    # sin(q2) = pwc_x_in_frame1 / d2z
+    # cos(q2) = pwc_z / d2z
+    # So, q2 = atan2(pwc_x_in_frame1 / d2z, pwc_z / d2z)
+    if abs(d2z) < 1e-9: # d2z is a link length, should not be zero
+        q2 = 0.0 
+    else:
+        q2 = math.atan2(pwc_x_in_frame1, pwc_z)
+
+
+    # Step 4: Solve for q3
+    # Target orientation R_tcp_base = Rz(q1) * Ry(q2) * Ry(q3)
+    # So, Ry(q3) = Ry(-q2) * Rz(-q1) * R_tcp_base
+    
+    Rz_negq1 = [
+        [cos_q1,  sin_q1, 0.0],
+        [-sin_q1, cos_q1, 0.0],
+        [0.0,     0.0,    1.0]
+    ]
+
+    cos_negq2 = math.cos(-q2) # cos(q2)
+    sin_negq2 = math.sin(-q2) # -sin(q2)
+    Ry_negq2 = [
+        [cos_negq2, 0.0, sin_negq2],
+        [0.0,       1.0, 0.0      ],
+        [-sin_negq2,0.0, cos_negq2]
+    ]
+
+    Temp_mat = mat_mat_mult(Rz_negq1, R_tcp_base)
+    M = mat_mat_mult(Ry_negq2, Temp_mat) # M should be Ry(q3)
+
+    # Ry(q3) = [[cos(q3), 0, sin(q3)], [0,1,0], [-sin(q3),0,cos(q3)]]
+    q3 = math.atan2(M[0][2], M[0][0]) # atan2(sin(q3), cos(q3))
+    
+    return (q1, q2, q3)
+
+```

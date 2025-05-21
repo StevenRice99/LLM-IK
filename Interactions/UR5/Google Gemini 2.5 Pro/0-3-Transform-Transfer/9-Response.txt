@@ -1,0 +1,159 @@
+I will implement a refined strategy for the `inverse_kinematics` method. The approach is to systematically explore candidate solutions derived from the two primary elbow configurations (`q3 = arccos(val)` and `q3 = -arccos(val)`) and their `2*pi` variants that fall within the joint limits. The selection of the final solution will be based on a fixed order of preference for these `q3` configurations.
+
+The refined algorithm is as follows:
+
+1.  **Initialization**:
+    *   Parse input position `p` and orientation `r`.
+    *   Define robot parameters (`d2z`, `d3z`, `d4y_tcp`).
+    *   Define `twopi = 2 * np.pi` and `joint_limit = 2 * np.pi`.
+    *   Set a small `epsilon = 1e-9` for floating-point comparisons.
+
+2.  **Calculate Target Rotation and Wrist Position**:
+    *   Compute the target rotation matrix `R_target` from RPY angles `r`.
+    *   Calculate the wrist center position `P_wrist = (xw, yw, zw)` by subtracting the TCP offset (transformed by `R_target`) from the target TCP position `p`.
+
+3.  **Calculate `q1` and `q_sum`**:
+    *   `q1 = np.arctan2(-R_target[0,1], R_target[1,1])`. This `q1` is in `[-pi, pi]`.
+    *   `q_sum = q2 + q3 + q4 = np.arctan2(-R_target[2,0], R_target[2,2])`. This `q_sum` is in `[-pi, pi]`.
+
+4.  **Transform Wrist Position for 2R Arm**:
+    *   Transform `P_wrist` into Frame 1 (the frame after `q1` rotation) to get `(P_1x, P_1z)` which are the target coordinates for the 2R planar arm mechanism.
+
+5.  **Calculate `cos_q3_val`**:
+    *   `cos_q3_val = (P_1x^2 + P_1z^2 - d2z^2 - d3z^2) / (2 * d2z * d3z)`.
+    *   Clip `cos_q3_val` to `[-1.0, 1.0]`.
+
+6.  **Define Base `q3` Values**:
+    *   `q3_base_A = np.arccos(cos_q3_val)` (typically in `[0, pi]`).
+    *   `q3_base_B = -np.arccos(cos_q3_val)` (typically in `[-pi, 0]`).
+
+7.  **Ordered Search for a Valid Solution**:
+    *   Define an ordered list of candidate `q3` configurations:
+        `q3_options = [q3_base_A, q3_base_B, q3_base_A - twopi, q3_base_B + twopi]`
+        These options cover the `[-2pi, 2pi]` range for `q3` based on the two fundamental solutions.
+    *   Iterate through each `q3_candidate` in `q3_options`:
+        a.  **`q3` Check**: The `q3_candidate` values are constructed to be within `[-2pi, 2pi]`.
+        b.  **Calculate `q2_candidate`**:
+            *   `sin_q3 = np.sin(q3_candidate)`
+            *   `cos_q3 = np.cos(q3_candidate)`
+            *   `q2_candidate = np.arctan2(P_1x, P_1z) - np.arctan2(d3z*sin_q3, d2z + d3z*cos_q3)`
+            (This `q2_candidate` will be in `[-2pi, 2pi]`).
+        c.  **`q2` Check**: `q2_candidate` is inherently within `[-2pi, 2pi]`. `q1` is also within `[-pi,pi]`.
+        d.  **Calculate `q4_raw`**:
+            *   `q4_raw = q_sum - q2_candidate - q3_candidate`
+        e.  **Normalize `q4_final`**:
+            *   `q4_final = q4_raw`
+            *   `while q4_final > joint_limit + epsilon: q4_final -= twopi`
+            *   `while q4_final < -joint_limit - epsilon: q4_final += twopi`
+        f.  **`q4` Check and Solution Return**:
+            *   If `q4_final` is within `[-joint_limit - epsilon, joint_limit + epsilon]`:
+                The solution `(q1, q2_candidate, q3_candidate, q4_final)` is valid. Return this solution immediately.
+
+8.  **Fallback**: If the loop completes without returning a solution (which implies no configuration in the preferred order yielded a fully valid set of joint angles within limits), return a fallback (e.g., `(0.0, 0.0, 0.0, 0.0)`), though this case is unexpected if the target is reachable.
+
+This ordered search strategy aims to find a solution that matches the preference of a deterministic IK solver.
+
+```python
+def inverse_kinematics(p: tuple[float, float, float], r: tuple[float, float, float]) -> tuple[float, float, float, float]:
+    import numpy as np
+
+    px, py, pz = p
+    rx, ry, rz = r  # Assuming r = (roll, pitch, yaw)
+
+    # Robot parameters
+    d2z = 0.425   # Link length L1 for the 2R arm (J2 to J3 in Z)
+    d3z = 0.39225 # Link length L2 for the 2R arm (J3 to J4 in Z)
+    d4y_tcp = 0.093 # TCP offset from J4 along J4's Y
+
+    twopi = 2 * np.pi
+    joint_limit = twopi 
+    epsilon = 1e-9 # Small tolerance for float comparisons
+
+    # 1. Calculate target rotation matrix R_target
+    cr, sr = np.cos(rx), np.sin(rx)
+    cp, sp = np.cos(ry), np.sin(ry)
+    cy, sy = np.cos(rz), np.sin(rz)
+    R_target = np.array([
+        [cy*cp, cy*sp*sr - sy*cr, cy*sp*cr + sy*sr],
+        [sy*cp, sy*sp*sr + cy*cr, sy*sp*cr - cy*sr],
+        [-sp,   cp*sr,            cp*cr]
+    ])
+
+    # 2. Calculate wrist center P_wrist (origin of frame 4)
+    xw = px - R_target[0,1] * d4y_tcp
+    yw = py - R_target[1,1] * d4y_tcp
+    zw = pz - R_target[2,1] * d4y_tcp
+
+    # 3. Calculate q1 and q_sum = q2+q3+q4
+    q1 = np.arctan2(-R_target[0,1], R_target[1,1])      # q1 in [-pi, pi]
+    q_sum = np.arctan2(-R_target[2,0], R_target[2,2]) # q_sum in [-pi, pi]
+
+    # 4. Transform P_wrist to P_1 (target for 2R arm in Frame 1's XZ plane)
+    c1, s1 = np.cos(q1), np.sin(q1)
+    P_1x =  c1*xw + s1*yw  # Effective "Y" for standard 2R IK formulas if Z is "X"
+    P_1z =  zw             # Effective "X" for standard 2R IK formulas
+
+    # 5. Calculate cos_q3_val for the 2R arm
+    # cos(q3_elbow) = (X_eff^2 + Y_eff^2 - L1_2R^2 - L2_2R^2) / (2 * L1_2R * L2_2R)
+    # Here, X_eff = P_1z, Y_eff = P_1x. L1_2R = d2z, L2_2R = d3z.
+    val_num = P_1z**2 + P_1x**2 - d2z**2 - d3z**2 # Note: P_1z is X, P_1x is Y
+    val_den = 2 * d2z * d3z
+    
+    cos_q3_val = 2.0 # Default to out of range if val_den is zero
+    if abs(val_den) > epsilon: # Avoid division by zero
+        cos_q3_val = val_num / val_den
+    cos_q3_val = np.clip(cos_q3_val, -1.0, 1.0)
+
+    # 6. Define Base q3 Values
+    q3_base_A = np.arccos(cos_q3_val)  # Solution in [0, pi]
+    q3_base_B = -np.arccos(cos_q3_val) # Solution in [-pi, 0]
+
+    # 7. Ordered Search for a Valid Solution
+    # These q3 options cover [-2pi, 2pi] based on the two arccos solutions
+    q3_options_ordered = [
+        q3_base_A,          # Typically [0, pi]
+        q3_base_B,          # Typically [-pi, 0]
+        q3_base_A - twopi,  # Typically [-2pi, -pi]
+        q3_base_B + twopi,  # Typically [pi, 2pi]
+    ]
+
+    for q3_candidate in q3_options_ordered:
+        # 7a. q3_candidate is already constructed to be within [-2pi, 2pi]
+        # (assuming q3_base_A/B are in [-pi,pi])
+        # We still check its final validity if it's used.
+
+        # 7b. Calculate q2_candidate
+        sin_q3 = np.sin(q3_candidate)
+        cos_q3 = np.cos(q3_candidate)
+        
+        # q2_shoulder = atan2(Y_eff, X_eff) - atan2(L2_2R*sin(q3_elbow), L1_2R + L2_2R*cos(q3_elbow))
+        # Y_eff = P_1x, X_eff = P_1z
+        q2_candidate = np.arctan2(P_1x, P_1z) - np.arctan2(d3z*sin_q3, d2z + d3z*cos_q3)
+        
+        # 7c. q1 and q2_candidate are within joint_limit by calculation.
+        # q1 is [-pi,pi]. q2_candidate is [-2pi,2pi].
+
+        # 7d. Calculate q4_raw
+        q4_raw = q_sum - q2_candidate - q3_candidate
+
+        # 7e. Normalize q4_final to be within [-joint_limit, joint_limit]
+        q4_final = q4_raw
+        while q4_final > joint_limit + epsilon:
+            q4_final -= twopi
+        while q4_final < -joint_limit - epsilon:
+            q4_final += twopi
+            
+        # 7f. Check if all joints are valid and return if so
+        # We need to ensure q1, q2_candidate, q3_candidate, q4_final are all strictly within limits
+        # q1 is fine. q2_candidate is fine. q3_candidate from list is fine.
+        # Only q4_final needs the strict check after normalization.
+        if (q4_final >= -joint_limit - epsilon and q4_final <= joint_limit + epsilon and
+            q3_candidate >= -joint_limit - epsilon and q3_candidate <= joint_limit + epsilon and # Redundant but safe
+            q2_candidate >= -joint_limit - epsilon and q2_candidate <= joint_limit + epsilon and # Redundant but safe
+            q1 >= -joint_limit - epsilon and q1 <= joint_limit + epsilon): # Redundant but safe
+
+            return (q1, q2_candidate, q3_candidate, q4_final)
+
+    # 8. Fallback (should not be reached if target is reachable and logic is correct)
+    return (0.0, 0.0, 0.0, 0.0)
+```

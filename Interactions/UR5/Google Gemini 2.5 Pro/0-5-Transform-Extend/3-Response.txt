@@ -1,0 +1,344 @@
+The feedback indicates a systematic error where the produced `q6` is often the correct `q6 ± π`, `q5` is `–correct_q5`, `q3` is 0, and `q4` is also significantly different. This pattern strongly suggests that the chosen `q6` leads to `φ_produced = φ_correct ± π`.
+
+Let's analyze the consequences:
+1.  If `q6_prod = q6_corr ± π`, then `Ry(-q6_prod)` will have its first and third columns negated compared to `Ry(-q6_corr)`.
+2.  This means `R_0_5_frame_prod` (which is `R_0_6 @ Ry(-q6_prod)`) will have its first and third columns effectively negated compared to an intermediate matrix `R_0_6 @ Ry(-q6_corr)` where `Ry(-q6_corr)` has its columns permuted/negated. More directly, `R_0_5_frame_prod` will be `[ -col1(R_0_5_corr), col2(R_0_5_corr), -col3(R_0_5_corr) ]` if `R_0_5_corr` was `R_0_6 @ Ry(-q6_corr)`.
+3.  Then `M_prod = Rz(-q1) @ R_0_5_frame_prod`.
+    *   `M_prod[1,0] = -M_corr[1,0]` (component for `sin(q5)`)
+    *   `M_prod[1,1] = M_corr[1,1]` (component for `cos(q5)`)
+    *   This leads to `q5_prod = atan2(-sin(q5_corr), cos(q5_corr)) = -q5_corr`. This matches the feedback.
+4.  Also:
+    *   `M_prod[0,2] = -M_corr[0,2]` (component for `sin(φ)`)
+    *   `M_prod[2,2] = -M_corr[2,2]` (component for `cos(φ)`)
+    *   This leads to `φ_prod = atan2(-sin(φ_corr), -cos(φ_corr)) = φ_corr ± π`.
+5.  If `φ_prod = φ_corr ± π`:
+    *   `sin(φ_prod) = -sin(φ_corr)`
+    *   `cos(φ_prod) = -cos(φ_corr)`
+6.  The planar target coordinates for the 2R arm become:
+    *   `P_x_planar_prod = p_bar_x - L_tcp * sin(φ_prod) = p_bar_x + L_tcp * sin(φ_corr)`
+    *   `P_z_planar_prod = p_bar_z - L_tcp * cos(φ_prod) = p_bar_z + L_tcp * cos(φ_corr)`
+    These are significantly different from `P_x_planar_corr = p_bar_x - L_tcp * sin(φ_corr)` and `P_z_planar_corr = p_bar_z - L_tcp * cos(φ_corr)`. This altered target for the 2R arm likely pushes it to a singularity, such as being fully stretched, resulting in `q3_prod = 0`.
+
+The core issue is that both `q6_corr` and `q6_corr ± π` satisfy the condition `(Rz(-q1) @ R_0_5_frame)[1,2] = 0`. My code tries the `atan2` result for `q6` first, then `atan2_result + π`. If the `atan2` result itself corresponds to `q6_corr ± π` (the "wrong" branch), and this branch successfully passes all checks in `_ik_5dof` (even if it yields `q3=0`), it will be returned.
+
+The `atan2(y,x)` function returns a value in `(-π, π]`. The "correct" `q6` might be this value, or this value `±π`. There's no direct way from `tan(q6) = M_kp[1,2] / M_kp[1,0]` alone to pick the unique `q6` that corresponds to the physical linkage without ambiguity over `π`.
+
+Given that the `q1` values are mostly correct in the feedback, the `q1_s == q1_cand` check is passing for the returned (faulty) solution. This means the `_ik_5dof` solver is finding a self-consistent (though incorrect for the 6-DOF chain) solution for the `(P_wc, R_0_5_frame_prod)` it receives.
+
+The problem doesn't provide a criterion to disambiguate between the two `q6` solutions if both lead to a 5-DOF solution. The original 5-DOF solver had internal error minimization for `q3`. A similar global error metric or a forward kinematics check against the original target might be needed for the 6-DOF case to select the best `q6`, but this is outside the scope of a purely analytical solution if both branches are analytically valid up to a point.
+
+However, the `EXISTING` 5-DOF code has a specific structure and makes choices (e.g., for `q1` and `q3`) to resolve ambiguities. It's possible that one `q6` branch is "more compatible" with the internal choices of the `_ik_5dof` solver, even if that leads to a globally incorrect 6-DOF solution.
+
+One potential subtle issue: The `_ik_5dof` function has its own `q1` calculation and selection.
+`q1 = q1_candidate1 if err1 <= err2 else q1_candidate2` (based on `M[1,2]` for its `R_des`).
+The `q1_cand` (from 6-DOF) is used to derive `q6_c`, which in turn makes `(Rz(-q1_cand) @ R_0_5_frame)[1,2] = 0`.
+So, when `_ik_5dof` evaluates its `q1` candidates, the one matching `q1_cand` should yield `M[1,2]=0`. If the *other* `q1` candidate also yields `M[1,2]` near zero (e.g., numerically smaller), `_ik_5dof` might pick that other `q1`. This would cause `q1_s != q1_cand`, and my 6-DOF loop would reject that `(q1_cand, q6_c)` pair.
+If this happens more frequently for the "correct" `q6_c` than for the "wrong" `q6_c`, the "wrong" one would be selected.
+
+Let's ensure the `_ik_5dof` is as robust as the original. The original `EXISTING` code snippet for `q1` selection:
+`M1 = compute_M(q1_candidate1)`
+`M2 = compute_M(q1_candidate2)`
+`err1 = abs(M1[1, 2])`
+`err2 = abs(M2[1, 2])`
+`q1 = q1_candidate1 if err1 <= err2 else q1_candidate2`
+My `_ik_5dof` uses this.
+
+The problem is most likely that the first `q6` candidate processed, which successfully passes the `_ik_5dof` and the `q1_cand == q1_s` check, is the one leading to the incorrect overall solution. This implies that the "correct" `q6` candidate either causes an error within `_ik_5dof` or fails the `q1_cand == q1_s` check (meaning `_ik_5dof` preferred a different `q1` for that configuration).
+
+Without a more definitive way to select the correct `q6` branch, or a modification to `_ik_5dof` to be more robust or aware of the 6-DOF context, this is hard to fix. The provided solution structure implies that such a definitive choice should emerge.
+
+A small change to try: In `_ik_5dof`, when choosing `q1` if `abs(err1 - err2)` is very small (i.e., both `q1` candidates make `M[1,2]` very close to zero), there's no explicit tie-breaking rule that would prefer the `q1` matching the 6-DOF `q1_cand`. The current `err1 <= err2` might pick the "wrong" `q1` if `err2` is infinitesimally smaller than `err1`.
+
+Let's re-examine the `q1` selection in `_ik_5dof`. If `q1_cand` (from 6DOF) is, say, `q1_candidate1_5dof`, then `err1` (i.e. `abs(M1[1,2])`) should be very close to zero because `q6_c` was chosen for this. If `err2` (for `q1_candidate2_5dof`) happens to be numerically even closer to zero (e.g. `1e-18` vs `1e-17`), `_ik_5dof` would select `q1_candidate2_5dof`. Then `q1_s != q1_cand`, and this path is rejected by the 6DOF solver. This might disproportionately affect the "correct" `q6` branch.
+
+A slight modification to the `q1` selection in `_ik_5dof` to break ties in favor of a `q1` that is closer to the `q1_cand` that the 6-DOF solver is currently testing could be a solution, but `_ik_5dof` is not aware of `q1_cand`.
+
+The problem is likely that the "wrong" `q6` solution path is more numerically stable or less prone to internal rejection by `_ik_5dof` or the `q1_s == q1_cand` check.
+
+Final attempt: The normalization of angles.
+`q1_s_norm = math.fmod(q1_s + pi, 2*pi) - pi`
+`q1_cand_norm = math.fmod(q1_cand + pi, 2*pi) - pi`
+`diff_q1 = abs(q1_s_norm - q1_cand_norm)`
+`if diff_q1 > pi: diff_q1 = 2*pi - diff_q1`
+`if diff_q1 < tol:`
+This comparison logic for angles seems robust.
+
+The issue is deep in the branch selection. The provided `EXISTING` code is for 5-DOF and might not perfectly translate its branch preferences when used as a component in a 6-DOF solver where the input orientation `R_0_5_frame` can be one of two forms due to `q6` ambiguity.
+
+```python
+import math
+import numpy as np
+
+# --- Start of Helper: Rotation Matrix Utilities ---
+def _rpy_to_matrix(roll: float, pitch: float, yaw: float) -> np.ndarray:
+    cr, sr = math.cos(roll), math.sin(roll)
+    cp, sp = math.cos(pitch), math.sin(pitch)
+    cy, sy = math.cos(yaw), math.sin(yaw)
+    Rx = np.array([[1, 0, 0], [0, cr, -sr], [0, sr, cr]], dtype=float)
+    Ry_mat = np.array([[cp, 0, sp], [0, 1, 0], [-sp, 0, cp]], dtype=float)
+    Rz_mat = np.array([[cy, -sy, 0], [sy, cy, 0], [0, 0, 1]], dtype=float)
+    return Rz_mat @ Ry_mat @ Rx
+
+def _matrix_to_rpy(R: np.ndarray) -> tuple[float, float, float]:
+    sy = math.sqrt(R[0,0]**2 + R[1,0]**2) # cos(pitch)
+    singular_threshold = 1e-6
+    
+    if sy > singular_threshold: # Not singular
+        roll = math.atan2(R[2,1], R[2,2])
+        pitch = math.atan2(-R[2,0], sy)
+        yaw = math.atan2(R[1,0], R[0,0])
+    else: # Singular case: pitch is +/- pi/2
+        pitch_plus_half_pi = R[2,0] < -0.99999 # R[2,0] = -sin(pitch)
+        pitch_minus_half_pi = R[2,0] > 0.99999
+
+        if pitch_plus_half_pi: # pitch = +pi/2
+            pitch = math.pi / 2.0
+            yaw = 0.0 # Convention
+            roll = math.atan2(R[0,1], R[1,1]) # yaw=0 => R[0,1]=sin(r), R[1,1]=cos(r) (from Rz(0)Ry(pi/2)Rx(r))
+                                             # Rz(y)Ry(p)Rx(r): if y=0, p=pi/2: R[0,1]=sin(r), R[1,1]=cos(r)
+        elif pitch_minus_half_pi: # pitch = -pi/2
+            pitch = -math.pi / 2.0
+            yaw = 0.0 # Convention
+            roll = math.atan2(-R[0,1], R[1,1]) # yaw=0 => R[0,1]=-sin(r), R[1,1]=cos(r) (from Rz(0)Ry(-pi/2)Rx(r))
+                                              # Rz(y)Ry(p)Rx(r): if y=0, p=-pi/2: R[0,1]=-sin(r), R[1,1]=cos(r)
+        else: # Not quite singular, but sy is small. Use non-singular path but be wary.
+              # This case should ideally not be hit if singular_threshold is robust.
+              # Or, if R is ill-conditioned. For safety, fall back.
+            roll = math.atan2(R[2,1], R[2,2])
+            pitch = math.atan2(-R[2,0], sy if sy > 1e-9 else 1e-9) # Avoid division by zero if sy is extremely small
+            yaw = math.atan2(R[1,0], R[0,0])
+
+    return roll, pitch, yaw
+
+def _Ry_matrix(angle: float) -> np.ndarray:
+    c, s = math.cos(angle), math.sin(angle)
+    return np.array([[c,0,s],[0,1,0],[-s,0,c]], dtype=float)
+
+def _Rz_matrix(angle: float) -> np.ndarray:
+    c, s = math.cos(angle), math.sin(angle)
+    return np.array([[c,-s,0],[s,c,0],[0,0,1]], dtype=float)
+# --- End of Helper: Rotation Matrix Utilities ---
+
+# --- Start of Helper: 5-DOF IK Solver (adapted from EXISTING section) ---
+def _ik_5dof(p_5dof_tuple: tuple[float, float, float], 
+             r_5dof_tuple: tuple[float, float, float],
+             q1_target_for_tie_breaking: float # Added for 6-DOF context
+            ) -> tuple[float, float, float, float, float]:
+    L1 = 0.425
+    L2 = 0.39225
+    L_tcp = 0.09465 
+    y_const = 0.13585 - 0.1197 + 0.093
+    pi = math.pi
+    tol = 1e-7 # General tolerance
+
+    p_x, p_y, p_z = p_5dof_tuple
+    roll, pitch, yaw = r_5dof_tuple
+    
+    R_des = _rpy_to_matrix(roll, pitch, yaw)
+
+    r_xy = math.sqrt(p_x ** 2 + p_y ** 2)
+    
+    q1_candidates_5dof = []
+    if r_xy < tol: 
+        if abs(y_const) < tol:
+            theta = 0.0
+            a = 0.0 # asin(0/small_number) -> can be 0 if y_const is 0
+            q1_candidates_5dof.extend([theta - a, theta - (pi - a)])
+        else:
+            raise ValueError("5-DOF: Unreachable (P_wc on Z-axis, y_const != 0)")
+    else:
+        theta = math.atan2(p_y, p_x)
+        ratio = y_const / r_xy
+        if abs(ratio) > 1.0 + tol:
+             raise ValueError(f"5-DOF: Unreachable q1 (asin out of bounds: {ratio})")
+        ratio = max(-1.0, min(1.0, ratio))
+        a = math.asin(ratio)
+        q1_candidates_5dof.extend([theta - a, theta - (pi - a)])
+
+    valid_q1_solutions = []
+    for q1_val in q1_candidates_5dof:
+        cos_q1 = math.cos(q1_val)
+        sin_q1 = math.sin(q1_val)
+        Rz_neg_q1 = np.array([[cos_q1, sin_q1, 0], [-sin_q1, cos_q1, 0], [0, 0, 1]], dtype=float)
+        M_val = Rz_neg_q1 @ R_des
+        valid_q1_solutions.append({'q1': q1_val, 'M': M_val, 'err_m12': abs(M_val[1,2])})
+    
+    if not valid_q1_solutions:
+        raise ValueError("5-DOF: No valid q1 candidates found.")
+
+    # Sort by error, then by closeness to q1_target_for_tie_breaking
+    valid_q1_solutions.sort(key=lambda s: (s['err_m12'], abs( (s['q1'] - q1_target_for_tie_breaking + pi) % (2*pi) - pi) ) )
+    
+    chosen_q1_solution = valid_q1_solutions[0]
+    q1 = chosen_q1_solution['q1']
+    M = chosen_q1_solution['M']
+
+    if abs(M[1,2]) > 1e-4 : # Check if M[1,2] is reasonably close to zero
+        # This might indicate an issue if the chosen q1 is not compatible
+        pass # Allow to proceed, but this is a warning sign
+
+    cos_q1 = math.cos(q1)
+    sin_q1 = math.sin(q1)
+    Rz_neg_q1_mat = np.array([[cos_q1, sin_q1, 0], [-sin_q1, cos_q1, 0], [0, 0, 1]], dtype=float)
+    p_vec = np.array([p_x, p_y, p_z], dtype=float)
+    p_bar = Rz_neg_q1_mat @ p_vec
+    p_bar_x, _, p_bar_z = p_bar 
+
+    phi = math.atan2(M[0, 2], M[2, 2]) 
+    q5 = math.atan2(M[1, 0], M[1, 1])
+
+    P_x_planar = p_bar_x - L_tcp * math.sin(phi)
+    P_z_planar = p_bar_z - L_tcp * math.cos(phi)
+    
+    r2_planar_sq = P_x_planar**2 + P_z_planar**2
+    
+    # Check reachability for 2R arm more carefully
+    L_sum_sq = (L1 + L2)**2
+    L_diff_sq = (L1 - L2)**2
+    
+    if r2_planar_sq > L_sum_sq * (1 + tol) or r2_planar_sq < L_diff_sq * (1 - tol): # Add tolerance
+        # If significantly outside, it's an issue.
+        # If slightly outside, clamping cos_q3_val will handle it.
+        pass
+
+    cos_q3_val_num = r2_planar_sq - L1**2 - L2**2
+    cos_q3_val_den = 2 * L1 * L2
+    if abs(cos_q3_val_den) < tol: # L1 or L2 is zero, or bad input
+        raise ValueError("5-DOF: L1 or L2 is zero in 2R arm.")
+        
+    cos_q3_val = cos_q3_val_num / cos_q3_val_den
+    cos_q3_val = max(-1.0, min(1.0, cos_q3_val)) 
+    
+    q3_candidateA = math.acos(cos_q3_val)
+    q3_candidateB = -q3_candidateA
+
+    solutions_2R = []
+    for q3_val in [q3_candidateA, q3_candidateB]:
+        # Denominator for second atan2 term in q2 calculation
+        den_q2_beta = L1 + L2 * math.cos(q3_val)
+        if abs(den_q2_beta) < tol and abs(L2 * math.sin(q3_val)) < tol : # atan2(0,0) case
+             # This happens if L1+L2c3=0 and L2s3=0.
+             # If L2=0, this is fine, beta=0. If L2!=0, then s3=0, c3=-L1/L2.
+             # If L1=L2, c3=-1 (q3=pi). If L1!=L2, |L1/L2| must be <=1.
+             # If q3=pi, L1-L2. If P_x_planar, P_z_planar are also 0, then q2 is indeterminate.
+             # For now, let beta be 0 if num and den are 0.
+             beta = 0.0
+        else:
+             beta = math.atan2(L2 * math.sin(q3_val), den_q2_beta)
+        
+        q2_val = math.atan2(P_x_planar, P_z_planar) - beta
+        q4_val = phi - (q2_val + q3_val)
+        
+        calc_x_rec = L1 * math.sin(q2_val) + L2 * math.sin(q2_val + q3_val) + L_tcp * math.sin(phi)
+        calc_z_rec = L1 * math.cos(q2_val) + L2 * math.cos(q2_val + q3_val) + L_tcp * math.cos(phi)
+        err_val = math.sqrt((calc_x_rec - p_bar_x)**2 + (calc_z_rec - p_bar_z)**2)
+        solutions_2R.append({'q2':q2_val, 'q3':q3_val, 'q4':q4_val, 'err':err_val})
+
+    if not solutions_2R:
+        raise ValueError("5-DOF: No solution found in planar subproblem.")
+
+    solutions_2R.sort(key=lambda x: x['err'])
+    best_2R = solutions_2R[0]
+    
+    return q1, best_2R['q2'], best_2R['q3'], best_2R['q4'], q5
+# --- End of Helper: 5-DOF IK Solver ---
+
+def inverse_kinematics(p: tuple[float, float, float], r: tuple[float, float, float]) -> tuple[float, float, float, float, float, float]:
+    d_tcp_offset_vec = np.array([0, 0.0823, 0], dtype=float)
+    y_const_for_q1 = 0.13585 - 0.1197 + 0.093 
+    pi = math.pi
+    tol = 1e-7 
+
+    R_tcp_fixed_inv = np.array([[0,1,0],[-1,0,0],[0,0,1]], dtype=float) # Rz(-pi/2)
+
+    p_target_vec = np.array(p, dtype=float)
+    R_target = _rpy_to_matrix(r[0], r[1], r[2])
+
+    R_0_6 = R_target @ R_tcp_fixed_inv
+    P_wc_vec = p_target_vec - R_0_6 @ d_tcp_offset_vec
+    
+    P_wc_x, P_wc_y = P_wc_vec[0], P_wc_vec[1]
+    r_xy_q1 = math.sqrt(P_wc_x**2 + P_wc_y**2)
+    
+    q1_cand_forms_6dof = []
+    if r_xy_q1 < tol:
+        if abs(y_const_for_q1) < tol:
+            theta_q1 = 0.0
+            a_q1 = 0.0 
+            q1_cand_forms_6dof.extend([theta_q1 - a_q1, theta_q1 - (pi - a_q1)])
+        else: 
+            raise ValueError("IK: Unreachable q1 (P_wc on Z, y_const != 0)")
+    else:
+        theta_q1 = math.atan2(P_wc_y, P_wc_x)
+        ratio_q1 = y_const_for_q1 / r_xy_q1
+        if abs(ratio_q1) > 1.0 + tol : 
+             raise ValueError(f"IK: Unreachable q1 (asin out of bounds: {ratio_q1})")
+        ratio_q1 = max(-1.0, min(1.0, ratio_q1))
+        a_q1 = math.asin(ratio_q1)
+        q1_cand_forms_6dof.extend([theta_q1 - a_q1, theta_q1 - (pi - a_q1)])
+
+    all_found_solutions = []
+
+    for q1_cand in q1_cand_forms_6dof:
+        R_z_neg_q1 = _Rz_matrix(-q1_cand)
+        M_known_part = R_z_neg_q1 @ R_0_6 
+        
+        mkp_10 = M_known_part[1,0] 
+        mkp_12 = M_known_part[1,2] 
+        
+        current_q6_candidates = []
+        if abs(mkp_10) < tol and abs(mkp_12) < tol:
+            current_q6_candidates.append(0.0) # Convention for this singularity
+        else:
+            q6_base = math.atan2(mkp_12, mkp_10)
+            current_q6_candidates.append(q6_base)
+            current_q6_candidates.append(math.fmod(q6_base + pi + pi, 2*pi) - pi) # Normalized +pi version
+
+        for q6_c in current_q6_candidates:
+            R_0_5_frame = R_0_6 @ _Ry_matrix(-q6_c)
+            
+            try:
+                r_5dof_roll, r_5dof_pitch, r_5dof_yaw = _matrix_to_rpy(R_0_5_frame)
+            except ValueError: 
+                continue
+
+            r_5dof_tuple = (r_5dof_roll, r_5dof_pitch, r_5dof_yaw)
+            P_wc_tuple = tuple(P_wc_vec)
+
+            try:
+                q1_s, q2_s, q3_s, q4_s, q5_s = _ik_5dof(P_wc_tuple, r_5dof_tuple, q1_cand) # Pass q1_cand for tie-breaking
+            except ValueError: 
+                continue
+            
+            q1_s_norm = math.fmod(q1_s + pi, 2*pi) - pi
+            q1_cand_norm = math.fmod(q1_cand + pi, 2*pi) - pi
+            
+            diff_q1 = abs(q1_s_norm - q1_cand_norm)
+            if diff_q1 > pi - tol : # Handle wrap-around for angles like -pi vs pi
+                diff_q1 = 2*pi - diff_q1
+            
+            if diff_q1 < tol:
+                # Store this valid solution
+                result_angles = [q1_s, q2_s, q3_s, q4_s, q5_s, q6_c]
+                # Normalization to [-pi, pi]
+                normalized_result = []
+                for angle_val in result_angles:
+                    norm_angle = math.fmod(angle_val + pi, 2*pi) - pi
+                    if abs(norm_angle + pi) < tol and abs(angle_val - pi) < tol and angle_val > 0: 
+                        normalized_result.append(pi)
+                    else:
+                        normalized_result.append(norm_angle)
+                all_found_solutions.append(tuple(normalized_result))
+
+
+    if not all_found_solutions:
+        raise ValueError("6-DOF IK solution not found after checking all branches.")
+
+    # If multiple solutions were found (e.g. from different q1_cand or q6_c),
+    # we need a consistent way to pick one. The problem implies one analytical solution.
+    # The first one found that passes all checks is usually the convention.
+    # The prompt implies that a solution should be found.
+    # For now, return the first one. If the tie-breaking in _ik_5dof is good, this should be more stable.
+    return all_found_solutions[0]
+
+```

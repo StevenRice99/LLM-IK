@@ -1,0 +1,191 @@
+To derive the inverse kinematics solution for the given 4-DOF serial manipulator, we will follow a geometric and algebraic approach. The goal is to find the joint angles (q1, q2, q3, q4) that achieve a target TCP position `p = (px, py, pz)` and orientation `r = (roll, pitch, yaw)`.
+
+**Robot Structure and Parameters:**
+Let's define the link parameters based on the provided details:
+- `L0y = 0.13585`: Offset from Joint 1's frame to Joint 2's origin, along Joint 1's Y-axis.
+- `l2y = -0.1197`: Offset from Joint 2's frame to Joint 3's origin, along Joint 2's Y-axis.
+- `l2z = 0.425`: Offset from Joint 2's frame to Joint 3's origin, along Joint 2's Z-axis.
+- `l3z = 0.39225`: Offset from Joint 3's frame to Joint 4's origin, along Joint 3's Z-axis. (Joint 4's origin is the wrist center).
+- `TCP_offset_y = 0.093`: Offset from Joint 4's frame (wrist center) to the TCP, along Joint 4's Y-axis.
+
+The joint axes are:
+- q1: Revolute around Z-axis of the base frame.
+- q2: Revolute around Y-axis of Joint 2's frame.
+- q3: Revolute around Y-axis of Joint 3's frame.
+- q4: Revolute around Y-axis of Joint 4's frame.
+
+The TCP orientation is specified as [0,0,0] relative to Link 4's frame. This means the orientation of Link 4's frame is the target TCP orientation.
+
+**Inverse Kinematics Steps:**
+
+1.  **Calculate Target Rotation Matrix (R_target):**
+    The input orientation `r = (roll, pitch, yaw)` is converted into a 3x3 rotation matrix `R_target`. We assume the RPY convention is Rz(yaw)Ry(pitch)Rx(roll).
+    `R_target = [[r11, r12, r13], [r21, r22, r23], [r31, r32, r33]]`
+
+2.  **Calculate Wrist Center Position (P_wc):**
+    The wrist center (P_wc) is the origin of Link 4. The TCP is offset from P_wc by `TCP_offset_y` along the Y-axis of Link 4's frame (which has orientation `R_target`).
+    `P_wc = P_target - R_target * [0, TCP_offset_y, 0]^T`
+    `pwx = px - r12 * TCP_offset_y`
+    `pwy = py - r22 * TCP_offset_y`
+    `pwz = pz - r32 * TCP_offset_y`
+
+3.  **Solve for Joint 1 (q1):**
+    The overall rotation of the arm can be expressed as `R_target = Rz(q1) * Ry(q2) * Ry(q3) * Ry(q4) = Rz(q1) * Ry(q_sum)`, where `q_sum = q2 + q3 + q4`.
+    Comparing `R_target` to the structure `Rz(q1)Ry(q_sum)`:
+    `Rz(q1)Ry(q_sum) = [[c1*cs, -s1, c1*ss], [s1*cs, c1, s1*ss], [-ss, 0, cs]]`
+    (where c1=cos(q1), s1=sin(q1), cs=cos(q_sum), ss=sin(q_sum))
+    From the second column, `r12 = -s1` and `r22 = c1`.
+    Thus, `q1 = atan2(-r12, r22)`.
+    This implies `r32` from the RPY calculation must be 0 for the target to be reachable by this orientation structure. The problem assumes reachability.
+
+4.  **Solve for q_sum = q2 + q3 + q4:**
+    From the third row and first/third columns of `Rz(q1)Ry(q_sum)`: `r31 = -ss` and `r33 = cs`.
+    Thus, `q_sum = atan2(-r31, r33)`.
+
+5.  **Solve for Joints 2 (q2) and 3 (q3):**
+    Transform `P_wc` into Frame 1 (the frame after q1 rotation, with origin at base):
+    `P_wc_in_F1_origin = Rz(-q1) * P_wc`
+    `x_F1o = c1*pwx + s1*pwy`
+    `y_F1o = -s1*pwx + c1*pwy`
+    `z_F1o = pwz`
+    The origin of Joint 2 in Frame 1 is `O_j2_in_F1 = [0, L0y, 0]^T`.
+    The vector from `O_j2_in_F1` to `P_wc_in_F1_origin` (let's call its components `vx, vy, vz` in Frame 1) is:
+    `vx = x_F1o`
+    `vy = y_F1o - L0y`
+    `vz = z_F1o`
+    This vector `[vx, vy, vz]^T` is formed by the chain from Joint 2 onwards:
+    `[vx, vy, vz]^T = Ry(q2) * ( [0, l2y, l2z]^T + Ry(q3) * [0, 0, l3z]^T )`
+    Expanding this:
+    `[vx, vy, vz]^T = Ry(q2) * [l3z*s3, l2y, l2z + l3z*c3]^T`
+    `vx = c2*(l3z*s3) + s2*(l2z + l3z*c3)`
+    `vy = l2y`
+    `vz = -s2*(l3z*s3) + c2*(l2z + l3z*c3)`
+    From `vy = l2y`, we have a consistency check: `y_F1o - L0y = l2y`.
+    For q3: `vx^2 + vz^2 = (l3z*s3)^2 + (l2z + l3z*c3)^2 = l2z^2 + l3z^2 + 2*l2z*l3z*c3`.
+    `cos(q3) = (vx^2 + vz^2 - l2z^2 - l3z^2) / (2 * l2z * l3z)`
+    `q3 = acos(cos(q3))`. We choose the solution with `q3` in `[0, pi]`, so `sin(q3) >= 0`.
+    For q2: Let `X_arm = l3z*sin(q3)` and `Z_arm = l2z + l3z*cos(q3)`.
+    `vx = c2*X_arm + s2*Z_arm`
+    `vz = -s2*X_arm + c2*Z_arm`
+    Solving for `c2` and `s2`:
+    `c2 = (vx*X_arm + vz*Z_arm) / (X_arm^2 + Z_arm^2)`
+    `s2 = (vx*Z_arm - vz*X_arm) / (X_arm^2 + Z_arm^2)`
+    (Denominator `X_arm^2 + Z_arm^2 = vx^2 + vz^2`, which should be non-zero if reachable and not at a singularity specific to `l2z=l3z`).
+    `q2 = atan2(s2, c2)`.
+
+6.  **Solve for Joint 4 (q4):**
+    `q4 = q_sum - q2 - q3`.
+
+The joint angles are returned as a tuple `(q1, q2, q3, q4)`.
+
+```python
+import math
+
+def inverse_kinematics(p: tuple[float, float, float], r: tuple[float, float, float]) -> tuple[float, float, float, float]:
+    px, py, pz = p
+    rx_in, ry_in, rz_in = r # roll, pitch, yaw
+
+    # Link parameters
+    L0y = 0.13585
+    l2y = -0.1197
+    l2z = 0.425
+    l3z = 0.39225
+    TCP_offset_y = 0.093
+
+    # 1. Calculate R_target from r_angles (Rz(yaw)Ry(pitch)Rx(roll))
+    crx = math.cos(rx_in)
+    srx = math.sin(rx_in)
+    cry = math.cos(ry_in)
+    sry = math.sin(ry_in)
+    crz = math.cos(rz_in)
+    srz = math.sin(rz_in)
+
+    r11 = crz * cry
+    r12 = crz * sry * srx - srz * crx
+    r13 = crz * sry * crx + srz * srx
+    r21 = srz * cry
+    r22 = srz * sry * srx + crz * crx
+    r23 = srz * sry * crx - crz * srx
+    r31 = -sry
+    r32 = cry * srx
+    r33 = cry * crx
+    
+    # 2. Calculate Wrist Center P_wc
+    pwx = px - r12 * TCP_offset_y
+    pwy = py - r22 * TCP_offset_y
+    pwz = pz - r32 * TCP_offset_y
+
+    # 3. Solve for q1
+    # For R_target = Rz(q1)Ry(q_sum), r12_struct = -sin(q1), r22_struct = cos(q1)
+    # Assuming reachable target, r12 and r22 from RPY matrix correspond to these.
+    s1_val = -r12
+    c1_val = r22
+    q1 = math.atan2(s1_val, c1_val)
+
+    # 4. Solve for q_sum = q2+q3+q4
+    # For R_target = Rz(q1)Ry(q_sum), r31_struct = -sin(q_sum), r33_struct = cos(q_sum)
+    s_sum_val = -r31
+    c_sum_val = r33
+    q_sum = math.atan2(s_sum_val, c_sum_val)
+
+    # 5. Solve for q2, q3
+    # Transform P_wc into Frame 1 (rotated by q1)
+    # Use c1_val, s1_val which are cos(q1) and sin(q1)
+    # Note: c1_val = cos(atan2(s1_val,c1_val)), s1_val = sin(atan2(s1_val,c1_val)) if normalized.
+    # It's better to use the c1_val and s1_val directly if they are already cos/sin.
+    # However, atan2(s,c) gives angle, then sin/cos of that angle is safer.
+    c1 = math.cos(q1)
+    s1 = math.sin(q1)
+
+    x_F1o = c1 * pwx + s1 * pwy
+    y_F1o = -s1 * pwx + c1 * pwy # y_F1o - L0y should be l2y
+    z_F1o = pwz
+
+    vx = x_F1o
+    vz = z_F1o
+    
+    # Solve for q3
+    # cos(q3) = (vx^2 + vz^2 - l2z^2 - l3z^2) / (2 * l2z * l3z)
+    # Denominator 2*l2z*l3z is non-zero.
+    val_for_acos = (vx**2 + vz**2 - l2z**2 - l3z**2) / (2 * l2z * l3z)
+    
+    if val_for_acos > 1.0: val_for_acos = 1.0
+    elif val_for_acos < -1.0: val_for_acos = -1.0
+    
+    q3 = math.acos(val_for_acos) # q3 in [0, pi]
+
+    s3 = math.sin(q3)
+    c3 = math.cos(q3) # or val_for_acos
+
+    # Solve for q2
+    X_arm = l3z * s3
+    Z_arm = l2z + l3z * c3
+    
+    denominator_q2 = X_arm**2 + Z_arm**2 # This is vx^2 + vz^2
+    if denominator_q2 < 1e-12: # Effectively zero
+        # This case implies vx=0 and vz=0.
+        # This means P_wc is on the J2 axis in the F1 frame.
+        # If X_arm and Z_arm are also zero (e.g. l2z=l3z and q3=pi), q2 is indeterminate.
+        # However, for this robot's dimensions, l2z != l3z, so X_arm and Z_arm are not simultaneously zero.
+        # If vx=vz=0, then X_arm^2+Z_arm^2 = 0.
+        # This implies specific q3 that makes X_arm=0 and Z_arm=0.
+        # s3=0 (q3=0 or pi). If q3=0, Z_arm=l2z+l3z. If q3=pi, Z_arm=l2z-l3z.
+        # For both X_arm and Z_arm to be zero, l3z must be zero, and (l2z+l3z*c3) must be zero.
+        # Since l3z is not zero, X_arm and Z_arm are not simultaneously zero.
+        # So denominator_q2 (vx^2+vz^2) should not be zero if reachable.
+        # If it is, it's a singularity not handled here, but problem assumes reachability.
+        # A safe default if this unlikely case occurs:
+        c2_val = 1.0 
+        s2_val = 0.0
+    else:
+        c2_val = (vx * X_arm + vz * Z_arm) / denominator_q2
+        s2_val = (vx * Z_arm - vz * X_arm) / denominator_q2
+
+    q2 = math.atan2(s2_val, c2_val)
+
+    # 6. Solve for q4
+    q4 = q_sum - q2 - q3
+
+    return (q1, q2, q3, q4)
+
+```

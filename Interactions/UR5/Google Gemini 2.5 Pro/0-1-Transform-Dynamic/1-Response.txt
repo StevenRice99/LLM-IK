@@ -1,0 +1,99 @@
+To derive the inverse kinematics solution for the given 2-DOF robot, we will determine the joint angles `theta1` (for Revolute 1, Z-axis rotation) and `theta2` (for Revolute 2, Y-axis rotation) that achieve the target TCP position `p = (px, py, pz)` and orientation `r = (rx, ry, rz)`. The problem states that all target poses `(p,r)` are reachable.
+
+The robot kinematics are as follows:
+1.  **Revolute 1**: Rotation `theta1` about the Z-axis. Origin at `[0,0,0]`.
+2.  **Revolute 2**: Located at `[0, L1y, 0]` relative to Link 1's frame, where `L1y = 0.13585`. Rotation `theta2` about its local Y-axis.
+3.  **TCP**: Located at `[0, L2y_tcp, L2z_tcp]` relative to Link 2's frame, where `L2y_tcp = -0.1197` and `L2z_tcp = 0.425`. The TCP has a fixed orientation `[0,0,0]` RPY relative to Link 2.
+
+The forward kinematics equations for the TCP position `(px, py, pz)` are:
+`px = cos(theta1) * (sin(theta2) * L2z_tcp) - sin(theta1) * (L1y + L2y_tcp)`
+`py = sin(theta1) * (sin(theta2) * L2z_tcp) + cos(theta1) * (L1y + L2y_tcp)`
+`pz = cos(theta2) * L2z_tcp`
+
+The orientation of the TCP is determined by `RotZ(theta1) * RotY(theta2)`. When converted to RPY Euler angles (roll, pitch, yaw, corresponding to `r = (rx, ry, rz)`), and assuming not in a gimbal lock configuration:
+*   `roll (rx)` will be 0.
+*   `pitch (ry)` will be `theta2`.
+*   `yaw (rz)` will be `theta1`.
+
+Given that the target `(p,r)` is reachable:
+1.  The target roll `r[0]` must be 0 (or compatible, which we assume means 0 for a non-gimbal lock case).
+2.  The target pitch `r[1]` must correspond to `theta2`. Thus, `theta2 = r[1]`.
+3.  The target yaw `r[2]` must correspond to `theta1`.
+
+We can use `theta2 = r[1]` to simplify the position equations.
+Let `s2 = sin(theta2)` and `c2 = cos(theta2)`.
+The `pz` equation `pz = c2 * L2z_tcp` must hold. This is guaranteed by the reachability assumption.
+
+Now, let's define intermediate coefficients:
+`X_coeff = s2 * L2z_tcp`
+`Y_coeff = L1y + L2y_tcp = 0.13585 - 0.1197 = 0.01615`
+
+The equations for `px` and `py` become:
+`px = X_coeff * cos(theta1) - Y_coeff * sin(theta1)`
+`py = X_coeff * sin(theta1) + Y_coeff * cos(theta1)`
+
+This is a standard problem that can be solved for `theta1` using `atan2`. If we have:
+`x = A * cos(phi) - B * sin(phi)`
+`y = A * sin(phi) + B * cos(phi)`
+Then `phi = atan2(y, x) - atan2(B, A)`.
+In our case, `A = X_coeff`, `B = Y_coeff`, and `phi = theta1`.
+So, `theta1 = atan2(py, px) - atan2(Y_coeff, X_coeff)`.
+
+The reachability assumption also guarantees that this calculated `theta1` will be consistent with the target yaw `r[2]` (modulo 2*pi).
+
+The final IK solution is:
+1.  Set `theta2 = r[1]`.
+2.  Calculate `s2 = sin(theta2)`.
+3.  Calculate `X_coeff = s2 * L2z_tcp`.
+4.  `Y_coeff` is constant `0.01615`.
+5.  Calculate `theta1 = atan2(py, px) - atan2(Y_coeff, X_coeff)`.
+6.  Return `(theta1, theta2)`.
+
+```python
+import math
+
+def inverse_kinematics(p: tuple[float, float, float], r: tuple[float, float, float]) -> tuple[float, float]:
+    """
+    Gets the joint values needed to reach position "p" and orientation "r".
+    :param p: The position to reach in the form [x, y, z].
+    :param r: The orientation to reach in radians in the form [rx, ry, rz] (roll, pitch, yaw).
+              It's assumed that for a reachable target, r[0] (roll) will be 0.
+    :return: A tuple of the joint values (joint1, joint2) for reaching position "p" and orientation "r".
+    """
+    px, py, pz = p
+    # r[0] is roll (rx), r[1] is pitch (ry), r[2] is yaw (rz).
+
+    # Robot geometric constants
+    L1y = 0.13585      # Link 2's Y offset from Link 1 in Link 1's frame
+    L2y_tcp = -0.1197  # TCP's Y offset from Link 2 in Link 2's frame
+    L2z_tcp = 0.425    # TCP's Z offset from Link 2 in Link 2's frame
+
+    # Based on the robot's structure and the reachability assumption,
+    # joint 2 (theta2) corresponds to the target pitch (r[1]).
+    theta2 = r[1]
+
+    # Calculate trigonometric values for theta2
+    s2 = math.sin(theta2)
+    # c2 = math.cos(theta2) # Used for pz consistency: pz = L2z_tcp * c2
+
+    # Define coefficients for solving theta1, based on forward kinematics
+    # X_coeff and Y_coeff are effectively the coordinates of a point in Link 1's
+    # (theta1-rotated) XY plane that would result in the TCP's global XY position.
+    # px = X_coeff * cos(theta1) - Y_coeff * sin(theta1)
+    # py = X_coeff * sin(theta1) + Y_coeff * cos(theta1)
+    
+    X_coeff = s2 * L2z_tcp
+    Y_coeff = L1y + L2y_tcp  # This evaluates to 0.01615
+
+    # Solve for theta1 using atan2
+    # theta1 = atan2(py, px) - atan2(B, A) where A=X_coeff, B=Y_coeff
+    theta1 = math.atan2(py, px) - math.atan2(Y_coeff, X_coeff)
+
+    # The reachability assumption ensures that this (theta1, theta2) pair
+    # achieves the target position p, and the resulting orientation
+    # (roll=0, pitch=theta2, yaw=theta1) matches the target orientation r.
+    # Specifically, the calculated theta1 will be consistent with r[2].
+
+    return (theta1, theta2)
+
+```

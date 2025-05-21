@@ -1,0 +1,105 @@
+The primary issue identified in previous attempts was that the calculated `theta1` could be off by multiples of `2*pi` from the reference solution, and the selection of `theta2` needed to be robustly tied to the input orientation `r`. The feedback indicates that even when joint values are extremely close to the reference, failures are reported, suggesting that either the pose comparison is extremely sensitive or that matching the reference joint values (within their principal range) is key.
+
+Here's the refined strategy:
+
+1.  **Constants:**
+    *   `S = L2_z_tcp = 0.425`
+    *   `A = L1_y + L2_y_tcp = 0.13585 - 0.1197 = 0.01615`
+
+2.  **Solve for `theta2`:**
+    *   The Z-component of the TCP position is `pz = S * cos(theta2)`.
+    *   Thus, `cos_theta2_val = pz / S`. This value is clamped to `[-1, 1]` to prevent domain errors with `acos` due to potential floating-point inaccuracies.
+    *   This gives a magnitude for `theta2`: `theta2_abs = acos(cos_theta2_val)`, which is in `[0, pi]`.
+    *   The sign of `theta2` is determined by the target orientation. The TCP orientation matrix `R_tcp` has `R_tcp(2,0) = -sin(theta2)`. The target orientation matrix `R_target` (from ZYX Euler angles `r_roll, r_pitch, r_yaw`) has `R_target(2,0) = -sin(r_pitch)`.
+    *   Therefore, we must have `sin(theta2) = sin(r_pitch)`.
+    *   If `sin(r_pitch) < 0`, then `chosen_theta2 = -theta2_abs`.
+    *   Otherwise (`sin(r_pitch) >= 0`), `chosen_theta2 = theta2_abs`.
+    *   This ensures `chosen_theta2` is in `[-pi, pi]`, matches `pz`, and its sine matches `sin(r_pitch)`.
+
+3.  **Solve for `theta1`:**
+    *   The forward kinematics equations for `px` and `py` are:
+        `px = S * sin(chosen_theta2) * cos(theta1) - A * sin(theta1)`
+        `py = S * sin(chosen_theta2) * sin(theta1) + A * cos(theta1)`
+    *   Let `k1 = S * sin(chosen_theta2)` and `k2 = A`.
+        `px = k1*cos(theta1) - k2*sin(theta1)`
+        `py = k1*sin(theta1) + k2*cos(theta1)`
+    *   This system can be solved for `theta1` using `atan2`:
+        `theta1_raw = atan2(py, px) - atan2(k2, k1)`
+        `theta1_raw = atan2(py, px) - atan2(A, S * sin(chosen_theta2))`
+    *   The result `theta1_raw` can be in `(-2*pi, 2*pi)`.
+
+4.  **Normalize `theta1`:**
+    *   The feedback suggests that the reference solutions for `theta1` are typically within `(-pi, pi]`.
+    *   Normalize `theta1_raw` to this range using `norm_theta1 = math.atan2(math.sin(theta1_raw), math.cos(theta1_raw))`. This standard method correctly handles all angles and maps them to `(-pi, pi]`.
+
+This approach should yield joint angles consistent with the target position and orientation, with `theta1` normalized to a standard range, which is expected to align better with the reference solutions.
+
+```python
+import math
+
+# Constants from the problem description
+L1_Y_OFFSET = 0.13585
+TCP_Y_OFFSET_IN_L2 = -0.1197
+TCP_Z_OFFSET_IN_L2 = 0.425
+
+# Derived constants for IK
+S_PARAM = TCP_Z_OFFSET_IN_L2  # Effective length for pz calculation from theta2
+A_PARAM = L1_Y_OFFSET + TCP_Y_OFFSET_IN_L2 # Effective Y offset in J1's XY plane projection before J2's Z contribution
+
+def inverse_kinematics(p: tuple[float, float, float], r: tuple[float, float, float]) -> tuple[float, float]:
+    """
+    Gets the joint values needed to reach position "p" and orientation "r".
+    :param p: The position to reach in the form [px, py, pz].
+    :param r: The orientation to reach in radians in the form [roll, pitch, yaw].
+    :return: A tuple (joint1_angle, joint2_angle) in radians.
+    """
+    px, py, pz = p
+    r_roll, r_pitch, r_yaw = r
+
+    # Step 1: Solve for theta2
+    # pz = S_PARAM * cos(theta2)
+    cos_theta2_val = pz / S_PARAM
+    
+    # Clamp cos_theta2_val to [-1, 1] to avoid domain errors with math.acos
+    if cos_theta2_val > 1.0:
+        cos_theta2_val = 1.0
+    elif cos_theta2_val < -1.0:
+        cos_theta2_val = -1.0
+        
+    theta2_abs = math.acos(cos_theta2_val)  # Result in [0, pi]
+
+    # Determine sign of theta2 based on sin(r_pitch)
+    # From orientation matrix comparison: sin(theta2) must equal sin(r_pitch)
+    # (assuming the target (p,r) is reachable by this robot structure)
+    sin_r_pitch = math.sin(r_pitch)
+    
+    chosen_theta2: float
+    # A small tolerance for checking the sign of sin_r_pitch against zero
+    # If sin_r_pitch is effectively zero, sin(theta2_abs) should also be zero.
+    # theta2_abs is in [0,pi], so sin(theta2_abs) >= 0.
+    # If sin_r_pitch is negative, chosen_theta2 must have a negative sine.
+    if sin_r_pitch < -1e-9: # Check if significantly negative
+        chosen_theta2 = -theta2_abs
+    else: # sin_r_pitch is positive or very close to zero
+        chosen_theta2 = theta2_abs
+        
+    # Step 2: Solve for theta1
+    # px = S_PARAM*sin(chosen_theta2)*cos(theta1) - A_PARAM*sin(theta1)
+    # py = S_PARAM*sin(chosen_theta2)*sin(theta1) + A_PARAM*cos(theta1)
+    # Let k1 = S_PARAM*sin(chosen_theta2)
+    # Let k2 = A_PARAM
+    # theta1_raw = atan2(py, px) - atan2(k2, k1)
+    
+    sin_chosen_theta2 = math.sin(chosen_theta2)
+    k1 = S_PARAM * sin_chosen_theta2
+    k2 = A_PARAM
+    
+    theta1_raw = math.atan2(py, px) - math.atan2(k2, k1)
+
+    # Step 3: Normalize theta1 to the range (-pi, pi]
+    # This helps match the typical output range of reference IK solvers.
+    norm_theta1 = math.atan2(math.sin(theta1_raw), math.cos(theta1_raw))
+
+    return (norm_theta1, chosen_theta2)
+
+```

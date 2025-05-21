@@ -1,0 +1,199 @@
+To derive the inverse kinematics solution for the given 3-DOF serial manipulator, we will follow these steps:
+
+**Nomenclature and Constants:**
+Let the joint angles be `q1, q2, q3`.
+Link parameters (from "DETAILS" section):
+*   `d1y = 0.13585`: Offset from J1 origin to J2 origin, along Y-axis of Frame 1 (after J1 rotation).
+*   `d2y = -0.1197`: Offset from J2 origin to J3 origin, along Y-axis of Frame 2 (after J2 rotation).
+*   `d2z = 0.425`: Offset from J2 origin to J3 origin, along Z-axis of Frame 2.
+*   `d3z = 0.39225`: Offset from J3 origin to TCP, along Z-axis of Frame 3 (after J3 rotation).
+
+Target TCP position: `P_tcp = (px, py, pz)`.
+Target TCP orientation: `r = (rx, ry, rz)` (roll, pitch, yaw Euler angles ZYX).
+
+**Step 1: Calculate the Wrist Center Position (P_wc)**
+The wrist center `P_wc` is the origin of Joint 3's frame.
+We first need the rotation matrix of the target TCP orientation, `R_tcp_base`. Assuming ZYX Euler angles `(rz, ry, rx)` for `(yaw, pitch, roll)`:
+`R_tcp_base = Rz(rz) * Ry(ry) * Rx(rx)`.
+The vector from J3's origin to the TCP, in J3's frame, is `V_j3_tcp_local = [0, 0, d3z]^T`.
+So, `P_wc = P_tcp - R_tcp_base * V_j3_tcp_local`.
+Let `P_wc = (pwc_x, pwc_y, pwc_z)`.
+
+**Step 2: Solve for Joint 1 (q1)**
+The position of `P_wc` in the base frame can be expressed as:
+`P_wc = Rz(q1) * V_wc_f1`
+where `V_wc_f1` is the position of `P_wc` in Frame 1 (after J1 rotation).
+`V_wc_f1 = [X_coord_in_F1, Y_coord_in_F1, Z_coord_in_F1]^T`.
+The components of `V_wc_f1` are:
+`X_coord_in_F1 = d2z * sin(q2)`
+`Y_coord_in_F1 = d1y + d2y`
+`Z_coord_in_F1 = d2z * cos(q2)`
+So,
+`pwc_x = (d2z*sin(q2))*cos(q1) - (d1y+d2y)*sin(q1)`
+`pwc_y = (d2z*sin(q2))*sin(q1) + (d1y+d2y)*cos(q1)`
+`pwc_z = d2z*cos(q2)`
+
+From the equations for `pwc_x` and `pwc_y`, we can write:
+`Rz(-q1) * [pwc_x, pwc_y]^T = [d2z*sin(q2), d1y+d2y]^T`.
+So, the Y-component in Frame 1 is:
+`-pwc_x*sin(q1) + pwc_y*cos(q1) = d1y + d2y`.
+Let `K = d1y + d2y`.
+`pwc_y*cos(q1) - pwc_x*sin(q1) = K`.
+This can be solved for `q1`:
+`q1 = atan2(pwc_y, pwc_x) - atan2(K, sqrt(pwc_x^2 + pwc_y^2 - K^2))`
+Or, more commonly: `q1 = atan2(pwc_y, pwc_x) - asin(K / sqrt(pwc_x^2 + pwc_y^2))`.
+We'll use the `asin` form. A check for `sqrt(pwc_x^2+pwc_y^2)` being non-zero and `abs(K / sqrt(...)) <= 1` is needed. The problem assumes reachability.
+
+**Step 3: Solve for Joint 2 (q2)**
+Once `q1` is known, transform `P_wc` into Frame 1:
+`pwc_x_f1 = pwc_x*cos(q1) + pwc_y*sin(q1)`
+`pwc_y_f1 = -pwc_x*sin(q1) + pwc_y*cos(q1)` (This should be `K = d1y+d2y` by construction of `q1`)
+`pwc_z_f1 = pwc_z`
+
+We have `pwc_x_f1 = d2z*sin(q2)` and `pwc_z_f1 = d2z*cos(q2)`.
+So, `q2 = atan2(pwc_x_f1 / d2z, pwc_z_f1 / d2z) = atan2(pwc_x_f1, pwc_z_f1)`.
+
+**Step 4: Solve for Joint 3 (q3)**
+The overall rotation of the TCP is `R_tcp_base = Rz(q1) * Ry(q2) * Ry(q3)`.
+Therefore, `Ry(q3) = Ry(-q2) * Rz(-q1) * R_tcp_base`.
+Let `M = Ry(-q2) * Rz(-q1) * R_tcp_base`.
+`M` should be a pure Y-rotation matrix: `[[cos(q3), 0, sin(q3)], [0, 1, 0], [-sin(q3), 0, cos(q3)]]`.
+So, `q3 = atan2(M[0,2], M[0,0])`.
+
+This requires manual matrix multiplication helper functions.
+
+```python
+import math
+
+def inverse_kinematics(p: tuple[float, float, float], r: tuple[float, float, float]) -> tuple[float, float, float]:
+    """
+    Gets the joint values needed to reach position "p" and orientation "r".
+    :param p: The position to reach in the form [x, y, z].
+    :param r: The orientation to reach in radians in the form [rx, ry, rz] (roll, pitch, yaw ZYX).
+    :return: A list of the values to set the links to for reaching position "p" and orientation "r".
+    """
+    px, py, pz = p
+    rx, r_pitch, r_yaw = r # rx=roll, r_pitch=pitch, r_yaw=yaw
+
+    # Constants
+    d1y = 0.13585
+    d2y = -0.1197
+    d2z = 0.425
+    d3z = 0.39225
+
+    # Helper for ZYX Euler angles to rotation matrix
+    def euler_zyx_to_matrix(yaw, pitch, roll):
+        cy = math.cos(yaw)
+        sy = math.sin(yaw)
+        cp = math.cos(pitch)
+        sp = math.sin(pitch)
+        cr = math.cos(roll)
+        sr = math.sin(roll)
+
+        R = [
+            [cy*cp, cy*sp*sr - sy*cr, cy*sp*cr + sy*sr],
+            [sy*cp, sy*sp*sr + cy*cr, sy*sp*cr - cy*sr],
+            [-sp,   cp*sr,            cp*cr]
+        ]
+        return R
+
+    # Helper for matrix multiplication (3x3 * 3x1 vector)
+    def mat_vec_mult(mat, vec):
+        res = [0.0, 0.0, 0.0]
+        for i in range(3):
+            for j in range(3):
+                res[i] += mat[i][j] * vec[j]
+        return res
+
+    # Helper for 3x3 matrix multiplication (A * B)
+    def mat_mat_mult(A, B):
+        C = [[0.0, 0.0, 0.0], [0.0, 0.0, 0.0], [0.0, 0.0, 0.0]]
+        for i in range(3):
+            for j in range(3):
+                for k_mult in range(3):
+                    C[i][j] += A[i][k_mult] * B[k_mult][j]
+        return C
+
+    # Step 1: Calculate Wrist Center P_wc
+    R_tcp_base = euler_zyx_to_matrix(r_yaw, r_pitch, rx)
+    V_j3_tcp_local = [0, 0, d3z]
+    offset_vec = mat_vec_mult(R_tcp_base, V_j3_tcp_local)
+    
+    pwc_x = px - offset_vec[0]
+    pwc_y = py - offset_vec[1]
+    pwc_z = pz - offset_vec[2]
+
+    # Step 2: Solve for q1
+    K = d1y + d2y
+    den_q1 = math.sqrt(pwc_x**2 + pwc_y**2)
+    
+    q1 = 0.0 # Default q1 if at singularity
+    if abs(den_q1) > 1e-9: # Avoid division by zero
+        val_for_asin = K / den_q1
+        # Clamp val_for_asin to [-1, 1] to avoid math domain error
+        if val_for_asin > 1.0:
+            val_for_asin = 1.0
+        elif val_for_asin < -1.0:
+            val_for_asin = -1.0
+        
+        # Two solutions for q1 exist based on asin, choose one.
+        # q1 = atan2(pwc_y, pwc_x) - asin(K / den_q1)
+        # q1_alt = atan2(pwc_y, pwc_x) - (pi - asin(K / den_q1))
+        # We pick the first one.
+        q1 = math.atan2(pwc_y, pwc_x) - math.asin(val_for_asin)
+    elif abs(K) > 1e-9 : # Denominator is zero but K is not, means P_wc is on Z axis but shouldn't be.
+        # This case implies an unreachable configuration if K is not zero.
+        # As per problem statement, assume reachable. This path might not be hit.
+        # If K is also near zero, q1 is indeterminate (can be any value, e.g. 0)
+        pass
+
+
+    # Step 3: Solve for q2
+    cos_q1 = math.cos(q1)
+    sin_q1 = math.sin(q1)
+
+    pwc_x_f1 = pwc_x * cos_q1 + pwc_y * sin_q1
+    # pwc_y_f1 = -pwc_x * sin_q1 + pwc_y * cos_q1 # Should be K
+    pwc_z_f1 = pwc_z
+    
+    # q2 = atan2(pwc_x_f1 / d2z, pwc_z_f1 / d2z)
+    if abs(d2z) < 1e-9: # d2z is a link length, should not be zero
+        q2 = 0.0 # Or handle error
+    else:
+        q2 = math.atan2(pwc_x_f1, pwc_z_f1)
+
+
+    # Step 4: Solve for q3
+    # M = Ry(-q2) * Rz(-q1) * R_tcp_base
+    
+    # Rz(-q1)
+    Rz_negq1 = [
+        [cos_q1,  sin_q1, 0],
+        [-sin_q1, cos_q1, 0],
+        [0,       0,      1]
+    ]
+
+    # Ry(-q2)
+    cos_negq2 = math.cos(-q2)
+    sin_negq2 = math.sin(-q2)
+    Ry_negq2 = [
+        [cos_negq2, 0, sin_negq2],
+        [0,         1, 0        ],
+        [-sin_negq2,0, cos_negq2]
+    ]
+
+    # Temp = Rz(-q1) * R_tcp_base
+    Temp_mat = mat_mat_mult(Rz_negq1, R_tcp_base)
+    
+    # M = Ry(-q2) * Temp
+    M = mat_mat_mult(Ry_negq2, Temp_mat)
+
+    q3 = math.atan2(M[0][2], M[0][0])
+    
+    # Normalize angles to be within typical joint limits if necessary,
+    # though atan2, acos, asin results are usually fine.
+    # The problem does not specify output range beyond "in radians".
+
+    return (q1, q2, q3)
+
+```

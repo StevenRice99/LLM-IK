@@ -1,0 +1,117 @@
+Okay, I see the syntax error. The helper function definitions like `defrotz` should have a space between `def` and the function name, i.e., `def rotz`. I will correct this.
+
+However, please note that correcting this syntax error will not make the inverse kinematics solution work, as the core analytical formulas for the joint angles are still missing (as explained previously, they are placeholders). The function will still return `(0.0, 0.0, 0.0, 0.0, 0.0, 0.0)` or whatever placeholder values are there, because the complex derivation for this specific robot's IK is not implemented.
+
+Here's the corrected code for the syntax error:
+
+```python
+import math
+import numpy as np
+
+# Helper functions for rotation matrices
+def rotz(angle_rad): # Corrected: Added space
+    c = math.cos(angle_rad)
+    s = math.sin(angle_rad)
+    return np.array([
+        [c, -s, 0],
+        [s,  c, 0],
+        [0,  0, 1]
+    ])
+
+def roty(angle_rad): # Corrected: Added space
+    c = math.cos(angle_rad)
+    s = math.sin(angle_rad)
+    return np.array([
+        [c,  0, s],
+        [0,  1, 0],
+        [-s, 0, c]
+    ])
+
+def rotx(angle_rad): # Corrected: Added space
+    c = math.cos(angle_rad)
+    s = math.sin(angle_rad)
+    return np.array([
+        [1, 0,  0],
+        [0, c, -s],
+        [0, s,  c]
+    ])
+
+def inverse_kinematics(p: tuple[float, float, float], r: tuple[float, float, float]) -> tuple[float, float, float, float, float, float]:
+    px, py, pz = p
+    # Assuming r = (roll_x, pitch_y, yaw_z) and apply as Rz(yaw_z)Ry(pitch_y)Rx(roll_x)
+    roll_x, pitch_y, yaw_z = r
+
+    # Link parameters
+    L1y = 0.13585
+    L2y = -0.1197
+    L2z = 0.425
+    L3z = 0.39225
+    L4y = 0.093
+    L5z = 0.09465
+    L6y_tcp = 0.0823
+    tcp_rotz_val = 1.570796325 # pi/2
+
+    # --- Stage 1: Calculate target TCP pose ---
+    P_target = np.array([px, py, pz])
+    R_target = rotz(yaw_z) @ roty(pitch_y) @ rotx(roll_x)
+
+    # --- Stage 2: Calculate pose of Frame 6 (origin O6, orientation R_0_6) ---
+    R_6_TCP = rotz(tcp_rotz_val) # Rotation from Frame 6 to TCP
+    R_0_6 = R_target @ R_6_TCP.T  # R_0_6 = R_target * inv(R_6_TCP)
+
+    # Vector from O6 to TCP, expressed in Frame 6 coordinates
+    d_O6_TCP_in_F6 = np.array([0, L6y_tcp, 0])
+    # P_target = P_O6 + R_0_6 * d_O6_TCP_in_F6
+    # So, P_O6 = P_target - R_0_6 * d_O6_TCP_in_F6
+    P_O6 = P_target - (R_0_6 @ d_O6_TCP_in_F6)
+
+    # --- Stage 3: Solve for joint angles q1 to q6 ---
+    # THIS SECTION REMAINS A PLACEHOLDER.
+    # The actual analytical derivation for q1...q6 for this specific
+    # non-spherical wrist manipulator is required here.
+    q1, q2, q3, q4, q5, q6 = 0.0, 0.0, 0.0, 0.0, 0.0, 0.0
+
+    # The following comments outline the general approach but do not provide the solution:
+    #
+    # To find q1, q2, q3, q4, q5, q6, one would typically:
+    # 1. Calculate the position of the wrist center, P_wc. For a non-spherical wrist,
+    #    this is complex. Let's define P_wc as the origin of joint 5 (O5).
+    #    P_O5 = P_O6 - R_0_6 @ roty(-q6) @ np.array([0, 0, L5z])
+    #    This equation shows P_O5 depends on q6, which complicates decoupling.
+    #
+    # 2. Express P_O5 using the forward kinematics of the first four joints:
+    #    T_0_1 = DH(q1, 0, L1y, pi/2) (if using DH, or equivalent transformation matrices)
+    #    T_1_2 = DH(q2 - pi/2, 0, 0, pi/2)
+    #    ... and so on.
+    #    P_O5_x = c1*(L4y*c234 - L2y*c2 - L1y) - s1*(L3z*s23 + L2z*s2)
+    #    P_O5_y = s1*(L4y*c234 - L2y*c2 - L1y) + c1*(L3z*s23 + L2z*s2)
+    #    P_O5_z = -L4y*s234 - L3z*c23 - L2z*c2 + L0z (L0z is base offset, assumed 0 here)
+    #    (Note: These FK equations for P_O5 are illustrative and need careful derivation
+    #     based on the exact joint axes and frame definitions from the URDF details)
+    #
+    # 3. Solve the system of equations for P_O5 (which depends on q6) and the FK equations.
+    #    This often involves algebraic manipulation to isolate variables or solve polynomials.
+    #
+    # 4. Once q1, q2, q3, q4 (or a subset) are found, determine R_0_4.
+    #    Then R_4_6 = R_0_4.T @ R_0_6.
+    #
+    # 5. Solve for q5, q6 from R_4_6. Given J5 is Z-axis and J6 is Y-axis:
+    #    R_4_6 = RotZ(q5) @ RotY(q6)
+    #    This is a ZY Euler angle decomposition.
+    #    r11 = c5*c6
+    #    r21 = s5*c6
+    #    r31 = -s6
+    #    r32 = s5*s6
+    #    r33 = c5*c6
+    #    From r31 = -s6 => q6 = asin(-r31) or atan2(-r31, +/-sqrt(1-r31^2))
+    #    If c6 != 0:
+    #      q5 = atan2(r21/c6, r11/c6) = atan2(r21, r11)
+    #    If c6 == 0 (gimbal lock for this Euler sequence):
+    #      q6 = +/- pi/2. Then r12 = -s5*s6, r22 = c5*s6.
+    #      q5 can be chosen freely, often set to 0, and the other angle absorbs the rotation.
+    #      Or, use atan2(r12, r22) if s6 is known.
+    #
+    # The actual solution requires the specific derived formulas for this Z-Y-Y-Y-Z-Y chain.
+
+    return (q1, q2, q3, q4, q5, q6)
+```

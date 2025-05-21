@@ -1,0 +1,99 @@
+The previous solution assumed a direct mapping from the target orientation `r = (rx, ry, rz)` to joint angles `theta1=rz, theta2=ry`. This is only valid when the roll `rx` is zero. The feedback indicates cases where `rx` is `pi`, which requires a different interpretation.
+
+Let the target orientation be `R_target = (rx_T, ry_T, rz_T)`.
+The forward kinematics for orientation results in `RPY = [roll, pitch, yaw]` where:
+- `pitch (ry_calc) = asin(sin(theta2))`
+- If `cos(theta2) >= 0` (i.e., `theta2` is in `[-pi/2, pi/2]`):
+    - `roll (rx_calc) = 0`
+    - `pitch (ry_calc) = theta2`
+    - `yaw (rz_calc) = theta1`
+- If `cos(theta2) < 0` (i.e., `theta2` is outside `(-pi/2, pi/2)`):
+    - `roll (rx_calc) = pi` (or `-pi`, `atan2(0, negative)` is `pi`)
+    - `pitch (ry_calc) = asin(sin(theta2))` (this will be `theta2` folded into `[-pi/2, pi/2]`)
+    - `yaw (rz_calc) = theta1 + pi` (normalized, because `atan2(s1*c2, c1*c2)` with `c2<0` becomes `atan2(-s1,-c1)`)
+
+Now, for inverse kinematics, given `(rx_T, ry_T, rz_T)`:
+
+Case 1: `rx_T` is close to 0.
+This implies `cos(theta2) >= 0`.
+So, `theta2 = ry_T`.
+And `theta1 = rz_T`.
+
+Case 2: `rx_T` is close to `pi` (or `-pi`).
+This implies `cos(theta2) < 0`.
+The relationship `rz_T = theta1_actual + pi` (normalized) means `theta1_actual = rz_T - pi` (normalized). If `rx_T` was `-pi`, then `theta1_actual = rz_T + pi`. This can be written as `theta1 = rz_T - rx_T` (where `rx_T` is `pi` or `-pi`).
+The relationship `ry_T = asin(sin(theta2_actual))` means `sin(theta2_actual) = sin(ry_T)`.
+Since we also need `cos(theta2_actual) < 0`:
+The solutions for `sin(x) = sin(ry_T)` are `x = ry_T + 2k*pi` and `x = (pi - ry_T) + 2k*pi`.
+`cos(ry_T)` is `>0` (assuming `ry_T` is the principal value in `[-pi/2, pi/2]`).
+`cos(pi - ry_T) = -cos(ry_T) < 0`.
+So, we must choose the form `theta2_actual = (pi - ry_T) + 2k*pi`.
+A common solution is `theta2 = pi - ry_T`. Another is `theta2 = -pi - ry_T` (which is `(pi - ry_T) - 2pi`).
+The feedback examples show that either of these might be the "correct" one. Since the problem asks for *a* solution, `theta2 = pi - ry_T` is a valid choice.
+
+The joint limits are `[-2pi, 2pi]`. The returned values should be within this range, but the specific `2k*pi` multiple is not strictly determined by the target pose alone if multiple solutions are within limits. We will provide the simplest ones.
+
+```python
+import math
+
+def inverse_kinematics(p: tuple[float, float, float], r: tuple[float, float, float]) -> tuple[float, float]:
+    """
+    Gets the joint values needed to reach position "p" and orientation "r".
+    :param p: The position to reach in the form [x, y, z].
+    :param r: The orientation to reach in radians in the form [roll, pitch, yaw].
+    :return: A tuple of the values (theta1, theta2) for the joints in radians.
+    """
+    # px_target, py_target, pz_target = p # Position not directly used for these angles if orientation dictates them
+    rx_target, ry_target, rz_target = r
+
+    theta1: float
+    theta2: float
+
+    # Tolerance for checking roll angle
+    tol = 1e-4 # A small tolerance for floating point comparisons
+
+    # Case 1: Roll is close to 0
+    if abs(rx_target) < tol:
+        # This implies cos(theta2) >= 0, so theta2 is in [-pi/2, pi/2]
+        # theta2_actual = ry_target
+        # theta1_actual = rz_target
+        theta1 = rz_target
+        theta2 = ry_target
+    # Case 2: Roll is close to pi
+    elif abs(rx_target - math.pi) < tol:
+        # This implies cos(theta2) < 0
+        # theta1_actual = rz_target - pi
+        # theta2_actual must satisfy sin(theta2) = sin(ry_target) and cos(theta2) < 0
+        # One such solution is pi - ry_target
+        theta1 = rz_target - math.pi
+        theta2 = math.pi - ry_target
+    # Case 3: Roll is close to -pi
+    elif abs(rx_target + math.pi) < tol:
+        # This also implies cos(theta2) < 0
+        # theta1_actual = rz_target - (-pi) = rz_target + pi
+        # theta2_actual is pi - ry_target (same logic as for rx_target = pi)
+        theta1 = rz_target + math.pi
+        theta2 = math.pi - ry_target
+    else:
+        # This case should ideally not be reached if rx_target is always 0 or +/-pi
+        # as per the RPY conventions for this manipulator.
+        # Fallback, though likely not perfectly correct for arbitrary roll.
+        # However, problem states "Assume all targets given as inputs to the method will be reachable".
+        # This implies rx_target will conform to what the manipulator can achieve (0 or +/-pi).
+        # If somehow it's a different roll, this is a guess.
+        # For safety, let's assume it's like the rx_target = 0 case.
+        theta1 = rz_target
+        theta2 = ry_target
+
+    # Normalize angles to be within a common range, e.g. [-pi, pi] for consistency,
+    # though the joint limits are larger. The problem doesn't specify output range beyond being valid.
+    # The provided "correct" solutions sometimes fall outside [-pi, pi], so we avoid aggressive normalization here
+    # if the computed values are already valid solutions.
+    # For example, theta2_corr in one example was -3.179 which is just outside [-pi,pi].
+    # The calculations above should yield a principal solution.
+
+    # The problem guarantees that these (theta1, theta2) will achieve the target position p.
+
+    return (theta1, theta2)
+
+```

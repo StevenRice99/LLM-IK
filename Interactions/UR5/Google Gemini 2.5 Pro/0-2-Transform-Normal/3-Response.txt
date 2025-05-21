@@ -1,0 +1,124 @@
+To provide the closed-form analytical solution for the inverse kinematics, I will complete the Python function `inverse_kinematics`. The solution involves first determining the primary rotation `q1` and the sum of the secondary rotations `q_sum = q2 + q3` from the target orientation `r = [roll, pitch, yaw]`. Then, `q2` is solved using the target position `p` and the previously found `q1` and `q_sum`. Finally, `q3` is found as `q_sum - q2`.
+
+The robot's end-effector orientation `R_EE` is equivalent to `Rz(q1) * Ry(q_sum)`. The target orientation `r = [roll, pitch, yaw]` is assumed to correspond to an RPY convention `R_target = Rz(yaw) * Ry(pitch) * Rx(roll)`. For `R_EE` to match `R_target`, the element `R_target[2,1]` (0-indexed) must be zero. `R_target[2,1] = cos(pitch) * sin(roll)`. This implies that either `cos(pitch) = 0` (pitch is `+/- pi/2`, a gimbal lock scenario) or `sin(roll) = 0` (roll is `0` or `+/- pi`). The problem guarantees reachable targets.
+
+The derivation distinguishes these cases:
+
+1.  **Gimbal Lock** (`abs(cos(pitch))` is small, i.e., `pitch` is `+/- pi/2`):
+    *   `q_sum_raw = pitch`
+    *   If `pitch` is near `pi/2`: `q1_raw = yaw - roll`
+    *   If `pitch` is near `-pi/2`: `q1_raw = yaw + roll`
+
+2.  **Not Gimbal Lock** (`cos(pitch)` is not small, so `sin(roll)` must be small, i.e., `roll` is `0` or `+/-pi`):
+    *   If `roll` is near `0`:
+        *   `q1_raw = yaw`
+        *   `q_sum_raw = pitch`
+    *   If `roll` is near `+/-pi`:
+        *   `q1_raw = yaw + pi`
+        *   `q_sum_raw = pi - pitch`
+
+The calculated `q1_raw` and `q_sum_raw` are then normalized to the range `[-pi, pi]` using `atan2(sin(angle), cos(angle))` to get `q1` and `q_sum`.
+
+With `q1` and `q_sum`, the position equations are:
+`px_rotated = cos(q1)*px + sin(q1)*py`
+`pz_rotated = pz`
+These correspond to the TCP position in a frame rotated by `q1` around Z.
+In this frame (`F1` in derivation):
+`Vx = l2*sin(q2) + l3*sin(q_sum)`
+`Vy = a1 + a2` (This component is handled by the `px_rotated` term which effectively aligns the frame with `Vx`)
+`Vz = l2*cos(q2) + l3*cos(q_sum)`
+
+So:
+`l2*sin(q2) = px_rotated - l3*sin(q_sum)`
+`l2*cos(q2) = pz_rotated - l3*cos(q_sum)`
+
+`q2` is then found using `atan2((px_rotated - l3*sin(q_sum)), (pz_rotated - l3*cos(q_sum)))`.
+And `q3 = q_sum - q2`. `q3` is not further normalized, as example solutions show values outside `[-pi, pi]` but within joint limits.
+
+The geometric constants are:
+`a1 = 0.13585` (offset along Y from J1 to J2)
+`a2 = -0.1197` (offset along Y in J2's frame to J3)
+`l2 = 0.425` (offset along Z in J2's frame to J3)
+`l3 = 0.39225` (offset along Z from J3 to TCP)
+
+```python
+import math
+
+def inverse_kinematics(p: tuple[float, float, float], r: tuple[float, float, float]) -> tuple[float, float, float]:
+    """
+    Gets the joint values needed to reach position "p" and orientation "r".
+    :param p: The position to reach in the form [x, y, z].
+    :param r: The orientation to reach in radians in the form [roll, pitch, yaw].
+    :return: A tuple of the joint values (q1, q2, q3) in radians.
+    """
+    px, py, pz = p
+    roll, pitch, yaw = r[0], r[1], r[2]
+
+    # Constants from robot geometry
+    # Link 1 to Joint 2: d1 = [0, 0.13585, 0] -> a1 (not directly used in this formulation here, part of Vy)
+    # Link 2 to Joint 3: d2 = [0, -0.1197, 0.425] -> l2
+    # TCP offset: [0, 0, 0.39225] -> l3
+    l2 = 0.425
+    l3 = 0.39225
+    epsilon = 1e-6 # For floating point comparisons
+
+    q1_raw = 0.0
+    q_sum_raw = 0.0
+
+    # Determine q1_raw and q_sum_raw from target orientation r = [roll, pitch, yaw]
+    # Target RPY = Rz(yaw)Ry(pitch)Rx(roll)
+    # Robot R = Rz(q1)Ry(q_sum)
+    # Reachability implies cos(pitch)*sin(roll) == 0.
+
+    # Case 1: Gimbal Lock (pitch is +/- pi/2)
+    if abs(math.cos(pitch)) < epsilon:
+        q_sum_raw = pitch
+        if pitch > 0:  # Pitch is near pi/2
+            q1_raw = yaw - roll
+        else:  # Pitch is near -pi/2
+            q1_raw = yaw + roll
+    # Case 2: Not Gimbal Lock (sin(roll) is 0, so roll is 0 or +/-pi)
+    else:
+        # Normalize roll to [-pi, pi] to simplify checking if it's near 0 or +/-pi
+        # A direct check on sin(roll) is also fine as reachability is guaranteed.
+        # If sin(roll) is very close to 0:
+        current_roll_normalized = math.atan2(math.sin(roll), math.cos(roll))
+        if abs(current_roll_normalized) < math.pi / 2.0:  # Roll is near 0
+            q1_raw = yaw
+            q_sum_raw = pitch
+        else:  # Roll is near +/- pi
+            q1_raw = yaw + math.pi
+            q_sum_raw = math.pi - pitch
+            
+    # Normalize q1 and q_sum to [-pi, pi]
+    q1 = math.atan2(math.sin(q1_raw), math.cos(q1_raw))
+    q_sum = math.atan2(math.sin(q_sum_raw), math.cos(q_sum_raw))
+
+    # Pre-calculate sines and cosines for q1 and q_sum
+    cos_q1 = math.cos(q1)
+    sin_q1 = math.sin(q1)
+    cos_q_sum = math.cos(q_sum)
+    sin_q_sum = math.sin(q_sum)
+
+    # Solve for q2
+    # Transform px, py into the coordinate system after q1 rotation.
+    # P_tcp_F1_x = l2*sin(q2) + l3*sin(q_sum)
+    # P_tcp_F1_z = l2*cos(q2) + l3*cos(q_sum)
+    # where P_tcp_F1_x = cos(q1)*px + sin(q1)*py
+    # and   P_tcp_F1_z = pz
+
+    # This is the target for l2*sin(q2)
+    term_Y_for_atan2 = cos_q1 * px + sin_q1 * py - l3 * sin_q_sum
+    # This is the target for l2*cos(q2)
+    term_X_for_atan2 = pz - l3 * cos_q_sum
+    
+    q2 = math.atan2(term_Y_for_atan2, term_X_for_atan2)
+
+    # Solve for q3
+    # q_sum = q2 + q3  => q3 = q_sum - q2
+    q3 = q_sum - q2
+    # q3 is not further normalized, to match example solution characteristics.
+
+    return (q1, q2, q3)
+
+```

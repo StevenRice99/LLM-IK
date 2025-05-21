@@ -1,0 +1,227 @@
+Okay, I've revised the approach. The core idea is to iteratively refine the target position for Link 6's origin (`P_L6_origin`) and the joint angle `θ5`. The `EXISTING` 5-DOF solver is used to find joints `θ1` through `θ4` that reach the current estimate of `P_L6_origin`. Then, `θ5` is calculated to ensure that the TCP, offset from this `P_L6_origin` by `R_04 * R_Z(θ5) * [0, 0.0823, 0]^T`, meets the desired TCP target. `P_L6_origin` is then updated for the next iteration. This process is repeated for a fixed number of iterations. Joint `θ6` is set to 0, as indicated by the feedback from correct solutions.
+
+Here's the Python code for the `inverse_kinematics` function:
+
+```python
+import math
+import numpy as np
+
+# Helper functions for rotation matrices
+def rot_z_matrix(angle_rad: float) -> np.ndarray:
+    c = math.cos(angle_rad)
+    s = math.sin(angle_rad)
+    return np.array([
+        [c, -s, 0],
+        [s,  c, 0],
+        [0,  0, 1]
+    ], dtype=float)
+
+def rot_y_matrix(angle_rad: float) -> np.ndarray:
+    c = math.cos(angle_rad)
+    s = math.sin(angle_rad)
+    return np.array([
+        [c,  0, s],
+        [0,  1, 0],
+        [-s, 0, c]
+    ], dtype=float)
+
+# Normalization function
+def normalize_angle(angle: float) -> float:
+    while angle > math.pi:
+        angle -= 2 * math.pi
+    while angle < -math.pi:
+        angle += 2 * math.pi
+    return angle
+
+# Placeholder for the existing_inverse_kinematics function.
+# In the actual execution environment, this will be the provided <EXISTING> code.
+# For clarity, I'm defining a class structure that would encapsulate this.
+
+class KinematicsSolver:
+    def existing_inverse_kinematics(self, p_target_j6: tuple[float, float, float]) -> tuple[float, float, float, float, float]:
+        """
+        This is the <EXISTING> 5-DOF IK solver.
+        It's pasted here directly for completeness of the conceptual solution.
+        """
+        x_w, y_w, z_w = p_target_j6
+        d2_y = 0.13585
+        y_chain = -0.1197 + 0.093  # Target y-coordinate in J2's frame for the planar chain
+        L1 = 0.425  # d23_z (Link 3 z-offset in J2 frame)
+        L2 = 0.39225 # d34_z (Link 4 z-offset in J3 frame)
+        L3 = 0.09465 # d5E_z (Link 6 z-offset in J5 frame, E is L6 origin)
+
+        delta_for_t1_calc = y_chain + d2_y
+        r = math.hypot(x_w, y_w)
+        
+        phi = math.atan2(-x_w, y_w) # Angle related to projection on XY plane
+
+        # Argument for acos; handle r=0 case or small r
+        if r < 1e-9: # Effectively r is zero
+            if abs(delta_for_t1_calc) < 1e-9: # Target is at origin, delta is zero
+                arg_acos = 0.0 # cos(pi/2) = 0
+            else: # Target at origin, delta non-zero, or r is too small for delta
+                  # This implies an issue or singularity for this t1 choice method.
+                  # Clamp arg_acos, relying on "target is reachable".
+                arg_acos = 1.0 if delta_for_t1_calc > 0 else -1.0
+        else:
+            arg_acos = delta_for_t1_calc / r
+        
+        arg_acos = max(-1.0, min(1.0, arg_acos)) # Clamp arg to [-1, 1] for acos
+        gamma = math.acos(arg_acos)
+        
+        t1_cands = [normalize_angle(phi + gamma), normalize_angle(phi - gamma)]
+        
+        best_solution = (float('inf'), 0.0, 0.0, 0.0, 0.0) # (error_sq, t1, t2, t3, t4)
+
+        for t1_sol in t1_cands:
+            c1 = math.cos(t1_sol)
+            s1 = math.sin(t1_sol)
+            
+            # Transform target to J2's frame's XZ plane for the 3R planar solver
+            x2_target_in_j2_frame = c1 * x_w + s1 * y_w
+            y2_coord_in_j2_frame = -s1 * x_w + c1 * y_w - d2_y 
+            z2_target_in_j2_frame = z_w
+
+            # Planar solver part
+            # psi is the angle of the vector from J2 origin to (L6 origin) in J2's XZ plane
+            psi_angle = math.atan2(x2_target_in_j2_frame, z2_target_in_j2_frame) 
+            
+            # T_orientation is the orientation of the L3 link (J5_origin -> L6_origin vector) in J2's XZ plane
+            for T_orientation_L3 in (psi_angle, normalize_angle(psi_angle + math.pi)):
+                # Target for the 2R planar arm (L1, L2) formed by J2, J3, J4.
+                # This target is the origin of J5, projected onto J2's XZ plane.
+                xw_planar_target_for_L1L2 = x2_target_in_j2_frame - L3 * math.sin(T_orientation_L3)
+                zw_planar_target_for_L1L2 = z2_target_in_j2_frame - L3 * math.cos(T_orientation_L3)
+                
+                dist_sq_L1L2_target = xw_planar_target_for_L1L2**2 + zw_planar_target_for_L1L2**2
+                
+                # Check reachability for the 2R planar arm (L1, L2)
+                epsilon_reach = 1e-9 # Small tolerance for floating point comparisons
+                if dist_sq_L1L2_target > (L1 + L2)**2 + epsilon_reach or \
+                   dist_sq_L1L2_target < (L1 - L2)**2 - epsilon_reach:
+                    # More precise check for boundary conditions
+                    if not (math.isclose(dist_sq_L1L2_target, (L1+L2)**2, rel_tol=1e-7, abs_tol=1e-7) or \
+                            math.isclose(dist_sq_L1L2_target, (L1-L2)**2, rel_tol=1e-7, abs_tol=1e-7)):
+                        continue # Target out of reach for this configuration
+
+                den_cos_beta = 2 * L1 * L2
+                if abs(den_cos_beta) < 1e-12: # Avoid division by zero if L1 or L2 are effectively zero
+                    continue 
+
+                cos_beta = (dist_sq_L1L2_target - L1**2 - L2**2) / den_cos_beta
+                cos_beta = max(-1.0, min(1.0, cos_beta)) # Clamp for acos
+                
+                for sign_beta_val in (+1.0, -1.0):
+                    beta_angle = sign_beta_val * math.acos(cos_beta) # This is joint angle t3 (for J3)
+                    
+                    alpha_angle = math.atan2(xw_planar_target_for_L1L2, zw_planar_target_for_L1L2)
+                    
+                    den_delta_angle_calc = L1 + L2 * math.cos(beta_angle)
+                    num_delta_angle_calc = L2 * math.sin(beta_angle)
+                    delta_angle_val = math.atan2(num_delta_angle_calc, den_delta_angle_calc)
+                    
+                    # Calculate joint angles for the planar chain
+                    t2_sol = normalize_angle(alpha_angle - delta_angle_val) # Joint angle for J2
+                    t3_sol = normalize_angle(beta_angle)                    # Joint angle for J3
+                    t4_sol = normalize_angle(T_orientation_L3 - (t2_sol + t3_sol)) # Joint angle for J4
+                    
+                    # Forward kinematics check for the planar part (J2, J3, J4) + L3 link
+                    x_fk_planar_check = L1*math.sin(t2_sol) + L2*math.sin(t2_sol+t3_sol) + L3*math.sin(t2_sol+t3_sol+t4_sol)
+                    z_fk_planar_check = L1*math.cos(t2_sol) + L2*math.cos(t2_sol+t3_sol) + L3*math.cos(t2_sol+t3_sol+t4_sol)
+                    
+                    # Error calculation based on existing code
+                    current_err_sq = (x_fk_planar_check - x2_target_in_j2_frame)**2 + \
+                                     (z_fk_planar_check - z2_target_in_j2_frame)**2 + \
+                                     (y2_coord_in_j2_frame - y_chain)**2 # y_chain constraint error
+
+                    if current_err_sq < best_solution[0]:
+                        best_solution = (current_err_sq, t1_sol, t2_sol, t3_sol, t4_sol)
+
+        _, final_t1, final_t2, final_t3, final_t4 = best_solution
+        final_t5 = 0.0 # As per existing code's behavior for its 5th joint
+
+        return (normalize_angle(final_t1), 
+                normalize_angle(final_t2), 
+                normalize_angle(final_t3), 
+                normalize_angle(final_t4), 
+                normalize_angle(final_t5))
+
+    def inverse_kinematics(self, p_tcp_target_tuple: tuple[float, float, float]) -> tuple[float, float, float, float, float, float]:
+        p_tcp_desired_np = np.array(p_tcp_target_tuple, dtype=float)
+        
+        # TCP offset from Link 6's origin, in Link 6's frame (along its Y-axis).
+        # Since theta6=0, this is also the offset in Link 5's frame if Link 5 and Link 6 frames are aligned.
+        d_tcp_offset_val = 0.0823
+        # Vector from L6 origin to TCP, expressed in L5's frame (since R_Z(theta5) is applied by R_05)
+        # This vector is rotated by R_Z(theta5) and then by R_04.
+        # The vector [-d_tcp*sin(theta5), d_tcp*cos(theta5), 0] is this offset in L4's frame *after* R_Z(theta5)
+        # has been applied to an initial [0, d_tcp, 0] vector.
+
+        # Iterative refinement for P_L6_origin and theta5
+        current_P_L6_origin_np = np.copy(p_tcp_desired_np) # Initial guess for Link 6 origin
+        
+        # Initialize joint angles
+        theta1, theta2, theta3, theta4 = 0.0, 0.0, 0.0, 0.0
+        current_theta5 = 0.0 # Initial guess for theta5
+
+        N_ITERATIONS = 5 # Number of fixed iterations for refinement
+
+        for _ in range(N_ITERATIONS):
+            # 1. Call existing_IK with current_P_L6_origin
+            P_L6_origin_tuple = tuple(current_P_L6_origin_np.tolist())
+            
+            # Assuming self.existing_inverse_kinematics is the provided robust solver
+            # It returns (th1, th2, th3, th4, th5_calc_zero)
+            # We only use th1 to th4 from it.
+            res_theta1, res_theta2, res_theta3, res_theta4, _ = self.existing_inverse_kinematics(P_L6_origin_tuple)
+            theta1, theta2, theta3, theta4 = res_theta1, res_theta2, res_theta3, res_theta4
+
+            # 2. Form R_04 matrix (World to Link 4 frame)
+            R01 = rot_z_matrix(theta1)
+            R12 = rot_y_matrix(theta2)
+            R23 = rot_y_matrix(theta3)
+            R34 = rot_y_matrix(theta4)
+            R_04_np = R01 @ R12 @ R23 @ R34
+
+            # 3. The vector from current_P_L6_origin to P_TCP_desired, when expressed in L4's frame,
+            #    should be [-d_tcp*sin(theta5), d_tcp*cos(theta5), 0]^T.
+            V_offset_world_np = p_tcp_desired_np - current_P_L6_origin_np
+            V_offset_L4_np = R_04_np.T @ V_offset_world_np
+            
+            vx_prime_L4 = V_offset_L4_np[0]
+            vy_prime_L4 = V_offset_L4_np[1]
+            # vz_prime_L4 = V_offset_L4_np[2] # This should ideally be zero.
+
+            # 4. Determine current_theta5 from vx_prime_L4 and vy_prime_L4
+            # vx_prime_L4 = -d_tcp_offset_val * sin(theta5)
+            # vy_prime_L4 =  d_tcp_offset_val * cos(theta5)
+            current_theta5 = math.atan2(-vx_prime_L4, vy_prime_L4) # atan2(sin_component, cos_component)
+
+            # 5. Update current_P_L6_origin based on the new current_theta5
+            # P_L6_origin = P_TCP_desired - R_04 * R_Z(theta5) * [0, d_tcp, 0]_L5
+            # R_Z(theta5) * [0, d_tcp, 0]_L5 = [-d_tcp*sin(theta5), d_tcp*cos(theta5), 0]_L4_after_Rz_theta5
+            
+            vec_tcp_in_L4_after_Rz_theta5 = np.array([
+                -d_tcp_offset_val * math.sin(current_theta5),
+                 d_tcp_offset_val * math.cos(current_theta5),
+                 0.0
+            ], dtype=float)
+            
+            current_P_L6_origin_np = p_tcp_desired_np - (R_04_np @ vec_tcp_in_L4_after_Rz_theta5)
+
+        # Final joint angles
+        theta6 = 0.0 # As per problem spec and feedback
+
+        return (normalize_angle(theta1),
+                normalize_angle(theta2),
+                normalize_angle(theta3),
+                normalize_angle(theta4),
+                normalize_angle(current_theta5),
+                normalize_angle(theta6))
+
+# This is the function that will be called, matching the <CODE> section.
+def inverse_kinematics(p: tuple[float, float, float]) -> tuple[float, float, float, float, float, float]:
+    solver = KinematicsSolver()
+    return solver.inverse_kinematics(p)
+
+```

@@ -1,0 +1,144 @@
+To solve the inverse kinematics for the 3-DOF serial manipulator, I've developed a method that sequentially determines the joint angles `theta1`, `theta2`, and `theta3`.
+
+1.  **Solve for `theta1` (Joint 1, Z-axis rotation):**
+    *   The first joint `theta1` rotates around the global Z-axis. Its primary role is to position the base of Joint 2 such that the remaining Y-offset constraint in the kinematic chain can be met.
+    *   The origin of Joint 2 is at `[0, d1y, 0]` in Joint 1's frame (`d1y = 0.13585`). After Joint 1 rotates by `theta1`, the global coordinates of Joint 2's origin become `P_J2_global = [-d1y*sin(theta1), d1y*cos(theta1), 0]`.
+    *   The target TCP position `(px, py, pz)` must be reached. The sub-chain from Joint 2 onwards has its own Y-offset. Specifically, Joint 3's origin is at `[0, d2y, 0.425]` in Joint 2's frame (`d2y = -0.1197`), and the TCP is at `[0, 0, 0.39225]` in Joint 3's frame. Both Joint 2 and Joint 3 rotate around their local Y-axes. This means the Y-coordinate of the TCP relative to Joint 2's frame, expressed in Joint 2's frame coordinates, is fixed at `d2y`.
+    *   Transforming the global TCP target `(px, py, pz)` into Joint 2's frame (F1, which is rotated by `theta1` around Z relative to global, and whose origin is `P_J2_global`):
+        *   `P_tcp_relative_to_J2_origin_global = [px - P_J2_global_x, py - P_J2_global_y, pz]`
+        *   `P_tcp_in_F1 = RotZ(-theta1) * P_tcp_relative_to_J2_origin_global`
+        *   The Y-component of `P_tcp_in_F1` is `(py - d1y*cos(theta1))*cos(theta1) - (px + d1y*sin(theta1))*(-sin(theta1)) = py*cos(theta1) - px*sin(theta1) - d1y`.
+    *   This Y-component must equal `d2y`. So, `py*cos(theta1) - px*sin(theta1) - d1y = d2y`.
+    *   Rearranging: `py*cos(theta1) - px*sin(theta1) = d1y + d2y`. Let `C_offset = d1y + d2y = 0.01615`.
+    *   This is an equation of the form `A*cos(x) + B*sin(x) = D`, solvable using `atan2` and `acos`:
+        `theta1 = atan2(-px, py) +/- acos(C_offset / sqrt(px^2 + py^2))`. This yields two solutions for `theta1`. The solution `alpha + phi` (where `alpha = atan2(-px, py)` and `phi = acos(...)`) is chosen first, as it matched the example provided in the feedback.
+
+2.  **Determine Target for Planar J2-J3 System and `theta_sum_j2j3`:**
+    *   For a chosen `theta1`:
+        *   The target X and Z coordinates for the J2-J3 planar system (operating in the XZ-plane of Frame F1) are:
+            `x_planar_target = px*cos(theta1) + py*sin(theta1)`
+            `z_planar_target = pz`
+        *   The sum of Joint 2 and Joint 3 angles (`theta_sum_j2j3 = theta2 + theta3`) is determined from the target orientation. The global target orientation `r_global = (rx_g, ry_g, rz_g)` (ZYX Euler) is transformed into Frame F1: `R_target_F1 = RotZ(-theta1) * R_global_matrix`. Since J2 and J3 cause Y-axis rotation in F1, `R_target_F1` must be equivalent to `RotY(theta_sum_j2j3)`.
+            `theta_sum_j2j3 = atan2(R_target_F1[0,2], R_target_F1[0,0])`.
+
+3.  **Solve for `theta2` and `theta3` (Joints 2 & 3, Y-axis rotations):**
+    *   This is a 2-link planar inverse kinematics problem with link lengths `L2z = 0.425` and `L3z = 0.39225` (these are the Z-displacements caused by the links when aligned with F1's Z-axis).
+    *   `theta3` can be found using the law of cosines:
+        `cos(theta3) = (x_planar_target^2 + z_planar_target^2 - L2z^2 - L3z^2) / (2 * L2z * L3z)`. This gives two solutions for `theta3` (`+/- acos_value`).
+    *   `theta2 = theta_sum_j2j3 - theta3`.
+    *   A selection strategy similar to "EXISTING 2" is used:
+        *   Both `theta3` solutions are considered.
+        *   A forward kinematics check for the planar system (`x_calc = L2z*sin(theta2) + L3z*sin(theta_sum_j2j3)`, `z_calc = L2z*cos(theta2) + L3z*cos(theta_sum_j2j3)`) ensures consistency.
+        *   The solution where `theta3` is negative is prioritized if valid, matching the example from the feedback. If not, the positive `theta3` solution is used.
+        *   If the `acos` method fails the FK check (which is unlikely if values are clamped and reachable), a fallback calculation for `theta2` and `theta3` (also from "EXISTING 2") is available.
+
+The overall process iterates through the two `theta1` solutions and, for each, attempts to find consistent `theta2` and `theta3`. The first complete solution found (prioritizing `theta1 = alpha + phi` and then negative `theta3`) is returned.
+
+```python
+import math
+
+def inverse_kinematics(p_global: tuple[float, float, float], r_global_rpy_zyx: tuple[float, float, float]) -> tuple[float, float, float]:
+    px, py, pz = p_global
+    rx_g, ry_g, rz_g = r_global_rpy_zyx
+
+    # Constants
+    d1y = 0.13585  # J1 to J2 Y-offset in J1's frame
+    d2y = -0.1197  # J2 to J3 Y-offset in J2's frame (local y-coord of J3 origin)
+    C_offset = d1y + d2y # = 0.01615
+
+    L2z = 0.425   # Effective Z-length of link from J2 axis to J3 axis
+    L3z = 0.39225 # Effective Z-length of link from J3 axis to TCP
+
+    # --- Solve for theta1 ---
+    R_val_sq = px**2 + py**2
+    if R_val_sq < 1e-12: # px and py are effectively zero
+        # If C_offset is non-zero (which it is), this implies unreachability.
+        # However, problem states "assume all targets ... will be reachable".
+        # This path should ideally not be taken with valid, reachable targets.
+        # If it were, R_val would be ~0, leading to division by zero or large cos_phi_val.
+        # For robustness if such near-zero R_val occurs with a reachable target (highly unlikely geometry):
+        R_val = 1e-6 # Avoid division by zero, acos will likely fail if C_offset/R_val > 1
+    else:
+        R_val = math.sqrt(R_val_sq)
+    
+    alpha_angle = math.atan2(-px, py)
+    
+    cos_phi_val = C_offset / R_val
+    if cos_phi_val > 1.0: cos_phi_val = 1.0
+    if cos_phi_val < -1.0: cos_phi_val = -1.0
+    
+    phi_angle = math.acos(cos_phi_val)
+
+    # Two candidates for theta1
+    theta1_cand_1 = alpha_angle + phi_angle # Corresponds to example's choice
+    theta1_cand_2 = alpha_angle - phi_angle
+    
+    possible_final_solutions = []
+
+    for theta1 in [theta1_cand_1, theta1_cand_2]:
+        c1 = math.cos(theta1)
+        s1 = math.sin(theta1)
+
+        # Target position for the J2-J3 planar system in F1's XZ plane
+        x_planar_target = px*c1 + py*s1 
+        z_planar_target = pz
+
+        # Target orientation sum for J2+J3
+        crx, srx = math.cos(rx_g), math.sin(rx_g)
+        cry, sry = math.cos(ry_g), math.sin(ry_g)
+        crz, srz = math.cos(rz_g), math.sin(rz_g)
+
+        # R_global = Rz(rz_g)Ry(ry_g)Rx(rx_g)
+        R00_g = crz * cry
+        R02_g = crz * sry * crx + srz * srx
+        R10_g = srz * cry
+        R12_g = srz * sry * crx - crz * srx
+        
+        # R_target_F1 = RotZ(-theta1) * R_global
+        R_target_F1_00 = c1 * R00_g + s1 * R10_g
+        R_target_F1_02 = c1 * R02_g + s1 * R12_g
+        theta_sum_j2j3 = math.atan2(R_target_F1_02, R_target_F1_00)
+        
+        # Solve for theta3 using cosine rule for the J2-J3 planar arm
+        d_sq_planar = x_planar_target**2 + z_planar_target**2
+        val_for_acos_theta3 = (d_sq_planar - L2z**2 - L3z**2) / (2 * L2z * L3z)
+        val_for_acos_theta3 = max(min(val_for_acos_theta3, 1.0), -1.0) # Clamp
+
+        theta3_sol_A = math.acos(val_for_acos_theta3) # Typically "elbow up" for positive val_for_acos_theta3
+        theta3_sol_B = -theta3_sol_A                # Typically "elbow down"
+
+        solutions_j2_j3_for_this_theta1 = []
+        # Iterate theta3 candidates, preferring negative theta3 as per example
+        for theta3_current_raw in [theta3_sol_B, theta3_sol_A]: 
+            theta2_current = theta_sum_j2j3 - theta3_current_raw
+            
+            # Planar FK check from "EXISTING 2"
+            x_calc_planar = L2z * math.sin(theta2_current) + L3z * math.sin(theta_sum_j2j3)
+            z_calc_planar = L2z * math.cos(theta2_current) + L3z * math.cos(theta_sum_j2j3)
+
+            if math.isclose(x_calc_planar, x_planar_target, abs_tol=1e-5) and \
+               math.isclose(z_calc_planar, z_planar_target, abs_tol=1e-5):
+                solutions_j2_j3_for_this_theta1.append({'t2': theta2_current, 't3': theta3_current_raw})
+        
+        if solutions_j2_j3_for_this_theta1:
+            # Select the first valid J2/J3 solution found (order of theta3_current_raw iteration matters)
+            chosen_j2_j3 = (solutions_j2_j3_for_this_theta1[0]['t2'], solutions_j2_j3_for_this_theta1[0]['t3'])
+            possible_final_solutions.append((theta1, chosen_j2_j3[0], chosen_j2_j3[1]))
+        else: 
+            # Fallback for J2,J3 if acos method + FK check failed for both theta3s
+            term_x = x_planar_target - L3z * math.sin(theta_sum_j2j3)
+            term_z = z_planar_target - L3z * math.cos(theta_sum_j2j3)
+            theta2_fallback = math.atan2(term_x, term_z)
+            theta3_fallback = theta_sum_j2j3 - theta2_fallback
+            possible_final_solutions.append((theta1, theta2_fallback, theta3_fallback))
+
+    if not possible_final_solutions:
+         # This case implies no solution was found, contradicting "assume reachable".
+         # Return a default or raise error. For now, (0,0,0) as a placeholder.
+         return (0.0, 0.0, 0.0) 
+
+    # Return the first solution found. The iteration order for theta1 and theta3
+    # is set to prefer the configuration that matched the example.
+    return possible_final_solutions[0]
+
+```

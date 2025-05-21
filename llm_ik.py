@@ -2064,8 +2064,6 @@ class Solver:
         if not self.is_valid():
             logging.error(f"{self.model} | Perform | Solver is not valid.")
             return True
-        # Set the solution types we want to solve for.
-        orientation = [False, True] if orientation else [False]
         # Get the modes to run in.
         if mode == TRANSFER:
             mode = [NORMAL, EXTEND, DYNAMIC, CUMULATIVE, TRANSFER]
@@ -2107,7 +2105,7 @@ class Solver:
                             messages = self.handle_interactions(lower, upper, current_orientation, current_mode)
                             # If there are no messages, or we should not call the LLM due to parameters, stop.
                             if (messages is None or len(messages) < 1 or self.url == "" or not run
-                                    or current_orientation not in orientation or current_mode not in mode
+                                    or (current_orientation and not orientation) or current_mode not in mode
                                     or length >= max_length):
                                 break
                             # Run the API if all checks were passed.
@@ -3180,7 +3178,10 @@ class Solver:
             if joints is None or len(joints) != number or error is not None:
                 return False
             # See if we reached the target.
-            positions, orientations = self.robot.forward_kinematics(lower, upper, joints)
+            try:
+                positions, orientations = self.robot.forward_kinematics(lower, upper, joints)
+            except:
+                return False
             distance = difference_distance(target_position, positions[-1])
             angle = difference_angle(target_orientation, orientations[-1]) if orientation else 0
             # If we did not, this was a failure so stop.

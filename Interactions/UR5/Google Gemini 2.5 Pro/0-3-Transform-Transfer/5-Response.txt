@@ -1,0 +1,112 @@
+I will attempt to complete the `inverse_kinematics` method by making a consistent choice for the elbow joint (`q3`) and ensuring the final joint angles are within the specified `[-2pi, 2pi]` range.
+
+The strategy will be:
+1.  Calculate `q1` (Joint 1 angle) and `q_sum = q2 + q3 + q4` from the target orientation matrix `R_target`.
+2.  Determine the wrist center position `P_wrist = (xw, yw, zw)`.
+3.  Transform `P_wrist` into Frame 1 (after `q1` rotation) to get `P_1 = (P_1x, P_1y, P_1z)`. The coordinates `(P_1x, P_1z)` are the target for the 2R planar arm formed by links associated with `q2` and `q3`.
+4.  Calculate `cos_q3_val = (P_1x^2 + P_1z^2 - d2z^2 - d3z^2) / (2 * d2z * d3z)`. Clip this value to `[-1, 1]`.
+5.  Choose `q3 = np.arccos(cos_q3_val)`. This consistently picks the "elbow up" solution where `q3` is in `[0, pi]`.
+6.  Calculate `q2` using the formula: `q2 = atan2(P_1x, P_1z) - atan2(d3z*sin(q3), d2z + d3z*cos(q3))`.
+7.  Calculate the raw value for `q4_raw = q_sum - q2 - q3`.
+8.  The joints `q1, q2, q3` are already within `[-pi, pi]` (and thus within `[-2pi, 2pi]`).
+9.  Adjust `q4_raw` to be within the `[-2pi, 2pi]` range by adding or subtracting multiples of `2*pi` as needed. Let this be `q4_final`.
+10. Return the joint tuple `(q1, q2, q3, q4_final)`.
+
+This approach is deterministic and provides a closed-form solution. The main assumption is the consistent choice for `q3`.
+
+```python
+def inverse_kinematics(p: tuple[float, float, float], r: tuple[float, float, float]) -> tuple[float, float, float, float]:
+    import numpy as np
+
+    px, py, pz = p
+    rx, ry, rz = r  # Assuming r = (roll, pitch, yaw) -> (rx, ry, rz)
+
+    # Robot parameters
+    d1y = 0.13585
+    d2y = -0.1197
+    d2z = 0.425
+    d3z = 0.39225
+    d4y_tcp = 0.093
+    
+    twopi = 2 * np.pi
+
+    # 1. Calculate target rotation matrix R_target from RPY angles (rx, ry, rz)
+    cr, sr = np.cos(rx), np.sin(rx)
+    cp, sp = np.cos(ry), np.sin(ry)
+    cy, sy = np.cos(rz), np.sin(rz)
+
+    R_target = np.array([
+        [cy*cp, cy*sp*sr - sy*cr, cy*sp*cr + sy*sr],
+        [sy*cp, sy*sp*sr + cy*cr, sy*sp*cr - cy*sr],
+        [-sp,   cp*sr,            cp*cr]
+    ])
+
+    # 2. Calculate the wrist center position P_wrist (origin of frame 4)
+    xw = px - R_target[0,1] * d4y_tcp
+    yw = py - R_target[1,1] * d4y_tcp
+    zw = pz - R_target[2,1] * d4y_tcp
+
+    # Calculate q1 and q_sum = q2+q3+q4
+    # R_target = Rz(q1) * Ry(q_sum) implies:
+    # R_target[0,1] = -sin(q1), R_target[1,1] = cos(q1)
+    # R_target[2,0] = -sin(q_sum), R_target[2,2] = cos(q_sum)
+    q1 = np.arctan2(-R_target[0,1], R_target[1,1])
+    q_sum = np.arctan2(-R_target[2,0], R_target[2,2])
+
+    # 3. Transform P_wrist to P_1 (coordinates in frame after q1 rotation)
+    c1, s1 = np.cos(q1), np.sin(q1)
+    P_1x =  c1*xw + s1*yw
+    P_1z =  zw
+    # P_1y = -s1*xw + c1*yw; # Should be d1y + d2y = 0.01615
+
+    # 4. Calculate cos_q3_val for the 2R arm (lengths d2z, d3z) in XZ plane of Frame 1
+    # Target for 2R arm is (P_1x, P_1z)
+    # cos(q3) = (X^2 + Z^2 - L1^2 - L2^2) / (2 * L1 * L2)
+    val_num = P_1x**2 + P_1z**2 - d2z**2 - d3z**2
+    val_den = 2 * d2z * d3z
+    
+    # Handle potential division by zero if d2z or d3z were zero (not the case here)
+    if val_den == 0:
+        # This case should ideally not be reached with the given non-zero link lengths.
+        # If it were, it implies a singularity or an issue with the target.
+        # For robustness, one might set q3 to 0 or raise an error.
+        # Given problem constraints, we assume val_den is non-zero.
+        cos_q3_val = 0 # Placeholder, should not happen
+    else:
+        cos_q3_val = val_num / val_den
+        
+    cos_q3_val = np.clip(cos_q3_val, -1.0, 1.0)
+
+    # 5. Choose q3 (elbow up/down). Consistently choose q3 >= 0.
+    q3 = np.arccos(cos_q3_val)  # q3 is in [0, pi]
+
+    # 6. Calculate q2
+    # q2 = atan2(TargetY_2R, TargetX_2R) - atan2(L2_2R*sin(q3_elbow), L1_2R + L2_2R*cos(q3_elbow))
+    # Here, TargetY_2R = P_1x, TargetX_2R = P_1z. L1_2R = d2z, L2_2R = d3z. q3_elbow = q3.
+    sin_q3, cos_q3 = np.sin(q3), np.cos(q3)
+    q2 = np.arctan2(P_1x, P_1z) - np.arctan2(d3z*sin_q3, d2z + d3z*cos_q3)
+
+    # 7. Calculate q4_raw
+    q4_raw = q_sum - q2 - q3
+
+    # 8. Normalize q1, q2, q3 to [-pi, pi] (they are already in this range or [0,pi] for q3)
+    #    Adjust q4_raw to be in [-2pi, 2pi] as per problem limits.
+    
+    # Helper to normalize angle to [-pi, pi]
+    def normalize_to_pi(angle):
+        return (angle + np.pi) % twopi - np.pi
+
+    final_q1 = normalize_to_pi(q1)
+    final_q2 = normalize_to_pi(q2)
+    final_q3 = normalize_to_pi(q3) # q3 from arccos is [0,pi], which is fine.
+
+    # Adjust q4_raw to be in [-2*pi, 2*pi]
+    q4_final = q4_raw
+    limit_2pi = twopi
+    while q4_final > limit_2pi:
+        q4_final -= twopi
+    while q4_final < -limit_2pi:
+        q4_final += twopi
+    
+    return (final_q1, final_q2, final_q3, q4_final)
+```

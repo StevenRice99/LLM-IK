@@ -1,0 +1,311 @@
+To solve the 6-DOF inverse kinematics problem, we will extend the provided 5-DOF solution. The core idea is to first determine the position and orientation of the base of the 6th joint (Link 6 origin). This effectively reduces the problem to finding a configuration for the first 5 joints to reach this intermediate point, and then solving for the 6th joint angle.
+
+Here's the breakdown of the approach:
+
+1.  **Transform Target to Link 6 Origin**:
+    The input is the desired TCP position (`p_target`) and orientation (`r_target_rpy`).
+    Link 6 has a fixed TCP offset (`d_tcp_offset = [0, 0.0823, 0]`) and a fixed TCP orientation relative to Link 6's frame (`R_tcp_fixed = Rz(pi/2)`).
+    The global orientation of Link 6's frame (`R_0_6`) can be found by `R_0_6 = R_target * R_tcp_fixed_inv`, where `R_target` is the matrix form of `r_target_rpy` and `R_tcp_fixed_inv = Rz(-pi/2)`.
+    The global position of Link 6's origin (`P_wc`, or wrist center) is then `P_wc = p_target - R_0_6 @ d_tcp_offset`. This `P_wc` becomes the position target for the 5-DOF sub-problem.
+
+2.  **Determine `q1` and `q6`**:
+    The first joint `q1` (Z-axis rotation) can be determined using the same geometric constraint as in the 5-DOF solver, applied to `P_wc`. This yields two candidates for `q1`.
+    `p_bar_y = -P_wc_x*sin(q1) + P_wc_y*cos(q1) = y_const` (where `y_const` is from the 5-DOF kinematics).
+
+    The orientation of Link 5's frame (`R_0_5_frame`) is related to `R_0_6` by `R_0_6 = R_0_5_frame * Ry(q6)`.
+    The 5-DOF solver expects `R_0_5_frame` as its orientation input.
+    From the structure `M = Rz(-q1) * R_0_5_frame = Ry(phi) * Rz(q5)`, we know that `M[1,2]` (the (1,2) element of M) must be zero.
+    Substituting `R_0_5_frame = Rz(q1) * M_known_part * Ry(-q6)`, where `M_known_part = Rz(-q1) * R_0_6`.
+    The condition `(Rz(-q1) * R_0_5_frame)[1,2] = 0` becomes `(M_known_part * Ry(-q6))_[1,2] = 0`.
+    This expands to `-M_known_part[1,0]*sin(q6) + M_known_part[1,2]*cos(q6) = 0`.
+    This equation can be solved for `q6`: `tan(q6) = M_known_part[1,2] / M_known_part[1,0]`. This gives two candidates for `q6` (differing by pi) for each `q1` candidate.
+
+3.  **Solve for `q2, q3, q4, q5` using the 5-DOF Solver**:
+    For each valid pair of `(q1_cand, q6_cand)`:
+    a.  Calculate `R_0_5_frame = R_0_6 * Ry(-q6_cand)`.
+    b.  Convert `R_0_5_frame` to roll-pitch-yaw angles (`r_5dof`).
+    c.  Call the provided 5-DOF inverse kinematics solver with `P_wc` and `r_5dof`. This will yield `q1_s, q2, q3, q4, q5`.
+    d.  Verify that the `q1_s` returned by the 5-DOF solver is consistent with `q1_cand`. The 5-DOF solver has its own `q1` selection logic based on minimizing `abs(M[1,2])`. Since our `q6_cand` was chosen to make this term zero for `q1_cand`, the 5-DOF solver should ideally pick `q1_cand`.
+
+4.  **Return Solution**:
+    The first consistent set `(q1_s, q2, q3, q4, q5, q6_cand)` forms the 6-DOF solution. All joint angles are normalized to the range `[-pi, pi]`.
+
+Helper functions for rotation matrix conversions (RPY to matrix, matrix to RPY, and individual axis rotation matrices) will be used. The provided 5-DOF solver code will be adapted into a helper function.
+
+```python
+import math
+import numpy as np
+
+# --- Start of Helper: 5-DOF IK Solver (adapted from EXISTING section) ---
+def _ik_5dof(p_5dof_tuple: tuple[float, float, float], r_5dof_tuple: tuple[float, float, float]) -> tuple[float, float, float, float, float]:
+    # Constants from the 5-DOF solver's description
+    L1 = 0.425
+    L2 = 0.39225
+    L_tcp = 0.09465  # This is the offset from Link 5 frame to Link 6 origin
+    y_const = 0.13585 - 0.1197 + 0.093  # Net Y offset for the planar subproblem
+
+    p_x, p_y, p_z = p_5dof_tuple
+    roll, pitch, yaw = r_5dof_tuple
+    
+    # Calculate R_des from r_5dof (orientation of Link 5 frame)
+    cr, sr = math.cos(roll), math.sin(roll)
+    cp, sp = math.cos(pitch), math.sin(pitch)
+    cy, sy = math.cos(yaw), math.sin(yaw)
+    
+    Rx = np.array([[1, 0, 0], [0, cr, -sr], [0, sr, cr]])
+    Ry_mat = np.array([[cp, 0, sp], [0, 1, 0], [-sp, 0, cp]]) # Renamed to avoid conflict
+    Rz_mat = np.array([[cy, -sy, 0], [sy, cy, 0], [0, 0, 1]]) # Renamed
+    R_des = Rz_mat @ Ry_mat @ Rx
+
+    # q1 calculation
+    r_xy = math.sqrt(p_x ** 2 + p_y ** 2)
+    
+    # Handle cases where p_x, p_y are zero (on Z-axis)
+    if r_xy < 1e-9: # Effectively zero
+        if abs(y_const) < 1e-9: # y_const is also zero, q1 indeterminate.
+                                # 5-DOF code implies theta=0, a=0, so q1_cand1=0, q1_cand2=-pi
+            theta = 0.0
+            a = 0.0
+        else: # On Z-axis but y_const is not zero. Unreachable by this formulation.
+            raise ValueError("5-DOF: Unreachable configuration (on Z axis, y_const != 0)")
+    else:
+        theta = math.atan2(p_y, p_x)
+        ratio = y_const / r_xy
+        if abs(ratio) > 1.0: # Clamp ratio due to potential floating point inaccuracies
+            ratio = max(-1.0, min(1.0, ratio))
+            # If still > 1.0 after clamping (e.g. if y_const is large and r_xy small), it's unreachable
+            if abs(ratio) > 1.0:
+                 raise ValueError("5-DOF: Unreachable configuration (asin out of bounds for q1)")
+        a = math.asin(ratio)
+
+    q1_candidate1 = theta - a
+    q1_candidate2 = theta - (math.pi - a)
+
+    def compute_M_for_5dof(q1_val, R_des_mat):
+        cos_q1 = math.cos(q1_val)
+        sin_q1 = math.sin(q1_val)
+        Rz_neg_q1 = np.array([[cos_q1, sin_q1, 0], [-sin_q1, cos_q1, 0], [0, 0, 1]])
+        M_val = Rz_neg_q1 @ R_des_mat
+        return M_val
+
+    M1 = compute_M_for_5dof(q1_candidate1, R_des)
+    M2 = compute_M_for_5dof(q1_candidate2, R_des)
+    
+    # The 5-DOF code checks M[1,2] for q1 selection.
+    # M = Ry(phi)Rz(q5), so M[1,2] should be 0.
+    err1 = abs(M1[1, 2]) 
+    err2 = abs(M2[1, 2])
+
+    q1 = q1_candidate1 if err1 <= err2 else q1_candidate2
+    M = M1 if err1 <= err2 else M2
+    
+    cos_q1 = math.cos(q1)
+    sin_q1 = math.sin(q1)
+    Rz_neg_q1_mat = np.array([[cos_q1, sin_q1, 0], [-sin_q1, cos_q1, 0], [0, 0, 1]])
+    p_vec = np.array([p_x, p_y, p_z])
+    p_bar = Rz_neg_q1_mat @ p_vec
+    p_bar_x, _, p_bar_z = p_bar # p_bar_y should be y_const
+
+    # phi and q5 from M
+    # M = Ry(phi)Rz(q5) = [[c_phi*c_q5, -c_phi*s_q5, s_phi], [s_q5, c_q5, 0], [-s_phi*c_q5, s_phi*s_q5, c_phi]]
+    # Ensure M[1,2] is indeed close to 0 for the chosen q1.
+    if abs(M[1,2]) > 1e-5 : # Tolerance for M[1,2] == 0
+        # This might happen if R_des cannot be formed by Rz(q1)Ry(phi)Rz(q5)
+        # Or if the q1 selection was poor.
+        # Given the 6-DOF logic, this M[1,2] should be very close to 0.
+        pass # Proceed, but note potential issue.
+
+    phi = math.atan2(M[0, 2], M[2, 2]) # atan2(s_phi, c_phi)
+    q5 = math.atan2(M[1, 0], M[1, 1])  # atan2(s_q5, c_q5)
+
+    # Planar 2R arm solution (q2, q3)
+    P_x_planar = p_bar_x - L_tcp * math.sin(phi)
+    P_z_planar = p_bar_z - L_tcp * math.cos(phi)
+    
+    r2_planar_sq = P_x_planar**2 + P_z_planar**2
+    
+    # Check reachability for 2R arm
+    if r2_planar_sq > (L1 + L2)**2 * (1 + 1e-9) or r2_planar_sq < (L1 - L2)**2 * (1 - 1e-9  if L1!=L2 else 1e-9):
+        # Add small tolerance for floating point issues
+        # If (L1-L2)^2 < r2_planar_sq < (L1+L2)^2 is not met
+        pass # Let acos handle it, might lead to math error if strictly outside
+
+    cos_q3_val = (r2_planar_sq - L1**2 - L2**2) / (2 * L1 * L2)
+    cos_q3_val = max(-1.0, min(1.0, cos_q3_val)) # Clamp for acos
+    
+    q3_candidateA = math.acos(cos_q3_val)
+    q3_candidateB = -q3_candidateA
+
+    solutions = []
+    for q3_val in [q3_candidateA, q3_candidateB]:
+        # alpha = atan2(P_z_planar, P_x_planar) - this is what atan2(P_x,P_z) in original code means for X-Z plane
+        # beta = atan2(L2*sin(q3), L1+L2*cos(q3))
+        # q2 = alpha - beta
+        # Original: q2 = atan2(P_x, P_z) – atan2( L2*sin(q3), L1 + L2*cos(q3) )
+        # P_x_planar is along the "horizontal" axis of the 2R arm, P_z_planar is "vertical"
+        q2_val = math.atan2(P_x_planar, P_z_planar) - math.atan2(L2 * math.sin(q3_val), L1 + L2 * math.cos(q3_val))
+        q4_val = phi - (q2_val + q3_val)
+        
+        # Test reconstruction (error calculation from 5-DOF code)
+        calc_x = L1 * math.sin(q2_val) + L2 * math.sin(q2_val + q3_val) + L_tcp * math.sin(phi)
+        calc_z = L1 * math.cos(q2_val) + L2 * math.cos(q2_val + q3_val) + L_tcp * math.cos(phi)
+        err_val = math.sqrt((calc_x - p_bar_x)**2 + (calc_z - p_bar_z)**2)
+        solutions.append(((q1, q2_val, q3_val, q4_val, q5), err_val))
+
+    if not solutions:
+        raise ValueError("5-DOF: No solution found in planar subproblem.")
+
+    # Select the solution with the smallest reconstruction error
+    solutions.sort(key=lambda x: x[1])
+    best_solution_joints, _ = solutions[0]
+    
+    return best_solution_joints
+# --- End of Helper: 5-DOF IK Solver ---
+
+
+# --- Start of Helper: Rotation Matrix Utilities ---
+def _rpy_to_matrix(roll: float, pitch: float, yaw: float) -> np.ndarray:
+    cr, sr = math.cos(roll), math.sin(roll)
+    cp, sp = math.cos(pitch), math.sin(pitch)
+    cy, sy = math.cos(yaw), math.sin(yaw)
+    Rx = np.array([[1, 0, 0], [0, cr, -sr], [0, sr, cr]])
+    Ry = np.array([[cp, 0, sp], [0, 1, 0], [-sp, 0, cp]])
+    Rz = np.array([[cy, -sy, 0], [sy, cy, 0], [0, 0, 1]])
+    return Rz @ Ry @ Rx
+
+def _matrix_to_rpy(R: np.ndarray) -> tuple[float, float, float]:
+    sy = math.sqrt(R[0,0]**2 + R[1,0]**2)
+    singular = sy < 1e-6
+    if not singular:
+        roll = math.atan2(R[2,1], R[2,2])
+        pitch = math.atan2(-R[2,0], sy)
+        yaw = math.atan2(R[1,0], R[0,0])
+    else: # Singular case: pitch is +/- pi/2
+        yaw = 0.0 # Conventionally, set yaw to 0
+        if R[2,0] < -0.99999: # pitch = +pi/2 (R[2,0] is -sin(pitch))
+            pitch = math.pi/2.0
+            roll = math.atan2(R[0,1], R[0,2]) # roll = yaw_eff - roll_eff or roll_eff - yaw_eff
+        else: # pitch = -pi/2 (R[2,0] is -sin(pitch))
+            pitch = -math.pi/2.0
+            roll = math.atan2(-R[0,1], -R[0,2])
+    return roll, pitch, yaw
+
+def _Ry_matrix(angle: float) -> np.ndarray:
+    c, s = math.cos(angle), math.sin(angle)
+    return np.array([[c,0,s],[0,1,0],[-s,0,c]])
+
+def _Rz_matrix(angle: float) -> np.ndarray:
+    c, s = math.cos(angle), math.sin(angle)
+    return np.array([[c,-s,0],[s,c,0],[0,0,1]])
+# --- End of Helper: Rotation Matrix Utilities ---
+
+def inverse_kinematics(p: tuple[float, float, float], r: tuple[float, float, float]) -> tuple[float, float, float, float, float, float]:
+    # Constants
+    d_tcp_offset_vec = np.array([0, 0.0823, 0])
+    y_const_for_q1 = 0.13585 - 0.1197 + 0.093 # From 5-DOF kinematics summary
+    pi = math.pi
+    tol = 1e-5 # Tolerance for comparisons
+
+    # TCP fixed transform relative to Link 6
+    # R_tcp_fixed = Rz(pi/2) -> R_tcp_fixed_inv = Rz(-pi/2)
+    R_tcp_fixed_inv = np.array([[0,1,0],[-1,0,0],[0,0,1]], dtype=float)
+
+    # Inputs
+    p_target_vec = np.array(p)
+    roll_target, pitch_target, yaw_target = r
+    R_target = _rpy_to_matrix(roll_target, pitch_target, yaw_target)
+
+    # 1. Calculate R_0_6 (orientation of Link 6) and P_wc (position of Link 6 origin)
+    R_0_6 = R_target @ R_tcp_fixed_inv
+    P_wc_vec = p_target_vec - R_0_6 @ d_tcp_offset_vec
+    
+    # 2. Calculate q1 candidates from P_wc_vec
+    P_wc_x, P_wc_y = P_wc_vec[0], P_wc_vec[1]
+    r_xy_q1 = math.sqrt(P_wc_x**2 + P_wc_y**2)
+    
+    q1_cand_forms = []
+    if r_xy_q1 < 1e-9: # P_wc on Z-axis
+        if abs(y_const_for_q1) < 1e-9: # y_const is also zero
+            theta_q1 = 0.0
+            a_q1 = 0.0
+            q1_cand_forms.append(theta_q1 - a_q1)
+            q1_cand_forms.append(theta_q1 - (pi - a_q1))
+        else: # Unreachable by this formulation if P_wc on Z-axis and y_const != 0
+            raise ValueError("IK: Unreachable configuration for q1 (P_wc on Z-axis, y_const != 0)")
+    else:
+        theta_q1 = math.atan2(P_wc_y, P_wc_x)
+        ratio_q1 = y_const_for_q1 / r_xy_q1
+        if abs(ratio_q1) > 1.0 + tol : # Add tolerance for floating point
+             raise ValueError("IK: Unreachable configuration for q1 (asin out of bounds)")
+        ratio_q1 = max(-1.0, min(1.0, ratio_q1)) # Clamp
+        a_q1 = math.asin(ratio_q1)
+        q1_cand_forms.append(theta_q1 - a_q1)
+        q1_cand_forms.append(theta_q1 - (pi - a_q1))
+
+    for q1_cand in q1_cand_forms:
+        R_z_neg_q1 = _Rz_matrix(-q1_cand)
+        M_known_part = R_z_neg_q1 @ R_0_6 # This is Rz(-q1)*R_0_6
+        
+        mkp_10 = M_known_part[1,0] # (Rz(-q1)R_0_6)_10
+        mkp_12 = M_known_part[1,2] # (Rz(-q1)R_0_6)_12
+
+        # Condition for (Rz(-q1)R_0_5_frame)_12 = 0 is -mkp_10*sin(q6) + mkp_12*cos(q6) = 0
+        # So, tan(q6) = mkp_12 / mkp_10
+        
+        current_q6_candidates = []
+        if abs(mkp_10) < tol and abs(mkp_12) < tol:
+            # Singularity: 0*s6 + 0*c6 = 0. True for any q6.
+            # This implies (Rz(-q1)R_0_6) has its middle row as [0, X, 0].
+            # M = (Rz(-q1)R_0_6) * Ry(-q6). M_10, M_11, M_12 are (0, X, 0).
+            # This means s_q5=0, c_q5=X. q5 is 0 or pi. q6 is free.
+            # Pick q6 = 0 as a convention in this singular case.
+            current_q6_candidates.append(0.0)
+        else:
+            q6_val1 = math.atan2(mkp_12, mkp_10)
+            q6_val2 = q6_val1 + pi # The other solution for tan()
+            current_q6_candidates.append(q6_val1)
+            current_q6_candidates.append(q6_val2)
+
+        for q6_c in current_q6_candidates:
+            R_0_5_frame = R_0_6 @ _Ry_matrix(-q6_c)
+            
+            try:
+                r_5dof_roll, r_5dof_pitch, r_5dof_yaw = _matrix_to_rpy(R_0_5_frame)
+            except ValueError: # Should not happen if R_0_5_frame is valid
+                continue
+
+            r_5dof_tuple = (r_5dof_roll, r_5dof_pitch, r_5dof_yaw)
+            P_wc_tuple = tuple(P_wc_vec)
+
+            try:
+                # Call the 5-DOF solver
+                q1_s, q2_s, q3_s, q4_s, q5_s = _ik_5dof(P_wc_tuple, r_5dof_tuple)
+            except ValueError: # Catch math errors like "unreachable" from 5-DOF solver
+                continue
+            
+            # Normalize q1_s and q1_cand for comparison
+            # (angle - (-pi)) % (2*pi) + (-pi) -> fmod(angle + pi, 2*pi) - pi
+            q1_s_norm = math.fmod(q1_s + pi, 2*pi) - pi
+            q1_cand_norm = math.fmod(q1_cand + pi, 2*pi) - pi
+            
+            diff_q1 = abs(q1_s_norm - q1_cand_norm)
+            if diff_q1 > pi: # Handle wrap-around for angles like -pi vs pi
+                diff_q1 = 2*pi - diff_q1
+            
+            if diff_q1 < tol:
+                # Solution found
+                result_angles = [q1_s, q2_s, q3_s, q4_s, q5_s, q6_c]
+                normalized_result = []
+                for angle_val in result_angles:
+                    norm_angle = math.fmod(angle_val + pi, 2*pi) - pi
+                    # Ensure -pi is chosen if it's on the boundary, unless pi is explicitly preferred by limits.
+                    # Given limits are [-2pi, 2pi], standard normalization to [-pi, pi] is fine.
+                    if abs(norm_angle + pi) < tol and abs(angle_val - pi) < tol : # If original was pi, keep pi
+                        normalized_result.append(pi)
+                    else:
+                        normalized_result.append(norm_angle)
+                return tuple(normalized_result)
+
+    raise ValueError("6-DOF IK solution not found. This may indicate an unreachable target or an issue in the logic.")
+
+```

@@ -1,0 +1,166 @@
+I've identified a key issue in the previous approach: the selection of `theta1`. There are two potential solutions for `theta1` that satisfy the geometric constraint for the Y-offset of the kinematic chain. The previous code effectively only used the first `theta1` candidate it generated because the J2-J3 solver always returned a solution (either primary or fallback).
+
+The refined strategy is as follows:
+
+1.  **Calculate `theta1` Candidates:**
+    *   Solve `py*cos(theta1) - px*sin(theta1) = C_offset` (where `C_offset = d1y + d2y`).
+    *   This yields two solutions: `theta1_A = alpha - phi` and `theta1_B = alpha + phi`, where `alpha = atan2(-px, py)` and `phi = acos(C_offset / sqrt(px^2 + py^2))`.
+    *   Both candidates will be tested. The order of testing will be `theta1_A` then `theta1_B`.
+
+2.  **Iterate Through `theta1` Candidates:**
+    *   For each `theta1` candidate:
+        *   Transform the global target position `(px, py, pz)` into the XZ-plane target `(x_planar_target, z_planar_target)` for the J2-J3 system, based on the current `theta1`.
+        *   Transform the global target orientation `r_global` into the F1 frame (rotated by `theta1`) to calculate `theta_sum_j2j3 = theta2 + theta3`.
+        *   Call a revised J2-J3 solver (`_solve_j2_j3_v2`) with `x_planar_target`, `z_planar_target`, and `theta_sum_j2j3`.
+
+3.  **Revised J2-J3 Solver (`_solve_j2_j3_v2`):**
+    *   This function attempts to find `theta2` and `theta3`.
+    *   **Primary Method:** It first tries to solve for `theta3` using the law of cosines (`acos` method) based on `x_planar_target` and `z_planar_target`. It considers both `+acos()` and `-acos()` solutions for `theta3_raw` (prioritizing `-acos()` as it matched earlier examples). For each, `theta2` is derived from `theta_sum_j2j3`. A forward kinematics check is performed on the planar J2-J3 system. If the check passes, these `(theta2, theta3)` are returned along with a flag indicating `primary_success = True`.
+    *   **Fallback Method:** If the primary method fails the FK check for both `theta3_raw` options, a fallback calculation (as in "EXISTING 2") is used to find `theta2` and `theta3` based on `x_planar_target`, `z_planar_target`, and `theta_sum_j2j3`. An FK check is also performed for this fallback solution. If it passes, these values are returned with `primary_success = False`.
+    *   **Failure:** If even the fallback's FK check fails, the function returns `(None, None, False)` to indicate that no consistent J2-J3 solution was found for the given inputs.
+
+4.  **Solution Selection:**
+    *   Collect all successful solutions `(theta1, theta2, theta3, primary_success_flag)` from both `theta1` candidates.
+    *   If no solutions are found (i.e., both `theta1` paths led to J2-J3 failure), return `(0,0,0)` (this path should not be taken if the target is "assumed reachable").
+    *   Prioritize solutions where `primary_success_flag` is `True`.
+        *   If there are any primary solutions, take the first one found (respecting the trial order of `theta1_A` then `theta1_B`).
+        *   If there are no primary solutions, take the first fallback solution found (again, respecting the `theta1` trial order).
+
+This approach ensures that both `theta1` possibilities are explored and gives preference to solutions derived from the more direct geometric `acos` method for the J2-J3 subproblem.
+
+```python
+import math
+
+def _solve_j2_j3_v2(x_pt, z_pt, t_sum, L2z, L3z, abs_tol=1e-5):
+    """
+    Solves the J2-J3 planar subproblem.
+    Returns (theta2, theta3, primary_success_flag)
+    primary_success_flag is True if acos method worked, False if fallback was used.
+    Returns (None, None, False) on total failure.
+    """
+    d_sq_planar = x_pt**2 + z_pt**2
+    
+    # Primary method: acos for theta3
+    val_for_acos_theta3_num = d_sq_planar - L2z**2 - L3z**2
+    val_for_acos_theta3_den = 2 * L2z * L3z
+
+    # Denominator should not be zero as L2z, L3z are fixed non-zero constants
+    val_for_acos_theta3 = val_for_acos_theta3_num / val_for_acos_theta3_den
+    clamped_val = max(min(val_for_acos_theta3, 1.0), -1.0)
+    theta3_from_acos_raw_val = math.acos(clamped_val)
+    
+    # Order: prefer negative acos result for theta3_raw, then positive
+    theta3_candidates_raw = [-theta3_from_acos_raw_val, theta3_from_acos_raw_val] 
+
+    for t3_raw in theta3_candidates_raw:
+        t2_cand = t_sum - t3_raw
+        
+        # Planar FK check
+        x_calc = L2z * math.sin(t2_cand) + L3z * math.sin(t_sum)
+        z_calc = L2z * math.cos(t2_cand) + L3z * math.cos(t_sum)
+
+        if math.isclose(x_calc, x_pt, abs_tol=abs_tol) and \
+           math.isclose(z_calc, z_pt, abs_tol=abs_tol):
+            return (t2_cand, t3_raw, True) # Primary solution found
+
+    # Fallback method (if acos method + FK check failed for both theta3_raw options)
+    term_x = x_pt - L3z * math.sin(t_sum)
+    term_z = z_pt - L3z * math.cos(t_sum)
+    t2_fallback = math.atan2(term_x, term_z)
+    t3_fallback = t_sum - t2_fallback
+    
+    # FK check for fallback
+    x_calc_fb = L2z * math.sin(t2_fallback) + L3z * math.sin(t_sum)
+    z_calc_fb = L2z * math.cos(t2_fallback) + L3z * math.cos(t_sum)
+    if math.isclose(x_calc_fb, x_pt, abs_tol=abs_tol) and \
+       math.isclose(z_calc_fb, z_pt, abs_tol=abs_tol):
+        return (t2_fallback, t3_fallback, False) # Fallback solution, FK passed
+    else:
+        return (None, None, False) # Total failure for this sub-problem
+
+def inverse_kinematics(p_global: tuple[float, float, float], r_global_rpy_zyx: tuple[float, float, float]) -> tuple[float, float, float]:
+    px, py, pz = p_global
+    rx_g, ry_g, rz_g = r_global_rpy_zyx
+
+    # Constants
+    d1y = 0.13585
+    d2y = -0.1197
+    C_offset = d1y + d2y 
+
+    L2z = 0.425
+    L3z = 0.39225
+
+    # Calculate theta1 candidates
+    R_val_sq = px**2 + py**2
+    if R_val_sq < 1e-12: 
+        R_val = 1e-6 # Avoid division by zero if px,py are zero (unreachable if C_offset!=0)
+    else:
+        R_val = math.sqrt(R_val_sq)
+    
+    alpha_angle = math.atan2(-px, py)
+    
+    cos_phi_val_arg = C_offset / R_val
+    clamped_cos_phi_val = max(min(cos_phi_val_arg, 1.0), -1.0)
+    phi_angle = math.acos(clamped_cos_phi_val)
+
+    theta1_options = [
+        alpha_angle - phi_angle, # Try this first
+        alpha_angle + phi_angle
+    ]
+    
+    collected_solutions = []
+
+    for theta1 in theta1_options:
+        c1 = math.cos(theta1)
+        s1 = math.sin(theta1)
+
+        # Target position for the J2-J3 planar system in F1's XZ plane
+        x_planar_target = px*c1 + py*s1 
+        z_planar_target = pz
+
+        # Target orientation sum for J2+J3 (theta_sum_j2j3)
+        crx, srx = math.cos(rx_g), math.sin(rx_g)
+        cry, sry = math.cos(ry_g), math.sin(ry_g)
+        crz, srz = math.cos(rz_g), math.sin(rz_g)
+
+        # R_global = Rz(rz_g)Ry(ry_g)Rx(rx_g)
+        R00_g = crz * cry
+        R02_g = crz * sry * crx + srz * srx
+        R10_g = srz * cry
+        R12_g = srz * sry * crx - crz * srx
+        
+        # R_target_F1 = RotZ(-theta1) * R_global
+        # RotZ(-theta1) = [[c1, s1, 0], [-s1, c1, 0], [0,0,1]]
+        R_target_F1_00 = c1 * R00_g + s1 * R10_g
+        R_target_F1_02 = c1 * R02_g + s1 * R12_g
+        theta_sum_j2j3 = math.atan2(R_target_F1_02, R_target_F1_00)
+        
+        theta2, theta3, primary_success = _solve_j2_j3_v2(
+            x_planar_target, z_planar_target, theta_sum_j2j3, L2z, L3z
+        )
+        
+        if theta2 is not None and theta3 is not None: # A solution (primary or fallback) was found for J2/J3
+            collected_solutions.append({
+                't1': theta1, 't2': theta2, 't3': theta3, 
+                'primary_j2j3': primary_success
+            })
+
+    if not collected_solutions:
+         # Should not be reached if target is "assumed reachable"
+         return (0.0, 0.0, 0.0) 
+
+    # Prioritize solutions where J2/J3 was solved by the primary (acos) method
+    primary_j2j3_solutions = [s for s in collected_solutions if s['primary_j2j3']]
+    
+    if primary_j2j3_solutions:
+        # If multiple theta1 options led to primary J2/J3 solutions,
+        # the first one (due to order of theta1_options) is chosen.
+        chosen_sol = primary_j2j3_solutions[0]
+        return (chosen_sol['t1'], chosen_sol['t2'], chosen_sol['t3'])
+    else:
+        # If no primary J2/J3 solutions, use the first fallback solution found.
+        # (This implies all entries in collected_solutions have primary_j2j3=False)
+        chosen_sol = collected_solutions[0]
+        return (chosen_sol['t1'], chosen_sol['t2'], chosen_sol['t3'])
+
+```

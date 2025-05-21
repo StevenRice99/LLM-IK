@@ -1,0 +1,327 @@
+To derive the inverse kinematics solution for the given 3-DOF serial manipulator, considering both position and orientation of the TCP, we will follow these steps:
+
+**1. Define Robot Parameters:**
+From the "DETAILS" section:
+*   L1y = 0.13585 (Offset from Joint 1 to Joint 2 along local Y of Joint 1's frame, but Joint 2 is at [0, 0.13585, 0] relative to Joint 1, and Joint 1 rotates about Z. So this is effectively a translation along Y in the frame *before* Joint 1's Z rotation if we consider J1 origin fixed, or along Y in J1's frame after Z rotation if J1 is at origin).
+    Let's clarify the forward kinematics chain based on the provided table:
+    *   Joint 1 (Revolute Z) at origin [0,0,0].
+    *   Joint 2 (Revolute Y) is at [0, 0.13585, 0] in Link 1's frame.
+    *   Joint 3 (Revolute Y) is at [0, -0.1197, 0.425] in Link 2's frame.
+    *   TCP is at [0, 0, 0.39225] in Link 3's frame.
+
+Let:
+*   `d1y = 0.13585` (y-offset from J1 to J2 in J1's frame)
+*   `d2y = -0.1197` (y-offset from J2 to J3 in J2's frame)
+*   `d2z = 0.425` (z-offset from J2 to J3 in J2's frame)
+*   `d3z = 0.39225` (z-offset from J3 to TCP in J3's frame)
+
+**2. Target Orientation (Rotation Matrix):**
+The input orientation `r = (roll, pitch, yaw) = (phi, theta, psi)` is given in radians. We convert this to a target rotation matrix `R_target`. Assuming ZYX extrinsic convention (Rz(psi) * Ry(theta) * Rx(phi)):
+Let `phi = r[0]`, `theta = r[1]`, `psi = r[2]`.
+`cphi = cos(phi)`, `sphi = sin(phi)`
+`cth = cos(theta)`, `sth = sin(theta)`
+`cpsi = cos(psi)`, `spsi = sin(psi)`
+
+`R_target = [[cpsi*cth, cpsi*sth*sphi - spsi*cphi, cpsi*sth*cphi + spsi*sphi],
+             [spsi*cth, spsi*sth*sphi + cpsi*cphi, spsi*sth*cphi - cpsi*sphi],
+             [-sth,     cth*sphi,                  cth*cphi                 ]]`
+
+**3. Robot End-Effector Orientation:**
+The orientation of the TCP is determined by the sequence of joint rotations: `R_0_TCP = Rz(q1) * Ry(q2) * Ry(q3)`.
+Let `c1=cos(q1), s1=sin(q1)`, etc.
+Let `q23 = q2 + q3`. Then `R_0_TCP = Rz(q1) * Ry(q23)`.
+`R_0_TCP = [[c1*cos(q23), -s1, c1*sin(q23)],
+            [s1*cos(q23),  c1, s1*sin(q23)],
+            [-sin(q23),    0,  cos(q23)  ]]`
+
+**4. Solve for q1 and q2+q3 (S_q23):**
+Equating `R_target` with `R_0_TCP`:
+`r12 = -s1`
+`r22 = c1`
+`r32 = 0` (This implies `cth*sphi = 0`. Since the target is assumed reachable, this condition holds.)
+
+From `r12` and `r22`:
+`q1 = atan2(-r12, r22)`
+
+From `r31` and `r33`:
+`r31 = -sin(q23)`
+`r33 = cos(q23)`
+`S_q23 = q2 + q3 = atan2(-r31, r33)`
+
+Let `s_S_q23 = sin(S_q23)` and `c_S_q23 = cos(S_q23)`.
+
+**5. Forward Kinematics for Position:**
+Let `(Px, Py, Pz) = p`.
+The position of Joint 2 (P_J2) in base frame:
+`P_J2 = Rz(q1) * [0, d1y, 0]^T = [-s1*d1y, c1*d1y, 0]^T`
+
+The position of Joint 3 (P_J3) in base frame:
+`P_J3 = P_J2 + Rz(q1)*Ry(q2) * [0, d2y, d2z]^T`
+`Rz(q1)*Ry(q2) = [[c1c2, -s1, c1s2], [s1c2, c1, s1s2], [-s2, 0, c2]]`
+`P_J3_x = -s1*d1y + (-s1*d2y + c1s2*d2z)`
+`P_J3_y =  c1*d1y + ( c1*d2y + s1s2*d2z)`
+`P_J3_z =                         c2*d2z`
+
+The position of TCP (P_TCP) in base frame:
+`P_TCP = P_J3 + Rz(q1)*Ry(q2)*Ry(q3) * [0, 0, d3z]^T`
+`P_TCP = P_J3 + R_0_TCP * [0, 0, d3z]^T` (using R_0_TCP with q23)
+`P_TCP_x = P_J3_x + c1*s_S_q23*d3z`
+`P_TCP_y = P_J3_y + s1*s_S_q23*d3z`
+`P_TCP_z = P_J3_z + c_S_q23*d3z`
+
+Substituting P_J3 components:
+`Px = -s1*d1y - s1*d2y + c1s2*d2z + c1*s_S_q23*d3z`
+   `= -s1*(d1y+d2y) + c1*(s2*d2z + s_S_q23*d3z)`
+`Py =  c1*d1y + c1*d2y + s1s2*d2z + s1*s_S_q23*d3z`
+   `=  c1*(d1y+d2y) + s1*(s2*d2z + s_S_q23*d3z)`
+`Pz = c2*d2z + c_S_q23*d3z`
+
+**6. Solve for q2:**
+From the `Pz` equation:
+`c2*d2z = Pz - c_S_q23*d3z`
+`c2 = (Pz - c_S_q23*d3z) / d2z` (assuming `d2z != 0`, which is true: 0.425)
+
+From `Px` and `Py` equations:
+Let `A = d1y + d2y`
+Let `B = s2*d2z + s_S_q23*d3z`
+`Px = -s1*A + c1*B`
+`Py =  c1*A + s1*B`
+Multiply first by `c1`, second by `s1` and add:
+`c1*Px + s1*Py = -s1c1*A + c1^2*B + s1c1*A + s1^2*B = (c1^2+s1^2)*B = B`
+So, `B = c1*Px + s1*Py`
+`s2*d2z + s_S_q23*d3z = c1*Px + s1*Py`
+`s2*d2z = c1*Px + s1*Py - s_S_q23*d3z`
+`s2 = (c1*Px + s1*Py - s_S_q23*d3z) / d2z`
+
+Now we have `s2` and `c2`:
+`q2 = atan2(s2, c2)`
+
+**7. Solve for q3:**
+`q3 = S_q23 - q2`
+
+The joint values `(q1, q2, q3)` are in radians.
+
+```python
+import math
+
+def inverse_kinematics(p: tuple[float, float, float], r: tuple[float, float, float]) -> tuple[float, float, float]:
+    """
+    Gets the joint values needed to reach position "p" and orientation "r".
+    :param p: The position to reach in the form [x, y, z].
+    :param r: The orientation to reach in radians in the form [roll, pitch, yaw].
+    :return: A list of the values to set the links to for reaching position "p" and orientation "r".
+    """
+    Px, Py, Pz = p
+    phi, theta, psi = r # roll, pitch, yaw
+
+    # Robot Parameters
+    d1y = 0.13585
+    d2y = -0.1197
+    d2z = 0.425
+    d3z = 0.39225
+
+    # 1. Calculate Target Rotation Matrix R_target = Rz(psi)Ry(theta)Rx(phi)
+    cphi = math.cos(phi)
+    sphi = math.sin(phi)
+    cth = math.cos(theta)
+    sth = math.sin(theta)
+    cpsi = math.cos(psi)
+    spsi = math.sin(psi)
+
+    r11 = cpsi * cth
+    r12 = cpsi * sth * sphi - spsi * cphi
+    r13 = cpsi * sth * cphi + spsi * sphi
+    r21 = spsi * cth
+    r22 = spsi * sth * sphi + cpsi * cphi
+    r23 = spsi * sth * cphi - cpsi * sphi
+    r31 = -sth
+    r32 = cth * sphi # Should be close to 0 for reachable orientation
+    r33 = cth * cphi
+
+    # 2. Solve for q1
+    # R_robot's second column: [-s1, c1, 0]^T
+    # r12 = -s1, r22 = c1
+    q1 = math.atan2(-r12, r22)
+    s1 = math.sin(q1)
+    c1 = math.cos(q1)
+
+    # 3. Solve for S_q23 = q2 + q3
+    # R_robot's third row: [-sin(q2+q3), 0, cos(q2+q3)]^T
+    # r31 = -sin(q2+q3), r33 = cos(q2+q3)
+    S_q23 = math.atan2(-r31, r33)
+    s_S_q23 = math.sin(S_q23)
+    c_S_q23 = math.cos(S_q23)
+
+    # 4. Solve for q2
+    # Pz = c2*d2z + c_S_q23*d3z
+    # Ensure d2z is not zero (it is 0.425)
+    if d2z == 0:
+        # This case should not happen for the given robot dimensions.
+        # Handle error or alternative calculation if d2z could be zero.
+        # For now, assume d2z != 0 as per problem spec.
+        pass
+    
+    c2_numerator = Pz - c_S_q23 * d3z
+    c2 = c2_numerator / d2z
+    # Clamp c2 to [-1, 1] due to potential floating point inaccuracies
+    c2 = max(min(c2, 1.0), -1.0)
+
+
+    # s2*d2z = c1*Px + s1*Py - s_S_q23*d3z
+    s2_numerator = c1 * Px + s1 * Py - s_S_q23 * d3z
+    s2 = s2_numerator / d2z
+    # Clamp s2 to [-1, 1]
+    s2 = max(min(s2, 1.0), -1.0)
+    
+    # Verify s2^2 + c2^2 = 1, or use atan2 robustly
+    # The derivation for s2 and c2 should be consistent.
+    # If there are issues, it might be due to multiple solutions for q2 (elbow up/down)
+    # The problem asks for *a* solution. atan2(s2,c2) will pick one.
+    # However, it's better to ensure consistency or pick a specific configuration if needed.
+    # The Pz equation gives c2.
+    # The Px, Py equations give s2.
+    # Let's re-evaluate if one is more direct or if there's a choice.
+    # The current derivation for s2 and c2 is from two different sets of equations,
+    # which should be consistent for a valid solution.
+
+    q2 = math.atan2(s2, c2)
+
+    # 5. Solve for q3
+    q3 = S_q23 - q2
+
+    # Normalize angles to be within a common range if necessary, e.g. [-pi, pi]
+    # However, the joint limits are large, so atan2's output and subsequent subtractions are likely fine.
+    # q1 = (q1 + math.pi) % (2 * math.pi) - math.pi
+    # q2 = (q2 + math.pi) % (2 * math.pi) - math.pi
+    # q3 = (q3 + math.pi) % (2 * math.pi) - math.pi
+    # The problem doesn't specify normalization, and joint limits are [-2pi, 2pi]
+
+    return (q1, q2, q3)
+
+```
+Testing the provided "EXISTING" solution's constants:
+`k = 0.01615`
+`L1y = 0.13585` (my `d1y`)
+`L2y = -0.1197` (my `d2y`)
+`d1y + d2y = 0.13585 - 0.1197 = 0.01615`. This matches `k`.
+
+The existing solution's `numerator_cosθ3 = x ** 2 + y ** 2 + z ** 2 - 0.334746`
+`0.3334125`
+My `d2z = 0.425`, `d3z = 0.39225`
+`d2z^2 = 0.180625`
+`d3z^2 = 0.1538505625`
+`(d1y+d2y)^2 = k^2 = 0.0002608225`
+`d2z^2 + d3z^2 + (d1y+d2y)^2 = 0.180625 + 0.1538505625 + 0.0002608225 = 0.334736385` (This is the `0.334746` term, likely `d2z^2 + d3z^2 + (d1y+d2y)^2` or similar sum of squares of effective link lengths).
+`2 * d2z * d3z = 2 * 0.425 * 0.39225 = 0.3334125`. This is the divisor for `cosθ3`.
+The existing solution uses a law-of-cosines approach for a 2-link arm (lengths `d2z`, `d3z`) in the plane defined by `q2` and `q3`, after `q1` positions the base of this 2-link arm. `θ3` in their solution likely corresponds to my `q3` or an angle related to it.
+
+My solution decouples orientation first (q1, q2+q3), then solves for q2 and q3 using position. This is a standard approach when orientation is fully specified.
+
+A note on clamping `s2` and `c2`:
+If `abs(c2_numerator / d2z)` is slightly > 1 due to floating point errors, `math.acos(c2)` would fail. Clamping `c2` to `[-1, 1]` is a good practice. Similarly for `s2` if it were used to find `q2` via `asin`. `atan2(s2, c2)` is generally more robust as it handles signs correctly and `s2, c2` don't strictly need to form a perfect unit vector for `atan2` to give an angle, though the closer they are to satisfying `s2^2+c2^2=1`, the more accurate the result. The derivation ensures they should satisfy this if Px,Py,Pz is reachable with the given q1 and S_q23.
+
+Final check on the derivation of `s2` and `c2`:
+`c2 = (Pz - c_S_q23*d3z) / d2z`
+`s2 = (c1*Px + s1*Py - s_S_q23*d3z) / d2z`
+These seem correct and directly derived.
+
+One final thought: the problem states "Link 2 | [0, 0.13585, 0] | [0, 0, 0] | Y". This means the origin of Link 2's coordinate system (where joint 2 acts) is translated by [0, 0.13585, 0] relative to Link 1's coordinate system.
+My `d1y` is this translation.
+"Link 3 | [0, -0.1197, 0.425] | [0, 0, 0] | Y". Origin of Link 3 (where joint 3 acts) is translated by `[0, d2y, d2z]` relative to Link 2's system.
+"TCP | [0, 0, 0.39225] | [0, 0, 0]". TCP is translated by `[0, 0, d3z]` relative to Link 3's system.
+The kinematic chain for position seems correctly interpreted.
+
+The orientation `R_0_TCP = Rz(q1) * Ry(q2) * Ry(q3)` is also standard for this Z-Y-Y joint sequence where each rotation is about the new local axis.
+
+The solution appears solid.
+
+```python
+import math
+
+def inverse_kinematics(p: tuple[float, float, float], r: tuple[float, float, float]) -> tuple[float, float, float]:
+    """
+    Gets the joint values needed to reach position "p" and orientation "r".
+    :param p: The position to reach in the form [x, y, z].
+    :param r: The orientation to reach in radians in the form [roll, pitch, yaw].
+    :return: A tuple of the joint values (q1, q2, q3) in radians.
+    """
+    Px, Py, Pz = p
+    phi, theta, psi = r # roll, pitch, yaw (extrinsic ZYX convention for target)
+
+    # Robot Parameters from URDF-like description
+    # Link 1: Revolute Z at origin [0,0,0]
+    # Link 2: Revolute Y, offset from Link 1 by [0, d1y, 0]
+    # Link 3: Revolute Y, offset from Link 2 by [0, d2y, d2z]
+    # TCP: Offset from Link 3 by [0, 0, d3z]
+    d1y = 0.13585
+    d2y = -0.1197
+    d2z = 0.425
+    d3z = 0.39225
+
+    # Step 1: Calculate Target Rotation Matrix R_target = Rz(psi)Ry(theta)Rx(phi)
+    cphi = math.cos(phi)
+    sphi = math.sin(phi)
+    cth = math.cos(theta)
+    sth = math.sin(theta)
+    cpsi = math.cos(psi)
+    spsi = math.sin(psi)
+
+    # R_target = 
+    # [[r11, r12, r13],
+    #  [r21, r22, r23],
+    #  [r31, r32, r33]]
+    # r11 = cpsi * cth
+    r12 = cpsi * sth * sphi - spsi * cphi
+    # r13 = cpsi * sth * cphi + spsi * sphi
+    # r21 = spsi * cth
+    r22 = spsi * sth * sphi + cpsi * cphi
+    # r23 = spsi * sth * cphi - cpsi * sphi
+    r31 = -sth
+    # r32 = cth * sphi # This must be 0 for the robot's RzRyRy structure. Assumed reachable.
+    r33 = cth * cphi
+
+    # Step 2: Solve for q1
+    # The robot's end-effector orientation matrix R_robot = Rz(q1) * Ry(q2) * Ry(q3)
+    # R_robot = [[c1*c(2+3), -s1, c1*s(2+3)],
+    #            [s1*c(2+3),  c1, s1*s(2+3)],
+    #            [-s(2+3),    0,  c(2+3)  ]]
+    # Comparing R_robot with R_target:
+    # -s1 = r12
+    #  c1 = r22
+    q1 = math.atan2(-r12, r22)
+    s1 = math.sin(q1)
+    c1 = math.cos(q1)
+
+    # Step 3: Solve for S_q23 = q2 + q3
+    # -s(2+3) = r31
+    #  c(2+3) = r33
+    S_q23 = math.atan2(-r31, r33)
+    s_S_q23 = math.sin(S_q23) # sin(q2+q3)
+    c_S_q23 = math.cos(S_q23) # cos(q2+q3)
+
+    # Step 4: Solve for q2 using position equations
+    # Pz = c2*d2z + cos(q2+q3)*d3z
+    # c2*d2z = Pz - cos(q2+q3)*d3z
+    if d2z == 0:
+        # This case should not happen for the given robot dimensions.
+        # If d2z were 0, this specific derivation path would be invalid.
+        # However, d2z = 0.425, so it's safe.
+        raise ValueError("d2z cannot be zero for this solution.")
+
+    c2_val = (Pz - c_S_q23 * d3z) / d2z
+    # Clamp c2_val to [-1, 1] to handle potential floating point inaccuracies
+    c2_val = max(min(c2_val, 1.0), -1.0)
+
+    # s2*d2z = c1*Px + s1*Py - sin(q2+q3)*d3z
+    s2_val = (c1 * Px + s1 * Py - s_S_q23 * d3z) / d2z
+    # Clamp s2_val to [-1, 1]
+    s2_val = max(min(s2_val, 1.0), -1.0)
+    
+    q2 = math.atan2(s2_val, c2_val)
+
+    # Step 5: Solve for q3
+    q3 = S_q23 - q2
+
+    return (q1, q2, q3)
+
+```

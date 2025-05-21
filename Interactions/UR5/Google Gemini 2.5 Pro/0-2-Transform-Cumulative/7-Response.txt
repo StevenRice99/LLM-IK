@@ -1,0 +1,126 @@
+Okay, I will attempt to provide a complete `inverse_kinematics` method.
+Based on the analysis of the feedback, it appears there are generally two geometric solutions for `(q1, q2)` that position the wrist center. The "correct" joint values provided in the feedback sometimes correspond to one solution (e.g., "elbow up" where `q2 >= 0`) and sometimes to the other (e.g., "elbow down" where `q2 <= 0`).
+
+The derivation used is:
+1.  Calculate the wrist center `P_wc = (pwc_x, pwc_y, pwc_z)` by subtracting the TCP offset (in base frame coordinates) from the target TCP position `p`. The TCP offset is determined by `d3z` and the target orientation `r`.
+2.  The Z-coordinate of the wrist center in the base frame is related to `q2` by `pwc_z = d2z * cos(q2)`.
+3.  This gives `cos(q2) = pwc_z / d2z`.
+4.  Two solutions for `q2` arise: `q2_A = acos(pwc_z / d2z)` and `q2_B = -acos(pwc_z / d2z)`.
+5.  For each chosen `q2`, `q1` is found using the `pwc_x` and `pwc_y` coordinates:
+    `q1 = atan2(pwc_y, pwc_x) - atan2(d1y + d2y, d2z * sin(q2))`.
+6.  `q3` is then found using the target orientation `r` and the calculated `q1, q2`.
+
+To provide a single deterministic solution, I will choose the "elbow down" configuration, i.e., `q2 = -acos(pwc_z / d2z)`. This choice seemed to align with the "correct" solutions in the initial examples from the last feedback round. The joint angle `q1` will be normalized to the range `[-pi, pi]`.
+
+```python
+import math
+
+def inverse_kinematics(p: tuple[float, float, float], r: tuple[float, float, float]) -> tuple[float, float, float]:
+    """
+    Gets the joint values needed to reach position "p" and orientation "r".
+    :param p: The position to reach in the form [x, y, z].
+    :param r: The orientation to reach in radians in the form [rx, ry, rz] (roll, pitch, yaw ZYX).
+    :return: A list of the values to set the links to for reaching position "p" and orientation "r".
+    """
+    px, py, pz = p
+    roll, pitch, yaw = r # ZYX Euler angles: R = Rz(yaw) * Ry(pitch) * Rx(roll)
+
+    # Constants
+    d1y = 0.13585
+    d2y = -0.1197
+    d2z = 0.425
+    d3z = 0.39225
+
+    # Helper for ZYX Euler angles to rotation matrix
+    def euler_zyx_to_matrix(y_angle, p_angle, r_angle):
+        cy = math.cos(y_angle)
+        sy = math.sin(y_angle)
+        cp = math.cos(p_angle)
+        sp = math.sin(p_angle)
+        cr = math.cos(r_angle)
+        sr = math.sin(r_angle)
+        R = [
+            [cy*cp, cy*sp*sr - sy*cr, cy*sp*cr + sy*sr],
+            [sy*cp, sy*sp*sr + cy*cr, sy*sp*cr - cy*sr],
+            [-sp,   cp*sr,            cp*cr]
+        ]
+        return R
+
+    def mat_vec_mult(mat, vec):
+        res = [0.0, 0.0, 0.0]
+        for i in range(3):
+            for j_mult in range(3):
+                res[i] += mat[i][j_mult] * vec[j_mult]
+        return res
+
+    def mat_mat_mult(A, B):
+        C = [[0.0, 0.0, 0.0], [0.0, 0.0, 0.0], [0.0, 0.0, 0.0]]
+        for i in range(3):
+            for j in range(3):
+                for k_mult in range(3):
+                    C[i][j] += A[i][k_mult] * B[k_mult][j]
+        return C
+
+    # Step 1: Calculate Wrist Center P_wc (origin of J3 frame)
+    R_tcp_base = euler_zyx_to_matrix(yaw, pitch, roll)
+    V_j3_tcp_local = [0.0, 0.0, d3z]
+    offset_vec = mat_vec_mult(R_tcp_base, V_j3_tcp_local)
+    
+    pwc_x = px - offset_vec[0]
+    pwc_y = py - offset_vec[1]
+    pwc_z = pz - offset_vec[2]
+
+    # Step 2: Solve for q2 (choosing "elbow down" convention)
+    # pwc_z = d2z * cos(q2)
+    cos_q2_val = pwc_z / d2z
+    if cos_q2_val > 1.0: cos_q2_val = 1.0
+    if cos_q2_val < -1.0: cos_q2_val = -1.0
+    
+    q2 = -math.acos(cos_q2_val) # Elbow down
+
+    # Step 3: Solve for q1
+    # pwc_x = -(d1y+d2y)*sin(q1) + d2z*cos(q1)*sin(q2)
+    # pwc_y =  (d1y+d2y)*cos(q1) + d2z*sin(q1)*sin(q2)
+    # Let X_term = d1y+d2y and Y_term = d2z*sin(q2)
+    # pwc_x = Y_term*cos(q1) - X_term*sin(q1)
+    # pwc_y = X_term*cos(q1) + Y_term*sin(q1)
+    # q1 = atan2(pwc_y, pwc_x) - atan2(X_term, Y_term)
+    
+    sin_q2 = math.sin(q2)
+    term_X_for_q1 = d1y + d2y
+    term_Y_for_q1 = d2z * sin_q2
+    
+    q1 = math.atan2(pwc_y, pwc_x) - math.atan2(term_X_for_q1, term_Y_for_q1)
+    
+    # Normalize q1 to [-pi, pi]
+    q1 = (q1 + math.pi) % (2 * math.pi) - math.pi
+
+
+    # Step 4: Solve for q3
+    # R_tcp_base = Rz(q1) * Ry(q2) * Ry(q3)
+    # Ry(q3) = Ry(-q2) * Rz(-q1) * R_tcp_base
+    
+    cos_q1 = math.cos(q1)
+    sin_q1 = math.sin(q1)
+    Rz_negq1 = [
+        [cos_q1,  sin_q1, 0.0],
+        [-sin_q1, cos_q1, 0.0],
+        [0.0,     0.0,    1.0]
+    ]
+
+    cos_negq2 = math.cos(-q2) # cos(q2)
+    sin_negq2 = math.sin(-q2) # -sin(q2)
+    Ry_negq2 = [
+        [cos_negq2, 0.0, sin_negq2],
+        [0.0,       1.0, 0.0      ],
+        [-sin_negq2,0.0, cos_negq2]
+    ]
+
+    Temp_mat = mat_mat_mult(Rz_negq1, R_tcp_base)
+    M = mat_mat_mult(Ry_negq2, Temp_mat) # M should be Ry(q3)
+    
+    q3 = math.atan2(M[0][2], M[0][0])
+    
+    return (q1, q2, q3)
+
+```

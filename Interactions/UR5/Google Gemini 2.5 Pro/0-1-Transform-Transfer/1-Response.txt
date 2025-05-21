@@ -1,0 +1,135 @@
+To provide the inverse kinematics solution, I will complete the Python function `inverse_kinematics`. This function will calculate the two possible sets of joint angles `(theta1, theta2)` that achieve the target position `p` using the provided "EXISTING" method as a basis. Then, for each set of joint angles, it will compute the forward kinematics to get the resulting TCP orientation. This calculated orientation will be compared against the target orientation `r`. The set of joint angles that produces the matching orientation will be returned. I am assuming that the input orientation `r = (r_x, r_y, r_z)` corresponds to ZYX Euler angles (roll, pitch, yaw).
+
+```python
+import math
+
+def inverse_kinematics(p: tuple[float, float, float], r: tuple[float, float, float]) -> tuple[float, float]:
+    px, py, pz = p
+    # Assuming r = (roll, pitch, yaw) for ZYX Euler angles
+    # roll = r[0], pitch = r[1], yaw = r[2]
+    roll_target, pitch_target, yaw_target = r
+    
+    epsilon = 1e-7 # A small tolerance for floating-point comparisons
+
+    # Constants from the robot's kinematic description
+    L2z = 0.425      # Effective length for z_tcp calculation related to theta2
+    L_offset = 0.01615 # Offset term from the FK equations
+
+    # Calculate the target orientation matrix (R_target) from ZYX Euler angles
+    # R_target = Rz(yaw) * Ry(pitch) * Rx(roll)
+    c_roll = math.cos(roll_target)
+    s_roll = math.sin(roll_target)
+    c_pitch = math.cos(pitch_target)
+    s_pitch = math.sin(pitch_target)
+    c_yaw = math.cos(yaw_target)
+    s_yaw = math.sin(yaw_target)
+
+    R_target = [
+        [c_yaw*c_pitch, c_yaw*s_pitch*s_roll - s_yaw*c_roll, c_yaw*s_pitch*c_roll + s_yaw*s_roll],
+        [s_yaw*c_pitch, s_yaw*s_pitch*s_roll + c_yaw*c_roll, s_yaw*s_pitch*c_roll - c_yaw*s_roll],
+        [-s_pitch,      c_pitch*s_roll,                     c_pitch*c_roll]
+    ]
+
+    # --- Candidate Solution 1 (theta2_sol1 in [0, pi]) ---
+    # Calculate theta2
+    val_acos_theta2_sol1 = pz / L2z
+    if val_acos_theta2_sol1 > 1.0: # Clamp to avoid domain error with acos
+        val_acos_theta2_sol1 = 1.0
+    elif val_acos_theta2_sol1 < -1.0:
+        val_acos_theta2_sol1 = -1.0
+    
+    theta2_sol1 = math.acos(val_acos_theta2_sol1)
+    
+    # Calculate theta1 using the method from the "EXISTING" solution structure
+    # FK: x = A*cos(theta1) - B*sin(theta1), y = B*cos(theta1) + A*sin(theta1)
+    # where A = L2z * sin(theta2), B = L_offset
+    # Solution: c1 = (A*x + B*y)/(A^2+B^2), s1 = (A*y - B*x)/(A^2+B^2)
+    s2_sol1 = math.sin(theta2_sol1)
+    A_sol1 = L2z * s2_sol1
+    B_val = L_offset
+    
+    den_sol1 = A_sol1**2 + B_val**2
+    theta1_sol1 = 0.0 # Default initialization
+
+    if abs(den_sol1) > epsilon:
+        c1_val = (A_sol1 * px + B_val * py) / den_sol1
+        s1_val = (A_sol1 * py - B_val * px) / den_sol1
+        theta1_sol1 = math.atan2(s1_val, c1_val)
+    elif abs(B_val) > epsilon: # Handles A_sol1 = 0 (i.e., s2_sol1 = 0)
+        # x = -B*s1 => s1 = -px/B
+        # y = B*c1  => c1 = py/B
+        theta1_sol1 = math.atan2(-px / B_val, py / B_val)
+    # If den_sol1 is zero and B_val is zero (not possible here), (0,0) position, theta1 undefined.
+
+    # Check orientation for (theta1_sol1, theta2_sol1)
+    c1_check1 = math.cos(theta1_sol1)
+    s1_check1 = math.sin(theta1_sol1)
+    c2_check1 = math.cos(theta2_sol1) # This is val_acos_theta2_sol1
+    s2_check1 = s2_sol1               # math.sin(theta2_sol1)
+
+    R_calculated1 = [
+        [c1_check1*c2_check1, -s1_check1, c1_check1*s2_check1],
+        [s1_check1*c2_check1, c1_check1,  s1_check1*s2_check1],
+        [-s2_check1,          0.0,        c2_check1]
+    ]
+
+    match_found_sol1 = True
+    for i_row in range(3):
+        for j_col in range(3):
+            if abs(R_calculated1[i_row][j_col] - R_target[i_row][j_col]) > epsilon:
+                match_found_sol1 = False
+                break
+        if not match_found_sol1:
+            break
+    
+    if match_found_sol1:
+        return (theta1_sol1, theta2_sol1)
+
+    # --- Candidate Solution 2 (theta2_sol2 in [-pi, 0]) ---
+    theta2_sol2 = -theta2_sol1 # Second solution for theta2
+    
+    s2_sol2 = math.sin(theta2_sol2) # This will be -s2_sol1 if s2_sol1 is not 0
+    A_sol2 = L2z * s2_sol2
+    # B_val is the same
+    
+    den_sol2 = A_sol2**2 + B_val**2
+    theta1_sol2 = 0.0 # Default initialization
+
+    if abs(den_sol2) > epsilon:
+        c1_val2 = (A_sol2 * px + B_val * py) / den_sol2
+        s1_val2 = (A_sol2 * py - B_val * px) / den_sol2
+        theta1_sol2 = math.atan2(s1_val2, c1_val2)
+    elif abs(B_val) > epsilon: # Handles A_sol2 = 0 (i.e., s2_sol2 = 0)
+        theta1_sol2 = math.atan2(-px / B_val, py / B_val)
+        
+    # Check orientation for (theta1_sol2, theta2_sol2)
+    c1_check2 = math.cos(theta1_sol2)
+    s1_check2 = math.sin(theta1_sol2)
+    c2_check2 = math.cos(theta2_sol2)
+    s2_check2 = s2_sol2 # math.sin(theta2_sol2)
+
+    R_calculated2 = [
+        [c1_check2*c2_check2, -s1_check2, c1_check2*s2_check2],
+        [s1_check2*c2_check2, c1_check2,  s1_check2*s2_check2],
+        [-s2_check2,          0.0,        c2_check2]
+    ]
+
+    match_found_sol2 = True
+    for i_row in range(3):
+        for j_col in range(3):
+            if abs(R_calculated2[i_row][j_col] - R_target[i_row][j_col]) > epsilon:
+                match_found_sol2 = False
+                break
+        if not match_found_sol2:
+            break
+            
+    if match_found_sol2:
+        return (theta1_sol2, theta2_sol2)
+
+    # Based on the problem statement "Assume all targets given as inputs to the method will be reachable",
+    # one of the above solutions should have matched.
+    # If neither matched, it implies a contradiction or an unhandled edge case with floating point precision.
+    # For the purpose of this problem, we expect one of the paths to return.
+    # As a fallback, returning the first computed solution, though this line should ideally not be reached.
+    return (theta1_sol1, theta2_sol1)
+```

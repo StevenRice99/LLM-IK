@@ -1,0 +1,140 @@
+Okay, I will implement a refined inverse kinematics method. The strategy is to systematically generate all valid candidate solutions within the joint limits `[-2pi, 2pi]` based on the two fundamental elbow configurations (`q3 = arccos(val)` and `q3 = -arccos(val)`) and their `2pi` variants. From these valid candidates, the one that minimizes the sum of the absolute values of the joint angles will be selected. A tie-breaking mechanism will be used if multiple solutions have the same minimal sum.
+
+Here's the detailed algorithm:
+
+1.  **Initialization**:
+    *   Parse input position `p` and orientation `r`.
+    *   Define robot link parameters (`d2z`, `d3z`, `d4y_tcp`).
+    *   Define `twopi = 2 * np.pi` and `joint_limit = 2 * np.pi`.
+    *   Set a small `epsilon = 1e-9` for floating-point comparisons.
+
+2.  **Calculate Target Rotation and Wrist Position**:
+    *   Compute the target rotation matrix `R_target` from RPY angles `r`.
+    *   Calculate the wrist center position `P_wrist = (xw, yw, zw)`.
+
+3.  **Calculate `q1` and `q_sum`**:
+    *   `q1 = np.arctan2(-R_target[0,1], R_target[1,1])`. This `q1` is in `[-pi, pi]`.
+    *   `q_sum = q2 + q3 + q4 = np.arctan2(-R_target[2,0], R_target[2,2])`. This `q_sum` is in `[-pi, pi]`.
+
+4.  **Transform Wrist Position for 2R Arm**:
+    *   Transform `P_wrist` into Frame 1 (the frame after `q1` rotation) to get `(P_1x, P_1z)` which are the target coordinates for the 2R planar arm. `P_1x` is effectively the "Y" coordinate and `P_1z` is the "X" coordinate for standard 2R IK formulas.
+
+5.  **Calculate `cos_q3_val`**:
+    *   `cos_q3_val = (P_1z^2 + P_1x^2 - d2z^2 - d3z^2) / (2 * d2z * d3z)`.
+    *   Clip `cos_q3_val` to `[-1.0, 1.0]`.
+
+6.  **Generate Candidate Solutions**:
+    *   Initialize `valid_solutions = []`.
+    *   `q3_A_raw = np.arccos(cos_q3_val)` (typically in `[0, pi]`).
+    *   `q3_B_raw = -np.arccos(cos_q3_val)` (typically in `[-pi, 0]`).
+    *   Loop `q3_master_choice` through `[q3_A_raw, q3_B_raw]`:
+        a.  Calculate `q2_base_val`:
+            *   `sin_q3_master = np.sin(q3_master_choice)`
+            *   `cos_q3_master = np.cos(q3_master_choice)`
+            *   `alpha = np.arctan2(P_1x, P_1z)` (Target angle for 2R arm)
+            *   `beta = np.arctan2(d3z*sin_q3_master, d2z + d3z*cos_q3_master)` (Angle related to elbow)
+            *   `q2_base_val = alpha - beta` (This will be in `[-2pi, 2pi]`).
+        b.  Loop `k3` through `{-1, 0, 1}`:
+            i.  `q3_candidate = q3_master_choice + k3 * twopi`.
+            ii. If `q3_candidate` is outside `[-joint_limit - epsilon, joint_limit + epsilon]`, continue.
+            iii. `q2_candidate = q2_base_val` (Since `sin/cos` of `q3_master_choice` and `q3_candidate` are the same, `q2` remains unchanged).
+            iv. If `q2_candidate` is outside `[-joint_limit - epsilon, joint_limit + epsilon]`, continue (primarily a check for `q2_base_val` itself).
+            v.  `q4_raw = q_sum - q2_candidate - q3_candidate`.
+            vi. Loop `k4` through `{-2, -1, 0, 1, 2}`:
+                1.  `q4_candidate = q4_raw + k4 * twopi`.
+                2.  If `q4_candidate` is outside `[-joint_limit - epsilon, joint_limit + epsilon]`, continue.
+                3.  A valid candidate solution `(q1, q2_candidate, q3_candidate, q4_candidate)` is found.
+                4.  Calculate `sum_abs = abs(q1) + abs(q2_candidate) + abs(q3_candidate) + abs(q4_candidate)`.
+                5.  Determine `tie_break_score`: Prefer `q3_A_raw` family (score 0) over `q3_B_raw` family (score 1). Then prefer smaller `abs(k3)`, then smaller `abs(k4)`.
+                    *   `family_score = 0 if abs(q3_master_choice - q3_A_raw) < epsilon else 1`
+                    *   `tie_break_score = family_score * 100 + abs(k3) * 10 + abs(k4)`
+                6.  Add `(sum_abs, tie_break_score, (q1, q2_candidate, q3_candidate, q4_candidate))` to `valid_solutions`.
+
+7.  **Select Best Solution**:
+    *   If `valid_solutions` is empty, return a fallback (e.g., `(0.0, 0.0, 0.0, 0.0)`).
+    *   Sort `valid_solutions` based on `sum_abs` (primary key, ascending) and then `tie_break_score` (secondary key, ascending).
+    *   Return the joint tuple from the first element of the sorted list.
+
+```python
+def inverse_kinematics(p: tuple[float, float, float], r: tuple[float, float, float]) -> tuple[float, float, float, float]:
+    import numpy as np
+
+    px, py, pz = p
+    rx, ry, rz = r
+
+    d2z = 0.425
+    d3z = 0.39225
+    d4y_tcp = 0.093
+    
+    twopi = 2 * np.pi
+    joint_limit = twopi 
+    epsilon = 1e-9
+
+    cr, sr = np.cos(rx), np.sin(rx)
+    cp, sp = np.cos(ry), np.sin(ry)
+    cy, sy = np.cos(rz), np.sin(rz)
+    R_target = np.array([
+        [cy*cp, cy*sp*sr - sy*cr, cy*sp*cr + sy*sr],
+        [sy*cp, sy*sp*sr + cy*cr, sy*sp*cr - cy*sr],
+        [-sp,   cp*sr,            cp*cr]
+    ])
+
+    xw = px - R_target[0,1] * d4y_tcp
+    yw = py - R_target[1,1] * d4y_tcp
+    zw = pz - R_target[2,1] * d4y_tcp
+
+    q1 = np.arctan2(-R_target[0,1], R_target[1,1])
+    q_sum = np.arctan2(-R_target[2,0], R_target[2,2])
+
+    c1, s1 = np.cos(q1), np.sin(q1)
+    P_1x =  c1*xw + s1*yw 
+    P_1z =  zw             
+
+    val_num = P_1z**2 + P_1x**2 - d2z**2 - d3z**2
+    val_den = 2 * d2z * d3z
+    cos_q3_val = np.clip(val_num / val_den, -1.0, 1.0) if abs(val_den) > epsilon else 0.0
+
+
+    q3_A_raw = np.arccos(cos_q3_val)
+    q3_B_raw = -np.arccos(cos_q3_val)
+
+    valid_solutions = []
+
+    for family_idx, q3_master_choice in enumerate([q3_A_raw, q3_B_raw]):
+        sin_q3_master = np.sin(q3_master_choice)
+        cos_q3_master = np.cos(q3_master_choice)
+        
+        alpha = np.arctan2(P_1x, P_1z) 
+        beta = np.arctan2(d3z*sin_q3_master, d2z + d3z*cos_q3_master)
+        q2_base_val = alpha - beta
+
+        for k3 in range(-1, 2): # k3 in {-1, 0, 1}
+            q3_candidate = q3_master_choice + k3 * twopi
+            if not (-joint_limit - epsilon <= q3_candidate <= joint_limit + epsilon):
+                continue
+
+            q2_candidate = q2_base_val 
+            if not (-joint_limit - epsilon <= q2_candidate <= joint_limit + epsilon):
+                continue
+            
+            q4_raw = q_sum - q2_candidate - q3_candidate
+            for k4 in range(-2, 3): # k4 in {-2, -1, 0, 1, 2}
+                q4_candidate = q4_raw + k4 * twopi
+                if not (-joint_limit - epsilon <= q4_candidate <= joint_limit + epsilon):
+                    continue
+
+                current_solution = (q1, q2_candidate, q3_candidate, q4_candidate)
+                sum_abs = np.sum(np.abs(np.array(current_solution)))
+                
+                # Tie-breaking: family_idx (0 for A, 1 for B), abs(k3), abs(k4)
+                tie_break_score = family_idx * 100 + abs(k3) * 10 + abs(k4)
+                valid_solutions.append((sum_abs, tie_break_score, current_solution))
+
+    if not valid_solutions:
+        return (0.0, 0.0, 0.0, 0.0) # Fallback
+
+    valid_solutions.sort(key=lambda x: (x[0], x[1]))
+    
+    return valid_solutions[0][2]
+
+```

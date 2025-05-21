@@ -1,0 +1,113 @@
+The feedback indicates that for one specific case, my generated joint angles `(q1, q2, q3)` differ from the "correct" joint angles, although the resulting TCP pose is extremely close to the target (position differences ~1e-16 to 1e-13, orientation roll `pi` vs `-pi` which are equivalent, pitch/yaw match).
+Specifically, for the failing case:
+My `q1` matches `q1_correct`.
+My `q_sum = q2+q3` matches `q_sum_correct`.
+My `q2` is `q2_correct - 2*pi`.
+My `q3` is `q3_correct + 2*pi`.
+
+This means my solution `(q1, q2_my, q3_my)` is kinematically equivalent to the "correct" solution `(q1, q2_corr, q3_corr)` in terms of TCP pose, as `sin(q2_my) = sin(q2_corr)` and `cos(q2_my) = cos(q2_corr)`, and `q2_my+q3_my = q2_corr+q3_corr`. Both my `q2, q3` and the correct `q2, q3` are within the specified joint limits `[-2pi, 2pi]`.
+
+The `atan2` function, used to determine `q2`, returns a principal value in `[-pi, pi]`. The "correct" `q2` for the failing case (`3.3011...` rad) is outside this range, being `my_q2 + 2*pi`. For the other 9 (implicitly passed) cases, `atan2` directly yielded the "correct" `q2`.
+
+A "closed-form analytical solution" typically provides one solution, often the principal one from functions like `atan2`. Without additional criteria to select among multiple kinematically equivalent joint solutions (e.g., minimizing joint travel, preferring positive angles, etc.), choosing a solution other than the principal one from `atan2` would require a specific rule. Such a rule is not provided.
+
+Given that the calculated pose from my joints is extremely close to the target pose (as per the feedback's "Reached position/orientation" values), the core IK logic is sound. The discrepancy is in the choice of one specific joint configuration among valid, kinematically equivalent options.
+
+I will maintain the current code, as it provides a direct, closed-form analytical solution using standard interpretations of `atan2`. The problem asks for *a* solution, and the one provided achieves the target pose to high precision.
+
+```python
+import math
+
+def inverse_kinematics(p: tuple[float, float, float], r: tuple[float, float, float]) -> tuple[float, float, float]:
+    """
+    Gets the joint values needed to reach position "p" and orientation "r".
+    :param p: The position to reach in the form [x, y, z].
+    :param r: The orientation to reach in radians in the form [roll, pitch, yaw].
+    :return: A tuple of the joint values (q1, q2, q3) in radians.
+    """
+    px, py, pz = p
+    roll, pitch, yaw = r[0], r[1], r[2]
+
+    # Constants from robot geometry
+    l2 = 0.425  # z-component of d2 (Link 2 to Joint 3)
+    l3 = 0.39225 # z-component of d_tcp (Link 3 to TCP)
+    epsilon = 1e-6 # For floating point comparisons, e.g. gimbal lock check
+
+    q1_raw = 0.0
+    q_sum_raw = 0.0
+
+    # Determine q1_raw and q_sum_raw from target orientation r = [roll, pitch, yaw]
+    # Target RPY = Rz(yaw)Ry(pitch)Rx(roll)
+    # Robot R = Rz(q1)Ry(q_sum)
+    # From R_robot(2,1) = 0, and R_target(2,1) = cos(pitch)*sin(roll),
+    # for these to match, cos(pitch)*sin(roll) must be 0.
+    # This means either pitch is +/- pi/2 (gimbal lock) or roll is 0 or +/- pi.
+
+    # Case 1: Gimbal Lock (pitch is +/- pi/2)
+    if abs(math.cos(pitch)) < epsilon: # cos(pitch) is close to 0
+        q_sum_raw = pitch # q_sum is directly pitch
+        if pitch > 0:  # Pitch is near pi/2
+            # Rz(yaw)Ry(pi/2)Rx(roll) = Rz(yaw-roll)Ry(pi/2)
+            # Rz(q1)Ry(pi/2)
+            # So q1 = yaw - roll
+            q1_raw = yaw - roll
+        else:  # Pitch is near -pi/2
+            # Rz(yaw)Ry(-pi/2)Rx(roll) = Rz(yaw+roll)Ry(-pi/2)
+            # Rz(q1)Ry(-pi/2)
+            # So q1 = yaw + roll
+            q1_raw = yaw + roll
+    # Case 2: Not Gimbal Lock (sin(roll) is 0, so roll is 0 or +/-pi)
+    else:
+        # Normalize roll to check if it's near 0 or +/-pi
+        # atan2(sin(roll), cos(roll)) gives roll in [-pi, pi]
+        current_roll_normalized = math.atan2(math.sin(roll), math.cos(roll))
+
+        if abs(current_roll_normalized) < math.pi / 4.0:  # Roll is near 0 (e.g., within +/- 45 degrees of 0)
+            # If roll = 0, R_target = Rz(yaw)Ry(pitch). Matches Rz(q1)Ry(q_sum).
+            q1_raw = yaw
+            q_sum_raw = pitch
+        else:  # Roll is near +/- pi
+            # If roll = pi, R_target = Rz(yaw)Ry(pitch)Rx(pi).
+            # Rz(yaw)Ry(pitch)Rx(pi) = Rz(yaw+pi)Ry(pi-pitch)
+            # Matches Rz(q1)Ry(q_sum) if q1=yaw+pi, q_sum=pi-pitch
+            q1_raw = yaw + math.pi
+            q_sum_raw = math.pi - pitch
+            
+    # Normalize q1_raw and q_sum_raw to be in [-pi, pi]
+    q1 = math.atan2(math.sin(q1_raw), math.cos(q1_raw))
+    q_sum = math.atan2(math.sin(q_sum_raw), math.cos(q_sum_raw))
+
+    # Pre-calculate sines and cosines for q1 and q_sum
+    cos_q1 = math.cos(q1)
+    sin_q1 = math.sin(q1)
+    cos_q_sum = math.cos(q_sum)
+    sin_q_sum = math.sin(q_sum)
+
+    # Solve for q2
+    # The position of the TCP in a frame rotated by q1 around Z is:
+    # P_tcp_F1_x = px * cos_q1 + py * sin_q1
+    # P_tcp_F1_y = -px * sin_q1 + py * cos_q1 (this should correspond to a1+a2, not used for q2)
+    # P_tcp_F1_z = pz
+    #
+    # In this F1 frame, the forward kinematics give:
+    # P_tcp_F1_x = l2*sin(q2) + l3*sin(q_sum)
+    # P_tcp_F1_z = l2*cos(q2) + l3*cos(q_sum)
+    
+    # This is the target for l2*sin(q2)
+    term_for_l2_sin_q2 = cos_q1 * px + sin_q1 * py - l3 * sin_q_sum
+    # This is the target for l2*cos(q2)
+    term_for_l2_cos_q2 = pz - l3 * cos_q_sum
+    
+    # q2 = atan2(l2*sin(q2), l2*cos(q2))
+    q2 = math.atan2(term_for_l2_sin_q2, term_for_l2_cos_q2)
+
+    # Solve for q3
+    # q_sum = q2 + q3  => q3 = q_sum - q2
+    q3 = q_sum - q2
+    # q3 is not further normalized here, as example solutions sometimes have q3 outside [-pi,pi]
+    # but within joint limits. The problem asks for values in radians, respecting limits.
+    # The calculated q1, q2, q3 should be within limits [-2pi, 2pi] if target is reachable.
+
+    return (q1, q2, q3)
+
+```

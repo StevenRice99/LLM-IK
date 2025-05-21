@@ -1,0 +1,149 @@
+Okay, I will refine the inverse kinematics method. The core idea is to identify two primary solution families based on the two possible values for `q3` (elbow up/down), and then for each family, adjust `q3` and `q4` by multiples of `2*pi` to ensure all joint angles are within the specified `[-2pi, 2pi]` limits. From all valid adjusted solutions, I will select the one that minimizes the sum of the absolute values of the joint angles. This provides a deterministic way to choose a single solution.
+
+Here's the detailed plan:
+1.  Calculate `q1` (Joint 1 angle) and `q_sum = q2 + q3 + q4` from the target orientation matrix `R_target`. `q1` and `q_sum` will be in `[-pi, pi]`.
+2.  Determine the wrist center position `P_wrist = (xw, yw, zw)`.
+3.  Transform `P_wrist` into Frame 1 (after `q1` rotation) to get `P_1 = (P_1x, P_1y, P_1z)`. The coordinates `(P_1x, P_1z)` are the target for the 2R planar arm.
+4.  Calculate `cos_q3_val = (P_1x^2 + P_1z^2 - d2z^2 - d3z^2) / (2 * d2z * d3z)`. Clip this value to `[-1, 1]`.
+5.  Define two base values for `q3`:
+    *   `q3_base_A = np.arccos(cos_q3_val)` (in `[0, pi]`)
+    *   `q3_base_B = -np.arccos(cos_q3_val)` (in `[-pi, 0]`)
+6.  For each base `q3` (`q3_s` being `q3_base_A` or `q3_base_B`):
+    a.  Calculate `q2_s = np.arctan2(P_1x, P_1z) - np.arctan2(d3z*sin(q3_s), d2z + d3z*cos(q3_s))`. This `q2_s` will be in `[-2pi, 2pi]`.
+    b.  Calculate `q4_s_raw = q_sum - q2_s - q3_s`. This `q4_s_raw` can be outside `[-2pi, 2pi]`.
+    c.  Iterate `k` through `{-2, -1, 0, 1, 2}`. For each `k`:
+        i.  Form a candidate solution:
+            *   `q1_cand = q1`
+            *   `q2_cand = q2_s`
+            *   `q3_cand = q3_s + 2*np.pi*k`
+            *   `q4_cand = q4_s_raw - 2*np.pi*k`
+        ii. Check if all four joint angles (`q1_cand, q2_cand, q3_cand, q4_cand`) are within the limits `[-2*pi, 2*pi]`.
+        iii. If the candidate solution is valid, calculate `sum_abs = abs(q1_cand) + abs(q2_cand) + abs(q3_cand) + abs(q4_cand)`.
+        iv. Keep track of the `best_solution` found so far that minimizes `sum_abs`. If a new solution has a smaller `sum_abs`, it becomes the `best_solution`. If `sum_abs` is equal, the existing `best_solution` is kept to ensure determinism (e.g., preferring Family A or smaller `k` if they result in the same `sum_abs` and are encountered first).
+7.  Return the `best_solution`. If no valid solution is found (which shouldn't happen if the target is reachable as per problem statement), this would indicate an issue.
+
+This approach explores a small, bounded set of potential solutions derived from the two primary elbow configurations and their `2*pi` equivalencies, then selects the "most compact" one based on the sum of absolute joint movements.
+
+```python
+def inverse_kinematics(p: tuple[float, float, float], r: tuple[float, float, float]) -> tuple[float, float, float, float]:
+    import numpy as np
+
+    px, py, pz = p
+    rx, ry, rz = r  # Assuming r = (roll, pitch, yaw)
+
+    # Robot parameters
+    d1y = 0.13585
+    d2y = -0.1197 # Not directly used in this formulation if P_1y is not checked
+    d2z = 0.425   # Link length L1 for the 2R arm
+    d3z = 0.39225 # Link length L2 for the 2R arm
+    d4y_tcp = 0.093
+    
+    twopi = 2 * np.pi
+    joint_limit = twopi # Joints must be in [-2pi, 2pi]
+
+    # 1. Calculate target rotation matrix R_target
+    cr, sr = np.cos(rx), np.sin(rx)
+    cp, sp = np.cos(ry), np.sin(ry)
+    cy, sy = np.cos(rz), np.sin(rz)
+    R_target = np.array([
+        [cy*cp, cy*sp*sr - sy*cr, cy*sp*cr + sy*sr],
+        [sy*cp, sy*sp*sr + cy*cr, sy*sp*cr - cy*sr],
+        [-sp,   cp*sr,            cp*cr]
+    ])
+
+    # 2. Calculate wrist center P_wrist
+    xw = px - R_target[0,1] * d4y_tcp
+    yw = py - R_target[1,1] * d4y_tcp
+    zw = pz - R_target[2,1] * d4y_tcp
+
+    # Calculate q1 and q_sum = q2+q3+q4
+    q1 = np.arctan2(-R_target[0,1], R_target[1,1]) # q1 in [-pi, pi]
+    q_sum = np.arctan2(-R_target[2,0], R_target[2,2]) # q_sum in [-pi, pi]
+
+    # 3. Transform P_wrist to P_1 (coordinates in frame after q1 rotation)
+    c1, s1 = np.cos(q1), np.sin(q1)
+    P_1x =  c1*xw + s1*yw
+    P_1z =  zw
+    # P_1y = -s1*xw + c1*yw; # Expected to be d1y + d2y
+
+    # 4. Calculate cos_q3_val for the 2R arm (lengths d2z, d3z)
+    val_num = P_1x**2 + P_1z**2 - d2z**2 - d3z**2
+    val_den = 2 * d2z * d3z
+    
+    if val_den == 0: # Should not happen with non-zero d2z, d3z
+        # This would be an unreachable configuration or singular setup not expected
+        # Fallback or error, but problem assumes reachability.
+        # Defaulting to a value that might lead to arccos error, to be caught by clip.
+        cos_q3_val = 2.0 # Force clip to fail if not handled, or make it 0
+    else:
+        cos_q3_val = val_num / val_den
+    cos_q3_val = np.clip(cos_q3_val, -1.0, 1.0)
+
+    # 5. Define two base values for q3
+    q3_base_A = np.arccos(cos_q3_val)  # [0, pi]
+    q3_base_B = -np.arccos(cos_q3_val) # [-pi, 0]
+
+    best_solution = None
+    min_sum_abs = float('inf')
+
+    # Iterate through two families of solutions (A and B)
+    for q3_s_base_val in [q3_base_A, q3_base_B]:
+        # 6a. Calculate q2_s
+        sin_q3_s = np.sin(q3_s_base_val)
+        cos_q3_s = np.cos(q3_s_base_val) # same as cos_q3_val for A, and for B
+        q2_s = np.arctan2(P_1x, P_1z) - np.arctan2(d3z*sin_q3_s, d2z + d3z*cos_q3_s) # q2_s in [-2pi, 2pi]
+        
+        # 6b. Calculate q4_s_raw
+        q4_s_raw = q_sum - q2_s - q3_s_base_val
+
+        # 6c. Iterate k to adjust q3 and q4
+        for k_val in range(-2, 3): # k in {-2, -1, 0, 1, 2}
+            q1_cand = q1
+            q2_cand = q2_s 
+            q3_cand = q3_s_base_val + twopi * k_val
+            q4_cand = q4_s_raw - twopi * k_val
+            
+            # 6cii. Check if all joints are within limits [-2pi, 2pi]
+            # q1 is in [-pi,pi], q2_s is in [-2pi,2pi].
+            # So only q3_cand and q4_cand need rigorous checking.
+            # However, checking all for safety.
+            # A small tolerance epsilon might be needed for strict inequality checks with floats.
+            epsilon = 1e-9 
+            if (q1_cand >= -joint_limit - epsilon and q1_cand <= joint_limit + epsilon and
+                q2_cand >= -joint_limit - epsilon and q2_cand <= joint_limit + epsilon and
+                q3_cand >= -joint_limit - epsilon and q3_cand <= joint_limit + epsilon and
+                q4_cand >= -joint_limit - epsilon and q4_cand <= joint_limit + epsilon):
+                
+                # 6ciii. Calculate sum of absolute values
+                current_sum_abs = abs(q1_cand) + abs(q2_cand) + abs(q3_cand) + abs(q4_cand)
+                
+                # 6civ. Update best solution
+                if best_solution is None or current_sum_abs < min_sum_abs - epsilon: # Prefer strictly smaller
+                    min_sum_abs = current_sum_abs
+                    best_solution = (q1_cand, q2_cand, q3_cand, q4_cand)
+                # Tie-breaking: if sum_abs is equal, the one found first (smaller k, family A first) is kept.
+                # This makes the solution deterministic.
+    
+    if best_solution is None:
+        # This case should not be reached if a solution always exists and is reachable.
+        # Return a default or raise an error. For now, returning zeros.
+        # Based on problem, assume target is reachable.
+        # If somehow no solution is found by the k-loop (e.g. limits too tight for any k)
+        # this would be an issue.
+        # However, q1, q2 are already in range. q3_s_base is in range.
+        # It's about finding k that keeps both q3_cand and q4_cand in range.
+        # One of k=0, k=-1 (for q3_A to become q3_A-2pi) should work for case 1.
+        # It's possible that for some configurations, no k in {-2,...,2} makes *both* q3 and q4 valid.
+        # However, the problem implies a working solver exists.
+        # If best_solution is still None, it means no k worked for any family.
+        # This would be unexpected.
+        # Fallback to a raw solution if nothing better, though this path should ideally not be taken.
+        # For now, rely on the loop finding a solution.
+        # If no solution is found, this indicates a flaw in the logic or assumptions.
+        # The problem implies a solution should be found.
+        # If best_solution is None, we must return something.
+        # Let's assume the logic will find one.
+        pass
+
+    return best_solution if best_solution is not None else (0.0,0.0,0.0,0.0) # Fallback
+```

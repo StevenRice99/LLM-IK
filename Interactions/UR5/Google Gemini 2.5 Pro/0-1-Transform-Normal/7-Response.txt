@@ -1,0 +1,185 @@
+To find the joint angles `(theta1, theta2)` for the given 2-DOF manipulator to reach a target position `p = (px, py, pz)` and orientation `r = (rx_T, ry_T, rz_T)`, we will follow these steps:
+
+1.  **Define Constants**:
+    *   `L1y = 0.13585` (Y-offset of Revolute 2 from Revolute 1)
+    *   `L2y = -0.1197` (TCP y-offset from Revolute 2 frame)
+    *   `L2z = 0.425` (TCP z-offset from Revolute 2 frame)
+    *   `L_sum_y = L1y + L2y = 0.13585 - 0.1197 = 0.01615`
+
+2.  **Solve for `theta2` using Position**:
+    The Z-coordinate of the TCP is given by `pz = L2z * cos(theta2)`.
+    Thus, `cos(theta2) = pz / L2z`.
+    Let `cos_val = pz / L2z`. Clamp `cos_val` to `[-1, 1]` to handle potential floating-point inaccuracies if `pz` is slightly outside the reachable range `[-L2z, L2z]`.
+    Two base solutions for `theta2` in `[-pi, pi]` are `theta2_a = acos(cos_val)` and `theta2_b = -acos(cos_val)`.
+    We need to consider solutions within the joint limits `[-2*pi, 2*pi]`. The candidate `theta2` values will be derived from `theta2_a` and `theta2_b` and their `+/- 2*pi` shifts.
+
+3.  **Solve for `theta1` using Position**:
+    The XY-coordinates of the TCP are:
+    `px = L2z * sin(theta2) * cos(theta1) - L_sum_y * sin(theta1)`
+    `py = L2z * sin(theta2) * sin(theta1) + L_sum_y * cos(theta1)`
+    This can be rewritten as `px = A*cos(theta1) - B*sin(theta1)` and `py = A*sin(theta1) + B*cos(theta1)`, where `A = L2z * sin(theta2)` and `B = L_sum_y`.
+    This system is equivalent to rotating a vector `(A, B)` by `theta1` to get `(px, py)`.
+    So, `theta1 = atan2(py, px) - atan2(B, A) = atan2(py, px) - atan2(L_sum_y, L2z * sin(theta2))`.
+    This gives a base solution for `theta1` in `[-pi, pi]`. We also consider `+/- 2*pi` shifts for `theta1`.
+
+4.  **Generate Candidate Solutions and Verify Orientation**:
+    We will iterate through candidate `(theta1, theta2)` pairs that satisfy the position equations and fall within joint limits. For each pair, we calculate the orientation it produces and compare it to the target orientation.
+
+    *   **RPY Calculation Function (`calculate_rpy`)**:
+        Based on the problem description and feedback, the orientation `(roll, pitch, yaw)` produced by `(j1, j2)` is:
+        Let `th1 = j1`, `th2 = j2`.
+        Normalize `th2` to `th2_norm_branch` in `[-pi, pi]` to determine the branch: `th2_norm_branch = (th2 + pi) % (2*pi) - pi`.
+        If `abs(th2_norm_branch) <= pi/2` (i.e., `cos(th2) >= 0`):
+            `roll = 0.0`
+            `pitch = th2`
+            `yaw = th1`
+        Else (`cos(th2) < 0`):
+            `roll = pi`
+            `pitch = asin(sin(th2))` (which maps `th2` to `[-pi/2, pi/2]`)
+            `yaw = th1 + pi`
+        The resulting `roll, pitch, yaw` components are then normalized to `[-pi, pi]`.
+
+    *   **Iteration and Matching**:
+        Generate candidate `theta2` values:
+        `theta2_values_to_check = []`
+        For `th2_base_val` in `[acos(cos_val), -acos(cos_val)]`:
+            For `k` in `[-1, 0, 1]` (covers shifts for `[-2pi, 2pi]` range):
+                `th2 = th2_base_val + k * 2 * pi`
+                If `abs(th2) <= 2*pi + tolerance_limit`: Add `th2` to `theta2_values_to_check`.
+
+        For each `th2_cand` in (unique) `theta2_values_to_check`:
+            `s2 = sin(th2_cand)`
+            `A = L2z * s2`
+            `B = L_sum_y`
+            `theta1_base = atan2(py, px) - atan2(B, A)`
+            For `k` in `[-1, 0, 1]`:
+                `th1_cand = theta1_base + k * 2 * pi`
+                If `abs(th1_cand) <= 2*pi + tolerance_limit`:
+                    `(calc_roll, calc_pitch, calc_yaw) = calculate_rpy(th1_cand, th2_cand)`
+                    Compare `(calc_roll, calc_pitch, calc_yaw)` with normalized `(rx_T, ry_T, rz_T)`.
+                    A small tolerance (`1e-5` radians) is used for comparison. Special care for roll: `pi` and `-pi` are equivalent.
+                    If a match is found, `(th1_cand, th2_cand)` is the solution.
+
+The problem guarantees that a solution exists and is reachable.
+
+```python
+import math
+
+def inverse_kinematics(p: tuple[float, float, float], r: tuple[float, float, float]) -> tuple[float, float]:
+    """
+    Gets the joint values needed to reach position "p" and orientation "r".
+    :param p: The position to reach in the form [x, y, z].
+    :param r: The orientation to reach in radians in the form [roll, pitch, yaw].
+    :return: A tuple of the values (theta1, theta2) for the joints in radians.
+    """
+    px, py, pz = p
+    rx_T, ry_T, rz_T = r
+
+    L1y = 0.13585
+    L2y = -0.1197
+    L2z = 0.425
+    L_sum_y = L1y + L2y  # 0.01615
+
+    # Tolerance for floating point comparisons and joint limits
+    tol_angle = 1e-5
+    tol_limit = 1e-5 # Tolerance for checking joint limits
+
+    def angle_normalize(angle: float) -> float:
+        """Normalize angle to the range [-pi, pi]."""
+        return (angle + math.pi) % (2 * math.pi) - math.pi
+
+    def calculate_rpy_from_joints(j1: float, j2: float) -> tuple[float, float, float]:
+        """Calculates RPY orientation from joint angles j1, j2."""
+        th1 = j1
+        th2 = j2
+
+        # Normalize th2 to [-pi, pi] to decide on rx branch
+        th2_normalized_for_branch = angle_normalize(th2) # Simpler normalization for branch check
+
+        calc_r_x: float
+        calc_r_y: float
+        calc_r_z: float
+
+        # Check if th2 is in [-pi/2, pi/2] (cos(th2) >= 0)
+        if abs(th2_normalized_for_branch) <= (math.pi / 2.0 + tol_angle):
+            calc_r_x = 0.0
+            calc_r_y = th2 # Use original th2, then normalize component
+            calc_r_z = th1 # Use original th1, then normalize component
+        else:  # cos(th2) < 0
+            calc_r_x = math.pi
+            # asin(sin(th2)) maps th2 to [-pi/2, pi/2]
+            # This ensures that if th2 = pi - delta, ry = delta. If th2 = pi + delta, ry = -delta.
+            # If th2 = -pi + delta, ry = delta. If th2 = -pi - delta, ry = -delta.
+            # Effectively, ry = th2_normalized_for_branch if th2_normalized_for_branch is in [-pi, -pi/2) U (pi/2, pi]
+            # then reflected. E.g. if th2_norm = 0.6pi (108 deg), ry = 0.4pi (72 deg).
+            # if th2_norm = -0.6pi (-108 deg), ry = -0.4pi (-72 deg).
+            # This is equivalent to: ry = angle_normalize(math.pi - th2) if th2_normalized_for_branch > pi/2
+            # or ry = angle_normalize(-math.pi - th2) if th2_normalized_for_branch < -pi/2
+            # A simpler way is indeed math.asin(math.sin(th2))
+            calc_r_y = math.asin(math.sin(th2))
+            calc_r_z = th1 + math.pi # Yaw is shifted by pi when roll is pi
+
+        return angle_normalize(calc_r_x), angle_normalize(calc_r_y), angle_normalize(calc_r_z)
+
+    # Solve for theta2
+    cos_theta2_val = pz / L2z
+    # Clamp cos_theta2_val to [-1, 1] due to potential floating point issues
+    if cos_theta2_val > 1.0:
+        cos_theta2_val = 1.0
+    elif cos_theta2_val < -1.0:
+        cos_theta2_val = -1.0
+    
+    theta2_base_sols = [math.acos(cos_theta2_val), -math.acos(cos_theta2_val)]
+    
+    candidate_theta2s = set()
+    for th2_base in theta2_base_sols:
+        for k_th2 in [-2, -1, 0, 1, 2]: # Iterate to cover range up to +/-4pi then filter
+            th2_cand = th2_base + k_th2 * 2.0 * math.pi
+            if -2.0 * math.pi - tol_limit <= th2_cand <= 2.0 * math.pi + tol_limit:
+                candidate_theta2s.add(th2_cand)
+
+    # Normalize target orientation for comparison
+    rx_T_norm = angle_normalize(rx_T)
+    ry_T_norm = angle_normalize(ry_T)
+    rz_T_norm = angle_normalize(rz_T)
+
+    for th2_try in sorted(list(candidate_theta2s)): # sorted for deterministic behavior if multiple solutions
+        sin_th2_try = math.sin(th2_try)
+        
+        # Solve for theta1
+        # theta1 = atan2(py, px) - atan2(L_sum_y, L2z * sin_th2_try)
+        val_A_for_atan = L2z * sin_th2_try
+        val_B_for_atan = L_sum_y
+        
+        theta1_base = math.atan2(py, px) - math.atan2(val_B_for_atan, val_A_for_atan)
+        
+        candidate_theta1s_for_th2 = set()
+        for k_th1 in [-2, -1, 0, 1, 2]:
+            th1_cand = theta1_base + k_th1 * 2.0 * math.pi
+            if -2.0 * math.pi - tol_limit <= th1_cand <= 2.0 * math.pi + tol_limit:
+                 candidate_theta1s_for_th2.add(th1_cand)
+
+        for th1_try in sorted(list(candidate_theta1s_for_th2)):
+            # Verify orientation
+            r_calc_x, r_calc_y, r_calc_z = calculate_rpy_from_joints(th1_try, th2_try)
+            
+            # Check roll (pi and -pi are equivalent)
+            roll_match = False
+            if abs(r_calc_x - rx_T_norm) < tol_angle:
+                roll_match = True
+            elif (abs(abs(r_calc_x) - math.pi) < tol_angle and \
+                  abs(abs(rx_T_norm) - math.pi) < tol_angle):
+                roll_match = True
+            
+            pitch_match = abs(r_calc_y - ry_T_norm) < tol_angle
+            yaw_match = abs(r_calc_z - rz_T_norm) < tol_angle
+            
+            if roll_match and pitch_match and yaw_match:
+                # This solution (th1_try, th2_try) matches both position and orientation
+                return (th1_try, th2_try)
+
+    # Should not be reached if a solution is guaranteed
+    # Fallback, though problem implies a solution will be found by the logic above.
+    # This might indicate an issue in logic or an unreachable target if ever hit.
+    return (0.0, 0.0)
+```

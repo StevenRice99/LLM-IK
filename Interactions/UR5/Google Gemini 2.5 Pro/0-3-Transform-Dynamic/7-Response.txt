@@ -1,0 +1,166 @@
+The problem asks for a single closed-form analytical solution for the inverse kinematics. A 4-DOF robot like this can have multiple solutions. The feedback indicates that the "correct" solutions provided do not consistently follow a single branch of these multiple solutions (e.g., "elbow up" vs "elbow down", or different choices for the base rotation `j1`).
+
+Given the constraint that "optimization methods" (which would include iterating through solutions and picking the "best" based on some error metric) are disallowed, I must provide a solution that follows a single, deterministic analytical branch.
+
+The strategy will be:
+
+1.  **Calculate `j1` (Joint 1 - Z-axis rotation)**:
+    *   The TCP has a fixed Y-offset in Joint 1's coordinate frame (Frame 1) of `Y_req = 0.10915`.
+    *   The equation `py_f1 = -px * sin(j1) + py * cos(j1) = Y_req` is solved for `j1`.
+    *   Let `H = sqrt(px^2 + py^2)`.
+    *   Let `phi_offset = acos(clip(Y_req / H, -1.0, 1.0))`.
+    *   Let `j1_base_angle = atan2(-px, py)`.
+    *   Two solutions for `j1` are `j1_base_angle + phi_offset` and `j1_base_angle - phi_offset`.
+    *   A fixed choice will be made: `j1 = j1_base_angle - phi_offset`. This corresponds to `j1_sign_choice = -1` for the `phi_offset` term, which matched `j1` in several feedback cases.
+
+2.  **Determine Planar Arm Target (J2, J3, J4)**:
+    *   Once `j1` is found, transform the target `(px, py)` into Frame 1:
+        `x_planar = px * cos(j1) + py * sin(j1)`
+        `z_planar = pz_world` (World Z is Z in Frame 1).
+    *   The target orientation `r = (roll, pitch, yaw)` is transformed to `R_j2_base = RotZ(-j1) * R_target_world(roll, pitch, yaw)`.
+
+3.  **Calculate `j3_raw` (Joint 3 - Y-axis rotation, "elbow" of planar arm)**:
+    *   Effective link lengths: `L1 = 0.425`, `L2 = 0.39225`.
+    *   Distance squared to planar target: `d_sq = x_planar^2 + z_planar^2`.
+    *   Law of cosines: `cos_j3_val = (d_sq - L1^2 - L2^2) / (2 * L1 * L2)`.
+    *   Two solutions for `j3_raw` are `+acos(cos_j3_val)` and `-acos(cos_j3_val)`.
+    *   A fixed choice will be made: `j3_raw = +acos(clip(cos_j3_val, -1.0, 1.0))`. This yields `j3_raw` in `[0, pi]`, often corresponding to an "elbow up/out" convention.
+
+4.  **Calculate `j2` (Joint 2 - Y-axis rotation, "base" of planar arm)**:
+    *   Using `j3_raw`, `x_planar`, `z_planar`, and `d_sq`:
+        `k1 = L1 + L2*cos(j3_raw)`
+        `k2 = L2*sin(j3_raw)`
+        `sin_j2 = (k1*x_planar - k2*z_planar) / d_sq`
+        `cos_j2 = (k2*x_planar + k1*z_planar) / d_sq`
+        `j2 = atan2(sin_j2, cos_j2)`.
+
+5.  **Calculate `j4` (Joint 4 - Y-axis rotation, orientation adjustment)**:
+    *   From `R_j2_base = RotZ(-j1) * R_target_world`:
+        `sum_angles_j234 = atan2(R_j2_base[0,2], R_j2_base[0,0])`.
+    *   `j4 = sum_angles_j234 - j2 - j3_raw`.
+
+6.  **Normalization**: All joint angles `(j1, j2, j3_raw, j4)` are normalized to `[-pi, pi]`.
+
+This approach provides a single, deterministic, closed-form analytical solution by making fixed choices for the branches. It may not match all "correct" solutions from the feedback if those solutions dynamically switch branches based on criteria not provided or disallowed.
+
+```python
+import math
+import numpy as np
+
+def inverse_kinematics(p: tuple[float, float, float], r: tuple[float, float, float]) -> tuple[float, float, float, float]:
+    """
+    Gets the joint values needed to reach position "p" and orientation "r".
+    :param p: The position to reach in the form [x, y, z].
+    :param r: The orientation to reach in radians in the form [roll, pitch, yaw] (Rx, Ry, Rz).
+    :return: A tuple of the joint values (j1, j2, j3, j4).
+    """
+    px, py, pz_world = p
+    roll, pitch, yaw = r
+
+    # Robot constants
+    Y_req = 0.10915
+    L1 = 0.425
+    L2 = 0.39225
+
+    # Step 1: Calculate j1
+    H = math.sqrt(px**2 + py**2)
+    
+    val_for_acos_phi = 0.0
+    if H < 1e-9: # If H is effectively zero
+        if abs(Y_req) < 1e-9: # And Y_req is also zero (target at origin of J1's XY plane)
+            val_for_acos_phi = 0.0 # phi = pi/2, j1 can be atan2(-px,py) +/- pi/2
+        else: # H is zero but Y_req is not -> Unreachable by this configuration.
+              # Problem assumes reachability, so this path implies an issue or H won't be zero if Y_req isn't.
+              # Default to clipping, though it might lead to nan/inf if H is truly 0.
+              val_for_acos_phi = np.clip(Y_req / (H + 1e-12), -1.0, 1.0) # Add small epsilon to H
+    else:
+        val_for_acos_phi = np.clip(Y_req / H, -1.0, 1.0)
+    
+    phi_offset = math.acos(val_for_acos_phi)
+    j1_base_angle = math.atan2(-px, py)
+    
+    # Fixed choice for j1 branch
+    j1 = j1_base_angle - phi_offset
+
+    # Step 2: Determine Planar Arm Target
+    cj1 = math.cos(j1)
+    sj1 = math.sin(j1)
+    
+    x_planar = px * cj1 + py * sj1
+    z_planar = pz_world
+    d_sq = x_planar**2 + z_planar**2
+
+    # Step 3: Solve for j3_raw
+    cos_j3_val_num = d_sq - L1**2 - L2**2
+    cos_j3_val_den = 2 * L1 * L2
+    
+    cos_j3_val = 0.0
+    if abs(cos_j3_val_den) < 1e-12:
+        # This implies L1 or L2 is zero, which is not the case.
+        # Or, if it were, cos_j3_val_num should also be zero for a solution.
+        # Given L1, L2 > 0, this path is unlikely.
+        # If num is also zero, it's ambiguous, if not, it's an issue.
+        # Default to clipping, but this indicates an edge case or problem.
+        cos_j3_val = np.clip(cos_j3_val_num / (cos_j3_val_den + 1e-12), -1.0, 1.0)
+    else:
+        cos_j3_val = np.clip(cos_j3_val_num / cos_j3_val_den, -1.0, 1.0)
+    
+    # Fixed choice for j3 branch: j3_raw in [0, pi]
+    j3_raw = math.acos(cos_j3_val)
+
+    # Step 4: Solve for j2
+    s_j3_raw = math.sin(j3_raw)
+    c_j3_raw = math.cos(j3_raw) # Same as cos_j3_val if j3_raw = acos(cos_j3_val)
+    
+    k1 = L1 + L2 * c_j3_raw
+    k2 = L2 * s_j3_raw
+    
+    sin_j2 = 0.0
+    cos_j2 = 1.0 # Default j2 = 0 if d_sq is zero
+    if d_sq > 1e-9: # Avoid division by zero if target is at origin of planar arm
+                    # (which is unreachable if L1 != L2)
+        sin_j2 = (k1 * x_planar - k2 * z_planar) / d_sq
+        cos_j2 = (k2 * x_planar + k1 * z_planar) / d_sq
+    # else: d_sq is near zero. For this robot (L1!=L2), (0,0) for planar arm is unreachable.
+    # Smallest d_sq is (L1-L2)^2. So d_sq should not be zero.
+            
+    j2 = math.atan2(sin_j2, cos_j2)
+
+    # Step 5: Solve for j4
+    cr_world, sr_world = math.cos(roll), math.sin(roll)
+    cp_world, sp_world = math.cos(pitch), math.sin(pitch)
+    cy_world, sy_world = math.cos(yaw), math.sin(yaw)
+
+    R_target_world = np.array([
+        [cy_world*cp_world, cy_world*sp_world*sr_world - sy_world*cr_world, cy_world*sp_world*cr_world + sy_world*sr_world],
+        [sy_world*cp_world, sy_world*sp_world*sr_world + cy_world*cr_world, sy_world*sp_world*cr_world - cy_world*sr_world],
+        [-sp_world,         cp_world*sr_world,                             cp_world*cr_world]
+    ])
+
+    # Rotation matrix from Frame 0 to Frame 1 (due to j1)
+    # R_01 = np.array([[cj1, -sj1, 0], [sj1, cj1, 0], [0,0,1]])
+    # We need R_01_T = Rz(-j1)
+    R_01_T = np.array([
+        [cj1,  sj1, 0],
+        [-sj1, cj1, 0],
+        [0,    0,   1]
+    ])
+    
+    R_j2_base = R_01_T @ R_target_world # Target orientation in Frame 1
+                                        # This should be Ry(j2+j3_raw+j4)
+    
+    sum_angles_j234 = math.atan2(R_j2_base[0,2], R_j2_base[0,0])
+    
+    j4 = sum_angles_j234 - j2 - j3_raw
+    
+    # Step 6: Normalize angles to [-pi, pi]
+    j1_norm = (j1 + math.pi) % (2 * math.pi) - math.pi
+    j2_norm = (j2 + math.pi) % (2 * math.pi) - math.pi
+    # j3_raw is in [0, pi]. Normalizing (j3_raw + pi) % (2*pi) - pi:
+    # e.g. j3_raw=0 -> (pi)%(2pi)-pi = 0. j3_raw=pi -> (2pi)%(2pi)-pi = -pi.
+    # To keep it in the "elbow up" type range, or just normalize. Standard normalization is fine.
+    j3_norm = (j3_raw + math.pi) % (2 * math.pi) - math.pi
+    j4_norm = (j4 + math.pi) % (2 * math.pi) - math.pi
+
+    return j1_norm, j2_norm, j3_norm, j4_norm
+```

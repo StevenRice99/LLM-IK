@@ -1,0 +1,202 @@
+The problem requires finding a closed-form analytical solution for the inverse kinematics of a 6-DOF robot. The robot's joint structure is Z-Y-Y-Y-Z-Y. We are given an existing solver for a 5-DOF sub-chain (Z-Y-Y-Y-Z) that positions the origin of our Link 6. The provided Python code for this existing solver sets its 5th joint angle (a Z-rotation, corresponding to our `θ5`) to 0.0. However, the correct solutions for the 6-DOF robot often have a non-zero `θ5`. Joint `θ6` (Y-axis) is consistently 0 in the correct solutions, and given its geometry (TCP offset is along Y-axis of Link 6), `θ6` does not affect the TCP position.
+
+Let `P_TCP_desired` be the target TCP position.
+Let `P_V` be the target position for the `EXISTING` 5-DOF solver. The `EXISTING` solver, with its internal 5th joint (Z-axis) set to 0, positions a point `E`. This point `E` corresponds to the origin of our Link 6 *if our actual `θ5` were 0*.
+The relationship is: `P_V = P_L4_origin + R_04 * V_offset_existing`
+where `P_L4_origin` is the origin of Link 4, `R_04` is the rotation from world to Link 4 frame (determined by `θ1,θ2,θ3,θ4`), and `V_offset_existing = [0, 0.093, 0.09465]^T`. This vector represents the fixed offset from Link 4's origin to point `E` in Link 4's frame, as implicitly defined by the `EXISTING` solver's geometry (`d45` and `d5E` with `θ5_calc=0`).
+
+The actual TCP position for our 6-DOF robot (with `θ6=0`) is:
+`P_TCP_desired = P_L4_origin + R_04 * V_offset_actual(θ5)`
+where `V_offset_actual(θ5) = [0,0.093,0]^T + R_Z(θ5) * ([0,0,0.09465]^T + [0,0.0823,0]^T)`
+`V_offset_actual(θ5) = [0,0.093,0]^T + R_Z(θ5) * [0, 0.0823, 0.09465]^T`
+`V_offset_actual(θ5) = [-0.0823*sin(θ5), 0.093 + 0.0823*cos(θ5), 0.09465]^T`.
+
+Combining these, we relate `P_TCP_desired` to `P_V`:
+`P_TCP_desired = (P_V - R_04 * V_offset_existing) + R_04 * V_offset_actual(θ5)`
+`P_TCP_desired = P_V + R_04 * (V_offset_actual(θ5) - V_offset_existing)`
+`V_offset_actual(θ5) - V_offset_existing = ([-0.0823*s5, 0.093+0.0823*c5, 0.09465]^T) - ([0,0.093,0.09465]^T)`
+`= [-0.0823*s5, 0.0823*c5, 0]^T = R_Z(θ5) * [0, 0.0823, 0]^T`.
+So, `P_TCP_desired = P_V + R_04 * R_Z(θ5) * [0, 0.0823, 0]^T`.
+This means the target for the `EXISTING` solver should be `P_V_target = P_TCP_desired - R_04 * R_Z(θ5) * [0, 0.0823, 0]^T`.
+
+This is a coupled system: `P_V_target` depends on `R_04` and `θ5`, while `R_04` (from `θ1..θ4`) is an output of `existing_solver(P_V_target)`, and `θ5` also needs to be determined. We can solve this with a fixed number of iterations:
+
+1.  Initialize `θ5` (e.g., 0.0) and `R_04` (e.g., identity matrix).
+2.  Loop for a fixed number of iterations (e.g., 10):
+    a.  Calculate the current vector from `P_V` to `P_TCP_desired` in Link 4's frame: `V_PV_TCP_L4 = R_Z(θ5) * [0, 0.0823, 0]^T`.
+    b.  Calculate `P_V_target = P_TCP_desired - R_04 * V_PV_TCP_L4`. (Here `R_04` and `θ5` are from the previous iteration or initial guess).
+    c.  Call `(θ1, θ2, θ3, θ4, _) = existing_solver(P_V_target)`. These new angles define the new `R_04`.
+    d.  With the new `R_04` and the `P_V_target` used, the vector `P_TCP_desired - P_V_target` is known in the world frame. Transform it to the new Link 4 frame: `V_target_diff_L4 = R_04_new^T * (P_TCP_desired - P_V_target)`.
+    e.  This `V_target_diff_L4` should be equal to `R_Z(θ5_new) * [0, 0.0823, 0]^T`. So, `V_target_diff_L4 = [-0.0823*sin(θ5_new), 0.0823*cos(θ5_new), 0]^T`.
+    f.  Solve for `θ5_new = atan2(-V_target_diff_L4[0], V_target_diff_L4[1])`. Update `θ5` for the next iteration.
+3.  The final angles are `(θ1, θ2, θ3, θ4, θ5, 0.0)`.
+
+This iterative refinement, performed for a fixed number of steps, can be considered an analytical solution in this context.
+
+```python
+import math
+import numpy as np
+
+# Helper functions for rotation matrices
+def rot_z_matrix(angle_rad: float) -> np.ndarray:
+    c = math.cos(angle_rad)
+    s = math.sin(angle_rad)
+    return np.array([
+        [c, -s, 0.0],
+        [s,  c, 0.0],
+        [0.0,  0.0, 1.0]
+    ], dtype=float)
+
+def rot_y_matrix(angle_rad: float) -> np.ndarray:
+    c = math.cos(angle_rad)
+    s = math.sin(angle_rad)
+    return np.array([
+        [c,  0.0, s],
+        [0.0,  1.0, 0.0],
+        [-s, 0.0, c]
+    ], dtype=float)
+
+# Normalization function
+def normalize_angle(angle: float) -> float:
+    while angle > math.pi:
+        angle -= 2 * math.pi
+    while angle < -math.pi:
+        angle += 2 * math.pi
+    return angle
+
+class KinematicsSolver:
+    def existing_inverse_kinematics(self, p_target_j6: tuple[float, float, float]) -> tuple[float, float, float, float, float]:
+        # This is the <EXISTING> 5-DOF IK solver.
+        x_w, y_w, z_w = p_target_j6
+        d2_y = 0.13585
+        y_chain = -0.1197 + 0.093
+        L1 = 0.425
+        L2 = 0.39225
+        L3 = 0.09465
+        delta_for_t1_calc = y_chain + d2_y
+        r = math.hypot(x_w, y_w)
+        phi = math.atan2(-x_w, y_w)
+        
+        arg_acos = 0.0
+        if r < 1e-9: # Avoid division by zero if r is very small
+            if abs(delta_for_t1_calc) < 1e-9:
+                 arg_acos = 0.0 # Target at origin, delta is zero, effectively cos(pi/2)
+            else: # Target at/near origin, delta non-zero. Clamp to avoid domain error.
+                 arg_acos = 1.0 if delta_for_t1_calc > 0 else -1.0
+        else:
+            arg_acos = delta_for_t1_calc / r
+        
+        arg_acos = max(-1.0, min(1.0, arg_acos))
+        gamma = math.acos(arg_acos)
+        t1_cands = [normalize_angle(phi + gamma), normalize_angle(phi - gamma)]
+        best_solution = (float('inf'), 0.0, 0.0, 0.0, 0.0)
+
+        for t1_sol in t1_cands:
+            c1 = math.cos(t1_sol)
+            s1 = math.sin(t1_sol)
+            x2_target_in_j2_frame = c1 * x_w + s1 * y_w
+            y2_coord_in_j2_frame = -s1 * x_w + c1 * y_w - d2_y
+            z2_target_in_j2_frame = z_w
+            psi_angle = math.atan2(x2_target_in_j2_frame, z2_target_in_j2_frame)
+
+            for T_orientation_L3 in (psi_angle, normalize_angle(psi_angle + math.pi)):
+                xw_planar_target_for_L1L2 = x2_target_in_j2_frame - L3 * math.sin(T_orientation_L3)
+                zw_planar_target_for_L1L2 = z2_target_in_j2_frame - L3 * math.cos(T_orientation_L3)
+                dist_sq_L1L2_target = xw_planar_target_for_L1L2**2 + zw_planar_target_for_L1L2**2
+                
+                epsilon_reach = 1e-9 
+                if not ( (L1 - L2)**2 - epsilon_reach <= dist_sq_L1L2_target <= (L1 + L2)**2 + epsilon_reach ):
+                     if not (math.isclose(dist_sq_L1L2_target, (L1+L2)**2, rel_tol=1e-7, abs_tol=1e-7) or \
+                             math.isclose(dist_sq_L1L2_target, (L1-L2)**2, rel_tol=1e-7, abs_tol=1e-7)):
+                        continue
+                
+                den_cos_beta = 2 * L1 * L2
+                if abs(den_cos_beta) < 1e-12: continue
+                cos_beta = (dist_sq_L1L2_target - L1**2 - L2**2) / den_cos_beta
+                cos_beta = max(-1.0, min(1.0, cos_beta))
+                
+                for sign_beta_val in (+1.0, -1.0):
+                    beta_angle = sign_beta_val * math.acos(cos_beta)
+                    alpha_angle = math.atan2(xw_planar_target_for_L1L2, zw_planar_target_for_L1L2)
+                    den_delta_angle_calc = L1 + L2 * math.cos(beta_angle)
+                    num_delta_angle_calc = L2 * math.sin(beta_angle)
+                    delta_angle_val = math.atan2(num_delta_angle_calc, den_delta_angle_calc)
+                    t2_sol = normalize_angle(alpha_angle - delta_angle_val)
+                    t3_sol = normalize_angle(beta_angle)
+                    t4_sol = normalize_angle(T_orientation_L3 - (t2_sol + t3_sol))
+                    x_fk_planar_check = L1*math.sin(t2_sol) + L2*math.sin(t2_sol+t3_sol) + L3*math.sin(t2_sol+t3_sol+t4_sol)
+                    z_fk_planar_check = L1*math.cos(t2_sol) + L2*math.cos(t2_sol+t3_sol) + L3*math.cos(t2_sol+t3_sol+t4_sol)
+                    current_err_sq = (x_fk_planar_check - x2_target_in_j2_frame)**2 + \
+                                     (z_fk_planar_check - z2_target_in_j2_frame)**2 + \
+                                     (y2_coord_in_j2_frame - y_chain)**2
+                    if current_err_sq < best_solution[0]:
+                        best_solution = (current_err_sq, t1_sol, t2_sol, t3_sol, t4_sol)
+        
+        _, final_t1, final_t2, final_t3, final_t4 = best_solution
+        final_t5 = 0.0
+        return (normalize_angle(final_t1), normalize_angle(final_t2), 
+                normalize_angle(final_t3), normalize_angle(final_t4), normalize_angle(final_t5))
+
+    def inverse_kinematics(self, p_tcp_target_tuple: tuple[float, float, float]) -> tuple[float, float, float, float, float, float]:
+        p_tcp_desired_np = np.array(p_tcp_target_tuple, dtype=float)
+        
+        # TCP offset from L6 origin, along L6's Y-axis (which is L5's Y-axis after Rz(th5) if th6=0)
+        d_tcp_y_offset_in_L6 = 0.0823 
+
+        # Iterative refinement for theta5 and R04
+        current_theta5 = 0.0 
+        # Initial R04: from a first pass assuming theta5=0 for P_V_target calculation
+        initial_PV_target_offset_world = rot_z_matrix(current_theta5) @ np.array([0.0, d_tcp_y_offset_in_L6, 0.0])
+        initial_PV_target = p_tcp_desired_np - initial_PV_target_offset_world # R04 initially identity
+        
+        th1_curr, th2_curr, th3_curr, th4_curr, _ = self.existing_inverse_kinematics(tuple(initial_PV_target))
+        current_R04 = rot_z_matrix(th1_curr) @ rot_y_matrix(th2_curr) @ rot_y_matrix(th3_curr) @ rot_y_matrix(th4_curr)
+
+        N_ITERATIONS = 10 # Number of fixed iterations
+
+        for _ in range(N_ITERATIONS):
+            # Vector from P_V to P_TCP, expressed in L4 frame (depends on current_theta5)
+            # This is R_Z(current_theta5) * [0, d_tcp_y_offset_in_L6, 0]^T
+            vec_PV_to_TCP_in_L4 = np.array([
+                -d_tcp_y_offset_in_L6 * math.sin(current_theta5),
+                 d_tcp_y_offset_in_L6 * math.cos(current_theta5),
+                 0.0
+            ])
+            
+            # Target for the existing solver (P_V_target)
+            # P_V_target = P_TCP_desired - R04_current * vec_PV_to_TCP_in_L4
+            P_V_target_np = p_tcp_desired_np - (current_R04 @ vec_PV_to_TCP_in_L4)
+            
+            # Solve for th1, th2, th3, th4 using existing solver
+            th1_curr, th2_curr, th3_curr, th4_curr, _ = self.existing_inverse_kinematics(tuple(P_V_target_np.tolist()))
+            
+            # Update R04 matrix with new angles
+            current_R04 = rot_z_matrix(th1_curr) @ rot_y_matrix(th2_curr) @ rot_y_matrix(th3_curr) @ rot_y_matrix(th4_curr)
+            
+            # Now, determine new theta5
+            # We want P_TCP_desired = P_V_target_np + current_R04 * R_Z(theta5_new) * [0, d_tcp_y_offset_in_L6, 0]^T
+            # So, R_Z(theta5_new) * [0, d_tcp_y_offset_in_L6, 0]^T = current_R04^T * (P_TCP_desired - P_V_target_np)
+            V_for_theta5_calc_in_L4 = current_R04.T @ (p_tcp_desired_np - P_V_target_np)
+            
+            vx_L4_for_th5 = V_for_theta5_calc_in_L4[0]
+            vy_L4_for_th5 = V_for_theta5_calc_in_L4[1]
+            # vz_L4_for_th5 = V_for_theta5_calc_in_L4[2] # Should be close to 0
+
+            # vx_L4_for_th5 = -d_tcp_y_offset_in_L6 * sin(theta5_new)
+            # vy_L4_for_th5 =  d_tcp_y_offset_in_L6 * cos(theta5_new)
+            current_theta5 = math.atan2(-vx_L4_for_th5, vy_L4_for_th5)
+
+        theta6_final = 0.0
+
+        return (normalize_angle(th1_curr),
+                normalize_angle(th2_curr),
+                normalize_angle(th3_curr),
+                normalize_angle(th4_curr),
+                normalize_angle(current_theta5),
+                normalize_angle(theta6_final))
+
+def inverse_kinematics(p: tuple[float, float, float]) -> tuple[float, float, float, float, float, float]:
+    solver = KinematicsSolver()
+    return solver.inverse_kinematics(p)
+
+```

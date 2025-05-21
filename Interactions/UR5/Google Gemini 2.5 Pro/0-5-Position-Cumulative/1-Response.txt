@@ -1,0 +1,210 @@
+To find the inverse kinematics solution for the 6-DOF serial manipulator to reach a target TCP position `p = (px, py, pz)`, we can proceed as follows:
+
+1.  **Handle Joint 6 (q6)**:
+    The TCP is located at `[0, 0.0823, 0]` in Link 6's frame. Link 6 is a revolute joint rotating around its Y-axis. The transformation from Link 5 to Link 6 involves a translation `Trans(0, 0, 0.09465)` followed by `Rot_Y(q6)`.
+    The position of the TCP in Link 5's frame (P_tcp_F5) can be calculated as:
+    `P_tcp_F5 = Trans_5_to_J6origin * Rot_Y(q6) * P_tcp_in_F6`
+    `P_tcp_F5 = [[1,0,0,0],[0,1,0,0],[0,0,1,0.09465],[0,0,0,1]] * [[c6,0,s6,0],[0,1,0,0],[-s6,0,c6,0],[0,0,0,1]] * [0, 0.0823, 0, 1]^T`
+    `P_tcp_F5 = [[c6,0,s6,0],[0,1,0,0],[-s6,0,c6,0.09465],[0,0,0,1]] * [0, 0.0823, 0, 1]^T`
+    `P_tcp_F5 = [0, 0.0823, 0.09465, 1]^T`
+    This calculation shows that the position of the TCP in Link 5's frame is independent of `q6`. Therefore, `q6` is redundant for TCP positioning, and we can set `q6 = 0.0`.
+
+2.  **Handle Joint 5 (q5) and Adapt "EXISTING 5" Solution**:
+    With `q6=0`, the problem reduces to finding `(q1, q2, q3, q4, q5)` for a Z-Y-Y-Y-Z manipulator. The "EXISTING 5" solution solves for such a manipulator where the end-effector (EE) is at `d5E = [0, 0, 0.09465]` relative to Joint 5's frame.
+    In our case, the TCP is at `P_J5_TCP = [0, 0.0823, 0.09465]` relative to Joint 5's frame (this is `P_tcp_F5` calculated above, but interpreted as a vector from J5 origin).
+
+    The "EXISTING 5" solution decouples `q1` by ensuring that the y-coordinate of the target in Joint 2's frame (`y2`) matches a calculated `y_chain`. This `y_chain` originally accounts for y-offsets from J2 to J3 (`d23_y = -0.1197`) and J4 to J5 (`d45_y = 0.093`), assuming the y-component of the vector from J5 to EE (after q5 rotation) is zero.
+    `y_chain_orig = d23_y + d45_y = -0.1197 + 0.093 = -0.0267`.
+
+    Let `P_J5_TCP = [d5E_eff_x, d5E_eff_y, d5E_eff_z] = [0, 0.0823, 0.09465]`.
+    After rotation by `q5` (Z-axis): `Rot_Z(q5) * P_J5_TCP = [-s5*d5E_eff_y, c5*d5E_eff_y, d5E_eff_z]`.
+    The y-component is `c5*d5E_eff_y = c5 * 0.0823`.
+    The x-component is `-s5*d5E_eff_y = -s5 * 0.0823`.
+
+    To keep the planar solver structure of "EXISTING 5" (which assumes the "third link" L3 has no local x-offset), we need the x-component `-s5 * 0.0823` to be zero. This implies `s5 = 0`, so `q5 = 0` or `q5 = pi`. We choose `q5 = 0.0`.
+    If `q5 = 0.0`, then `c5 = 1`.
+    The y-component contributed by `P_J5_TCP` (after this chosen q5) is `1 * 0.0823 = 0.0823`.
+    The modified `y_chain` for the `q1` calculation becomes:
+    `y_chain_modified = y_chain_orig + 0.0823 = -0.0267 + 0.0823 = 0.0556`.
+
+    The parameters for the "EXISTING 5" solver adaptation are:
+    *   `d2_y = 0.13585` (offset from J1 to J2 y-component)
+    *   `y_chain` (to be used in `delta` calculation) becomes `y_chain_modified = 0.0556`.
+    *   `L1 = 0.425` (z-offset J2 to J3)
+    *   `L2 = 0.39225` (z-offset J3 to J4)
+    *   `L3 = d5E_eff_z = 0.09465` (z-component of `P_J5_TCP`). This is the length of the "third link" in the planar solver, as its x-component is now zero due to `q5=0`.
+
+    The "EXISTING 5" code can then be used with these adapted parameters. It will find `(q1, q2, q3, q4)`. The `theta5` it calculates should be consistent with our choice `q5=0` or can be overridden.
+
+3.  **Final Solution**:
+    The joint angles will be `(q1, q2, q3, q4, q5, q6)`, where `(q1,q2,q3,q4)` come from the adapted "EXISTING 5" solution, `q5 = 0.0`, and `q6 = 0.0`.
+
+```python
+import math
+
+def inverse_kinematics(p: tuple[float, float, float]) -> tuple[float, float, float, float, float, float]:
+    """
+    Gets the joint values needed to reach position "p".
+    :param p: The position to reach in the form [x, y, z].
+    :return: A list of the values to set the links to for reaching position "p".
+    """
+    x_w, y_w, z_w = p
+
+    # Constants from robot geometry and our choices
+    q6 = 0.0
+    chosen_q5 = 0.0 # This choice makes d5E_eff_rot_x = 0
+
+    # Parameters for adapting "EXISTING 5"
+    d2_y = 0.13585  # y-offset from J1 to J2
+
+    # Original y_chain from J2 to J5 origin projection on J2's y-axis
+    # d23_y = -0.1197 (J2y to J3y)
+    # d45_y = 0.093 (J4y to J5y)
+    y_chain_orig = -0.1197 + 0.093  # = -0.0267
+
+    # Effective TCP offset from J5 origin (P_J5_TCP)
+    # P_J5_TCP = [0, 0.0823, 0.09465]
+    # If chosen_q5 = 0, Rot_Z(chosen_q5) * P_J5_TCP = P_J5_TCP.
+    d5E_eff_y_contrib = 0.0823 # y-component of (Rot_Z(chosen_q5) * P_J5_TCP)
+    d5E_eff_z_contrib = 0.09465 # z-component, becomes L3
+
+    y_chain_modified = y_chain_orig + d5E_eff_y_contrib # = -0.0267 + 0.0823 = 0.0556
+
+    L1_planar = 0.425  # z-offset J2 to J3
+    L2_planar = 0.39225 # z-offset J3 to J4
+    L3_planar = d5E_eff_z_contrib # Effective z-length of the 3rd link for planar solver
+
+    # --- Start of "EXISTING 5" adapted logic ---
+    # Calculate q1 (theta1 in "EXISTING 5")
+    delta_for_q1 = y_chain_modified + d2_y # Target y-value in J1's frame for point -s1*x_w + c1*y_w
+                                         # delta_for_q1 = 0.0556 + 0.13585 = 0.19145
+    
+    r_xy_world = math.hypot(x_w, y_w)
+    
+    # If r_xy_world is zero, target is on Z axis of world.
+    # q1 can be arbitrary if x_w and y_w are zero.
+    # However, delta_for_q1 must be zero too in that case for a solution.
+    # If delta_for_q1 is non-zero and r_xy_world is zero, it's likely unreachable by q1.
+    # Assuming reachability, this case needs careful handling if it occurs.
+    # For simplicity, if r_xy_world is very small, we might hit acos domain issues.
+    
+    t1_cands = []
+    if r_xy_world < 1e-6: # Target near Z-axis
+        if abs(delta_for_q1) < 1e-6: # if delta is also near zero, y_J1_frame is zero.
+                                     # -s1*x_w + c1*y_w = 0. If x_w,y_w are zero, this is 0=0.
+                                     # q1 can be anything. Let's pick 0.
+            t1_cands = [0.0]
+        else:
+            # Unreachable by q1 choice if r_xy_world is zero and delta_for_q1 is not.
+            # However, problem statement says "Assume all targets ... will be reachable".
+            # This case implies an issue or needs specific q1.
+            # If x_w=0, y_w=0, then -s1*0 + c1*0 = delta_for_q1 => 0 = delta_for_q1.
+            # So delta_for_q1 must be 0.
+            pass # Should be handled by reachability assumption.
+    else:
+        phi_q1 = math.atan2(-x_w, y_w) # Note: "EXISTING 5" uses atan2(-x_w, y_w)
+        arg_acos_q1 = delta_for_q1 / r_xy_world
+        arg_acos_q1 = max(-1.0, min(1.0, arg_acos_q1)) # Clip for safety
+        gamma_q1 = math.acos(arg_acos_q1)
+        t1_cands = [phi_q1 + gamma_q1, phi_q1 - gamma_q1]
+
+    best_solution_params = (float('inf'), 0.0, 0.0, 0.0, 0.0) # (error, q1, q2, q3, q4)
+
+    for t1_sol in t1_cands:
+        c1 = math.cos(t1_sol)
+        s1 = math.sin(t1_sol)
+
+        # Target coordinates in J2's frame
+        x2_j2frame = c1 * x_w + s1 * y_w
+        y2_j2frame = -s1 * x_w + c1 * y_w - d2_y # This should be y_chain_modified
+        z2_j2frame = z_w
+
+        # Planar solver for q2, q3, q4 (t2, t3, t4 in "EXISTING 5")
+        # Target for planar 3R arm is (x2_j2frame, z2_j2frame)
+        psi_planar = math.atan2(x2_j2frame, z2_j2frame) # Orientation of target for 3R arm
+
+        for T_planar_orientation_choice in (psi_planar, psi_planar + math.pi): # Overall orientation of 3R arm
+            # Wrist center for the first 2 links (L1_planar, L2_planar) of the 3R arm
+            xw_2R_wrist = x2_j2frame - L3_planar * math.sin(T_planar_orientation_choice)
+            zw_2R_wrist = z2_j2frame - L3_planar * math.cos(T_planar_orientation_choice)
+            
+            rw2_2R_wrist = xw_2R_wrist * xw_2R_wrist + zw_2R_wrist * zw_2R_wrist
+            
+            # Check reachability for the 2R arm
+            if rw2_2R_wrist > (L1_planar + L2_planar)**2 or rw2_2R_wrist < (L1_planar - L2_planar)**2:
+                if abs(rw2_2R_wrist - (L1_planar + L2_planar)**2) < 1e-9 or \
+                   abs(rw2_2R_wrist - (L1_planar - L2_planar)**2) < 1e-9:
+                    # On boundary, treat as reachable
+                    pass
+                else:
+                    continue
+
+
+            cos_beta_q3_planar = (rw2_2R_wrist - L1_planar*L1_planar - L2_planar*L2_planar) / (2 * L1_planar * L2_planar)
+            cos_beta_q3_planar = max(-1.0, min(1.0, cos_beta_q3_planar)) # Clip
+
+            for sign_beta in (+1.0, -1.0):
+                beta_q3_planar = sign_beta * math.acos(cos_beta_q3_planar) # This is t3 (q3_planar)
+
+                # Solve for t2 (q2_planar)
+                phi_w_2R_wrist = math.atan2(xw_2R_wrist, zw_2R_wrist)
+                # Denominator for delta_w_q2_planar can be zero if L1_planar + L2_planar * cos(beta_q3_planar) is zero
+                # and L2_planar * sin(beta_q3_planar) is also zero.
+                # This happens if L1=L2 and beta=pi, or L2=0. Assume L1,L2 > 0.
+                # If L1 + L2*cos(beta) = 0 and L2*sin(beta)=0, then L2=0 or sin(beta)=0.
+                # If sin(beta)=0, beta=0 or pi. If beta=0, L1+L2=0 (impossible). If beta=pi, L1-L2=0.
+                # So if L1=L2 and beta=pi, atan2(0,0) -> undefined.
+                # This corresponds to r_w = 0, wrist at origin of 2R chain.
+                if abs(L1_planar + L2_planar * math.cos(beta_q3_planar)) < 1e-9 and \
+                   abs(L2_planar * math.sin(beta_q3_planar)) < 1e-9:
+                    delta_w_q2_planar = 0 # Wrist at origin, q2 can be phi_w_2R_wrist.
+                                          # Or more robustly, if r_w is zero, q2+q3 = atan2(x_target, z_target)
+                                          # and q2 can be chosen to make L1*s(q2) + L2*s(q2+q3) = x_target
+                                          # This case should be rare given reachability.
+                else:
+                    delta_w_q2_planar = math.atan2(L2_planar * math.sin(beta_q3_planar), L1_planar + L2_planar * math.cos(beta_q3_planar))
+                
+                t2_sol = phi_w_2R_wrist - delta_w_q2_planar # This is q2_planar
+                t3_sol = beta_q3_planar                  # This is q3_planar
+                t4_sol = T_planar_orientation_choice - (t2_sol + t3_sol) # This is q4_planar
+
+                # Forward Kinematics check (simplified for the planar part in J2's XZ plane)
+                # This FK is for the 3-link planar arm (L1,L2,L3_planar)
+                # with angles t2_sol, t3_sol, t4_sol (relative angles for the planar chain)
+                x_fk_planar = L1_planar * math.sin(t2_sol) + \
+                              L2_planar * math.sin(t2_sol + t3_sol) + \
+                              L3_planar * math.sin(t2_sol + t3_sol + t4_sol)
+                z_fk_planar = L1_planar * math.cos(t2_sol) + \
+                              L2_planar * math.cos(t2_sol + t3_sol) + \
+                              L3_planar * math.cos(t2_sol + t3_sol + t4_sol)
+                
+                # Error in J2's XZ plane
+                # y2_j2frame should match y_chain_modified due to q1 choice.
+                # We check error in xz plane of J2.
+                err_sq_planar = (x_fk_planar - x2_j2frame)**2 + (z_fk_planar - z2_j2frame)**2
+                # Add error in y2 just in case q1 choice wasn't perfect or for robustness
+                err_sq_planar += (y2_j2frame - y_chain_modified)**2
+
+
+                if err_sq_planar < best_solution_params[0]:
+                    best_solution_params = (err_sq_planar, t1_sol, t2_sol, t3_sol, t4_sol)
+
+    # --- End of "EXISTING 5" adapted logic ---
+
+    final_q1 = best_solution_params[1]
+    final_q2 = best_solution_params[2]
+    final_q3 = best_solution_params[3]
+    final_q4 = best_solution_params[4]
+    final_q5 = chosen_q5
+    final_q6 = q6
+
+    # Normalize angles to [-pi, pi] as in "EXISTING 5"
+    def norm(a):
+        while a > math.pi: a -= 2 * math.pi
+        while a < -math.pi: a += 2 * math.pi
+        return a
+
+    return (norm(final_q1), norm(final_q2), norm(final_q3), 
+            norm(final_q4), norm(final_q5), norm(final_q6))
+
+```

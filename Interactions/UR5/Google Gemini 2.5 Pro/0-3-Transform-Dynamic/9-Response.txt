@@ -1,0 +1,150 @@
+The core challenge in providing a single closed-form analytical solution for this 4-DOF manipulator is that multiple kinematic configurations (branches) can reach the same target position and orientation. The problem asks for *a* solution without using optimization methods to choose among branches. The feedback indicates that the "correct" solutions provided are not consistently from a single analytical branch.
+
+Therefore, I will provide a solution based on a *fixed, deterministic choice* for each multi-solution step:
+
+1.  **Joint 1 (`j1`) Calculation (Z-axis rotation)**:
+    *   The TCP has a fixed Y-offset in Joint 1's coordinate frame (Frame 1) of `Y_req = 0.13585 (J2_y) - 0.1197 (J3_y in J2) + 0 (J4_y in J3) + 0.093 (TCP_y in J4) = 0.10915`.
+    *   Solving `py_f1 = -px * sin(j1) + py * cos(j1) = Y_req`:
+        Let `H = sqrt(px^2 + py^2)`.
+        Let `phi_offset = acos(clip(Y_req / H, -1.0, 1.0))`.
+        Let `j1_base_angle = atan2(-px, py)`.
+    *   Fixed choice for `j1`: `j1 = j1_base_angle - phi_offset`.
+
+2.  **Planar Arm Target (J2, J3, J4)**:
+    *   Transform target `(px, py, pz)` into Frame 1 (after `j1` rotation):
+        `x_planar = px * cos(j1) + py * sin(j1)`
+        `z_planar = pz_world`
+    *   Transform target orientation `r = (roll, pitch, yaw)` to `R_j2_base = RotZ(-j1) * R_target_world(roll, pitch, yaw)`.
+
+3.  **Joint 3 (`j3_raw`) Calculation (Y-axis rotation, "elbow" of planar arm)**:
+    *   Effective link lengths: `L1 = 0.425`, `L2 = 0.39225`.
+    *   Distance squared to planar target: `d_sq = x_planar^2 + z_planar^2`.
+    *   Law of cosines: `cos_j3_val = (d_sq - L1^2 - L2^2) / (2 * L1 * L2)`.
+    *   Fixed choice for `j3_raw`: `j3_raw = -math.acos(clip(cos_j3_val, -1.0, 1.0))`. This choice (negative `acos`) was made to match the `j3` value of the first failed example in the previous feedback, aiming to align with at least one of the provided "correct" solutions' branching logic.
+
+4.  **Joint 2 (`j2`) Calculation (Y-axis rotation, "base" of planar arm)**:
+    *   Using `j3_raw`, `x_planar`, `z_planar`, and `d_sq`. The formulas are chosen to be consistent with the structure of `EXISTING 2` (where `j2` is analogous to `t1`, an angle from Z-axis towards X-axis in the planar arm's coordinate system):
+        `k1 = L1 + L2*cos(j3_raw)`
+        `k2 = L2*sin(j3_raw)`
+        `sin_j2 = (k1*x_planar - k2*z_planar) / d_sq`
+        `cos_j2 = (k2*x_planar + k1*z_planar) / d_sq`
+        `j2 = atan2(sin_j2, cos_j2)`.
+
+5.  **Joint 4 (`j4`) Calculation (Y-axis rotation, orientation adjustment)**:
+    *   The sum of Y-rotations in Frame 1 is `sum_angles_j234 = j2 + j3_raw + j4`. This must match the Y-rotation component derived from `R_j2_base`.
+        `sum_angles_j234 = atan2(R_j2_base[0,2], R_j2_base[0,0])`.
+    *   `j4 = sum_angles_j234 - j2 - j3_raw`.
+
+6.  **Normalization**: All joint angles are normalized to `[-pi, pi]`.
+
+This provides a single, deterministic, closed-form analytical solution. It may not match all "correct" solutions from the feedback if those solutions dynamically switch branches.
+
+```python
+import math
+import numpy as np
+
+def inverse_kinematics(p: tuple[float, float, float], r: tuple[float, float, float]) -> tuple[float, float, float, float]:
+    """
+    Gets the joint values needed to reach position "p" and orientation "r".
+    :param p: The position to reach in the form [x, y, z].
+    :param r: The orientation to reach in radians in the form [roll, pitch, yaw] (Rx, Ry, Rz).
+    :return: A tuple of the joint values (j1, j2, j3, j4).
+    """
+    px, py, pz_world = p
+    roll, pitch, yaw = r
+
+    # Robot constants
+    Y_req = 0.10915
+    L1 = 0.425
+    L2 = 0.39225
+
+    # Step 1: Calculate j1
+    H = math.sqrt(px**2 + py**2)
+    
+    val_for_acos_phi = 0.0
+    if H < 1e-9:
+        if abs(Y_req) < 1e-9: 
+            val_for_acos_phi = 0.0 
+        else: 
+            val_for_acos_phi = np.clip(Y_req / (H + 1e-12), -1.0, 1.0)
+    else:
+        val_for_acos_phi = np.clip(Y_req / H, -1.0, 1.0)
+    
+    phi_offset = math.acos(val_for_acos_phi)
+    j1_base_angle = math.atan2(-px, py)
+    
+    # Fixed choice for j1 branch: j1_base_angle - phi_offset
+    j1 = j1_base_angle - phi_offset
+
+    # Step 2: Determine Planar Arm Target
+    cj1 = math.cos(j1)
+    sj1 = math.sin(j1)
+    
+    x_planar = px * cj1 + py * sj1
+    z_planar = pz_world
+    d_sq = x_planar**2 + z_planar**2
+
+    # Step 3: Solve for j3_raw
+    cos_j3_val_num = d_sq - L1**2 - L2**2
+    cos_j3_val_den = 2 * L1 * L2
+    
+    cos_j3_val = 0.0
+    if abs(cos_j3_val_den) < 1e-12:
+        cos_j3_val = np.clip(cos_j3_val_num / (cos_j3_val_den + 1e-12 if cos_j3_val_den >= 0 else -1e-12), -1.0, 1.0)
+
+    else:
+        cos_j3_val = np.clip(cos_j3_val_num / cos_j3_val_den, -1.0, 1.0)
+    
+    # Fixed choice for j3 branch: -acos(...)
+    j3_raw = -math.acos(cos_j3_val)
+
+    # Step 4: Solve for j2 (using formulas consistent with EXISTING 2's angle definitions)
+    s_j3_raw = math.sin(j3_raw)
+    c_j3_raw = math.cos(j3_raw) 
+    
+    k1 = L1 + L2 * c_j3_raw # C in EXISTING 2
+    k2 = L2 * s_j3_raw # D in EXISTING 2
+    
+    sin_j2 = 0.0
+    cos_j2 = 1.0 # Default j2 = 0 if d_sq is zero
+    if d_sq > 1e-9: 
+        # sin_j2 = (k1 * x_planar - k2 * z_planar) / d_sq (EXISTING 2: (C*x - D*z)/denom)
+        # cos_j2 = (k2 * x_planar + k1 * z_planar) / d_sq (EXISTING 2: (D*x + C*z)/denom)
+        sin_j2 = (k1 * x_planar - k2 * z_planar) / d_sq
+        cos_j2 = (k2 * x_planar + k1 * z_planar) / d_sq
+    # else: d_sq is near zero. For this robot (L1!=L2), (0,0) for planar arm is unreachable.
+    # Smallest d_sq is (L1-L2)^2 if j3=pi. So d_sq should not be zero.
+            
+    j2 = math.atan2(sin_j2, cos_j2)
+
+    # Step 5: Solve for j4
+    cr_world, sr_world = math.cos(roll), math.sin(roll)
+    cp_world, sp_world = math.cos(pitch), math.sin(pitch)
+    cy_world, sy_world = math.cos(yaw), math.sin(yaw)
+
+    R_target_world = np.array([
+        [cy_world*cp_world, cy_world*sp_world*sr_world - sy_world*cr_world, cy_world*sp_world*cr_world + sy_world*sr_world],
+        [sy_world*cp_world, sy_world*sp_world*sr_world + cy_world*cr_world, sy_world*sp_world*cr_world - cy_world*sr_world],
+        [-sp_world,         cp_world*sr_world,                             cp_world*cr_world]
+    ])
+
+    R_01_T = np.array([
+        [cj1,  sj1, 0],
+        [-sj1, cj1, 0],
+        [0,    0,   1]
+    ])
+    
+    R_j2_base = R_01_T @ R_target_world
+    
+    sum_angles_j234 = math.atan2(R_j2_base[0,2], R_j2_base[0,0])
+    
+    j4 = sum_angles_j234 - j2 - j3_raw
+    
+    # Step 6: Normalize angles to [-pi, pi]
+    j1_norm = (j1 + math.pi) % (2 * math.pi) - math.pi
+    j2_norm = (j2 + math.pi) % (2 * math.pi) - math.pi
+    j3_norm = (j3_raw + math.pi) % (2 * math.pi) - math.pi
+    j4_norm = (j4 + math.pi) % (2 * math.pi) - math.pi
+
+    return j1_norm, j2_norm, j3_norm, j4_norm
+```

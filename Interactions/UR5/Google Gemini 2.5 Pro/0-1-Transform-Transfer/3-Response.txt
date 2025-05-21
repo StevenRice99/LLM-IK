@@ -1,0 +1,140 @@
+Okay, I've refined the inverse kinematics solution. The main changes focus on improving numerical precision in the calculation of the forward kinematics rotation matrix (`R_calculated`) that is used for checking against the target orientation. Instead of re-calculating `cos(theta2)` and `sin(theta2)` from the `theta2` angle (which might introduce small errors if `theta2` itself is a result of `acos`), I now use the more direct `cos_theta2_val = pz / L2z_tcp` and `sin_theta2_val = +/- sqrt(1 - cos_theta2_val^2)` in the construction of `R_calculated`.
+
+Here's the updated Python function:
+
+```python
+import math
+
+def inverse_kinematics(p: tuple[float, float, float], r: tuple[float, float, float]) -> tuple[float, float]:
+    """
+    Gets the joint values needed to reach position "p" and orientation "r".
+    :param p: The position to reach in the form [x, y, z].
+    :param r: The orientation to reach in radians in the form [x, y, z] (ZYX Euler: yaw, pitch, roll).
+    :return: A list of the values to set the links to for reaching position "p" and orientation "r".
+    """
+    px, py, pz = p
+    # Assuming r = (roll, pitch, yaw) for ZYX Euler angles as per typical conventions.
+    # The problem statement implies r = [x,y,z] which could be roll, pitch, yaw.
+    # If it's [yaw, pitch, roll], the R_target construction would need adjustment.
+    # Based on common robotics usage [x,y,z] for rpy is roll, pitch, yaw.
+    roll_target, pitch_target, yaw_target = r
+    
+    epsilon = 1e-7 # Tolerance for floating-point comparisons of rotation matrix elements.
+
+    # Robot kinematic constants
+    L1y = 0.13585       # Joint 2's y-offset from Joint 1's frame
+    L2y_tcp = -0.1197   # TCP's y-offset in Joint 2's frame (after Joint 2 rotation)
+    L2z_tcp = 0.425     # TCP's z-offset in Joint 2's frame (after Joint 2 rotation)
+    
+    K2_const = L2y_tcp + L1y # Effective y-offset for the Px, Py equations = 0.01615
+
+    # Calculate the target orientation matrix (R_target) from ZYX Euler angles (Roll, Pitch, Yaw)
+    # R_target = Rz(yaw) * Ry(pitch) * Rx(roll)
+    c_roll, s_roll = math.cos(roll_target), math.sin(roll_target)
+    c_pitch, s_pitch = math.cos(pitch_target), math.sin(pitch_target)
+    c_yaw, s_yaw = math.cos(yaw_target), math.sin(yaw_target)
+
+    R_target = [
+        [c_yaw*c_pitch, c_yaw*s_pitch*s_roll - s_yaw*c_roll, c_yaw*s_pitch*c_roll + s_yaw*s_roll],
+        [s_yaw*c_pitch, s_yaw*s_pitch*s_roll + c_yaw*c_roll, s_yaw*s_pitch*c_roll - c_yaw*s_roll],
+        [-s_pitch,      c_pitch*s_roll,                     c_pitch*c_roll]
+    ]
+
+    # --- Solve for theta2 ---
+    # Pz = L2z_tcp * cos(theta2)
+    cos_theta2_val = pz / L2z_tcp
+    # Clamp cos_theta2_val to avoid domain errors with acos due to potential float inaccuracies
+    if cos_theta2_val > 1.0: cos_theta2_val = 1.0
+    elif cos_theta2_val < -1.0: cos_theta2_val = -1.0
+
+    # Two potential solutions for theta2 (angle itself)
+    theta2_rad_sol1 = math.acos(cos_theta2_val) # Solution in [0, pi]
+    theta2_rad_sol2 = -theta2_rad_sol1         # Solution in [-pi, 0] (unless cos_theta2_val was 1.0, then also 0)
+    
+    # Corresponding sin(theta2) values
+    # For theta2_sol1 (angle in [0, pi]), sin is positive or zero
+    # Use max(0.0, ...) to prevent sqrt of tiny negative from float error if cos_theta2_val is +/-1.0
+    sin_theta2_val_sol1 = math.sqrt(max(0.0, 1.0 - cos_theta2_val**2))
+    # For theta2_sol2 (angle in [-pi, 0]), sin is negative or zero
+    sin_theta2_val_sol2 = -sin_theta2_val_sol1
+
+    # Package solutions for iteration: (theta2_angle, cos_theta2_for_FK, sin_theta2_for_FK)
+    solutions_to_check = [
+        (theta2_rad_sol1, cos_theta2_val, sin_theta2_val_sol1),
+    ]
+    # Add second solution only if it's distinct (i.e., theta2_rad_sol1 is not 0 or pi, where sin is 0)
+    # If theta2_rad_sol1 is 0, then theta2_rad_sol2 is also 0.
+    # If theta2_rad_sol1 is pi, then theta2_rad_sol2 is -pi. These are distinct angles.
+    # The check should be on the angle: if theta2_rad_sol1 != theta2_rad_sol2
+    if abs(theta2_rad_sol1 - theta2_rad_sol2) > epsilon: # Check if angles are meaningfully different
+         solutions_to_check.append((theta2_rad_sol2, cos_theta2_val, sin_theta2_val_sol2))
+
+
+    for theta2_rad, current_cos_theta2, current_sin_theta2 in solutions_to_check:
+        # --- Solve for theta1 ---
+        # Px = c1*K1 - s1*K2
+        # Py = s1*K1 + c1*K2
+        # where K1 = L2z_tcp * sin(theta2) and K2 = K2_const
+        K1 = L2z_tcp * current_sin_theta2
+        
+        den_theta1 = K1**2 + K2_const**2
+        
+        theta1_rad = 0.0 # Default initialization
+        # Check if denominator is non-zero (it should be, as K2_const is not zero)
+        if abs(den_theta1) > 1e-12: # Using a small absolute tolerance for denominator
+            # c1 = (K1*Px + K2*Py) / den_theta1
+            # s1 = (K1*Py - K2*Px) / den_theta1
+            cos_theta1_val = (K1 * px + K2_const * py) / den_theta1
+            sin_theta1_val = (K1 * py - K2_const * px) / den_theta1 # Corrected from potential typo in thought process
+            theta1_rad = math.atan2(sin_theta1_val, cos_theta1_val)
+        elif abs(K2_const) > 1e-9 : # Handles K1 = 0 (i.e., sin_theta2 = 0, theta2 is 0 or pi)
+                                   # Px = -K2*s1 => s1 = -Px/K2
+                                   # Py =  K2*c1 => c1 =  Py/K2
+            theta1_rad = math.atan2(-px / K2_const, py / K2_const)
+        # else: Both K1 and K2_const are zero. K2_const (0.01615) is not zero, so this case is not expected.
+        # This implies a singularity or an issue if K2_const was variable and zero.
+
+        # --- FK Orientation Check using the derived theta1_rad and current theta2 components ---
+        c1_check = math.cos(theta1_rad)
+        s1_check = math.sin(theta1_rad)
+        # Use current_cos_theta2 and current_sin_theta2 directly for precision
+        
+        R_calculated = [
+            [c1_check * current_cos_theta2, -s1_check, c1_check * current_sin_theta2],
+            [s1_check * current_cos_theta2,  c1_check, s1_check * current_sin_theta2],
+            [-current_sin_theta2,            0.0,      current_cos_theta2]
+        ]
+
+        match_found = True
+        for i_row in range(3):
+            for j_col in range(3):
+                if abs(R_calculated[i_row][j_col] - R_target[i_row][j_col]) > epsilon:
+                    match_found = False
+                    break
+            if not match_found:
+                break
+        
+        if match_found:
+            return (theta1_rad, theta2_rad)
+
+    # Fallback: As per problem spec, "Assume all targets given as inputs ... will be reachable".
+    # This means one of the solutions should have matched the orientation.
+    # If this part is reached, it implies a mismatch between assumption and outcome, possibly due to epsilon choice
+    # or an extremely specific edge case not perfectly handled by the float precision.
+    # For completeness and to ensure a return, calculate and return the first potential solution's angles
+    # without guaranteeing orientation match (this part should ideally not be executed).
+    
+    # This fallback is a safety net; problem implies it won't be needed.
+    # Recalculate theta1 for the first theta2 solution (theta2_rad_sol1)
+    K1_fallback = L2z_tcp * sin_theta2_val_sol1
+    den_fallback = K1_fallback**2 + K2_const**2
+    theta1_rad_fallback = 0.0
+    if abs(den_fallback) > 1e-12:
+        cos_t1_fallback = (K1_fallback * px + K2_const * py) / den_fallback
+        sin_t1_fallback = (K1_fallback * py - K2_const * px) / den_fallback
+        theta1_rad_fallback = math.atan2(sin_t1_fallback, cos_t1_fallback)
+    elif abs(K2_const) > 1e-9:
+        theta1_rad_fallback = math.atan2(-px / K2_const, py / K2_const)
+        
+    return (theta1_rad_fallback, theta2_rad_sol1)
+```

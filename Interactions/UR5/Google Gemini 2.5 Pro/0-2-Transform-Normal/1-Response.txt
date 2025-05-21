@@ -1,0 +1,110 @@
+To provide the closed-form analytical solution for the inverse kinematics of the described 3-DOF serial manipulator, I will complete the Python function `inverse_kinematics`.
+
+The robot's kinematic structure is as follows:
+1.  Joint 1: Revolute around Z-axis (angle `q1`).
+2.  Link 1 to Joint 2: Translation `d1 = [0, 0.13585, 0]`.
+3.  Joint 2: Revolute around Y-axis (angle `q2`).
+4.  Link 2 to Joint 3: Translation `d2 = [0, -0.1197, 0.425]`.
+5.  Joint 3: Revolute around Y-axis (angle `q3`).
+6.  Link 3 to TCP: Translation `d_tcp = [0, 0, 0.39225]`.
+
+The constants derived from the "DETAILS" section are:
+*   `a1 = d1[1] = 0.13585`
+*   `a2 = d2[1] = -0.1197`
+*   `l2 = d2[2] = 0.425` (This is the length component along Z in Link 2's frame, from Joint 2 to Joint 3)
+*   `l3 = d_tcp[2] = 0.39225` (This is the length component along Z in Link 3's frame, from Joint 3 to TCP)
+
+**Orientation:**
+The orientation of the TCP is given by `R_tcp = Rz(q1) * Ry(q2) * Ry(q3) = Rz(q1) * Ry(q2+q3)`.
+The target orientation is provided as Euler angles `r = [rx, ry, rz]`. Assuming this corresponds to `R_target = Rz(rz) * Ry(ry) * Rx(rx)`.
+For `R_tcp = R_target`, and given the structure of `R_tcp`, `rx` must be 0. The problem states that all targets are reachable, so we assume `rx=0`.
+Thus, `Rz(q1) * Ry(q2+q3) = Rz(rz) * Ry(ry)`.
+This yields:
+*   `q1 = rz` (from `r[2]`)
+*   `q_sum = q2 + q3 = ry` (from `r[1]`)
+
+**Position:**
+The forward kinematics for the TCP position `P_E = [px, py, pz]` are:
+`P_E = Rz(q1) * V`
+where `V = [Vx, Vy, Vz]^T` is the position of the TCP in the frame after the `q1` rotation:
+*   `Vx = l3*sin(q2+q3) + l2*sin(q2)`
+*   `Vy = a1 + a2`
+*   `Vz = l3*cos(q2+q3) + l2*cos(q2)`
+
+Substituting `q_sum = q2+q3`:
+*   `Vz = pz`
+    `pz = l3*cos(q_sum) + l2*cos(q2)`
+    `l2*cos(q2) = pz - l3*cos(q_sum)` (Equation 1)
+
+From `P_E = Rz(q1) * V`:
+*   `px = cos(q1)*Vx - sin(q1)*Vy`
+*   `py = sin(q1)*Vx + cos(q1)*Vy`
+Multiplying the first by `cos(q1)` and the second by `sin(q1)` and adding them gives:
+*   `cos(q1)*px + sin(q1)*py = Vx`
+Substituting `Vx = l3*sin(q_sum) + l2*sin(q2)`:
+*   `cos(q1)*px + sin(q1)*py = l3*sin(q_sum) + l2*sin(q2)`
+    `l2*sin(q2) = cos(q1)*px + sin(q1)*py - l3*sin(q_sum)` (Equation 2)
+
+From Equation 1 and Equation 2, we can find `q2`:
+*   `q2 = atan2( (cos(q1)*px + sin(q1)*py - l3*sin(q_sum)), (pz - l3*cos(q_sum)) )`
+    Note: The `l2` in the denominator of `sin(q2)` and `cos(q2)` cancels out when using `atan2(numerator_for_sin, numerator_for_cos)`. This is valid as `l2 = 0.425 != 0`.
+
+Finally, `q3` can be found:
+*   `q3 = q_sum - q2`
+
+The joint angles `(q1, q2, q3)` are returned in radians.
+
+```python
+import math
+
+def inverse_kinematics(p: tuple[float, float, float], r: tuple[float, float, float]) -> tuple[float, float, float]:
+    """
+    Gets the joint values needed to reach position "p" and orientation "r".
+    :param p: The position to reach in the form [x, y, z].
+    :param r: The orientation to reach in radians in the form [roll, pitch, yaw], where roll (r[0]) is assumed to be 0.
+    :return: A tuple of the joint values (q1, q2, q3) in radians.
+    """
+    px, py, pz = p
+    # r = [roll, pitch, yaw]
+    # Based on robot kinematics Rz(q1)Ry(q2+q3), roll (r[0]) must be 0.
+    # Problem states: "Assume all targets given as inputs to the method will be reachable".
+    ry_target = r[1]  # Target pitch
+    rz_target = r[2]  # Target yaw
+
+    # Constants from robot geometry (DETAILS section)
+    # Link 1 to Joint 2: d1 = [0, 0.13585, 0]
+    a1 = 0.13585
+    # Link 2 to Joint 3: d2 = [0, -0.1197, 0.425]
+    a2 = -0.1197
+    l2 = 0.425   # z-component of d2
+    # Link 3 to TCP: d_tcp = [0, 0, 0.39225]
+    l3 = 0.39225 # z-component of d_tcp
+
+    # Solve for q1 and q_sum = q2+q3 from orientation
+    q1 = rz_target
+    q_sum = ry_target # This is q2 + q3
+
+    # Pre-calculate sines and cosines for efficiency
+    cos_q1 = math.cos(q1)
+    sin_q1 = math.sin(q1)
+    cos_q_sum = math.cos(q_sum)
+    sin_q_sum = math.sin(q_sum)
+
+    # Solve for q2
+    # Numerator for sin(q2) term: (cos(q1)*px + sin(q1)*py - l3*sin(q_sum))
+    # Numerator for cos(q2) term: (pz - l3*cos(q_sum))
+    # q2 = atan2(l2*sin(q2), l2*cos(q2))
+    
+    # term_for_l2_sin_q2 is l2 * sin(q2)
+    term_for_l2_sin_q2 = cos_q1 * px + sin_q1 * py - l3 * sin_q_sum
+    # term_for_l2_cos_q2 is l2 * cos(q2)
+    term_for_l2_cos_q2 = pz - l3 * cos_q_sum
+
+    q2 = math.atan2(term_for_l2_sin_q2, term_for_l2_cos_q2)
+
+    # Solve for q3
+    q3 = q_sum - q2
+    
+    return (q1, q2, q3)
+
+```

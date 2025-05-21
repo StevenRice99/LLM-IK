@@ -1,0 +1,156 @@
+The core challenge in this inverse kinematics problem lies in selecting between the two primary solutions for `q3` (often termed "elbow up" and "elbow down") and then representing the full joint solution `(q1, q2, q3, q4)` in a way that matches the reference solver, especially when joint angles can be expressed with `2n*pi` offsets.
+
+My approach is as follows:
+1.  **Target TCP Orientation and Wrist Center Position**:
+    *   Convert the input Euler angles `r = (roll, pitch, yaw)` into a 3x3 rotation matrix `R_target`. The convention is ZYX Euler: `R_target = Rz(yaw) * Ry(pitch) * Rx(roll)`.
+    *   Calculate the wrist center `P_wc = (pwx, pwy, pwz)` by subtracting the TCP's offset from the target position `p`. The TCP is offset by `TCP_offset_y` along Link 4's Y-axis (which has orientation `R_target`). So, `P_wc = p - R_target * [0, TCP_offset_y, 0]^T`.
+
+2.  **Solving for q1 and the Sum of Subsequent Y-Rotations (q_sum_angles)**:
+    *   The robot's structure `Base -> Rz(q1) -> ... -> Ry(q2)Ry(q3)Ry(q4) -> TCP` implies that the overall orientation of Link 4 (to which the TCP is fixed) relative to the base is `R_L4_base = Rz(q1) * Ry(q2+q3+q4)`.
+    *   Given `R_target = R_L4_base`, we can write `R_target = Rz(q1) * Ry(q_sum_angles)`, where `q_sum_angles = q2 + q3 + q4`.
+    *   Comparing `R_target` (elements `r_ij`) to the structure `[[c1*cs, -s1, c1*ss], [s1*cs, c1, s1*ss], [-ss, 0, cs]]` (this form implies `r32` of `R_target` must be 0, which is assumed for reachable targets):
+        *   `q1 = atan2(-r12, r22)` (from `r12 = -sin(q1)` and `r22 = cos(q1)`).
+        *   `q_sum_angles = atan2(-r31, r33)` (from `r31 = -sin(q_sum_angles)` and `r33 = cos(q_sum_angles)`).
+
+3.  **Planar Inverse Kinematics for q2 and q3**:
+    *   Transform `P_wc` into Frame 1 (the coordinate frame after `q1` rotation, with origin at the base): `P_wc_F1 = Rz(-q1) * P_wc`.
+    *   The components of `P_wc_F1` relevant for the 2D planar arm kinematics (formed by links `l2z` and `l3z`) are `vx_planar = P_wc_F1.x` and `vz_planar = P_wc_F1.z`. These are the coordinates of `P_wc` in the XZ-plane of Joint 2's frame.
+    *   Using the law of cosines for the planar triangle (sides `l2z`, `l3z`, hypotenuse `sqrt(vx_planar^2 + vz_planar^2)`):
+        `cos_q3_val = (vx_planar^2 + vz_planar^2 - l2z^2 - l3z^2) / (2 * l2z * l3z)`.
+    *   This `cos_q3_val` is clamped to `[-1, 1]`.
+    *   This yields two principal solutions for `q3`:
+        *   `q3_A = acos(cos_q3_clamped)` (solution in `[0, pi]`)
+        *   `q3_B = -acos(cos_q3_clamped)` (solution in `[-pi, 0]`)
+
+4.  **Solving for q2 (for each q3 solution)**:
+    *   For each `q3` solution (`q3_choice`, using `cos_q3_clamped`):
+        Let `X_arm = l3z * sin(q3_choice)` and `Z_arm = l2z + l3z * cos_q3_clamped`.
+    *   The transformation by `q2` (a Y-axis rotation) gives:
+        `vx_planar = cos(q2)*X_arm + sin(q2)*Z_arm`
+        `vz_planar = -sin(q2)*X_arm + cos(q2)*Z_arm`
+    *   Solving for `sin(q2)` and `cos(q2)`:
+        `sin_q2 = (vx_planar*Z_arm - vz_planar*X_arm) / (X_arm^2 + Z_arm^2)`
+        `cos_q2 = (vx_planar*X_arm + vz_planar*Z_arm) / (X_arm^2 + Z_arm^2)`
+        (Denominator `X_arm^2 + Z_arm^2` is `vx_planar^2 + vz_planar^2`).
+    *   `q2 = atan2(sin_q2, cos_q2)`.
+
+5.  **Solving for q4 (for each set of q2, q3)**:
+    *   `q4 = q_sum_angles - q2 - q3`.
+
+6.  **Solution Selection**:
+    *   Two sets of `(q1, q2, q3, q4)` are generated. The feedback indicates that my previous heuristic (minimizing `abs(normalize(q4))`) did not consistently match the reference solver. The reference solver sometimes chooses a `q3` branch that results in a larger `abs(normalize(q4))`.
+    *   Without a clear, deducible rule from the examples for the reference solver's choice, I will stick to a common deterministic heuristic: prefer the solution where `q3 >= 0` (i.e., `q3_A` branch), unless it leads to an issue (which is ruled out by the problem statement assuming reachability). If both solutions are equivalent (e.g. `q3=0`), this choice is unambiguous. This is a simpler heuristic than `min abs norm q4` and might align with some solvers' preferences for a "canonical" elbow configuration when other factors are equal. Many of the "correct" solutions provided in the feedback had `q3 > 0` or an equivalent `q3 > 0` after normalization (e.g. case 4, 7). This is an attempt to align with that observation, though not perfectly, as some "correct" solutions have `q3 < 0`.
+
+```python
+import math
+
+def inverse_kinematics(p: tuple[float, float, float], r: tuple[float, float, float]) -> tuple[float, float, float, float]:
+    px, py, pz = p
+    rx_in, ry_in, rz_in = r # roll, pitch, yaw (ZYX Euler)
+
+    # Link parameters
+    l2z = 0.425    # Effective length of link 2 in the Z direction of J2's frame
+    l3z = 0.39225  # Effective length of link 3 in the Z direction of J3's frame
+    TCP_offset_y = 0.093 # Offset from J4 frame (wrist center) to TCP along J4's Y-axis
+
+    # 1. Calculate R_target from r_angles (Rz(yaw)Ry(pitch)Rx(roll))
+    crx = math.cos(rx_in)
+    srx = math.sin(rx_in)
+    cry = math.cos(ry_in)
+    sry = math.sin(ry_in)
+    crz = math.cos(rz_in)
+    srz = math.sin(rz_in)
+
+    r11 = crz * cry
+    r12 = crz * sry * srx - srz * crx
+    r22 = srz * sry * srx + crz * crx
+    r31 = -sry
+    r32 = cry * srx 
+    r33 = cry * crx
+    
+    # 2. Calculate Wrist Center P_wc
+    pwx = px - r12 * TCP_offset_y
+    pwy = py - r22 * TCP_offset_y
+    pwz = pz - r32 * TCP_offset_y
+
+    # 3. Solve for q1 and q_sum_angles = q2+q3+q4
+    q1 = math.atan2(-r12, r22)
+    q_sum_angles = math.atan2(-r31, r33)
+
+    # 4. Transform P_wc to Frame 1 and define planar coords
+    c1 = math.cos(q1)
+    s1 = math.sin(q1)
+    
+    pwx_F1 = c1 * pwx + s1 * pwy
+    pwz_F1 = pwz
+    vx_planar = pwx_F1 
+    vz_planar = pwz_F1 
+
+    # 5. Solve for cos(q3)
+    cos_q3_num = vx_planar**2 + vz_planar**2 - l2z**2 - l3z**2
+    cos_q3_den = 2 * l2z * l3z
+    
+    if abs(cos_q3_den) < 1e-12: 
+        cos_q3_clamped = 2.0 
+    else:
+        cos_q3_clamped = cos_q3_num / cos_q3_den
+
+    if cos_q3_clamped > 1.0: cos_q3_clamped = 1.0
+    elif cos_q3_clamped < -1.0: cos_q3_clamped = -1.0
+    
+    # Principal value for q3 from acos is in [0, pi]
+    q3_sol_positive_branch = math.acos(cos_q3_clamped)
+    q3_sol_negative_branch = -math.acos(cos_q3_clamped)
+
+    solutions = []
+
+    # Iterate over the two primary q3 solutions
+    for q3_choice in [q3_sol_positive_branch, q3_sol_negative_branch]:
+        s3 = math.sin(q3_choice)
+        # cos(q3_choice) is always cos_q3_clamped for both branches
+        c3 = cos_q3_clamped 
+
+        X_arm = l3z * s3
+        Z_arm = l2z + l3z * c3
+        
+        den_q2_calc = vx_planar**2 + vz_planar**2 # This is X_arm^2 + Z_arm^2
+        if abs(den_q2_calc) < 1e-12: 
+            s2_val = 0.0 
+            c2_val = 1.0 
+        else:
+            s2_val = (vx_planar * Z_arm - vz_planar * X_arm) / den_q2_calc
+            c2_val = (vx_planar * X_arm + vz_planar * Z_arm) / den_q2_calc
+        
+        q2_choice = math.atan2(s2_val, c2_val)
+        q4_choice = q_sum_angles - q2_choice - q3_choice
+        
+        solutions.append({
+            'q1': q1, 'q2': q2_choice, 'q3': q3_choice, 'q4': q4_choice,
+            'is_positive_q3_branch': (q3_choice == q3_sol_positive_branch)
+        })
+
+    # 6. Solution Selection:
+    # The previous heuristic (min abs norm q4) did not consistently match the reference.
+    # As a revised heuristic, attempt to prefer the q3 >= 0 branch (q3_sol_positive_branch)
+    # This is a common default choice if no other strong preference exists.
+    
+    # Check if the positive q3 branch solution is the first one.
+    if solutions[0]['is_positive_q3_branch']:
+        chosen_solution = solutions[0]
+    elif len(solutions) > 1 and solutions[1]['is_positive_q3_branch']: # Should be the case if first isn't
+        chosen_solution = solutions[1]
+    else: # Fallback if logic error or only one solution (e.g. q3=0)
+        chosen_solution = solutions[0]
+    
+    # If q3_sol_positive_branch and q3_sol_negative_branch are numerically identical (e.g. q3=0),
+    # solutions[0] will have is_positive_q3_branch = True (or effectively, as it's >=0).
+    # solutions[1] would be identical. The above logic picks solutions[0].
+
+    final_q1 = chosen_solution['q1']
+    final_q2 = chosen_solution['q2']
+    final_q3 = chosen_solution['q3']
+    final_q4 = chosen_solution['q4']
+        
+    return (final_q1, final_q2, final_q3, final_q4)
+
+```

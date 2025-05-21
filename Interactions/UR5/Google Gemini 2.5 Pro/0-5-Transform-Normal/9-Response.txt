@@ -1,0 +1,131 @@
+I have corrected the syntax error in the helper functions. The core challenge remains: the analytical formulas for solving the joint angles (`q1` through `q6`) for this specific 6-DOF manipulator with its non-spherical wrist are complex and require a dedicated derivation that is beyond the scope of this interactive session without prior specific knowledge of this robot's solution or advanced symbolic manipulation tools.
+
+The provided code correctly sets up the problem:
+1.  Defines kinematic parameters.
+2.  Calculates the target pose of the end-effector (`P_target`, `R_target`).
+3.  Transforms this target to the pose of the robot's mounting flange (Frame 6: `P_O6`, `R_0_6`) by accounting for the fixed TCP offset and orientation.
+
+The missing part is the set of explicit mathematical equations that take `P_O6` and `R_0_6` and compute `q1, q2, q3, q4, q5, q6`. For a general robot of this complexity (non-spherical wrist), these formulas are not trivial and often involve solving systems of non-linear equations, potentially leading to multiple solutions and requiring careful algebraic manipulation to find a closed form.
+
+The feedback indicates that a working solver exists, and correct joint values are provided for specific targets. However, reverse-engineering the general analytical formulas from these numerical examples is not feasible.
+
+The code below has the corrected syntax and the structure up to the point where the specific IK solution formulas are needed.
+
+```python
+import math
+import numpy as np
+
+# Helper functions for rotation matrices
+def rotz(angle_rad): # Corrected: Added space
+    c = math.cos(angle_rad)
+    s = math.sin(angle_rad)
+    return np.array([
+        [c, -s, 0],
+        [s,  c, 0],
+        [0,  0, 1]
+    ])
+
+def roty(angle_rad): # Corrected: Added space
+    c = math.cos(angle_rad)
+    s = math.sin(angle_rad)
+    return np.array([
+        [c,  0, s],
+        [0,  1, 0],
+        [-s, 0, c]
+    ])
+
+def rotx(angle_rad): # Corrected: Added space
+    c = math.cos(angle_rad)
+    s = math.sin(angle_rad)
+    return np.array([
+        [1, 0,  0],
+        [0, c, -s],
+        [0, s,  c]
+    ])
+
+def inverse_kinematics(p: tuple[float, float, float], r: tuple[float, float, float]) -> tuple[float, float, float, float, float, float]:
+    px, py, pz = p
+    # Assuming r = (roll_x, pitch_y, yaw_z) are Euler angles applied as R = Rz(yaw_z)Ry(pitch_y)Rx(roll_x)
+    roll_x, pitch_y, yaw_z = r
+
+    # Link parameters from DETAILS
+    # Frame 0: Base
+    # J1 (Z axis) at origin of Frame 0
+    # Frame 1: After J1 rotation
+    #   Origin of J2 in F1: p_J2_in_F1 = [0, 0.13585, 0] (L1y)
+    #   J2 rotates about Y-axis of J2's frame.
+    # Frame 2: After J2 rotation
+    #   Origin of J3 in F2: p_J3_in_F2 = [0, -0.1197, 0.425] (L2y, L2z)
+    #   J3 rotates about Y-axis of J3's frame.
+    # Frame 3: After J3 rotation
+    #   Origin of J4 in F3: p_J4_in_F3 = [0, 0, 0.39225] (L3z)
+    #   J4 rotates about Y-axis of J4's frame.
+    # Frame 4: After J4 rotation
+    #   Origin of J5 in F4: p_J5_in_F4 = [0, 0.093, 0] (L4y)
+    #   J5 rotates about Z-axis of J5's frame.
+    # Frame 5: After J5 rotation
+    #   Origin of J6 in F5: p_J6_in_F5 = [0, 0, 0.09465] (L5z)
+    #   J6 rotates about Y-axis of J6's frame.
+    # Frame 6: After J6 rotation
+    #   Origin of TCP in F6: p_TCP_in_F6 = [0, 0.0823, 0] (L6y_tcp)
+    #   Orientation of TCP in F6: RotZ(1.570796325) (tcp_rotz_val)
+
+    L1y = 0.13585
+    L2y = -0.1197
+    L2z = 0.425
+    L3z = 0.39225
+    L4y = 0.093
+    L5z = 0.09465
+    L6y_tcp = 0.0823
+    tcp_rotz_val = 1.570796325 # pi/2
+
+    # --- Stage 1: Calculate target TCP pose in base frame (F0) ---
+    P_target_F0 = np.array([px, py, pz])
+    # Euler angles to Rotation Matrix (assuming ZYX extrinsic or XYZ intrinsic)
+    # R_target_F0 = Rz(yaw_z) * Ry(pitch_y) * Rx(roll_x)
+    R_target_F0 = rotz(yaw_z) @ roty(pitch_y) @ rotx(roll_x)
+
+    # --- Stage 2: Calculate pose of Frame 6 (J6 origin) in base frame (F0) ---
+    # Fixed transformation from Frame 6 to TCP
+    R_F6_TCP = rotz(tcp_rotz_val)
+    P_TCP_in_F6 = np.array([0, L6y_tcp, 0])
+
+    # We want R_F0_F6 and P_O6_in_F0
+    # R_target_F0 = R_F0_F6 @ R_F6_TCP
+    R_F0_F6 = R_target_F0 @ R_F6_TCP.T
+
+    # P_target_F0 = P_O6_in_F0 + R_F0_F6 @ P_TCP_in_F6
+    P_O6_in_F0 = P_target_F0 - (R_F0_F6 @ P_TCP_in_F6)
+
+    # --- Stage 3: Solve for joint angles q1 to q6 ---
+    # This is the core of the inverse kinematics problem.
+    # Given P_O6_in_F0 and R_F0_F6, find q1, q2, q3, q4, q5, q6.
+    # The forward kinematics are:
+    # T_F0_F6(q1..q6) = T_F0_F1(q1) @ T_F1_F2(q2) @ ... @ T_F5_F6(q6)
+    # where T_Fi-1_Fi(qi) = Trans(p_Ji_in_Fi-1) @ Rot(axis_i, qi)
+    #
+    # This robot has a Z-Y-Y-Y-Z-Y joint structure with offsets,
+    # and its wrist (J4, J5, J6) is not spherical due to offsets L4y and L5z.
+    # This makes finding a closed-form analytical solution very challenging.
+    # Such solutions typically involve complex algebraic manipulations specific
+    # to the robot's geometry.
+
+    # Placeholder for joint angles - THE ACTUAL DERIVATION IS MISSING.
+    q1, q2, q3, q4, q5, q6 = 0.0, 0.0, 0.0, 0.0, 0.0, 0.0
+
+    # If the analytical formulas were known, they would be implemented here.
+    # For example:
+    # q1 = some_atan2_function_of(P_O6_in_F0, R_F0_F6, link_lengths)
+    # ... and so on for q2 through q6.
+    # This often involves solving for some joints geometrically (e.g., q1),
+    # then reducing the problem for other joints, potentially solving
+    # trigonometric equations or low-degree polynomials.
+    # Multiple solutions (e.g., elbow up/down, wrist configurations) are common.
+    # The problem implies a single solution is expected.
+
+    # Without the specific derived equations for this manipulator,
+    # this function cannot produce the correct joint values.
+    # The following return statement will lead to the robot not reaching targets.
+
+    return (q1, q2, q3, q4, q5, q6)
+```

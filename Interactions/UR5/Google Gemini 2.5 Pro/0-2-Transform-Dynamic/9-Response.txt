@@ -1,0 +1,164 @@
+The feedback indicates that while some solutions are very close (differing only by small floating-point errors or angle normalization, e.g., `theta1` vs `theta1 +/- 2pi`), others have significantly different `theta2` and `theta3` values, often with `theta2` being off by approximately `2*pi`. This suggests an issue with how `theta2` and `theta3` are chosen or normalized, especially when `theta_sum_j2j3` is used.
+
+The core problem might be that `theta_sum_j2j3 = atan2(...)` gives a value in `[-pi, pi]`. However, the true sum `theta2 + theta3` could be outside this range (e.g., `theta_sum_j2j3 + 2k*pi`). When `theta3` is found (e.g., via `acos`), and then `theta2 = theta_sum_j2j3 - theta3` is calculated, this `theta2` might be the "wrong" wrap-around.
+
+Let's refine the J2-J3 solver:
+
+1.  **`theta1` Calculation:** Remains the same, testing both `alpha - phi` and `alpha + phi`.
+2.  **`theta_sum_j2j3` Calculation:** Remains `atan2(R_target_F1[0,2], R_target_F1[0,0])`. This gives a principal value.
+3.  **Revised J2-J3 Solver (`_solve_j2_j3_v3`):**
+    *   **Calculate `theta3` Candidates:**
+        *   `cos_val_theta3 = (x_planar_target^2 + z_planar_target^2 - L2z^2 - L3z^2) / (2 * L2z * L3z)`
+        *   `theta3_raw_acos = acos(clamp(cos_val_theta3, -1, 1))`
+        *   The two base candidates for `theta3` are `t3_cand_A = -theta3_raw_acos` and `t3_cand_B = +theta3_raw_acos`.
+    *   **Iterate `theta3` and `theta_sum_j2j3` variations:**
+        *   For each base `t3_candidate` (from `t3_cand_A`, `t3_cand_B`):
+            *   For each `k_sum` in `[0, -1, 1]` (representing `theta_sum_j2j3 + 2*k_sum*pi`):
+                *   `current_theta_sum = theta_sum_j2j3 + k_sum * 2 * math.pi`
+                *   `t2_candidate = current_theta_sum - t3_candidate`
+                *   Perform the planar FK check:
+                    `x_calc = L2z*sin(t2_candidate) + L3z*sin(current_theta_sum)`
+                    `z_calc = L2z*cos(t2_candidate) + L3z*cos(current_theta_sum)`
+                *   If FK passes, this `(t2_candidate, t3_candidate)` is a valid primary solution. Add it to a list of potential J2-J3 solutions.
+    *   **Fallback (if no primary solutions found):**
+        *   For each `k_sum` in `[0, -1, 1]`:
+            *   `current_theta_sum = theta_sum_j2j3 + k_sum * 2 * math.pi`
+            *   `term_x = x_planar_target - L3z*sin(current_theta_sum)`
+            *   `term_z = z_planar_target - L3z*cos(current_theta_sum)`
+            *   `t2_fallback = atan2(term_x, term_z)`
+            *   `t3_fallback = current_theta_sum - t2_fallback`
+            *   Perform FK check. If it passes, add `(t2_fallback, t3_fallback)` to a list of potential J2-J3 fallback solutions.
+    *   **Return from J2-J3 Solver:**
+        *   If primary solutions exist, return the first one found (order of trying `t3_cand_A` then `t3_cand_B`, and `k_sum=0` then `-1` then `1`).
+        *   Else, if fallback solutions exist, return the first one.
+        *   Else, return failure.
+
+4.  **Overall Solution Selection:**
+    *   The main `inverse_kinematics` function will iterate through `theta1_A` then `theta1_B`.
+    *   It will call `_solve_j2_j3_v3`. If a valid `(theta2, theta3)` is returned, that full `(theta1, theta2, theta3)` is a candidate.
+    *   The first complete candidate solution found is returned. The problem statement implies joint limits are wide (`+/- 2pi`), so solutions from `k_sum != 0` should be acceptable if they are the ones that match.
+
+The key change is to explicitly check `theta_sum_j2j3 + 2k*pi` to handle different wrappings of the sum of angles, which directly impacts the derived `theta2`.
+
+```python
+import math
+
+def _normalize_angle(angle):
+    """Normalize angle to the range [-pi, pi]."""
+    return (angle + math.pi) % (2 * math.pi) - math.pi
+
+def _solve_j2_j3_v3(x_pt, z_pt, t_sum_principal, L2z, L3z, abs_tol=1e-5):
+    """
+    Solves the J2-J3 planar subproblem, considering 2pi variations for t_sum.
+    Returns (theta2, theta3, is_primary_solution_flag) or (None, None, False)
+    """
+    d_sq_planar = x_pt**2 + z_pt**2
+    
+    val_for_acos_theta3_num = d_sq_planar - L2z**2 - L3z**2
+    val_for_acos_theta3_den = 2 * L2z * L3z
+    if abs(val_for_acos_theta3_den) < 1e-9: # Should not happen with non-zero L2z, L3z
+        return (None, None, False) 
+    
+    val_for_acos_theta3 = val_for_acos_theta3_num / val_for_acos_theta3_den
+    clamped_val = max(min(val_for_acos_theta3, 1.0), -1.0)
+    theta3_from_acos_raw_val = math.acos(clamped_val)
+    
+    base_theta3_candidates = [-theta3_from_acos_raw_val, theta3_from_acos_raw_val]
+    k_sum_options = [0, -1, 1] # For t_sum_principal + 2*k*pi
+
+    # Try primary (acos) method
+    for t3_cand_raw in base_theta3_candidates:
+        for k_sum in k_sum_options:
+            current_t_sum = t_sum_principal + k_sum * 2 * math.pi
+            t2_cand = current_t_sum - t3_cand_raw
+            
+            x_calc = L2z * math.sin(t2_cand) + L3z * math.sin(current_t_sum)
+            z_calc = L2z * math.cos(t2_cand) + L3z * math.cos(current_t_sum)
+
+            if math.isclose(x_calc, x_pt, abs_tol=abs_tol) and \
+               math.isclose(z_calc, z_pt, abs_tol=abs_tol):
+                return (t2_cand, t3_cand_raw, True)
+
+    # Try fallback method
+    for k_sum in k_sum_options:
+        current_t_sum = t_sum_principal + k_sum * 2 * math.pi
+        term_x = x_pt - L3z * math.sin(current_t_sum)
+        term_z = z_pt - L3z * math.cos(current_t_sum)
+        t2_fallback = math.atan2(term_x, term_z)
+        t3_fallback = current_t_sum - t2_fallback
+        
+        x_calc_fb = L2z * math.sin(t2_fallback) + L3z * math.sin(current_t_sum)
+        z_calc_fb = L2z * math.cos(t2_fallback) + L3z * math.cos(current_t_sum)
+        if math.isclose(x_calc_fb, x_pt, abs_tol=abs_tol) and \
+           math.isclose(z_calc_fb, z_pt, abs_tol=abs_tol):
+            return (t2_fallback, t3_fallback, False)
+            
+    return (None, None, False) # No solution found
+
+def inverse_kinematics(p_global: tuple[float, float, float], r_global_rpy_zyx: tuple[float, float, float]) -> tuple[float, float, float]:
+    px, py, pz = p_global
+    rx_g, ry_g, rz_g = r_global_rpy_zyx
+
+    d1y = 0.13585
+    d2y = -0.1197
+    C_offset = d1y + d2y 
+
+    L2z = 0.425
+    L3z = 0.39225
+
+    R_val_sq = px**2 + py**2
+    if R_val_sq < 1e-12: R_val = 1e-6
+    else: R_val = math.sqrt(R_val_sq)
+    
+    alpha_angle = math.atan2(-px, py)
+    
+    cos_phi_val_arg = C_offset / R_val
+    clamped_cos_phi_val = max(min(cos_phi_val_arg, 1.0), -1.0)
+    phi_angle = math.acos(clamped_cos_phi_val)
+
+    theta1_options = [alpha_angle - phi_angle, alpha_angle + phi_angle]
+    
+    all_found_solutions = []
+
+    for theta1 in theta1_options:
+        c1 = math.cos(theta1)
+        s1 = math.sin(theta1)
+
+        x_planar_target = px*c1 + py*s1 
+        z_planar_target = pz
+
+        crx, srx = math.cos(rx_g), math.sin(rx_g)
+        cry, sry = math.cos(ry_g), math.sin(ry_g)
+        crz, srz = math.cos(rz_g), math.sin(rz_g)
+
+        R00_g = crz * cry; R02_g = crz * sry * crx + srz * srx
+        R10_g = srz * cry; R12_g = srz * sry * crx - crz * srx
+        
+        R_target_F1_00 = c1 * R00_g + s1 * R10_g
+        R_target_F1_02 = c1 * R02_g + s1 * R12_g
+        theta_sum_j2j3_principal = math.atan2(R_target_F1_02, R_target_F1_00)
+        
+        theta2, theta3, is_primary = _solve_j2_j3_v3(
+            x_planar_target, z_planar_target, theta_sum_j2j3_principal, L2z, L3z
+        )
+        
+        if theta2 is not None and theta3 is not None:
+            all_found_solutions.append({
+                't1': theta1, 't2': theta2, 't3': theta3, 'is_primary': is_primary
+            })
+
+    if not all_found_solutions:
+         return (0.0, 0.0, 0.0) # Should not be reached
+
+    # Prioritize primary J2J3 solutions
+    primary_sols = [s for s in all_found_solutions if s['is_primary']]
+    if primary_sols:
+        # The order of theta1_options is already alpha-phi then alpha+phi
+        chosen_sol = primary_sols[0] 
+        return (chosen_sol['t1'], chosen_sol['t2'], chosen_sol['t3'])
+    else:
+        # If no primary, take the first fallback (respecting theta1_options order)
+        chosen_sol = all_found_solutions[0]
+        return (chosen_sol['t1'], chosen_sol['t2'], chosen_sol['t3'])
+
+```

@@ -1,0 +1,148 @@
+To derive the inverse kinematics solution for the 3-DOF serial manipulator, we will combine and adapt the provided solutions for sub-chains. The overall strategy is:
+
+1.  **Solve for Joint 1 (`theta1`):** Joint 1 rotates around the Z-axis. We can determine `theta1` by considering the projection of the target TCP position `(px, py)` onto the XY plane. The approach from "EXISTING 1" (`theta1 = atan2(-px, py)`) effectively rotates the coordinate system such that the remaining problem for Joints 2 and 3 lies in a plane, simplifying calculations. After this rotation, the target's x-coordinate in the new frame (let's call it F1) becomes 0.
+
+2.  **Transform Target Orientation to Frame F1:** The global target orientation `r = (rx, ry, rz)` (assumed to be RPY angles corresponding to ZYX Euler rotations: `R_global = Rz(rz)Ry(ry)Rx(rx)`) needs to be transformed into Frame F1. This is done by `R_target_F1 = RotZ(-theta1) * R_global`. The sum of Joint 2 and Joint 3 angles (`theta_sum_j2j3 = theta2 + theta3`) can then be found from the elements of `R_target_F1`, as `R_target_F1` should be equivalent to `RotY(theta2 + theta3)`. Specifically, `theta_sum_j2j3 = atan2(R_target_F1[0,2], R_target_F1[0,0])`.
+
+3.  **Solve for Joints 2 and 3 (`theta2`, `theta3`):**
+    *   **Target Position:** After the `theta1` rotation, the target position in Frame F1 is `(0, sqrt(px^2+py^2), pz)`. Joint 2's origin is offset from Frame F1's origin by `[0, 0.13585, 0]` along F1's Y-axis. The kinematic chain from Joint 2 onwards has a fixed Y-component due to the link offsets (`d_2_3[1] = -0.1197`). For the target to be reachable, `sqrt(px^2+py^2) - 0.13585` must equal `-0.1197`. The problem statement guarantees reachability, so this condition is assumed to hold.
+    *   The problem for Joints 2 and 3 (both rotating around their Y-axes) becomes a 2D planar inverse kinematics problem in the XZ plane of Joint 2's base frame. The target coordinates for this planar problem are `(x_planar = 0, z_planar = pz)`.
+    *   **Using "EXISTING 2" Logic:** The "EXISTING 2" solution is for a 2-link planar arm with link lengths `a = 0.425` (Z-component of Link 3) and `b = 0.39225` (Z-component of TCP). Its inputs are a target position `(x_target, z_target)` and an orientation `(rx, ry, rz)` from which it derives `theta_sum`.
+        *   We will use `x_target_ex2 = 0.0` and `z_target_ex2 = pz`.
+        *   The `theta_sum` for "EXISTING 2" will be our calculated `theta_sum_j2j3`. We can pass this by setting the `ry` component of its orientation input to `theta_sum_j2j3` and `rx, rz` to 0.
+        *   The angles returned by "EXISTING 2" (`theta1_ex2`, `theta2_ex2`) will correspond to our `theta2` and `theta3`, respectively.
+
+The joint limits are `[-2*pi, 2*pi]`, which are quite permissive and usually don't constrain the first solution found by `acos` or `atan2`.
+
+```python
+import math
+
+def inverse_kinematics(p: tuple[float, float, float], r: tuple[float, float, float]) -> tuple[float, float, float]:
+    """
+    Gets the joint values needed to reach position "p" and orientation "r".
+    :param p: The position to reach in the form [x, y, z].
+    :param r: The orientation to reach in radians in the form [roll, pitch, yaw] (Rx, Ry, Rz for ZYX Euler).
+    :return: A list of the values to set the links to for reaching position "p" and orientation "r".
+    """
+    px, py, pz = p
+    rx_global, ry_global, rz_global = r # Assuming RPY ZYX: roll=rx, pitch=ry, yaw=rz
+
+    # Step 1: Calculate theta1
+    # theta1 aligns the rest of the arm into a plane where x_transformed = 0
+    theta1 = math.atan2(-px, py)
+
+    # Step 2: Calculate theta_sum_j2j3 = theta2 + theta3
+    # B.1. Form R_target_F0 from r_global=(rx,ry,rz) (ZYX Euler: Rz(rz_global)Ry(ry_global)Rx(rx_global))
+    crx = math.cos(rx_global)
+    srx = math.sin(rx_global)
+    cry = math.cos(ry_global)
+    sry = math.sin(ry_global)
+    crz = math.cos(rz_global)
+    srz = math.sin(rz_global)
+
+    R00_F0 = crz * cry
+    R01_F0 = crz * sry * srx - srz * crx
+    R02_F0 = crz * sry * crx + srz * srx
+    R10_F0 = srz * cry
+    R11_F0 = srz * sry * srx + crz * crx
+    R12_F0 = srz * sry * crx - crz * srx
+    # R20_F0 = -sry
+    # R21_F0 = cry * srx
+    # R22_F0 = cry * crx
+
+    # B.2. Transform to R_target_F1 = RotZ(-theta1) * R_target_F0
+    # RotZ(-theta1) = [[cos(theta1), sin(theta1), 0],
+    #                  [-sin(theta1), cos(theta1), 0],
+    #                  [0,            0,           1]]
+    c1 = math.cos(theta1)
+    s1 = math.sin(theta1)
+
+    # R_prime_ij = sum_k (R_rot_ik * R_orig_kj)
+    # We need R_target_F1[0,0] and R_target_F1[0,2] for atan2(sin_sum, cos_sum)
+    # R_target_F1 = RotZ(-theta1) * R_target_F0
+    # R_target_F1_00 = c1*R00_F0 + s1*R10_F0 (Corrected: RotZ(-theta1)[0,1] is sin(theta1))
+    # R_target_F1_02 = c1*R02_F0 + s1*R12_F0
+    
+    # Let's re-verify matrix multiplication for R_target_F1 = R_z(-theta1) * R_target_F0
+    # R_z(-theta1) has elements:
+    # r_neg_z_00 = c1
+    # r_neg_z_01 = s1  (sin(-theta1) = -s1, but for standard RotZ(angle) matrix, R_01 = -sin(angle). So RotZ(-theta1)_01 = -sin(-theta1) = s1)
+    # r_neg_z_10 = -s1 (sin(-theta1))
+    # r_neg_z_11 = c1
+    
+    # R_target_F1[0,0] = r_neg_z_00 * R00_F0 + r_neg_z_01 * R10_F0
+    R_target_F1_00 = c1 * R00_F0 + s1 * R10_F0
+    # R_target_F1[0,2] = r_neg_z_00 * R02_F0 + r_neg_z_01 * R12_F0
+    R_target_F1_02 = c1 * R02_F0 + s1 * R12_F0
+    
+    # B.3. theta_sum_j2j3 = theta2 + theta3
+    # This sum represents the total rotation around Y in the F1 frame.
+    # R_target_F1 should be RotY(theta_sum_j2j3)
+    # RotY(angle) = [[cos(angle), 0, sin(angle)], [0,1,0], [-sin(angle),0,cos(angle)]]
+    # So, R_target_F1[0,2] is sin(theta_sum_j2j3) and R_target_F1[0,0] is cos(theta_sum_j2j3)
+    theta_sum_j2j3 = math.atan2(R_target_F1_02, R_target_F1_00)
+
+    # Step 3: Solve for theta2, theta3 using logic adapted from "EXISTING 2"
+    # Link lengths for the planar subproblem (J2, J3)
+    a = 0.425  # Effective length of link from J2 to J3 in the Z direction of J2's frame
+    b = 0.39225 # Effective length of link from J3 to TCP in the Z direction of J3's frame
+
+    # Target position for the planar arm (in J2's base XZ plane, after theta1 rotation and offset)
+    # x_transformed_to_F1 = 0 (due to theta1 choice)
+    # z_transformed_to_F1 = pz (global pz)
+    # The offset d1 = [0, 0.13585, 0] is along F1's Y axis.
+    # The y-component constraint sqrt(px^2+py^2) - 0.13585 = -0.1197 is assumed to hold.
+    # The planar solver operates on x and z coordinates.
+    x_target_planar = 0.0 # This is the x-coordinate in F1, which is the x-input for the planar solver
+    z_target_planar = pz  # This is the z-coordinate in F1, which is the z-input for the planar solver
+
+    # "EXISTING 2" logic:
+    # Its theta_sum is our theta_sum_j2j3.
+    # Its (x_target, z_target) are our (x_target_planar, z_target_planar).
+    # Its (theta1, theta2) are our (theta2, theta3).
+    
+    d_sq = x_target_planar**2 + z_target_planar**2 # This is pz**2
+    
+    # cos_theta2 in "EXISTING 2" is cos(our_theta3)
+    # (d_sq - a^2 - b^2) / (2ab)
+    val_for_acos = (d_sq - a**2 - b**2) / (2 * a * b)
+    val_for_acos = max(min(val_for_acos, 1.0), -1.0) # Clamp to avoid domain errors
+
+    theta3_sol_A = math.acos(val_for_acos)
+    theta3_sol_B = -theta3_sol_A
+    
+    solutions_j2_j3 = []
+    
+    for theta3_candidate in [theta3_sol_A, theta3_sol_B]:
+        theta2_candidate = theta_sum_j2j3 - theta3_candidate
+        
+        # Forward check from "EXISTING 2"
+        # x_calc = a*sin(theta1_ex2) + b*sin(theta_sum_ex2)
+        # z_calc = a*cos(theta1_ex2) + b*cos(theta_sum_ex2)
+        # Here, theta1_ex2 is theta2_candidate, theta_sum_ex2 is theta_sum_j2j3
+        x_calc_planar = a * math.sin(theta2_candidate) + b * math.sin(theta_sum_j2j3)
+        z_calc_planar = a * math.cos(theta2_candidate) + b * math.cos(theta_sum_j2j3)
+        
+        if math.isclose(x_calc_planar, x_target_planar, abs_tol=1e-05) and \
+           math.isclose(z_calc_planar, z_target_planar, abs_tol=1e-05):
+            # Joint limits are [-2pi, 2pi], generally satisfied by acos/atan2 results
+            # "EXISTING 2" checks limits for its theta2 (our theta3)
+            # if -6.2831853 <= theta3_candidate <= 6.2831853: (always true for acos range)
+            solutions_j2_j3.append((theta2_candidate, theta3_candidate))
+
+    if solutions_j2_j3:
+        # "EXISTING 2" picks the first valid solution.
+        theta2, theta3 = solutions_j2_j3[0]
+    else:
+        # Fallback logic from "EXISTING 2"
+        # This case implies the acos method didn't yield a solution that passed FK,
+        # or val_for_acos was initially out of range (though clamped).
+        # Given "assume reachable", this fallback might be less critical but included for completeness.
+        term_x = x_target_planar - b * math.sin(theta_sum_j2j3)
+        term_z = z_target_planar - b * math.cos(theta_sum_j2j3)
+        theta2 = math.atan2(term_x, term_z) # This is theta1_ex2
+        theta3 = theta_sum_j2j3 - theta2    # This is theta2_ex2
+        
+    return (theta1, theta2, theta3)
+
+```

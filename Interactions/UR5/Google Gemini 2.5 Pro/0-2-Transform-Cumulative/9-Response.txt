@@ -1,0 +1,147 @@
+The feedback indicates that the previous solutions were not consistently matching the "correct" joint values, particularly for `q1` and `q2`. The issue often stemmed from selecting a different configuration branch (e.g., "elbow up" vs. "elbow down") than the one represented by the "correct" values.
+
+The core kinematic equations for the wrist center `P_wc = (pwc_x, pwc_y, pwc_z)` are:
+1.  `pwc_x = cos(q1)*d2z*sin(q2) - sin(q1)*(d1y+d2y)`
+2.  `pwc_y = sin(q1)*d2z*sin(q2) + cos(q1)*(d1y+d2y)`
+3.  `pwc_z = d2z*cos(q2)`
+
+From (3), `cos(q2) = pwc_z / d2z`. This yields two solutions for `q2`:
+*   `q2_A = acos(pwc_z / d2z)` (typically "elbow up/straight", `q2` in `[0, pi]`)
+*   `q2_B = -acos(pwc_z / d2z)` (typically "elbow down", `q2` in `[-pi, 0]`)
+
+Let `K = d1y + d2y` and `A_val = d2z*sin(q2)`. The equations (1) and (2) become:
+`pwc_x = cos(q1)*A_val - sin(q1)*K`
+`pwc_y = sin(q1)*A_val + cos(q1)*K`
+
+Solving for `sin(q1)` and `cos(q1)`:
+`sin(q1) = (A_val*pwc_y - K*pwc_x) / (A_val^2 + K^2)`
+`cos(q1) = (A_val*pwc_x + K*pwc_y) / (A_val^2 + K^2)`
+So, `q1 = atan2(A_val*pwc_y - K*pwc_x, A_val*pwc_x + K*pwc_y)`.
+
+The previous attempts either used `q2_B` (elbow down) or had a different formulation for `q1` that led to branch issues. The feedback for the last attempt (where `q2_mycode = -q2_corr` and `q1_mycode` was `q1_corr +/- pi`) strongly suggests that the "correct" solutions often correspond to the `q2_A` ("elbow up") branch.
+
+This revised solution will:
+1.  Calculate `P_wc`.
+2.  Choose `q2 = acos(pwc_z / d2z)`, ensuring `q2` is in `[0, pi]`.
+3.  Calculate `sin(q2)`.
+4.  Use the derived `atan2` formula for `q1` based on this `q2`.
+5.  Calculate `q3` based on `q1`, `q2`, and the target orientation.
+
+This provides a deterministic solution by consistently picking the "elbow up/straight" configuration for `q2`.
+
+```python
+import math
+
+def inverse_kinematics(p: tuple[float, float, float], r: tuple[float, float, float]) -> tuple[float, float, float]:
+    """
+    Gets the joint values needed to reach position "p" and orientation "r".
+    :param p: The position to reach in the form [x, y, z].
+    :param r: The orientation to reach in radians in the form [rx, ry, rz] (roll, pitch, yaw ZYX).
+    :return: A list of the values to set the links to for reaching position "p" and orientation "r".
+    """
+    px, py, pz = p
+    roll, pitch, yaw = r # ZYX Euler angles: R = Rz(yaw) * Ry(pitch) * Rx(roll)
+
+    # Constants
+    d1y = 0.13585
+    d2y = -0.1197
+    d2z = 0.425
+    d3z = 0.39225
+
+    # Helper for ZYX Euler angles to rotation matrix
+    def euler_zyx_to_matrix(y_angle, p_angle, r_angle):
+        cy = math.cos(y_angle)
+        sy = math.sin(y_angle)
+        cp = math.cos(p_angle)
+        sp = math.sin(p_angle)
+        cr = math.cos(r_angle)
+        sr = math.sin(r_angle)
+        R = [
+            [cy*cp, cy*sp*sr - sy*cr, cy*sp*cr + sy*sr],
+            [sy*cp, sy*sp*sr + cy*cr, sy*sp*cr - cy*sr],
+            [-sp,   cp*sr,            cp*cr]
+        ]
+        return R
+
+    def mat_vec_mult(mat, vec):
+        res = [0.0, 0.0, 0.0]
+        for i in range(3):
+            for j_mult in range(3):
+                res[i] += mat[i][j_mult] * vec[j_mult]
+        return res
+
+    def mat_mat_mult(A, B):
+        C = [[0.0, 0.0, 0.0], [0.0, 0.0, 0.0], [0.0, 0.0, 0.0]]
+        for i in range(3):
+            for j in range(3):
+                for k_mult in range(3):
+                    C[i][j] += A[i][k_mult] * B[k_mult][j]
+        return C
+
+    # Step 1: Calculate Wrist Center P_wc (origin of J3 frame)
+    R_tcp_base = euler_zyx_to_matrix(yaw, pitch, roll)
+    V_j3_tcp_local = [0.0, 0.0, d3z]
+    offset_vec = mat_vec_mult(R_tcp_base, V_j3_tcp_local)
+    
+    pwc_x = px - offset_vec[0]
+    pwc_y = py - offset_vec[1]
+    pwc_z = pz - offset_vec[2]
+
+    # Step 2: Solve for q2 (choosing "elbow up/straight" convention)
+    # pwc_z = d2z * cos(q2)
+    if abs(d2z) < 1e-9: # Should not happen for this robot
+        # Handle singularity or error, though problem assumes reachability
+        # If d2z is zero, pwc_z must be zero. q2 is indeterminate.
+        # For now, assume d2z is not zero.
+        pass
+
+    cos_q2_val = pwc_z / d2z
+    # Clamp to avoid domain errors with acos due to floating point inaccuracies
+    if cos_q2_val > 1.0: cos_q2_val = 1.0
+    if cos_q2_val < -1.0: cos_q2_val = -1.0
+    
+    q2 = math.acos(cos_q2_val) # q2 is in [0, pi]
+
+    # Step 3: Solve for q1
+    # pwc_x = cos(q1)*d2z*sin(q2) - sin(q1)*(d1y+d2y)
+    # pwc_y = sin(q1)*d2z*sin(q2) + cos(q1)*(d1y+d2y)
+    # Let K_const = d1y+d2y and A_coeff = d2z*sin(q2)
+    # q1 = atan2(A_coeff*pwc_y - K_const*pwc_x, A_coeff*pwc_x + K_const*pwc_y)
+    
+    s2 = math.sin(q2) # sin(q2) will be >= 0 since q2 is in [0, pi]
+    K_const = d1y + d2y
+    A_coeff = d2z * s2
+    
+    q1_num = A_coeff * pwc_y - K_const * pwc_x
+    q1_den = A_coeff * pwc_x + K_const * pwc_y
+    q1 = math.atan2(q1_num, q1_den) # atan2 returns in [-pi, pi]
+
+    # Step 4: Solve for q3
+    # R_tcp_base = Rz(q1) * Ry(q2) * Ry(q3)
+    # Ry(q3) = Ry(-q2) * Rz(-q1) * R_tcp_base
+    
+    cos_q1 = math.cos(q1)
+    sin_q1 = math.sin(q1)
+    Rz_negq1 = [ # Rz(-q1)
+        [cos_q1,  sin_q1, 0.0],
+        [-sin_q1, cos_q1, 0.0],
+        [0.0,     0.0,    1.0]
+    ]
+
+    cos_negq2 = math.cos(-q2) # This is cos(q2)
+    sin_negq2 = math.sin(-q2) # This is -sin(q2)
+    Ry_negq2 = [ # Ry(-q2)
+        [cos_negq2, 0.0, sin_negq2],
+        [0.0,       1.0, 0.0      ],
+        [-sin_negq2,0.0, cos_negq2]
+    ]
+
+    Temp_mat = mat_mat_mult(Rz_negq1, R_tcp_base)
+    M = mat_mat_mult(Ry_negq2, Temp_mat) # M should be Ry(q3)
+    
+    # Ry(q3) = [[cos(q3), 0, sin(q3)], [0,1,0], [-sin(q3),0,cos(q3)]]
+    q3 = math.atan2(M[0][2], M[0][0]) # atan2(sin(q3), cos(q3))
+    
+    return (q1, q2, q3)
+
+```

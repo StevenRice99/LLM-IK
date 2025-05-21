@@ -1,0 +1,108 @@
+The feedback indicates that my previous selection logic for `(q2, q3)` was still not perfectly matching the "correct" solver's behavior in all cases. The key failing case showed that even if the principal solution for `q2` (and its corresponding `q3`) was valid and within joint limits, the "correct" solver preferred an alternative (`q2_principal + 2*pi` and its `q3`) because that alternative had a lower `abs(q2) + abs(q3)` cost.
+
+This implies that the selection criterion is simpler:
+1.  Calculate `q1` (robot's first joint angle) and `q_sum = q2 + q3` from the target orientation `r = [roll, pitch, yaw]`.
+2.  Calculate the principal value for `q2` using `math.atan2`, let this be `q2_principal`.
+3.  Generate three candidate `q2` values:
+    *   `q2_cand_A = q2_principal`
+    *   `q2_cand_B = q2_principal + 2*pi`
+    *   `q2_cand_C = q2_principal - 2*pi`
+4.  For each of these three `q2_candidates`:
+    a.  Calculate the corresponding `q3_candidate = q_sum - q2_candidate`.
+    b.  Check if both `q2_candidate` and `q3_candidate` are within the joint limits `[-2*pi, 2*pi]`.
+    c.  If both are within limits, this `(q2_candidate, q3_candidate)` pair is a valid solution. Add it to a list of `valid_solutions_with_cost`, storing the pair and its cost: `abs(q2_candidate) + abs(q3_candidate)`.
+5.  The problem guarantees that the list `valid_solutions_with_cost` will be non-empty.
+6.  From `valid_solutions_with_cost`, select the solution pair `(q2, q3)` that has the minimum cost. This gives the final `q2` and `q3`.
+7.  Return `(q1, q2_final, q3_final)`.
+
+This approach considers all three potential `q2` configurations (differing by `2*pi`), filters them based on joint limits for both `q2` and `q3`, and then applies the cost minimization `min(abs(q2) + abs(q3))` to the resulting set of valid solutions.
+
+```python
+import math
+
+def inverse_kinematics(p: tuple[float, float, float], r: tuple[float, float, float]) -> tuple[float, float, float]:
+    """
+    Gets the joint values needed to reach position "p" and orientation "r".
+    :param p: The position to reach in the form [x, y, z].
+    :param r: The orientation to reach in radians in the form [roll, pitch, yaw].
+    :return: A tuple of the joint values (q1, q2, q3) in radians.
+    """
+    px, py, pz = p
+    roll, pitch, yaw = r[0], r[1], r[2]
+
+    # Constants
+    l2 = 0.425  # z-component of d2 (Link 2 to Joint 3)
+    l3 = 0.39225 # z-component of d_tcp (Link 3 to TCP)
+    
+    # Joint limits are [-2pi, 2pi]
+    J_MIN = -2.0 * math.pi
+    J_MAX = 2.0 * math.pi
+    epsilon_gimbal = 1e-6 # For gimbal lock check (cos(pitch) near 0)
+    epsilon_limit = 1e-9 # For joint limit floating point comparisons
+
+    # --- Calculate q1 and q_sum from orientation ---
+    q1_raw = 0.0
+    q_sum_raw = 0.0
+    if abs(math.cos(pitch)) < epsilon_gimbal: # Gimbal Lock
+        q_sum_raw = pitch
+        if pitch > 0: q1_raw = yaw - roll
+        else: q1_raw = yaw + roll
+    else: # Not Gimbal Lock
+        current_roll_normalized = math.atan2(math.sin(roll), math.cos(roll))
+        if abs(current_roll_normalized) < math.pi / 4.0:  # Roll is near 0
+            q1_raw = yaw
+            q_sum_raw = pitch
+        else:  # Roll is near +/- pi
+            q1_raw = yaw + math.pi
+            q_sum_raw = math.pi - pitch
+            
+    q1 = math.atan2(math.sin(q1_raw), math.cos(q1_raw))
+    q_sum = math.atan2(math.sin(q_sum_raw), math.cos(q_sum_raw))
+
+    # --- Calculate q2_principal ---
+    cos_q1 = math.cos(q1)
+    sin_q1 = math.sin(q1)
+    cos_q_sum = math.cos(q_sum)
+    sin_q_sum = math.sin(q_sum)
+
+    term_Y_for_atan2 = cos_q1 * px + sin_q1 * py - l3 * sin_q_sum
+    term_X_for_atan2 = pz - l3 * cos_q_sum
+    q2_principal = math.atan2(term_Y_for_atan2, term_X_for_atan2)
+
+    # --- Generate candidate solutions for (q2, q3) ---
+    q2_candidates_raw = [
+        q2_principal, 
+        q2_principal + 2 * math.pi, 
+        q2_principal - 2 * math.pi
+    ]
+    
+    valid_solutions_with_cost = []
+
+    for q2_cand_val in q2_candidates_raw:
+        q3_cand_val = q_sum - q2_cand_val
+        
+        # Check if both q2_cand_val and q3_cand_val are within joint limits
+        # Using a small epsilon for floating point precision at the boundaries
+        if (J_MIN - epsilon_limit <= q2_cand_val <= J_MAX + epsilon_limit and
+            J_MIN - epsilon_limit <= q3_cand_val <= J_MAX + epsilon_limit):
+            cost = abs(q2_cand_val) + abs(q3_cand_val)
+            valid_solutions_with_cost.append({'q2': q2_cand_val, 'q3': q3_cand_val, 'cost': cost})
+
+    # --- Select the final solution ---
+    # Problem guarantees at least one valid solution exists in valid_solutions_with_cost
+    if not valid_solutions_with_cost:
+        # This block should ideally not be reached due to problem guarantee.
+        # If it is, it implies no candidate met the joint limits.
+        # Fallback to principal solution, though it might violate limits or not be "correct".
+        # This is a safeguard against an empty list if assumptions are violated.
+        final_q2 = q2_principal
+        final_q3 = q_sum - q2_principal
+    else:
+        # Select the solution with the minimum cost
+        best_solution = min(valid_solutions_with_cost, key=lambda x: x['cost'])
+        final_q2 = best_solution['q2']
+        final_q3 = best_solution['q3']
+        
+    return (q1, final_q2, final_q3)
+
+```

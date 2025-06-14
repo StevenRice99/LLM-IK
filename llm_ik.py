@@ -3873,6 +3873,7 @@ def format_beamer(s: str) -> str:
     s = s.replace("OpenAI GPT-4o", "GPT-4o")
     s = s.replace("OpenAI o3-mini", "o3-mini")
     s = s.replace("OpenAI o4-mini", "o4-mini")
+    s = s.replace("Google Gemini 2.5 Pro", "2.5 Pro")
     s = s.replace("OpenAI o3", "o3")
     s = s.replace("OpenAI o1", "o1")
     s = s.replace("Direct", "Dir.")

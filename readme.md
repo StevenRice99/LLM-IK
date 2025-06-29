@@ -8,7 +8,7 @@ Here are some helpful quick-access links to view key findings from the results.
 
 - [Google Gemini 2.5 Pro Six Degrees-of-Freedom Position and Orientation Results achieved with the Extending Approach](Interactions/UR5/Google%20Gemini%202.5%20Pro/0-5-Transform-Extend "Google Gemini 2.5 Pro Six Degrees-of-Freedom Position and Orientation Extending Approach Results")
   - [Initial prompt given to Google Gemini 2.5 Pro.](Interactions/UR5/Google%20Gemini%202.5%20Pro/0-5-Transform-Extend/0-Prompt.txt "Google Gemini 2.5 Pro Six Degrees-of-Freedom Position and Orientation Extending Approach Initial Prompt")
-    - Note that the existing solution provided in the prompt does not have comments. This is due to how code is extracted and loaded dynamically in this implementation, and thus added into extending, dynamic, cumulative, and transfer prompts.
+    - Note that the existing solution provided in the prompt does not have in-line comments. This is due to how code is extracted and loaded dynamically in this implementation, and thus added into extending, dynamic, cumulative, and transfer prompts.
     - [However, it can be easily seen that this solution itself, achieved via OpenAI's o3-mini using the direct approach, contains full comments.](Interactions/UR5/OpenAI%20o3-mini/0-4-Transform-Normal "OpenAI o3-mini Five Degrees-of-Freedom from Joints One to Five Position and Orientation Direct Approach Final Response")
   - [Final response with the complete solution received by Google Gemini 2.5 Pro.](Interactions/UR5/Google%20Gemini%202.5%20Pro/0-5-Transform-Extend/7-Response.txt "Google Gemini 2.5 Pro Six Degrees-of-Freedom Position and Orientation Extending Approach Final Response")
 

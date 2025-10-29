@@ -26,6 +26,9 @@ inverse_kinematics = getattr(module, "inverse_kinematics")
 # Create the various solvers.
 robot_llm_ik = Robot("UR5")
 links = robot_llm_ik.chains[0][5].links
+# TODO - Initialize any solvers or robots needed for the other IK algorithms.
+
+# Cache joint limits, just in case the representations of the robot differ slightly in different implementations.
 bounds_llm_ik = []
 for link in links:
     if link.joint_type == "fixed":
@@ -34,10 +37,11 @@ for link in links:
         bounds_llm_ik.append((-BOUND, BOUND))
     else:
         bounds_llm_ik.append(link.bounds)
+# TODO - Cache joint limits of the other robots as needed.
 
 # Define data caches.
 cache = {}
-for entry in ["IKPy", "LLM-IK"]:
+for entry in ["IKPy", "LLM-IK", "Newton-Raphson", "IKFast", "Trac-IK"]:
     cache[entry] = {"Success": 0, "Elapsed": 0, "Distance": 0, "Angle": 0}
 
 
@@ -64,10 +68,7 @@ def ikpy_common(case: list[float]) -> tuple[list[float], list[float]]:
     :param case: The joints to test for this case.
     :return: The target position and orientation to solve for.
     """
-    adjusted = []
-    for joint in range(6):
-        adjusted.append(min(max(case[joint], -BOUND), BOUND))
-    positions, orientations = robot_llm_ik.forward_kinematics(0, 5, adjusted)
+    positions, orientations = robot_llm_ik.forward_kinematics(0, 5, case)
     return positions[-1], orientations[-1]
 
 
@@ -98,17 +99,73 @@ def test_llm_ik(case: list[float]) -> None:
     common_caching(elapsed, distance, angle, "LLM-IK")
 
 
+def test_newton_raphson_ik(case: list[float]) -> None:
+    """
+    Test Newton-Raphson inverse kinematics from robotics toolkit as it is the same method as the default MoveIt solver.
+    :param case: The joints to test for this case.
+    :return: Nothing.
+    """
+    # TODO - 1. Clamp joint values as needed.
+    # TODO - 2. Perform forward kinematics using the joint values to obtain the desired target the solver should reach.
+    # TODO - 3. Reset the robot's joint values to zero (midpoints) before solving IK.
+    # TODO - 4. Calculate the elapsed time in seconds, distance, and angle in degrees from the target position using IK.
+    elapsed = 1
+    distance = 100
+    angle = 100
+    common_caching(elapsed, distance, angle, "Newton-Raphson")
+
+
+def test_ikfast(case: list[float]) -> None:
+    """
+    Test the IKFast solver.
+    :param case: The joints to test for this case.
+    :return: Nothing.
+    """
+    # TODO - 1. Clamp joint values as needed.
+    # TODO - 2. Perform forward kinematics using the joint values to obtain the desired target the solver should reach.
+    # TODO - 3. Reset the robot's joint values to zero (midpoints) before solving IK.
+    # TODO - 4. Calculate the elapsed time in seconds, distance, and angle in degrees from the target position using IK.
+    elapsed = 1
+    distance = 100
+    angle = 100
+    common_caching(elapsed, distance, angle, "IKFast")
+
+
+def test_trac_ik(case: list[float]) -> None:
+    """
+    Test the Trac-IK solver.
+    :param case: The joints to test for this case.
+    :return: Nothing.
+    """
+    # TODO - 1. Clamp joint values as needed.
+    # TODO - 2. Perform forward kinematics using the joint values to obtain the desired target the solver should reach.
+    # TODO - 3. Reset the robot's joint values to zero (midpoints) before solving IK.
+    # TODO - 4. Calculate the elapsed time in seconds, distance, and angle in degrees from the target position using IK.
+    elapsed = 1
+    distance = 100
+    angle = 100
+    common_caching(elapsed, distance, angle, "Trac-IK")
+
+
 # Run all test cases.
 for i in range(TESTS):
-    # Generate random joints between -2 Pi and 2 Pi.
-    joints = [random.uniform(-BOUND, BOUND) for _ in range(6)]
+    # Generate random joints between the IKPy URDF limits.
+    # Other solvers further clamp as needed if their limits differ.
+    joints = []
+    for j in range(6):
+        joints.append(random.uniform(bounds_llm_ik[j][0], bounds_llm_ik[j][1]))
+    # Test each model.
     test_ikpy(joints)
     test_llm_ik(joints)
 
 
 # Tabulate data.
 s = "Solver,Success Rate (%),Average Elapsed Time (s),Average Failure Distance,Average Failure Angle (°)"
-# TODO - Order by best to worst.
+cache = dict(sorted(cache.items(), key=lambda item: (
+    -item[1]["Success"],
+    item[1]["Elapsed"],
+    item[0]
+)))
 for entry in cache:
     failures = TESTS - cache[entry]["Success"]
     if failures < 1:
@@ -118,5 +175,5 @@ for entry in cache:
         d = cache[entry]["Distance"] / failures
         a = f"{cache[entry]['Distance'] / failures} °"
     s += f"\n{entry},{cache[entry]['Success'] / TESTS * 100}%,{cache[entry]['Elapsed'] / TESTS} s,{d},{a}"
-with open("Additional.csv", "w") as file:
+with open("Additional.csv", "w", encoding="utf-8", errors="ignore") as file:
     file.write(s)

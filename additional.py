@@ -4,7 +4,6 @@ import sys
 import time
 
 import numpy as np
-import roboticstoolbox as rtb
 
 from llm_ik import BOUND, difference_angle, difference_distance, reached, Robot, SEED
 from trac_ik import TracIK
@@ -44,7 +43,7 @@ for link in links:
 
 # Define data caches.
 cache = {}
-for entry in ["IKPy", "LLM-IK", "Newton-Raphson", "IKFast", "Trac-IK"]:
+for entry in ["IKPy", "LLM-IK", "IKFast", "Trac-IK"]:
     cache[entry] = {"Success": 0, "Elapsed": 0, "Distance": 0, "Angle": 0}
 
 
@@ -100,22 +99,6 @@ def test_llm_ik(case: list[float]) -> None:
     distance = difference_distance(target_position, positions[-1])
     angle = difference_angle(target_orientation, orientations[-1])
     common_caching(elapsed, distance, angle, "LLM-IK")
-
-
-def test_newton_raphson_ik(case: list[float]) -> None:
-    """
-    Test Newton-Raphson inverse kinematics from robotics toolkit as it is the same method as the default MoveIt solver.
-    :param case: The joints to test for this case.
-    :return: Nothing.
-    """
-    # TODO - 1. Clamp joint values as needed.
-    # TODO - 2. Perform forward kinematics using the joint values to obtain the desired target the solver should reach.
-    # TODO - 3. Reset the robot's joint values to zero (midpoints) before solving IK.
-    # TODO - 4. Calculate the elapsed time in seconds, distance, and angle in degrees from the target position using IK.
-    elapsed = 1
-    distance = 100
-    angle = 100
-    common_caching(elapsed, distance, angle, "Newton-Raphson")
 
 
 def test_ikfast(case: list[float]) -> None:

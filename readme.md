@@ -114,4 +114,4 @@ For running the additional comparisons tests from `additional.py`, you will need
     - `git clone https://github.com/chenhaox/pytracik.git`
 3. Run the required setup for each. The below commands assume you are executing them from the root directory of this project. Note that the core `requirements.txt` of this project already contains all Python dependencies for each.
     - `pip install -e ur_ikfast`
-    - `python3 pytracik/setup_linux.py install`
+    - `cd pytracik` followed by `python3 pytracik/setup_linux.py install`

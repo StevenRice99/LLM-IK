@@ -36,25 +36,26 @@ for link in links:
         bounds_llm_ik.append(link.bounds)
 
 # Define data caches.
-cache_ik_py = {"Success": 0, "Elapsed": 0, "Distance": 0, "Angle": 0}
-cache_llm_ik = {"Success": 0, "Elapsed": 0, "Distance": 0, "Angle": 0}
+cache = {}
+for entry in ["IKPy", "LLM-IK"]:
+    cache[entry] = {"Success": 0, "Elapsed": 0, "Distance": 0, "Angle": 0}
 
 
-def common_caching(elapsed: float, distance: float, angle: float, cache: dict) -> None:
+def common_caching(elapsed: float, distance: float, angle: float, title: str) -> None:
     """
     Common solver caching operations.
     :param elapsed: The elapsed execution time.
     :param distance: The positional error.
     :param angle: The orientation error.
-    :param cache: The cache to save to.
+    :param title: Where to cache it.
     :return: If it was a success, the elapsed execution time, and the distance and angle offsets.
     """
     if reached(distance, angle):
-        cache["Success"] += 1
+        cache[title]["Success"] += 1
     else:
-        cache["Distance"] += distance
-        cache["Angle"] += angle
-    cache["Elapsed"] += elapsed
+        cache[title]["Distance"] += distance
+        cache[title]["Angle"] += angle
+    cache[title]["Elapsed"] += elapsed
 
 
 def ikpy_common(case: list[float]) -> tuple[list[float], list[float]]:
@@ -78,7 +79,7 @@ def test_ikpy(case: list[float]) -> None:
     """
     target_position, target_orientation = ikpy_common(case)
     _, distance, angle, elapsed = robot_llm_ik.inverse_kinematics(0, 5, target_position, target_orientation)
-    common_caching(elapsed, distance, angle, cache_ik_py)
+    common_caching(elapsed, distance, angle, "IKPy")
 
 
 def test_llm_ik(case: list[float]) -> None:
@@ -94,7 +95,7 @@ def test_llm_ik(case: list[float]) -> None:
     positions, orientations = robot_llm_ik.forward_kinematics(0, 5, solution)
     distance = difference_distance(target_position, positions[-1])
     angle = difference_angle(target_orientation, orientations[-1])
-    common_caching(elapsed, distance, angle, cache_llm_ik)
+    common_caching(elapsed, distance, angle, "LLM-IK")
 
 
 # Run all test cases.
@@ -107,14 +108,15 @@ for i in range(TESTS):
 
 # Tabulate data.
 s = "Solver,Success Rate (%),Average Elapsed Time (s),Average Failure Distance,Average Failure Angle (°)"
-for cached in [cache_ik_py, cache_llm_ik]:
-    failures = TESTS - cached["Success"]
+# TODO - Order by best to worst.
+for entry in cache:
+    failures = TESTS - cache[entry]["Success"]
     if failures < 1:
         d = "-"
         a = "-"
     else:
-        d = cached["Distance"] / failures
-        a = f"{cached['Distance'] / failures} °"
-    s += f"\nTODO,{cached['Success'] / TESTS * 100}%,{cached['Elapsed'] / TESTS} s,{d},{a}"
+        d = cache[entry]["Distance"] / failures
+        a = f"{cache[entry]['Distance'] / failures} °"
+    s += f"\n{entry},{cache[entry]['Success'] / TESTS * 100}%,{cache[entry]['Elapsed'] / TESTS} s,{d},{a}"
 with open("Additional.csv", "w") as file:
     file.write(s)

@@ -37,69 +37,81 @@ Here are some helpful quick-access links to view key findings from the results.
 
 # Setup
 
-1. **Recommended:** Create a virtual environment ``python3 -m venv .venv``.
+1. **Recommended:** Create a virtual environment `python3 -m venv .venv`.
    - Activate the virtual environment.
-      - Windows: ``.venv\Scripts\activate.bat``.
-      - Linux: ``.venv\Scripts\activate.ps1``.
-      - Mac: ``source .venv/bin/activate``.
-2. Install all requirements with ``pip install -r requirements.txt``.
-3. If doing your own experiments, it is recommended to delete all folders in this project, except for the ``Robots`` or ``Models``, and ``Providers`` folders if you wish to use some of the same robots or LLMs as we have.
-4. In the root directory, ensure there is a folder named ``Robots``, and place the URDF files of the robots you wish to use inside.
-5. In the root directory, ensure there is a folder named ``Models``, and place all your LLM specification files you wish to use inside as detailed in the [Models](#models "Models") section.
+      - Windows: `.venv\Scripts\activate.bat`.
+      - Linux: `.venv\Scripts\activate.ps1`.
+      - Mac: `source .venv/bin/activate`.
+2. Install all requirements with `pip install -r requirements.txt`.
+3. If doing your own experiments, it is recommended to delete all folders in this project, except for the `Robots` or `Models`, and `Providers` folders if you wish to use some of the same robots or LLMs as we have.
+4. In the root directory, ensure there is a folder named `Robots`, and place the URDF files of the robots you wish to use inside.
+5. In the root directory, ensure there is a folder named `Models`, and place all your LLM specification files you wish to use inside as detailed in the [Models](#models "Models") section.
 6. **Optional:** These steps only apply if you wish to use OpenAI API compatible APIs.
-   - In the root directory, ensure there is a folder named ``Providers``, and place your OpenAI API compatible specification files you wish to use inside as detailed in the [Providers](#providers "Providers") section.
-   - In the root directory, ensure there is a folder named ``Keys``, and make ``.txt`` files named the same as the OpenAI API compatible specification files in the ``Providers`` folder and paste the appropriate API keys into each.
-7. Run ``llm_ik`` with the parameters outlined in the [Usage](#usage "Usage") section.
-8. View the results in the ``Results`` folder in the root directory.
+   - In the root directory, ensure there is a folder named `Providers`, and place your OpenAI API compatible specification files you wish to use inside as detailed in the [Providers](#providers "Providers") section.
+   - In the root directory, ensure there is a folder named `Keys`, and make `.txt` files named the same as the OpenAI API compatible specification files in the `Providers` folder and paste the appropriate API keys into each.
+7. Run `llm_ik` with the parameters outlined in the [Usage](#usage "Usage") section.
+8. View the results in the `Results` folder in the root directory.
 
 # Models
 
-- Models are specified in ``.txt`` files in the ``Models`` folder in the root directory.
+- Models are specified in `.txt` files in the `Models` folder in the root directory.
 - The name of the file is what will appear in results.
 - Each line of the file represents information about the file, with only the first line being needed for non-API models.
 
 ## Format
 
-1. If the model is a reasoning model or not, specified by either ``True`` or ``False`` and defaulting to ``False``. If not a reasoning model, the prompts will include a statement to "think step by step and show all your work" to elicit some benefits from chain-of-thought thinking. Otherwise, this is omitted, as reasoning already do a process like this internally.
-2. The name of the "provider" of the model being the name of the OpenAI API compatible specification file (without the ``.txt`` extension) to use from the ``Providers`` folder. See the [Providers](#providers "Providers") section for how to configure these files themselves.
+1. If the model is a reasoning model or not, specified by either `True` or `False` and defaulting to `False`. If not a reasoning model, the prompts will include a statement to "think step by step and show all your work" to elicit some benefits from chain-of-thought thinking. Otherwise, this is omitted, as reasoning already do a process like this internally.
+2. The name of the "provider" of the model being the name of the OpenAI API compatible specification file (without the `.txt` extension) to use from the `Providers` folder. See the [Providers](#providers "Providers") section for how to configure these files themselves.
 3. The input cost per token of this model. If unspecified, this model cannot be inherited by other API models.
 4. The output cost per token of this model. If unspecified, this model cannot be inherited by other API models.
-5. If this model supports function calling via the OpenAI API, specified by either ``True`` or ``False`` and defaulting to whether its provider supports functions. This is useful as some providers, such as OpenRouter, supports function calling, but, not all models they provide do as well, thus giving you an option to perform a per-model override. However, if the provider does not support function calls and this is set to ``True``, the provider's configuration will override this to ``False``, so this can only be used to disable function calling and not enable it. If this is ``False``, additional details are added to the prompt so models can still call methods, just not through the OpenAI API functions and instead the regular message response is parsed.
-6. The API name to use for this model. If omitted, the file name (without the ``.txt`` extension) will be used.
+5. If this model supports function calling via the OpenAI API, specified by either `True` or `False` and defaulting to whether its provider supports functions. This is useful as some providers, such as OpenRouter, supports function calling, but, not all models they provide do as well, thus giving you an option to perform a per-model override. However, if the provider does not support function calls and this is set to `True`, the provider's configuration will override this to `False`, so this can only be used to disable function calling and not enable it. If this is `False`, additional details are added to the prompt so models can still call methods, just not through the OpenAI API functions and instead the regular message response is parsed.
+6. The API name to use for this model. If omitted, the file name (without the `.txt` extension) will be used.
 
 # Providers
 
-- OpenAI API compatible providers are specified in ``.txt`` files in the ``Providers`` folder in the root directory.
+- OpenAI API compatible providers are specified in `.txt` files in the `Providers` folder in the root directory.
 
 ## Format
 
 1. The API endpoint of the provider.
-2. If this model supports function calling via the OpenAI API, specified by either ``True`` or ``False`` and defaulting to ``False``. If the provider supports methods but a model does not as explained in the [Models](#models "Models") section, this will be overwritten to ``False`` for that model only.
+2. If this model supports function calling via the OpenAI API, specified by either `True` or `False` and defaulting to `False`. If the provider supports methods but a model does not as explained in the [Models](#models "Models") section, this will be overwritten to `False` for that model only.
 
 # Usage
 
 ## Arguments
 
-- ``-r`` or ``--robots`` - The names of the robots. Defaults to ``None`` which will load all robot URDF files in the ``Robots`` folder.
-- ``-m`` or ``--max`` - The maximum chain length to run. Defaults to ``0`` which means there is no limit.
-- ``-o`` or ``--orientation`` - If we want to solve for orientation in addition to position. Defaults to ``True``.
-- ``-t`` or ``--types`` - The highest solving type to run. Defaults to ``Transfer``, meaning all are run.
-- ``-f`` or ``--feedbacks`` - The max number of times to give feedback. Defaults to ``5``.
-- ``-e`` or ``--examples`` - The number of examples to give with feedbacks. Defaults to ``10``.
-- ``-a`` or ``--training`` - The number of training samples. Defaults to ``1000``.
-- ``-v`` or ``--evaluating`` - The number of evaluating samples. Defaults to ``1000``.
-- ``-s`` or ``--seed`` - The samples generation seed. Defaults to ``42``.
-- ``-d`` or ``--distance`` - The acceptable distance error. Defaults to ``0.01`` m.
-- ``-n`` or ``--angle`` - The acceptable angle error. Defaults to ``1`` degree.
-- ``-c`` or ``--cwd`` - The working directory. Defaults to ``None`` which gets the current working directory.
-- ``-l`` or ``--logging`` - The logging level. Defaults to ``INFO``.
-- ``-w`` or ``--wait`` - How long to wait between API calls. Defaults to ``1`` second.
-- ``-u`` or ``--run`` - **Flag** - Enable API running .
-- ``-b`` or ``--bypass`` - **Flag** - Bypass the confirmation for API running.
+- `-r` or `--robots` - The names of the robots. Defaults to `None` which will load all robot URDF files in the `Robots` folder.
+- `-m` or `--max` - The maximum chain length to run. Defaults to `0` which means there is no limit.
+- `-o` or `--orientation` - If we want to solve for orientation in addition to position. Defaults to `True`.
+- `-t` or `--types` - The highest solving type to run. Defaults to `Transfer`, meaning all are run.
+- `-f` or `--feedbacks` - The max number of times to give feedback. Defaults to `5`.
+- `-e` or `--examples` - The number of examples to give with feedbacks. Defaults to `10`.
+- `-a` or `--training` - The number of training samples. Defaults to `1000`.
+- `-v` or `--evaluating` - The number of evaluating samples. Defaults to `1000`.
+- `-s` or `--seed` - The samples generation seed. Defaults to `42`.
+- `-d` or `--distance` - The acceptable distance error. Defaults to `0.01` m.
+- `-n` or `--angle` - The acceptable angle error. Defaults to `1` degree.
+- `-c` or `--cwd` - The working directory. Defaults to `None` which gets the current working directory.
+- `-l` or `--logging` - The logging level. Defaults to `INFO`.
+- `-w` or `--wait` - How long to wait between API calls. Defaults to `1` second.
+- `-u` or `--run` - **Flag** - Enable API running .
+- `-b` or `--bypass` - **Flag** - Bypass the confirmation for API running.
 
 ## Manual Chat
 
-- If manually chatting with an LLM, after running, look in the ``Interactions`` folder until you find the robot, model, and solving you are looking for.
-- Copy the last ``X-Prompt.txt``, ``X-Feedback.txt``, ``X-Forward.txt``, or ``X-Test.txt`` into your chat interface and wait for a response where ``X`` is a number.
+- If manually chatting with an LLM, after running, look in the `Interactions` folder until you find the robot, model, and solving you are looking for.
+- Copy the last `X-Prompt.txt`, `X-Feedback.txt`, `X-Forward.txt`, or `X-Test.txt` into your chat interface and wait for a response where `X` is a number.
   - **Copy the entire response, not just the code.** The program will look for a Python code block to extract from the response, so if you manually extract this code, the program will not recognize it.
-- Once a response was received, make a text file named ``X-Response.txt`` where ``X`` is the next number for the chat history and run the program again. Repeat the previous step and this until a file named ``X-Done.txt`` appears where ``X`` is a number.
+- Once a response was received, make a text file named `X-Response.txt` where `X` is the next number for the chat history and run the program again. Repeat the previous step and this until a file named `X-Done.txt` appears where `X` is a number.
+
+# Additional Comparison Tests
+
+For running the additional comparisons tests from `additional.py`, you will need to install [ur_ikfast](https://github.com/cambel/ur_ikfast "ur_ikfast") and [pytracik](https://github.com/chenhaox/pytracik "pytracik") onto your systems. [ur_ikfast](https://github.com/cambel/ur_ikfast "ur_ikfast") is only officially supported on Linux while [pytracik](https://github.com/chenhaox/pytracik "pytracik") can run on both Linux and Windows.
+
+1. Run `sudo apt install libblas-dev liblapack-dev libboost-all-dev libeigen3-dev liborocos-kdl-dev libnlopt-dev libnlopt-cxx-dev` to install required dependencies for both [ur_ikfast](https://github.com/cambel/ur_ikfast "ur_ikfast") and [pytracik](https://github.com/chenhaox/pytracik "pytracik").
+2. Clone each repository into your current directory for this project:
+    - `git clone https://github.com/cambel/ur_ikfast.git`
+    - `git clone https://github.com/chenhaox/pytracik.git`
+3. Run the required setup for each. The below commands assume you are executing them from the root directory of this project. Note that the core `requirements.txt` of this project already contains all Python dependencies for each.
+    - `pip install -e ur_ikfast`
+    - `python3 pytracik/setup_linux.py install`

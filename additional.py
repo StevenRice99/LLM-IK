@@ -43,7 +43,7 @@ for link in links:
 
 # Define data caches.
 cache = {}
-for entry in ["IKPy", "LLM-IK", "IKFast", "Trac-IK"]:
+for entry in ["IKPy", "LLM-IK", "IKFast", "TRAC-IK"]:
     cache[entry] = {"Success": 0, "Elapsed": 0, "Distance": 0, "Angle": 0}
 
 
@@ -199,7 +199,7 @@ def test_trac_ik(case: list[float]) -> None:
         r_p, r_r = robot_trac_ik.fk(solution)
     distance = difference_distance(t_p, r_p)
     angle = get_quaternion_angle_difference(quaternion_from_matrix(t_r), quaternion_from_matrix(r_r))
-    common_caching(elapsed, distance, angle, "Trac-IK")
+    common_caching(elapsed, distance, angle, "TRAC-IK")
 
 
 # Run all test cases.

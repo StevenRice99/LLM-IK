@@ -28,7 +28,8 @@ inverse_kinematics = getattr(module, "inverse_kinematics")
 # Create the various solvers.
 robot_llm_ik = Robot("UR5")
 links = robot_llm_ik.chains[0][5].links
-# TODO - Initialize any solvers or robots needed for the other IK algorithms.
+robot_ikfast = ur_kinematics.URKinematics('ur5')
+robot_trac_ik = TracIK(urdf_path="Robots/UR5.urdf", base_link_name="base_link", tip_link_name="tool0")
 
 # Cache joint limits, just in case the representations of the robot differ slightly in different implementations.
 bounds_llm_ik = []
@@ -39,12 +40,36 @@ for link in links:
         bounds_llm_ik.append((-BOUND, BOUND))
     else:
         bounds_llm_ik.append(link.bounds)
-# TODO - Cache joint limits of the other robots as needed.
 
 # Define data caches.
 cache = {}
 for entry in ["IKPy", "LLM-IK", "IKFast", "Trac-IK"]:
     cache[entry] = {"Success": 0, "Elapsed": 0, "Distance": 0, "Angle": 0}
+
+
+def get_quaternion_angle_difference(q1, q2):
+    """
+    Calculates the angular difference (in degrees) between two unit quaternions.
+    Assumes q1 and q2 are NumPy arrays of shape (4,) or (N, 4) for batch processing.
+    :param q1: The first quaternion.
+    :param q2: The second quaternion.
+    :return: The angle difference.
+    """
+    # Calculate the dot product.
+    dot_product = np.dot(q1, q2)
+    # Handle batch processing (N, 4) dot (N, 4).
+    if q1.ndim == 2:
+        dot_product = np.sum(q1 * q2, axis=1)
+    # Take the absolute value to get the shortest path.
+    dot_product = np.abs(dot_product)
+    # Clip the value to be in [-1.0, 1.0] to prevent acos from failing due to floating point inaccuracies.
+    dot_product = np.clip(dot_product, -1.0, 1.0)
+    # Calculate the angle in radians which is the half-angle.
+    half_angle = np.arccos(dot_product)
+    # Double it to get the full angle.
+    angle_rad = 2 * half_angle
+    # Convert to degrees.
+    return np.degrees(angle_rad)
 
 
 def common_caching(elapsed: float, distance: float, angle: float, title: str) -> None:
@@ -107,13 +132,21 @@ def test_ikfast(case: list[float]) -> None:
     :param case: The joints to test for this case.
     :return: Nothing.
     """
-    # TODO - 1. Clamp joint values as needed.
-    # TODO - 2. Perform forward kinematics using the joint values to obtain the desired target the solver should reach.
-    # TODO - 3. Reset the robot's joint values to zero (midpoints) before solving IK.
-    # TODO - 4. Calculate the elapsed time in seconds, distance, and angle in degrees from the target position using IK.
-    elapsed = 1
-    distance = 100
-    angle = 100
+    t = robot_ikfast.forward(case)
+    zeros = [0] * len(case)
+    start_time = time.perf_counter()
+    solution = robot_ikfast.inverse(t, False, zeros)
+    elapsed = time.perf_counter() - start_time
+    if solution is None:
+        distance = 100
+        angle = 100
+    else:
+        r = robot_ikfast.forward(solution)
+        distance = difference_distance([t[0], t[1], t[2]], [r[0], r[1], r[2]])
+        t = [t[3], t[4], t[5], t[6]]
+        r = [r[3], r[4], r[5], r[6]]
+        angle = get_quaternion_angle_difference(np.array(t, dtype='float64'),
+                                                np.array(r, dtype='float64'))
     common_caching(elapsed, distance, angle, "IKFast")
 
 
@@ -123,13 +156,31 @@ def test_trac_ik(case: list[float]) -> None:
     :param case: The joints to test for this case.
     :return: Nothing.
     """
-    # TODO - 1. Clamp joint values as needed.
-    # TODO - 2. Perform forward kinematics using the joint values to obtain the desired target the solver should reach.
-    # TODO - 3. Reset the robot's joint values to zero (midpoints) before solving IK.
-    # TODO - 4. Calculate the elapsed time in seconds, distance, and angle in degrees from the target position using IK.
-    elapsed = 1
-    distance = 100
-    angle = 100
+
+    # Perform forward kinematics using the joint values to obtain the desired target the solver should reach.
+    target_position, target_orientation = ikpy_common(case)
+    transform = np.eye(4)
+    transform[:3, :3] = target_orientation
+    transform[:3, 3] = target_position
+
+    # Reset the robot's joint values to zero (midpoints) before solving IK.
+    qinit = [0] * 6
+
+    # Calculate the elapsed time in seconds, distance, and angle in degrees from the target position using IK.
+    start_time = time.perf_counter()
+    solution = robot_trac_ik.get_ik(qinit,
+                                    transform[0, 3], transform[1, 3], transform[2, 3],
+                                    transform[0, 0], transform[0, 1], transform[0, 2],
+                                    transform[1, 0], transform[1, 1], transform[1, 2],
+                                    transform[2, 0], transform[2, 1], transform[2, 2])
+    elapsed = time.perf_counter() - start_time
+    if solution is None:
+        distance = 100
+        angle = 100
+    else:
+        positions, orientations = robot_llm_ik.forward_kinematics(0, 5, solution)
+        distance = difference_distance(target_position, positions[-1])
+        angle = difference_angle(target_orientation, orientations[-1])
     common_caching(elapsed, distance, angle, "Trac-IK")
 
 
@@ -143,6 +194,8 @@ for i in range(TESTS):
     # Test each model.
     test_ikpy(joints)
     test_llm_ik(joints)
+    test_ikfast(joints)
+    test_trac_ik(joints)
 
 
 # Tabulate data.

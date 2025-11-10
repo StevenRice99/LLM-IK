@@ -10,7 +10,7 @@ from trac_ik import TracIK
 from ur_ikfast import ur_kinematics
 
 # The total number of tests.
-TESTS = 100
+TESTS = 10000
 
 # Ensure consistent results.
 random.seed(SEED)
@@ -70,6 +70,36 @@ def get_quaternion_angle_difference(q1, q2):
     angle_rad = 2 * half_angle
     # Convert to degrees.
     return np.degrees(angle_rad)
+
+
+def quaternion_from_matrix(matrix):
+    """
+    Get a quaternion from a matrix.
+    :param matrix: The matrix.
+    :return: The quaternion.
+    """
+    M = np.array(matrix, dtype=np.float64, copy=False)[:4, :4]
+    m00 = M[0, 0]
+    m01 = M[0, 1]
+    m02 = M[0, 2]
+    m10 = M[1, 0]
+    m11 = M[1, 1]
+    m12 = M[1, 2]
+    m20 = M[2, 0]
+    m21 = M[2, 1]
+    m22 = M[2, 2]
+    # Symmetric matrix K.
+    K = np.array([[m00 - m11 - m22, 0.0, 0.0, 0.0],
+                  [m01 + m10, m11 - m00 - m22, 0.0, 0.0],
+                  [m02 + m20, m12 + m21, m22 - m00 - m11, 0.0],
+                  [m21 - m12, m02 - m20, m10 - m01, m00 + m11 + m22]])
+    K /= 3.0
+    # Quaternion is eigenvector of K that corresponds to the largest eigenvalue.
+    w, V = np.linalg.eigh(K)
+    q = V[[3, 0, 1, 2], np.argmax(w)]
+    if q[0] < 0.0:
+        np.negative(q, q)
+    return q
 
 
 def common_caching(elapsed: float, distance: float, angle: float, title: str) -> None:
@@ -138,15 +168,12 @@ def test_ikfast(case: list[float]) -> None:
     solution = robot_ikfast.inverse(t, False, zeros)
     elapsed = time.perf_counter() - start_time
     if solution is None:
-        distance = 100
-        angle = 100
+        r = robot_ikfast.forward(zeros)
     else:
         r = robot_ikfast.forward(solution)
-        distance = difference_distance([t[0], t[1], t[2]], [r[0], r[1], r[2]])
-        t = [t[3], t[4], t[5], t[6]]
-        r = [r[3], r[4], r[5], r[6]]
-        angle = get_quaternion_angle_difference(np.array(t, dtype='float64'),
-                                                np.array(r, dtype='float64'))
+    distance = difference_distance([t[0], t[1], t[2]], [r[0], r[1], r[2]])
+    angle = get_quaternion_angle_difference(np.array([t[3], t[4], t[5], t[6]], dtype="float64"),
+                                            np.array([r[3], r[4], r[5], r[6]], dtype="float64"))
     common_caching(elapsed, distance, angle, "IKFast")
 
 
@@ -156,31 +183,22 @@ def test_trac_ik(case: list[float]) -> None:
     :param case: The joints to test for this case.
     :return: Nothing.
     """
-
-    # Perform forward kinematics using the joint values to obtain the desired target the solver should reach.
-    target_position, target_orientation = ikpy_common(case)
-    transform = np.eye(4)
-    transform[:3, :3] = target_orientation
-    transform[:3, 3] = target_position
-
-    # Reset the robot's joint values to zero (midpoints) before solving IK.
-    qinit = [0] * 6
-
-    # Calculate the elapsed time in seconds, distance, and angle in degrees from the target position using IK.
+    lb, ub = robot_trac_ik.joint_limits
+    clamped = []
+    for index in range(len(case)):
+        clamped.append(min(ub[index], max(case[index], lb[index])))
+    t_p, t_r = robot_trac_ik.fk(np.array(clamped))
+    zeros = [0] * len(case)
+    zeros = np.array(zeros)
     start_time = time.perf_counter()
-    solution = robot_trac_ik.get_ik(qinit,
-                                    transform[0, 3], transform[1, 3], transform[2, 3],
-                                    transform[0, 0], transform[0, 1], transform[0, 2],
-                                    transform[1, 0], transform[1, 1], transform[1, 2],
-                                    transform[2, 0], transform[2, 1], transform[2, 2])
+    solution = robot_trac_ik.ik(t_p, t_r, zeros)
     elapsed = time.perf_counter() - start_time
     if solution is None:
-        distance = 100
-        angle = 100
+        r_p, r_r = robot_trac_ik.fk(zeros)
     else:
-        positions, orientations = robot_llm_ik.forward_kinematics(0, 5, solution)
-        distance = difference_distance(target_position, positions[-1])
-        angle = difference_angle(target_orientation, orientations[-1])
+        r_p, r_r = robot_trac_ik.fk(solution)
+    distance = difference_distance(t_p, r_p)
+    angle = get_quaternion_angle_difference(quaternion_from_matrix(t_r), quaternion_from_matrix(r_r))
     common_caching(elapsed, distance, angle, "Trac-IK")
 
 
